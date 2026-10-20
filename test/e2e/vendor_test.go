@@ -34,6 +34,7 @@ type vendorCase struct {
 	want     billed
 	noStream bool
 	hdr      map[string]string // extra client headers
+	clean    bool              // also require complete cost and no diagnostic
 }
 
 func chatBody(d string, stream bool) map[string]any {
@@ -96,7 +97,7 @@ func vendorCases() []vendorCase {
 		// output parts (issue #6); the standard rule must accept that partition.
 		{name: "gemini-openai-chat", target: map[string]any{"endpoint_type": "openai", "usage_adapter": "standard", "endpoint": "{A}/gemini/v1"},
 			upstream: "gemini-x", path: "/v1/chat/completions", body: chatBody, upPath: "/gemini/v1/chat/completions", auth: "bearer",
-			usage: "[[fake usage.in=8 usage.out=25 usage.reasoning=24]]", want: billed{in: 8, out: 25, reasoning: 24}},
+			usage: "[[fake usage.in=8 usage.out=25 usage.reasoning=24]]", want: billed{in: 8, out: 25, reasoning: 24}, clean: true},
 
 		// ---- Patch：国产厂商 ----
 		// Targets are configured as an operator does in the admin UI, which
@@ -185,6 +186,9 @@ func TestVendorMatrix(t *testing.T) {
 			}
 			for _, ev := range usageFor(t, name, len(modes)) {
 				checkBilled(t, ev, vc.want)
+				if vc.clean && (ev.CostIncomplete || ev.UsageDiagnostic != "") {
+					t.Errorf("cost_incomplete=%v diagnostic=%q, want complete cost without diagnostic", ev.CostIncomplete, ev.UsageDiagnostic)
+				}
 			}
 		})
 	}
