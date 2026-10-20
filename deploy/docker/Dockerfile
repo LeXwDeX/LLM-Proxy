@@ -4,7 +4,7 @@
 #     -t llms-proxy:latest -f deploy/docker/Dockerfile .
 #
 
-ARG GO_VERSION=1.24.2
+ARG GO_VERSION=1.27.2
 # 构建序号：CI / Makefile 通过 --build-arg BUILD_NUMBER=... 注入；
 # 未注入时回退到 git 提交计数，再不行为 0。版本号格式 YYYYMMDD.BUILD。
 ARG BUILD_NUMBER=0

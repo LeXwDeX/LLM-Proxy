@@ -44,7 +44,7 @@ The index, hourly revision state, quarantine records, and migration markers all 
 
 ## Requirements
 
-- The Go version is defined in [`go.mod`](go.mod) (currently declares Go 1.24.2).
+- The Go version is defined in [`go.mod`](go.mod) (currently declares Go 1.27.2).
 - Docker/Compose is only needed for container deployments.
 - Upstream API credentials and client access keys should be injected via protected local configuration or the environment; do not commit them to Git.
 
