@@ -542,13 +542,43 @@ func readUsagePayload(reader io.Reader) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err = decoder.Token(); err != io.EOF {
-		if err == nil {
-			err = fmt.Errorf("unexpected data after usage payload")
-		}
+	// Only JSON whitespace may follow the value. The trailing bytes are
+	// checked directly instead of with a final decoder.Token(): with the
+	// legacy encoding/json decoder (Go before jsonv2 became the default),
+	// that extra Token call refills and grows the decoder's read buffer for
+	// every SSE event even though nothing but EOF remains.
+	if err = expectJSONWhitespace(decoder.Buffered()); err == nil {
+		err = expectJSONWhitespace(reader)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return payload, nil
+}
+
+var errUsagePayloadTrailingData = fmt.Errorf("unexpected data after usage payload")
+
+// expectJSONWhitespace consumes reader to EOF and fails on the first byte that
+// is not JSON whitespace, or on a read error.
+func expectJSONWhitespace(reader io.Reader) error {
+	bytesReader, ok := reader.(io.ByteReader)
+	if !ok {
+		bytesReader = bufio.NewReaderSize(reader, 16)
+	}
+	for {
+		b, err := bytesReader.ReadByte()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch b {
+		case ' ', '\t', '\r', '\n':
+		default:
+			return errUsagePayloadTrailingData
+		}
+	}
 }
 
 func projectUsageObject(decoder *json.Decoder, wrappers bool) (map[string]any, error) {

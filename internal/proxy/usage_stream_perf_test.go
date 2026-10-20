@@ -35,7 +35,9 @@ func TestUsageStreamSSEReusesEventBuffer(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	run()
 	runtime.ReadMemStats(&after)
-	if perEvent := (after.TotalAlloc - before.TotalAlloc) / events; perEvent > 2560 {
+	perEvent := (after.TotalAlloc - before.TotalAlloc) / events
+	t.Logf("SSE observation allocated %d bytes per event", perEvent)
+	if perEvent > 2560 {
 		t.Fatalf("SSE observation allocated %d bytes per event, want <= 2560 (no per-event 4 KiB buffer)", perEvent)
 	}
 }
