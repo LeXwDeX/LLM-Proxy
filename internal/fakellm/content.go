@@ -276,6 +276,28 @@ func anthropicUsage(u Usage) map[string]any {
 	}
 }
 
+// anthropicIterations adds usage.iterations after the top-level counters are
+// final. Streams carry it on message_delta only. Shapes follow the advisor
+// tool doc (https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool,
+// checked 2026-10-21): top-level counters are the sum of "message" items and
+// advisor items are excluded. This is documentation evidence, not acceptance
+// against a real Claude API.
+func anthropicIterations(mode string, usage map[string]any) {
+	if mode == "" {
+		return
+	}
+	executor := map[string]any{"type": "message"}
+	for _, key := range []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"} {
+		executor[key] = usage[key]
+	}
+	items := []any{executor}
+	if mode == "advisor" {
+		items = append(items, map[string]any{"type": "advisor_message", "model": "fake-advisor", "input_tokens": 7,
+			"output_tokens": 3, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0})
+	}
+	usage["iterations"] = items
+}
+
 // geminiUsage renders usageMetadata; candidates exclude thoughts.
 func geminiUsage(u Usage) map[string]any {
 	return map[string]any{

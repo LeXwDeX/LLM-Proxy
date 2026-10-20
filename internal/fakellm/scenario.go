@@ -25,6 +25,9 @@ type Scenario struct {
 	Flavor string `json:"flavor,omitempty"`
 	// PricingPreset supplies response billing evidence independently of the request.
 	PricingPreset string `json:"pricing_preset,omitempty"`
+	// Iterations adds an Anthropic usage.iterations array: "message" (one
+	// executor item equal to top-level) or "advisor" (plus an advisor item).
+	Iterations string `json:"iterations,omitempty"`
 
 	// Status answers with this HTTP status and an error envelope instead of a
 	// reply. Preset picks a provider-specific error body (see presets.go).
@@ -125,6 +128,7 @@ func (s *Scenario) merge(o *Scenario) {
 		s.ResponseEncodingHeaders = append([]string{}, o.ResponseEncodingHeaders...)
 	}
 	str(&s.PricingPreset, o.PricingPreset)
+	str(&s.Iterations, o.Iterations)
 	num(&s.Status, o.Status)
 	str(&s.Preset, o.Preset)
 	str(&s.ErrCode, o.ErrCode)
@@ -233,6 +237,11 @@ func ParseDirective(text string) (*Scenario, error) {
 			setInt(&s.Status)
 		case "pricing":
 			s.PricingPreset = val
+		case "iterations":
+			if val != "message" && val != "advisor" {
+				err = fmt.Errorf("fakellm directive iterations=%q: want message or advisor", val)
+			}
+			s.Iterations = val
 		case "preset":
 			s.Preset = strings.ToLower(val)
 		case "code":

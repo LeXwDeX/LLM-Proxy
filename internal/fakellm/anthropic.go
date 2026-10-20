@@ -24,6 +24,7 @@ func (s *Server) serveMessages(c *call) {
 		if !c.sc.NoUsage {
 			resp["usage"] = anthropicUsage(u)
 			pricingPreset(c.sc.PricingPreset, resp["usage"].(map[string]any), true)
+			anthropicIterations(c.sc.Iterations, resp["usage"].(map[string]any))
 		}
 		c.rec.Usage = &u
 		c.ok(200, resp)
@@ -75,6 +76,7 @@ func (s *Server) serveMessages(c *call) {
 		// Current API repeats the cumulative input/cache counts here.
 		delta["usage"] = anthropicUsage(u)
 		pricingPreset(c.sc.PricingPreset, delta["usage"].(map[string]any), true)
+		anthropicIterations(c.sc.Iterations, delta["usage"].(map[string]any))
 	}
 	st.event("message_delta", delta)
 	st.event("message_stop", map[string]any{"type": "message_stop"})
