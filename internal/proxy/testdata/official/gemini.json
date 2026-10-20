@@ -1,0 +1,769 @@
+[
+  {
+    "name": "gemini-normal",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":4,\"cachedContentTokenCount\":30,\"totalTokenCount\":110}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true
+    }
+  },
+  {
+    "name": "gemini-stream-lifecycle",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "data: {\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好\"}]}}]}\n\ndata: {\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":4,\"cachedContentTokenCount\":30,\"totalTokenCount\":110}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true
+    }
+  },
+  {
+    "name": "gemini-explicit-zero",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":0,\"candidatesTokenCount\":0,\"thoughtsTokenCount\":0,\"cachedContentTokenCount\":0,\"totalTokenCount\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "gemini-missing-usage",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":null}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "observed_fields": 0
+    }
+  },
+  {
+    "name": "gemini-http-400",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"code\":400,\"status\":\"INVALID_ARGUMENT\",\"message\":\"contract upstream error\"}}",
+    "content_type": "application/json",
+    "status": 400,
+    "want": {}
+  },
+  {
+    "name": "gemini-http-401",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"code\":401,\"status\":\"UNAUTHENTICATED\",\"message\":\"contract upstream error\"}}",
+    "content_type": "application/json",
+    "status": 401,
+    "want": {}
+  },
+  {
+    "name": "gemini-http-403",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"code\":403,\"status\":\"PERMISSION_DENIED\",\"message\":\"contract upstream error\"}}",
+    "content_type": "application/json",
+    "status": 403,
+    "want": {}
+  },
+  {
+    "name": "gemini-http-429",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\",\"message\":\"contract upstream error\"}}",
+    "content_type": "application/json",
+    "status": 429,
+    "want": {}
+  },
+  {
+    "name": "gemini-http-500",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"code\":500,\"status\":\"INTERNAL\",\"message\":\"contract upstream error\"}}",
+    "content_type": "application/json",
+    "status": 500,
+    "want": {}
+  },
+  {
+    "name": "gemini-http-503",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"code\":503,\"status\":\"UNAVAILABLE\",\"message\":\"contract upstream error\"}}",
+    "content_type": "application/json",
+    "status": 503,
+    "want": {}
+  },
+  {
+    "name": "gemini-finish-MAX_TOKENS",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"MAX_TOKENS\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":4,\"cachedContentTokenCount\":30,\"totalTokenCount\":110}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true,
+      "finish_reason": "MAX_TOKENS"
+    }
+  },
+  {
+    "name": "gemini-finish-SAFETY",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"SAFETY\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":4,\"cachedContentTokenCount\":30,\"totalTokenCount\":110}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true,
+      "finish_reason": "SAFETY"
+    }
+  },
+  {
+    "name": "gemini-finish-RECITATION",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"RECITATION\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":4,\"cachedContentTokenCount\":30,\"totalTokenCount\":110}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true,
+      "finish_reason": "RECITATION"
+    }
+  },
+  {
+    "name": "gemini-finish-MALFORMED_FUNCTION_CALL",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"MALFORMED_FUNCTION_CALL\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":4,\"cachedContentTokenCount\":30,\"totalTokenCount\":110}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true,
+      "finish_reason": "MALFORMED_FUNCTION_CALL"
+    }
+  },
+  {
+    "name": "gemini-blocked",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"usageMetadata\":{\"promptTokenCount\":12}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "input_tokens": 12,
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "response_status": "blocked",
+      "finish_reason": "SAFETY"
+    }
+  },
+  {
+    "name": "gemini-tool-signature-roundtrip",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        },
+        {
+          "role": "model",
+          "parts": [
+            {
+              "functionCall": {
+                "name": "lookup",
+                "args": {
+                  "city": "北京"
+                }
+              },
+              "thoughtSignature": "opaque-signature"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "functionResponse": {
+                "name": "lookup",
+                "response": {
+                  "weather": "晴"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      },
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "name": "lookup",
+              "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                  "city": {
+                    "type": "STRING"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":4,\"cachedContentTokenCount\":30,\"totalTokenCount\":110}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true
+    }
+  },
+  {
+    "name": "gemini-tool-prompt-usage",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\": \"gemini-2.5-pro\", \"candidates\": [{\"index\": 0, \"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"你好 OK\"}]}, \"finishReason\": \"STOP\"}], \"usageMetadata\": {\"promptTokenCount\": 100, \"candidatesTokenCount\": 6, \"thoughtsTokenCount\": 4, \"cachedContentTokenCount\": 30, \"totalTokenCount\": 110, \"toolUsePromptTokenCount\": 7}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true,
+      "tool_use_prompt_tokens": 7
+    }
+  },
+  {
+    "name": "gemini-multiple-candidates-one-usage",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:generateContent",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64,
+        "candidateCount": 2
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"modelVersion\": \"gemini-2.5-pro\", \"candidates\": [{\"index\": 0, \"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"你好 OK\"}]}, \"finishReason\": \"STOP\"}, {\"index\": 1, \"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"你好 OK\"}]}, \"finishReason\": \"STOP\"}], \"usageMetadata\": {\"promptTokenCount\": 100, \"candidatesTokenCount\": 6, \"thoughtsTokenCount\": 4, \"cachedContentTokenCount\": 30, \"totalTokenCount\": 110}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true
+    }
+  },
+  {
+    "name": "gemini-query-credential-isolation",
+    "source": "https://ai.google.dev/api/generate-content",
+    "endpoint_type": "gemini",
+    "adapter": "standard",
+    "model": "gemini-2.5-pro",
+    "base_path": "",
+    "client_path": "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse&key=client-secret",
+    "upstream_path": "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+    "request": {
+      "contents": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "generationConfig": {
+        "maxOutputTokens": 64
+      }
+    },
+    "headers": {},
+    "auth_header": "X-Goog-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "data: {\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好\"}]}}]}\n\ndata: {\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"你好 OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":6,\"thoughtsTokenCount\":4,\"cachedContentTokenCount\":30,\"totalTokenCount\":110}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_gemini",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": true
+    }
+  }
+]

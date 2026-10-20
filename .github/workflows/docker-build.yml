@@ -1,0 +1,133 @@
+# ============================================================================
+# Docker Image Build & Export
+# ============================================================================
+# 构建 Docker 镜像并导出为传统 tar 归档文件。
+# 使用 Docker V1 manifest (docker save) 格式，兼容所有 Docker 版本（包括 1.10+）。
+#
+# 触发方式：
+#   - 推送 tag（v*）时自动构建
+#   - 手动触发（workflow_dispatch）
+#
+# 产出物：
+#   - llms-proxy-<tag>.tar.gz  上传为 GitHub Actions Artifact
+#   - 用户下载后 gunzip + docker load 即可导入
+# ============================================================================
+
+name: Build Docker Image Archive
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag (e.g. latest, v1.0.0)"
+        required: false
+        default: "latest"
+
+permissions:
+  contents: write
+
+env:
+  IMAGE_NAME: llms-proxy
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IMAGE_TAG_INPUT: ${{ github.event.inputs.image_tag }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            TAG="$IMAGE_TAG_INPUT"
+          else
+            # Strip 'refs/tags/' prefix
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if ! [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid Docker image tag" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: ${TAG}"
+
+      - name: Update model catalog
+        run: |
+          curl -sSfL --retry 3 --connect-timeout 10 --max-time 30 \
+            https://models.dev/api.json -o /tmp/models_dev_raw.json
+          python3 scripts/update-model-catalog.py \
+            /tmp/models_dev_raw.json internal/catalog/data/models.json
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ---------------------------------------------------------------
+      # 构建镜像
+      # 使用 --load 将镜像加载到本地 docker daemon，以便后续 docker save
+      # ---------------------------------------------------------------
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
+          no-cache: true
+          # 动态版本号 YYYYMMDD.BUILD：BUILD 取本次 workflow 运行序号
+          build-args: |
+            BUILD_NUMBER=${{ github.run_number }}
+            LLMS_SOURCE_COMMIT=${{ github.sha }}
+          # 不启用 provenance 以保持传统 manifest 格式
+          provenance: false
+
+      # ---------------------------------------------------------------
+      # 导出为传统 Docker V1 tar 格式
+      # `docker save` 输出的格式兼容所有 Docker 版本（1.10+），
+      # 无论是旧版 docker load 还是新版都可以正确导入。
+      # ---------------------------------------------------------------
+      - name: Export image as tar archive
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          ARCHIVE_NAME="${IMAGE_NAME}-${IMAGE_TAG}.tar"
+          echo "Exporting image to ${ARCHIVE_NAME} ..."
+          docker save "${IMAGE_NAME}:${IMAGE_TAG}" -o "${ARCHIVE_NAME}"
+          echo "Compressing with gzip ..."
+          gzip -9 "${ARCHIVE_NAME}"
+          ls -lh "${ARCHIVE_NAME}.gz"
+          echo "archive_name=${ARCHIVE_NAME}.gz" >> "$GITHUB_OUTPUT"
+        id: export
+
+      # ---------------------------------------------------------------
+      # 上传为 Actions Artifact，保留 90 天
+      # ---------------------------------------------------------------
+      - name: Upload image archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ steps.tag.outputs.tag }}
+          path: ${{ steps.export.outputs.archive_name }}
+          retention-days: 90
+          compression-level: 0  # 已经是 gzip 压缩过的
+
+      # ---------------------------------------------------------------
+      # 上传到 GitHub Release
+      # - tag 推送：使用 tag 名称作为 release tag
+      # - 手动触发：使用 image_tag 输入作为 release tag
+      # ---------------------------------------------------------------
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          files: ${{ steps.export.outputs.archive_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

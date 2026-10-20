@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("--proxy-test-boundary\r\n\n--proxy-test-boundary\r\n\r\n--proxy-test-boundary--")

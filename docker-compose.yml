@@ -1,0 +1,22 @@
+services:
+  llms-proxy:
+    container_name: llms-proxy
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+    image: llms-proxy:latest
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      - SERVER_BIND=0.0.0.0:8000
+      - LOG_LEVEL=info
+      # DEBUG 模式：启用请求记录（记录完整请求/响应 META + body）
+      # 生产环境应保持注释状态，仅在排查问题时临时开启
+      - TRACE_STORE_ENABLED=true
+      # - ADMIN_PASSWORD=your-secure-password  # 首次启动时的管理员密码，未设置则随机生成
+    ports:
+      - 8000:8000
+    volumes:
+      - ./config:/etc/llms-proxy
+      - ./data:/var/lib/llms-proxy
+      - ./logs:/var/log/llms-proxy

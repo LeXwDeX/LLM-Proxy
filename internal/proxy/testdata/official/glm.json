@@ -1,0 +1,1158 @@
+[
+  {
+    "name": "chat-normal",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":30}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "chat-stream-lifecycle",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "stream": true
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": ": keepalive\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":30}}}\n\ndata: [DONE]\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "chat-explicit-zero",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":0}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "chat-missing-usage",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":null}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "observed_fields": 0
+    }
+  },
+  {
+    "name": "chat-interrupted-stream",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "stream": true
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": ": keepalive\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":30}}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "cost_incomplete": false,
+      "usage_diagnostic": "interrupted_after_final_usage"
+    }
+  },
+  {
+    "name": "chat-http-400",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 400,
+    "want": {}
+  },
+  {
+    "name": "chat-http-401",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 401,
+    "want": {}
+  },
+  {
+    "name": "chat-http-403",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 403,
+    "want": {}
+  },
+  {
+    "name": "chat-http-429",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"rate_limit_error\"}}",
+    "content_type": "application/json",
+    "status": 429,
+    "want": {}
+  },
+  {
+    "name": "chat-http-500",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 500,
+    "want": {}
+  },
+  {
+    "name": "chat-http-503",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 503,
+    "want": {}
+  },
+  {
+    "name": "chat-reasoning-subset",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":30},\"completion_tokens_details\":{\"reasoning_tokens\":4}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "chat-finish-length",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":30}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "length"
+    }
+  },
+  {
+    "name": "chat-finish-content_filter",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"content_filter\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":30}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "content_filter"
+    }
+  },
+  {
+    "name": "chat-finish-tool_calls",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\\\"北京\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":30}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "tool_calls"
+    }
+  },
+  {
+    "name": "chat-tool-roundtrip",
+    "source": "https://docs.bigmodel.cn/cn/api/introduction",
+    "endpoint_type": "dual_protocol",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/paas/v4",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/api/paas/v4/chat/completions",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "type": "function",
+              "function": {
+                "name": "lookup",
+                "arguments": "{\"city\":\"北京\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1",
+          "content": "晴"
+        }
+      ],
+      "max_tokens": 64,
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":30}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-normal",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-stream-lifecycle",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好 OK\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":10}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-explicit-zero",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-missing-usage",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":null}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "observed_fields": 0
+    }
+  },
+  {
+    "name": "messages-interrupted-stream",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好 OK\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true
+    }
+  },
+  {
+    "name": "messages-http-400",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 400,
+    "want": {}
+  },
+  {
+    "name": "messages-http-401",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 401,
+    "want": {}
+  },
+  {
+    "name": "messages-http-403",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 403,
+    "want": {}
+  },
+  {
+    "name": "messages-http-429",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"rate_limit_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 429,
+    "want": {}
+  },
+  {
+    "name": "messages-http-500",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 500,
+    "want": {}
+  },
+  {
+    "name": "messages-http-503",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 503,
+    "want": {}
+  },
+  {
+    "name": "messages-stop-max_tokens",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"max_tokens\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "max_tokens"
+    }
+  },
+  {
+    "name": "messages-stop-tool_use",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{\"city\":\"北京\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "tool_use"
+    }
+  },
+  {
+    "name": "messages-stop-stop_sequence",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"stop_sequence\",\"stop_sequence\":\"END\",\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "stop_sequence"
+    }
+  },
+  {
+    "name": "messages-tool-signature-roundtrip",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "consider",
+              "signature": "opaque-signature"
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_1",
+              "name": "lookup",
+              "input": {
+                "city": "北京"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_1",
+              "content": "晴"
+            }
+          ]
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "tools": [
+        {
+          "name": "lookup",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "glm",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-stream-error",
+    "source": "https://docs.bigmodel.cn/cn/guide/develop/claude/introduction",
+    "endpoint_type": "claude",
+    "adapter": "glm",
+    "model": "glm-5.3",
+    "base_path": "/api/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/api/anthropic/v1/messages",
+    "request": {
+      "model": "glm-5.3",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "response_status": "failed"
+    }
+  }
+]

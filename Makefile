@@ -1,0 +1,72 @@
+BIN_DIR := bin
+BINARY := $(BIN_DIR)/llms-proxy
+CATALOG_RAW := /tmp/models_dev_raw.json
+CATALOG_OUT := internal/catalog/data/models.json
+
+# ===== 动态版本号 YYYYMMDD.BUILD =====
+# 日期部分取构建当天；BUILD 部分默认取 git 提交计数，
+# 可通过 `BUILD_NUMBER=... make build` 或环境变量覆盖（CI 一般注入 run_number）。
+BUILD_DATE  := $(shell date +%Y%m%d)
+BUILD_NUMBER ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
+VERSION     := $(BUILD_DATE).$(BUILD_NUMBER)
+VERSION_PKG := github.com/LeXwDeX/LLM-Proxy/internal/version
+LDFLAGS     := -X $(VERSION_PKG).Version=$(VERSION)
+
+.PHONY: all build test test-proxy integration e2e ui-sim clean catalog docker version check-docs
+
+all: test build
+
+# 打印将要注入的版本号
+version:
+	@echo "$(VERSION)"
+
+# ⚠️ Docker 构建必须 --no-cache，否则 BuildKit 缓存旧二进制
+docker:
+	@echo ">> building docker image (--no-cache)"
+	docker build --no-cache --build-arg BUILD_NUMBER=$(BUILD_NUMBER) -t llms-proxy:latest -f deploy/docker/Dockerfile .
+
+catalog:
+	@echo ">> updating model catalog from models.dev"
+	@if curl -sSf --connect-timeout 10 --max-time 30 https://models.dev/api.json -o $(CATALOG_RAW) 2>/dev/null; then \
+		python3 scripts/update-model-catalog.py $(CATALOG_RAW) $(CATALOG_OUT) && \
+		echo ">> catalog updated successfully"; \
+	else \
+		echo ">> catalog download failed, keeping existing data"; \
+	fi
+
+build: catalog
+	@echo ">> building $(BINARY) (version $(VERSION))"
+	@mkdir -p $(BIN_DIR)
+	GO111MODULE=on go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/proxy
+
+test: check-docs
+	@echo ">> running unit tests"
+	go test ./...
+
+# 核心代理链路快速回归（高 churn 路径；internal/proxy 改动后的最小验证，完整验证用 make test）
+test-proxy:
+	@echo ">> running core proxy regression tests"
+	go test ./internal/proxy/...
+
+# 校验共享 Agent 指引存在
+check-docs:
+	@bash scripts/check-agents-docs.sh
+
+integration:
+	@echo ">> running integration tests"
+	go test -tags=integration ./test/...
+
+# 虚假上游端到端：编译真实代理二进制，对接进程内 internal/fakellm，覆盖原厂 + Patch
+# 厂商协议、WebSocket、负载切换与计费回读；不调用任何真实模型。-v 输出已知缺口清单。
+e2e:
+	@echo ">> running fake-upstream end-to-end tests"
+	go test -tags=e2e -count=1 -v ./test/e2e/
+
+# 管理后台网页全流程模拟：真实代理 + fakellm + 本机 Chromium（CDP，零依赖，不进 CI）。
+ui-sim:
+	@echo ">> running admin UI simulation"
+	node scripts/testing/admin_ui_sim.cjs
+
+clean:
+	@echo ">> cleaning build artifacts"
+	rm -rf $(BIN_DIR)

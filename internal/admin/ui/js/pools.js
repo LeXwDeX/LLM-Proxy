@@ -1,0 +1,311 @@
+"use strict";
+// Pools owns deployment pool CRUD and member scheduling summaries.
+// Imports resolve through AdminApp; implementation state stays inside this module.
+AdminApp.register("pools", function (app) {
+  var state = app.state;
+  var esc = app.bind("core", "esc");
+  var toast = app.bind("core", "toast");
+  var api = app.bind("core", "api");
+  var openModal = app.bind("core", "openModal");
+  var closeModal = app.bind("core", "closeModal");
+  var showConfirm = app.bind("core", "showConfirm");
+  var schemaLabel = app.bind("schema", "schemaLabel");
+  var fetchSchedulingRuntime = app.bind("targets", "fetchSchedulingRuntime");
+  /* ===== Pools ===== */
+  function poolDisplayName(pool) {
+    if (typeof pool === "string") {
+      var key = pool.toLowerCase();
+      return poolDisplayName((state.pools || []).find(function (p) {
+        return String(p.name || "").toLowerCase() === key;
+      }) || {name: pool});
+    }
+    return pool ? pool.display_name || pool.name || "" : "";
+  }
+  function poolMemberCount(poolName) {
+    var key = String(poolName || "").toLowerCase();
+    return (state.targets || []).filter(function (t) {
+      return t.pool && String(t.pool).toLowerCase() === key;
+    }).length;
+  }
+  // poolMemberChips：池成员节点调度状态 chips（S5）。每 chip = 相位色点 + 名称，
+  // hover 展示在途/利用率/亲和命中/熔断次数；运行时快照缺失时仅显示名称。
+  function poolMemberChips(poolName) {
+    var key = String(poolName || "").toLowerCase();
+    var members = (state.targets || []).filter(function (t) {
+      return t.pool && String(t.pool).toLowerCase() === key;
+    });
+    if (!members.length)
+      return "<span style='color:var(--text-muted)'>无成员</span>";
+    return members
+      .map(function (t) {
+        var rt = state.runtime
+          ? state.runtime[String(t.name || "").toLowerCase()]
+          : null;
+        var dotColors = {
+          ready: "#16a34a",
+          muted: "#d97706",
+          "half-open": "#c2410c",
+          offline: "#94a3b8",
+        };
+        var dot = "#94a3b8";
+        var tip = esc(t.name);
+        if (rt) {
+          dot = dotColors[rt.phase] || dot;
+          tip +=
+            "｜状态 " +
+            esc(schemaLabel("target_phases", rt.phase)) +
+            "｜在途 " +
+            rt.in_flight +
+            (rt.max_concurrency > 0
+              ? "/" +
+                rt.max_concurrency +
+                "（" +
+                Math.round((rt.utilization || 0) * 100) +
+                "%）"
+              : "") +
+            "｜亲和命中 " +
+            rt.affinity_hits +
+            "｜熔断 " +
+            rt.breaker_trips;
+        } else {
+          tip += "｜运行态未知";
+        }
+        var inFlightTxt = rt
+          ? " <span class='pool-member-load'>" +
+            rt.in_flight +
+            (rt.max_concurrency > 0 ? "/" + rt.max_concurrency : "") +
+            "</span>"
+          : "";
+        return (
+          "<span class='pool-member-chip' title='" +
+          tip +
+          "'>" +
+          "<span class='pool-member-dot' style='background:" +
+          dot +
+          ";'></span>" +
+          "<span class='pool-member-name'>" +
+          esc(t.name) +
+          "</span>" +
+          inFlightTxt +
+          "</span>"
+        );
+      })
+      .join(" ");
+  }
+  async function loadPools() {
+    try {
+      var fetches = [api("/admin/data/pools"), fetchSchedulingRuntime()];
+      // 成员数按 targets 汇总，缺失时一并拉取。
+      if (!state.targets || !state.targets.length) {
+        fetches.push(
+          api("/admin/data/targets").catch(function () {
+            return { targets: [] };
+          }),
+        );
+      }
+      var results = await Promise.all(fetches);
+      state.pools = Array.isArray(results[0].pools) ? results[0].pools : [];
+      if (results[2] && Array.isArray(results[2].targets)) {
+        state.targets = results[2].targets;
+      }
+      renderPools();
+    } catch (e) {
+      toast("加载部署池失败: " + e.message, "error");
+    }
+  }
+  function renderPools() {
+    var tb = document.getElementById("poolsTableBody");
+    if (!state.pools || !state.pools.length) {
+      tb.innerHTML =
+        "<tr class='empty-row'><td colspan='5'>暂无部署池</td></tr>";
+      return;
+    }
+    tb.innerHTML = state.pools
+      .slice()
+      .sort(function (a, b) {
+        return String(a.name || "").localeCompare(String(b.name || ""));
+      })
+      .map(function (p) {
+        var members = poolMemberChips(p.name);
+        var pauseBadge = p.paused
+          ? "<span style='background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:4px;font-size:12px;'>已暂停（成员等效暂停）</span>"
+          : "<span style='background:#dcfce7;color:#16a34a;padding:2px 8px;border-radius:4px;font-size:12px;'>运行中</span>";
+        var pauseButton = p.paused
+          ? "<button class='btn btn-sm readonly-hide' data-resume-pool='" +
+            esc(p.name) +
+            "'>恢复</button>"
+          : "<button class='btn btn-sm readonly-hide' data-pause-pool='" +
+            esc(p.name) +
+            "'>暂停</button>";
+        return (
+          "<tr><td class='pool-name'>" +
+          esc(poolDisplayName(p)) +
+          "</td>" +
+          "<td class='pool-description'><div class='pool-description-text'>" +
+          (p.description
+            ? esc(p.description)
+            : "<span style='color:var(--text-muted)'>—</span>") +
+          "</div></td>" +
+          "<td class='pool-status'>" +
+          pauseBadge +
+          "</td>" +
+          "<td class='pool-members'><div class='pool-member-list'>" +
+          members +
+          "</div></td>" +
+          "<td class='pool-actions'><div class='btn-group'>" +
+          pauseButton +
+          "<button class='btn btn-sm readonly-hide' data-edit-pool='" +
+          esc(p.name) +
+          "'>编辑</button>" +
+          "<button class='btn btn-danger btn-sm readonly-hide' data-del-pool='" +
+          esc(p.name) +
+          "'>删除</button>" +
+          "</div></td></tr>"
+        );
+      })
+      .join("");
+  }
+  document
+    .getElementById("poolsTableBody")
+    .addEventListener("click", function (e) {
+      var t = e.target;
+      if (t.dataset.editPool) {
+        var p = state.pools.find(function (x) {
+          return x.name === t.dataset.editPool;
+        });
+        if (p) openPoolModal(p);
+      }
+      if (t.dataset.pausePool) {
+        var pauseName = t.dataset.pausePool;
+        showConfirm(
+          "确认暂停部署池「" +
+            poolDisplayName(pauseName) +
+            "」？池内全部成员节点将等效暂停，不参与转发。",
+          async function () {
+            try {
+              await api(
+                "/admin/data/pools/" + encodeURIComponent(pauseName) + "/pause",
+                { method: "PUT" },
+              );
+              toast("已暂停池: " + poolDisplayName(pauseName), "success");
+              await loadPools();
+            } catch (e) {
+              toast("暂停失败: " + e.message, "error");
+            }
+          },
+        );
+      }
+      if (t.dataset.resumePool) {
+        var resumeName = t.dataset.resumePool;
+        (async function () {
+          try {
+            await api(
+              "/admin/data/pools/" + encodeURIComponent(resumeName) + "/resume",
+              { method: "PUT" },
+            );
+            toast("已恢复池: " + poolDisplayName(resumeName), "success");
+            await loadPools();
+          } catch (e) {
+            toast("恢复失败: " + e.message, "error");
+          }
+        })();
+      }
+      if (t.dataset.delPool) {
+        var delName = t.dataset.delPool;
+        showConfirm(
+          "确认删除部署池「" + poolDisplayName(delName) + "」？池内需无成员目标。",
+          async function () {
+            try {
+              await api("/admin/data/pools/" + encodeURIComponent(delName), {
+                method: "DELETE",
+              });
+              toast("已删除池: " + poolDisplayName(delName), "success");
+              await loadPools();
+            } catch (e) {
+              toast("删除失败: " + e.message, "error");
+            }
+          },
+        );
+      }
+    });
+  function openPoolModal(p) {
+    if (document.body.classList.contains("readonly-mode")) {
+      toast("只读用户无法执行此操作", "error");
+      return;
+    }
+    state.editingPool = p || null;
+    document.getElementById("poolModalTitle").textContent = p
+      ? "编辑部署池"
+      : "新增部署池";
+    document.getElementById("poolName").value = poolDisplayName(p);
+    document.getElementById("poolName").readOnly = false;
+    document.getElementById("poolDescription").value =
+      p && p.description ? p.description : "";
+    document.getElementById("poolPaused").checked = p ? !!p.paused : false;
+    openModal("poolModal");
+  }
+  document.getElementById("newPoolBtn").addEventListener("click", function () {
+    openPoolModal(null);
+  });
+  document
+    .getElementById("refreshPoolsBtn")
+    .addEventListener("click", function () {
+      loadPools();
+    });
+  document
+    .getElementById("openPoolsModalBtn")
+    .addEventListener("click", function () {
+      openModal("poolsModal");
+      loadPools();
+    });
+  document
+    .getElementById("savePoolBtn")
+    .addEventListener("click", async function () {
+      var name = document.getElementById("poolName").value.trim();
+      var description = document.getElementById("poolDescription").value.trim();
+      var paused = document.getElementById("poolPaused").checked;
+      if (!name) {
+        toast("请填写池名称", "error");
+        return;
+      }
+      try {
+        if (state.editingPool) {
+          await api("/admin/data/pools/" + encodeURIComponent(state.editingPool.name), {
+            method: "PUT",
+            body: {
+              name: state.editingPool.name,
+              display_name: name,
+              description: description,
+              paused: paused,
+            },
+          });
+          toast("部署池已更新", "success");
+        } else {
+          await api("/admin/data/pools", {
+            method: "POST",
+            body: {
+              name: name,
+              description: description,
+              paused: paused,
+            },
+          });
+          toast("部署池已创建", "success");
+        }
+        closeModal("poolModal");
+        await loadPools();
+      } catch (e) {
+        toast("保存失败: " + e.message, "error");
+      }
+    });
+
+  /* ===== Consumer Groups ===== */
+
+  return {
+    poolDisplayName: poolDisplayName,
+    poolMemberCount: poolMemberCount,
+    poolMemberChips: poolMemberChips,
+    loadPools: loadPools,
+    renderPools: renderPools,
+    openPoolModal: openPoolModal,
+  };
+});

@@ -1,0 +1,31 @@
+"use strict";
+const assert = require("node:assert/strict");
+const test = require("node:test");
+const { createHarness } = require("../../../scripts/testing/admin_ui_test.cjs");
+
+test("pool casing is editable while requests and member matching retain canonical identity", async () => {
+ const harness = createHarness();
+ const app = await harness.run();
+ const p = {name: "openai-plan", display_name: "OpenAI-PLAN"};
+ app.state.pools = [p, {name: "legacy"}];
+ app.state.targets = [{name:"member", pool:"openai-plan"}];
+ const pools = app.modules.pools;
+ pools.renderPools();
+ const field = id => harness.ids.get(id);
+ assert.match(field("poolsTableBody").innerHTML, /class='pool-name'>OpenAI-PLAN</);
+ assert.match(field("poolsTableBody").innerHTML, /data-edit-pool='openai-plan'/);
+ assert.equal(pools.poolMemberCount(p.name), 1);
+ pools.openPoolModal(p);
+ assert.equal(field("poolName").value, "OpenAI-PLAN");
+ assert.equal(field("poolName").readOnly, false);
+ assert.equal(pools.poolDisplayName("openai-plan"), "OpenAI-PLAN");
+ assert.equal(pools.poolDisplayName("legacy"), "legacy");
+ assert.equal(pools.poolDisplayName("unknown"), "unknown");
+ const calls = [];
+ app.modules.core.api = async (url, options) => { calls.push({url, options}); return {pools:[p]}; };
+ field("poolName").value = "OPENAI-Plan";
+ await field("savePoolBtn").listeners.click[0]();
+ assert.equal(calls[0].url, "/admin/data/pools/openai-plan");
+ assert.equal(calls[0].options.body.name, "openai-plan");
+ assert.equal(calls[0].options.body.display_name, "OPENAI-Plan");
+});

@@ -1,0 +1,97 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+.error/
+
+# Project binaries
+bin/
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# Editor/IDE
+# .idea/
+# .vscode/
+
+# Runtime logs
+logs/
+!logs/.gitkeep
+
+# Generated reports
+reports/
+__pycache__/
+
+# Runtime data (config/ only tracks .gitkeep; all data files are generated at runtime)
+config/*
+!config/.gitkeep
+
+# Runtime data directory (bbolt database - NEVER commit, NEVER let git clean remove!)
+data/
+!data/.gitkeep
+
+# Vibe-coding / AI assistant artifacts
+# ⚠️ AGENTS.md 例外：本项目把根 AGENTS.md 与 scoped AGENTS.md 作为正式文档跟踪
+AGENTS.md
+!/AGENTS.md
+!internal/proxy/AGENTS.md
+!internal/admin/AGENTS.md
+COPILOT.md
+GEMINI.md
+CURSOR.md
+WINDSURF.md
+.github/copilot-instructions.md
+.aider*
+.claude/
+.copilot/
+.cursor/
+.gemini/
+.continue/
+.roo/
+.codex/
+.codex_plan/
+.qoder/
+
+# One-time migration scripts (not part of the project)
+migrate-to-bbolt.sh
+
+# BoltDB / SQLite database files (never commit)
+*.db
+
+# AI
+.graphify_*
+.memory/
+.task_state/
+graphify-out/
+.opencode/
+.codegraph
+
+# macOS metadata
+.DS_Store
+
+# 根目录 go build ./cmd/proxy 的本地产物
+/proxy
+
+# 本地私有资料（部署说明、环境脚本等），不纳入版本管理
+/local/

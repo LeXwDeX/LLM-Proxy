@@ -1,0 +1,410 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-14T13:43:32Z",
+  "title": "Design System: LLMs Proxy 管理台",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "工作蓝",
+        "canonical": "#3b82f6",
+        "tonalRamp": [
+          "#102b54",
+          "#173b70",
+          "#1f4d8d",
+          "#2860aa",
+          "#3474c5",
+          "#4c8ad9",
+          "#79a9e8",
+          "#b7d2f5"
+        ]
+      },
+      "primary-hover": {
+        "role": "primary",
+        "displayName": "按压蓝",
+        "canonical": "#2563eb",
+        "tonalRamp": [
+          "#102750",
+          "#16376c",
+          "#1b4789",
+          "#2158a6",
+          "#2869c4",
+          "#3c7bdd",
+          "#6d9bec",
+          "#abc7f7"
+        ]
+      },
+      "activity-input": {
+        "role": "primary",
+        "displayName": "输入蓝",
+        "canonical": "#2563eb",
+        "tonalRamp": [
+          "#102750",
+          "#16376c",
+          "#1b4789",
+          "#2158a6",
+          "#2869c4",
+          "#3c7bdd",
+          "#6d9bec",
+          "#abc7f7"
+        ]
+      },
+      "activity-output": {
+        "role": "secondary",
+        "displayName": "输出青绿",
+        "canonical": "#087f74",
+        "tonalRamp": [
+          "#12312e",
+          "#174743",
+          "#1b5c57",
+          "#1f726b",
+          "#26877f",
+          "#3b9b92",
+          "#68b5ad",
+          "#a4d4ce"
+        ]
+      },
+      "activity-concurrency": {
+        "role": "secondary",
+        "displayName": "并发靛蓝",
+        "canonical": "#355d9d",
+        "tonalRamp": [
+          "#19263c",
+          "#223656",
+          "#2b456f",
+          "#35558a",
+          "#4167a3",
+          "#587eb8",
+          "#7e9bca",
+          "#b3c5e0"
+        ]
+      },
+      "sidebar": {
+        "role": "neutral",
+        "displayName": "深石板",
+        "canonical": "#1e293b",
+        "tonalRamp": [
+          "#11151d",
+          "#191f2c",
+          "#222a3a",
+          "#2b3548",
+          "#374357",
+          "#4a5668",
+          "#687384",
+          "#9da5af"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "深石板文字",
+        "canonical": "#1e293b",
+        "tonalRamp": [
+          "#11151d",
+          "#191f2c",
+          "#222a3a",
+          "#2b3548",
+          "#374357",
+          "#4a5668",
+          "#687384",
+          "#9da5af"
+        ]
+      },
+      "secondary-text": {
+        "role": "neutral",
+        "displayName": "次级石板",
+        "canonical": "#64748b",
+        "tonalRamp": [
+          "#252b33",
+          "#333c49",
+          "#424d5e",
+          "#526174",
+          "#64748b",
+          "#7c8ba0",
+          "#9aa7b8",
+          "#c2cad4"
+        ]
+      },
+      "muted-text": {
+        "role": "neutral",
+        "displayName": "雾灰文字",
+        "canonical": "#94a3b8",
+        "tonalRamp": [
+          "#39414c",
+          "#4c5665",
+          "#606c7c",
+          "#758295",
+          "#8c9aad",
+          "#a3afbf",
+          "#bbc4d0",
+          "#d7dce3"
+        ]
+      },
+      "workspace": {
+        "role": "neutral",
+        "displayName": "工作区浅灰",
+        "canonical": "#f1f5f9",
+        "tonalRamp": [
+          "#383a3d",
+          "#4e5155",
+          "#64686d",
+          "#7c8187",
+          "#969ca3",
+          "#b0b7bf",
+          "#cbd2db",
+          "#e8edf3"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "纯白表面",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#3d3d3d",
+          "#555555",
+          "#6e6e6e",
+          "#888888",
+          "#a3a3a3",
+          "#bfbfbf",
+          "#dcdcdc",
+          "#fafafa"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "细线灰",
+        "canonical": "#e2e8f0",
+        "tonalRamp": [
+          "#353739",
+          "#4b4e51",
+          "#62666a",
+          "#7a7f84",
+          "#93999f",
+          "#adb4bb",
+          "#c8cfd7",
+          "#e4eaf2"
+        ]
+      },
+      "danger": {
+        "role": "tertiary",
+        "displayName": "错误红",
+        "canonical": "#ef4444",
+        "tonalRamp": [
+          "#501b1c",
+          "#6b2021",
+          "#862627",
+          "#a32d2e",
+          "#bf3636",
+          "#d94a49",
+          "#e87572",
+          "#f4b0ac"
+        ]
+      },
+      "success": {
+        "role": "tertiary",
+        "displayName": "成功绿",
+        "canonical": "#22c55e",
+        "tonalRamp": [
+          "#15331e",
+          "#1b4829",
+          "#205d34",
+          "#267340",
+          "#2d894c",
+          "#43a15e",
+          "#71b981",
+          "#abd6b3"
+        ]
+      },
+      "warning": {
+        "role": "tertiary",
+        "displayName": "提醒橙",
+        "canonical": "#f59e0b",
+        "tonalRamp": [
+          "#51330f",
+          "#6c4311",
+          "#875414",
+          "#a36517",
+          "#be771b",
+          "#d88b25",
+          "#e8a84e",
+          "#f3cd91"
+        ]
+      },
+      "activity-secondary": {
+        "role": "neutral",
+        "displayName": "首页辅助石板",
+        "canonical": "#526174",
+        "tonalRamp": [
+          "#252b33",
+          "#333c49",
+          "#424d5e",
+          "#526174",
+          "#64748b",
+          "#7c8ba0",
+          "#9aa7b8",
+          "#c2cad4"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "正文",
+        "purpose": "管理后台主要正文、表格和表单内容。"
+      },
+      "title": {
+        "displayName": "标题",
+        "purpose": "顶栏、面板和对话框标题。"
+      },
+      "label": {
+        "displayName": "标签",
+        "purpose": "表头、字段名称和辅助说明。"
+      }
+    },
+    "shadows": [
+      {
+        "name": "surface-low",
+        "value": "0 1px 3px rgba(0,0,0,0.08)",
+        "purpose": "静态卡片和面板的轻层次。"
+      },
+      {
+        "name": "hover-medium",
+        "value": "0 4px 12px rgba(0,0,0,0.1)",
+        "purpose": "悬停卡片和轻浮层。"
+      },
+      {
+        "name": "modal",
+        "value": "0 20px 60px rgba(0,0,0,0.2)",
+        "purpose": "编辑对话框与背景内容分层。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "standard",
+        "value": "0.2s ease",
+        "purpose": "导航、按钮及常规控件状态过渡。"
+      },
+      {
+        "name": "activity-selection",
+        "value": "120ms ease-out",
+        "purpose": "客户端切换时图表的短暂淡入；遵循减少动态效果偏好。"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "mobile-navigation",
+        "value": "768px",
+        "purpose": "侧栏切换为移动覆盖导航。"
+      },
+      {
+        "name": "activity-mobile",
+        "value": "700px",
+        "purpose": "首页汇总、图表和明细切换为窄屏布局。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "主要按钮",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "用于保存、确认等页面主要操作。",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">保存</button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;padding:7px 14px;border:1px solid var(--primary,#3b82f6);border-radius:6px;background:var(--primary,#3b82f6);color:var(--card,#fff);font:400 13px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Arial,sans-serif;cursor:pointer;transition:all .2s ease}.ds-btn-primary:hover{background:var(--primary-hover,#2563eb);border-color:var(--primary-hover,#2563eb)}"
+    },
+    {
+      "name": "次级按钮",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "用于取消、刷新等常规次级动作。",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">刷新</button>",
+      "css": ".ds-btn-secondary{display:inline-flex;align-items:center;justify-content:center;padding:7px 14px;border:1px solid var(--line,#e2e8f0);border-radius:6px;background:var(--card,#fff);color:var(--text,#1e293b);font:400 13px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Arial,sans-serif;cursor:pointer;transition:all .2s ease}.ds-btn-secondary:hover{border-color:#cbd5e1;background:#f8fafc}"
+    },
+    {
+      "name": "搜索字段",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "用于过滤客户端名称，焦点在整个搜索框上清楚可见。",
+      "html": "<label class=\"ds-search\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"10\" cy=\"10\" r=\"6\"/><path d=\"m15 15 5 5\"/></svg><input type=\"search\" placeholder=\"搜索客户端\" aria-label=\"搜索客户端\"></label>",
+      "css": ".ds-search{display:flex;align-items:center;gap:6px;width:220px;padding:6px 9px;border:1px solid #b9c5d3;border-radius:6px;color:var(--activity-secondary,#526174);background:var(--card,#fff)}.ds-search svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}.ds-search input{width:100%;min-width:0;padding:0;border:0;outline:0;background:transparent;color:var(--text,#1e293b);font:400 14px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Arial,sans-serif}.ds-search:focus-within{outline:2px solid var(--primary-hover,#2563eb);outline-offset:2px}.ds-search input::placeholder{color:var(--activity-secondary,#526174)}"
+    },
+    {
+      "name": "侧栏导航项",
+      "kind": "nav",
+      "refersTo": "",
+      "description": "在深色固定侧栏中标出当前管理区域。",
+      "html": "<nav class=\"ds-sidebar\"><div class=\"ds-nav-item ds-nav-item-active\"><span>总览</span></div></nav>",
+      "css": ".ds-sidebar{background:var(--sidebar-bg,#1e293b)}.ds-nav-item{display:flex;align-items:center;gap:10px;padding:10px 20px;border-left:3px solid transparent;background:transparent;color:var(--sidebar-text,#94a3b8);font:400 14px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Arial,sans-serif}.ds-nav-item:hover{background:var(--sidebar-hover,#334155);color:#cbd5e1}.ds-nav-item-active{border-left-color:var(--sidebar-active,#3b82f6);background:rgba(59,130,246,.12);color:var(--sidebar-text-active,#fff)}"
+    },
+    {
+      "name": "统计卡片",
+      "kind": "card",
+      "refersTo": "stat-card",
+      "description": "复现通用统计卡结构；现有浅底标签颜色记录为旧样式，不应作为新浅底小字规范。",
+      "html": "<article class=\"ds-stat-card\"><span class=\"ds-stat-label\">总请求数</span><strong class=\"ds-stat-value\">1,284</strong><span class=\"ds-stat-sub\">近 24 小时</span></article>",
+      "css": ".ds-stat-card{padding:16px 20px;border:1px solid var(--card-border,#e2e8f0);border-radius:var(--radius,8px);background:var(--card,#fff);box-shadow:var(--shadow,0 1px 3px rgba(0,0,0,.08));font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Arial,sans-serif;transition:box-shadow var(--transition,.2s ease)}.ds-stat-card:hover{box-shadow:var(--shadow-md,0 4px 12px rgba(0,0,0,.1))}.ds-stat-label{display:block;margin-bottom:6px;color:var(--text-muted,#94a3b8);font-size:12px;text-transform:uppercase;letter-spacing:.5px}.ds-stat-value{display:block;color:var(--text,#1e293b);font-size:24px;font-weight:700;line-height:1.2}.ds-stat-sub{display:block;margin-top:4px;color:var(--text-secondary,#64748b);font-size:12px}"
+    },
+    {
+      "name": "客户端明细行",
+      "kind": "custom",
+      "refersTo": "client-table",
+      "description": "可选择客户端并以浅蓝底色显示当前联动行。",
+      "html": "<table class=\"ds-table\"><thead><tr><th>客户端</th><th>请求</th></tr></thead><tbody><tr data-selected=\"true\"><th><button type=\"button\">示例客户端</button></th><td>3</td></tr></tbody></table>",
+      "css": ".ds-table{width:100%;border-collapse:collapse;background:var(--card,#fff);color:var(--text,#1e293b);font:400 13px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Arial,sans-serif;font-variant-numeric:tabular-nums}.ds-table th,.ds-table td{padding:10px 16px;border-bottom:1px solid var(--line,#e2e8f0);text-align:right}.ds-table th:first-child{text-align:left}.ds-table thead th{background:#f8fafc;color:var(--activity-secondary,#526174);font-size:12px;font-weight:500}.ds-table tbody tr:hover{background:#f8fafc}.ds-table tbody tr[data-selected=true]{background:#eff6ff}.ds-table button{padding:3px 0;border:0;background:transparent;color:var(--text,#1e293b);font:600 13px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Arial,sans-serif;text-align:left;cursor:pointer}.ds-table button:hover{text-decoration:underline;text-underline-offset:3px}.ds-table tbody tr[data-selected=true] button{color:var(--primary-hover,#2563eb)}.ds-table button:focus-visible{outline:2px solid var(--primary-hover,#2563eb);outline-offset:3px}"
+    },
+    {
+      "name": "趋势图例",
+      "kind": "custom",
+      "refersTo": "",
+      "description": "同时呈现输入、输出的颜色和线型含义。",
+      "html": "<div class=\"ds-legend\"><span><i></i>输入</span><span class=\"ds-output\"><i></i>输出</span></div>",
+      "css": ".ds-legend{display:flex;align-items:center;gap:6px;color:var(--activity-secondary,#526174);font:400 11px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Arial,sans-serif}.ds-legend span{display:inline-flex;align-items:center;gap:6px}.ds-legend i{width:20px;border-top:2px solid var(--activity-input,#2563eb)}.ds-legend .ds-output i{border-top:2px dashed var(--activity-output,#087f74)}"
+    },
+    {
+      "name": "信息提示按钮",
+      "kind": "button",
+      "refersTo": "",
+      "description": "用鼠标、键盘或触屏查看指标解释。",
+      "html": "<button class=\"ds-info\" type=\"button\" aria-label=\"查看指标说明\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 11v6M12 7v1\"/></svg></button>",
+      "css": ".ds-info{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:4px;border:0;border-radius:4px;background:transparent;color:var(--activity-secondary,#526174);cursor:pointer}.ds-info svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}.ds-info:hover,.ds-info:focus-visible{background:var(--primary-light,#dbeafe);color:var(--primary-hover,#2563eb)}.ds-info:focus-visible{outline:2px solid var(--primary-hover,#2563eb);outline-offset:3px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "深蓝侧栏里的清晰工作面",
+    "overview": "这是一个面向中文运维工作的管理界面：稳定的深蓝导航为浅色内容区提供清楚边界，蓝色动作色标出可操作位置，内容以易扫读的数字、表格和分区面板为主。整体使用系统无衬线字体，信息密度偏高但层次直接，适合长时间查看和维护配置。\n\n首页把全站活动、双趋势图和客户端明细放在同一条工作流中。图表中的输入、输出和并发各有颜色标记；表格仍是识别并切换客户端的主要入口。全站统计保持可见，历史完成统计和费用作为次级信息折叠展示。",
+    "keyCharacteristics": [
+      "深蓝侧栏与浅灰工作区形成稳定的框架。",
+      "明亮蓝色标识主要操作和选中状态。",
+      "以数字、趋势和可排序表格组织高密度运营信息。",
+      "系统中文字体保持各平台自然呈现。"
+    ],
+    "rules": [
+      {
+        "name": "The One Accent Rule",
+        "body": "蓝色是主要交互强调色；输入、输出和并发趋势使用各自的图例颜色，不以颜色作为唯一的数据区分方式，输出线同时使用虚线。",
+        "section": "colors"
+      },
+      {
+        "name": "The Readable Numbers Rule",
+        "body": "计数和时间读数使用表格数字，避免刷新或对齐变化妨碍比较。",
+        "section": "typography"
+      },
+      {
+        "name": "The Border Before Shadow Rule",
+        "body": "静态内容先靠表面和细边框分组；更明显的阴影留给悬停或浮层。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do 使用深蓝侧栏、浅色内容区和蓝色主要操作色维持页面框架。",
+      "Do 通过文字、单位和图例说明数据含义，不只依赖颜色。",
+      "Do 为数据表保留清楚的列对齐、分隔线和可见排序状态。",
+      "Do 在窄屏缩小间距并保留表格横向浏览能力。",
+      "Do 让键盘聚焦状态与悬停状态同样清楚。"
+    ],
+    "donts": [
+      "Don't 用大面积饱和色替代浅色工作区。",
+      "Don't 让颜色成为输入、输出或并发数据的唯一识别方式。",
+      "Don't 用持续动画或滚动计数干扰实时读数。",
+      "Don't 把全站样式规则误当成要求其他页面采用首页图表布局。"
+    ]
+  }
+}

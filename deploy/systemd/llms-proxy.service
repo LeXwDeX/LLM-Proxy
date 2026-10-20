@@ -1,0 +1,19 @@
+[Unit]
+Description=LLMs Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=llmsproxy
+Group=llmsproxy
+WorkingDirectory=/opt/llms-proxy
+ExecStart=/opt/llms-proxy/bin/llms-proxy -config /etc/llms-proxy/config.json
+Restart=on-failure
+RestartSec=5s
+Environment=LOG_LEVEL=info
+
+# Ensure log directory exists and is writable by the service account.
+RuntimeDirectory=llms-proxy
+
+[Install]
+WantedBy=multi-user.target

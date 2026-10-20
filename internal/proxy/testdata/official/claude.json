@@ -1,0 +1,1050 @@
+[
+  {
+    "name": "messages-normal",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-stream-lifecycle",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好 OK\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":10}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-explicit-zero",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-missing-usage",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":null}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "observed_fields": 0
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-interrupted-stream",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好 OK\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-400",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 400,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-401",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 401,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-403",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 403,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-429",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"rate_limit_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 429,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-500",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 500,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-503",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 503,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-stop-max_tokens",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"max_tokens\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "max_tokens"
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-stop-tool_use",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{\"city\":\"北京\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "tool_use"
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-stop-stop_sequence",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"stop_sequence\",\"stop_sequence\":\"END\",\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "stop_sequence"
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-stop-refusal",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"refusal\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "refusal"
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-stop-pause_turn",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"pause_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "pause_turn"
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-cache-mixed-ttl",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":50,\"cache_creation\":{\"ephemeral_5m_input_tokens\":20,\"ephemeral_1h_input_tokens\":30}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 50,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "cache_creation_5m_tokens": 20,
+      "cache_creation_1h_tokens": 30
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-tool-signature-roundtrip",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "consider",
+              "signature": "opaque-signature"
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_1",
+              "name": "lookup",
+              "input": {
+                "city": "北京"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_1",
+              "content": "晴"
+            }
+          ]
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "tools": [
+        {
+          "name": "lookup",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-stream-error",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "response_status": "failed"
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-server_tool_use",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\": \"msg_contract\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"claude-opus-5\", \"content\": [{\"type\": \"text\", \"text\": \"你好 OK\"}], \"stop_reason\": \"end_turn\", \"stop_sequence\": null, \"usage\": {\"input_tokens\": 70, \"output_tokens\": 10, \"cache_read_input_tokens\": 30, \"cache_creation_input_tokens\": 0, \"server_tool_use\": {\"web_search_requests\": 1}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": true
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-iterations",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\": \"msg_contract\", \"type\": \"message\", \"role\": \"assistant\", \"model\": \"claude-opus-5\", \"content\": [{\"type\": \"text\", \"text\": \"你好 OK\"}], \"stop_reason\": \"end_turn\", \"stop_sequence\": null, \"usage\": {\"input_tokens\": 70, \"output_tokens\": 10, \"cache_read_input_tokens\": 30, \"cache_creation_input_tokens\": 0, \"iterations\": [{\"type\": \"message\", \"input_tokens\": 70, \"output_tokens\": 10}]}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": true
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-stream-tool-signature-deltas",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好 OK\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-contract\",\"name\":\"lookup\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"杭州\\\"}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":10}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_anthropic",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    },
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-402",
+    "source": "https://platform.claude.com/docs/en/api/errors",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"type\": \"error\", \"error\": {\"type\": \"billing_error\", \"message\": \"contract error\"}, \"request_id\": \"official-fixture-request\"}",
+    "content_type": "application/json",
+    "status": 402,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-404",
+    "source": "https://platform.claude.com/docs/en/api/errors",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"type\": \"error\", \"error\": {\"type\": \"not_found_error\", \"message\": \"contract error\"}, \"request_id\": \"official-fixture-request\"}",
+    "content_type": "application/json",
+    "status": 404,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-409",
+    "source": "https://platform.claude.com/docs/en/api/errors",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"type\": \"error\", \"error\": {\"type\": \"conflict_error\", \"message\": \"contract error\"}, \"request_id\": \"official-fixture-request\"}",
+    "content_type": "application/json",
+    "status": 409,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-413",
+    "source": "https://platform.claude.com/docs/en/api/errors",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"type\": \"error\", \"error\": {\"type\": \"request_too_large\", \"message\": \"contract error\"}, \"request_id\": \"official-fixture-request\"}",
+    "content_type": "application/json",
+    "status": 413,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-504",
+    "source": "https://platform.claude.com/docs/en/api/errors",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"type\": \"error\", \"error\": {\"type\": \"timeout_error\", \"message\": \"contract error\"}, \"request_id\": \"official-fixture-request\"}",
+    "content_type": "application/json",
+    "status": 504,
+    "want": {},
+    "request_id_header": "request-id"
+  },
+  {
+    "name": "messages-http-529",
+    "source": "https://platform.claude.com/docs/en/api/errors",
+    "endpoint_type": "claude",
+    "adapter": "standard",
+    "model": "claude-opus-5",
+    "base_path": "",
+    "client_path": "/v1/messages",
+    "upstream_path": "/v1/messages",
+    "request": {
+      "model": "claude-opus-5",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"contract error\"}, \"request_id\": \"official-fixture-request\"}",
+    "content_type": "application/json",
+    "status": 529,
+    "want": {},
+    "request_id_header": "request-id"
+  }
+]

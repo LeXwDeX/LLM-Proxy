@@ -1,0 +1,3 @@
+# data/ runtime directory - contents tracked via .gitignore
+# This .gitkeep exists solely to ensure the directory is created on clone.
+# DO NOT commit llms-proxy.db or any runtime data files here.

@@ -1,0 +1,96 @@
+# internal/proxy — 代理转发层开发约束
+
+> 本目录是核心转发逻辑所在，改动最频繁、故障影响最大。改动前先读本文件；项目级约束见根目录 `AGENTS.md`。仓库当前不维护 `docs/architecture.md`。
+
+## 模块地图（改哪个文件先看职责）
+
+| 文件 | 职责 |
+|---|---|
+| `service.go` | 请求编排中枢：鉴权后路由、目标选择、失败静默、指标 |
+| `forward.go` | HTTP 转发执行：上游请求构造、调用 provider 认证策略、流式回写 |
+| `provider_profile.go` | 由 config 元数据派生 Provider Profile，将认证、路径与 query 策略绑定到目标 |
+| `url.go` | 上游 URL 拼装；`isAnthropicStylePath` 等路径形态判断 |
+| `protocol.go` | 共享请求 schema 分类 → 协议类型解析（`ResolveProtocol`），保留旧 helper 默认值 |
+| `path_capability.go` | 共享请求 schema 分类，消费 config 的能力声明（目标选择时过滤不兼容 target） |
+| `affinity.go` | 连接粘连：同客户端+同模型 TTL 5 分钟；会话级粘连按客户端+会话+客户端模型名（小写）保持同一 target，滑动 TTL 24 小时，优先识别 `X-Session-Affinity`、`X-Session-Id`、`session_id`、`X-Claude-Code-Session-Id`，均惰性过期 |
+| `keypool.go` | 多 API Key 池状态机：客户端亲和、耗尽检测、冷却恢复 |
+| `keypool_probe.go` | 耗尽 key 的恢复探测，使用 provider 的认证与探测路径策略 |
+| `responses_ws.go` | HTTP `/v1/responses` 经上游 WebSocket 连接池转发（target `prefer_websocket`，仅 openai）；握手前可回退 HTTP，发送后不重放 |
+| `responses_websocket.go` | 原生下游 WebSocket 会话（`GET /v1/responses` 升级）：逐轮鉴权与准入、上游 WS/HTTP 回退、空闲超时与关闭排空 |
+| `glm_ratelimit.go` | 智谱 GLM 5 小时限流识别（HTTP 200 + SSE 内嵌 error，非标准 429） |
+| `sanitize.go` | Azure v1 字段白名单净化（**仅 azure_openai 生效**，其他类型透传原始请求体） |
+| `models.go` / `test_model.go` | 模型名提取与校验 / 本地 `/v1/models` 拦截 |
+| `multipart_convert.go` | multipart/form-data → JSON 自动转换 |
+| `usage.go` | 用量采集（OpenAI / Claude / Gemini 三种响应格式） |
+| `response_observation.go` | HTTP 响应观察副本的 identity/gzip/deflate/zstd/br 解码；用量与 trace 共用，保持原始转发字节 |
+| `custom_inject.go` | 目标级自定义 Header/Body 注入 |
+| `pool.go` | 部署池：池成员调度与 `X-Proxy-Pool` 头来源 |
+| `model_rewrite.go` / `request_path.go` | 请求体/URL 模型名改写（大小写保留契约）与请求路径识别（`unknown_request_path`、`invalid_responses_path` 等错误码实现处） |
+| `json_members.go` | 唯一的顶层 JSON 成员扫描器（all/last/lastFold 查询与受保护成员规范化），HTTP 与 WS 共用 |
+| `no_official_usage.go` | 未取得官方最终用量时的统一结算（`settleNoOfficialUsage`）：0 token 事件、诊断、Warn 日志与计数，各协议/传输共用 |
+| `wire_transport_test.go` / `responses_ws_prewarm_test.go` | 连接层参数（TLS 会话缓存、h2、拨号超时）与 WS 预热的守护用例 |
+| `usage_protocol_*.go` / `usage_patch_*.go` / `usage_adapter*.go` / `usage_context.go` / `usage_stream.go` | 各协议用量解析、流式累计合并与用量上下文适配族 |
+| `provider_error_*.go` | 各 provider 错误响应的归一化识别（ breaker / keypool 依据） |
+| `target.go` / `runtime_window.go` | 目标运行时（熔断、暂停、`max_concurrency` 占用）与时段窗口 |
+
+## 🚨 红线约束（有回归测试守护，禁止破坏）
+
+1. **重试与 failover（2026-10-11 按当前源码核对）**：
+   - 普通上游 4xx/5xx 默认透传，不做通用同-target 重试；普通 503 的守护测试为 `TestService503PassThroughNoRetry`。
+   - 密钥池有有限例外：HTTP 429 和 GLM 瞬时限流可有限重试同一 key，达到限制后换 key；只有通用 `rate_limited` 与 GLM 瞬时类（1302/1303/1305）可坚持同 key；识别出的 GLM 额度类、余额/额度耗尽（如 `credit_balance_exhausted`）与 GLM 账户级失效（1113 欠费、1309 套餐到期，永久屏蔽，管理端唤醒直接恢复）跳过同 key 重试，进入换 key 路径（`sameKeyRetryable429Reason`）。符合条件时，全 key 耗尽可进入 target failover。具体条件与次数以 `service.go`、`forward.go`、`keypool.go` 及其用例为准，不得扩展为任意错误重试。上游 WS 池的握手拒绝（未发送生成事件、非代理本地应答）按同一规则处理；已发送生成事件的 WS 响应永不进入 key 重试。
+   - 原生下游 WS 的**当前轮生成发送前**握手拒绝也进入同一 key 循环：完整且不超过 64 KiB 的错误体使用共享分类器；401 仅识别到既有凭据规则时换 key，402 按既有状态规则换 key，429 保留每 key 两次、全局四次换 key 的有限策略，额度类跳过同 key。完整空体或无效 JSON 不触发文本前缀分类；超长、读取失败和取消不使用部分 envelope，不进入这条换 key 路径。原始体关闭一次，保存的拒绝响应关闭时释放 key/节点占用并结算该次握手健康；最终客户端指标只结算一次。普通 403/503 不新增重试，厂商特殊规则仍仅按所选 `usage_adapter` 生效。
+   - 原生 WS 重连的完整输入轮可在发送 create 前换 key；带 `previous_response_id` 的既有身份检查与 409 不变，不清除 lineage 强行重试。升级成功后的发送失败（含可能部分发送）和上游终态错误绝不重放，终态 key 反馈只影响下一轮。400/404/405/426/501 的 HTTP 回退规则不变。此项不扩展 F13/`supports_responses`、F7/F8/F11/F10、自动 `include_usage` 或 key/account lineage 放宽。
+   - WS 生成传输失败的集中诊断日志区分内部原因状态（取消 499、超时 504、其余 502）与客户端拟返回状态，两者职责不同。原生 WS 发送失败保留错误事件中的 502，不表示升级后另发 HTTP 502；客户端断开时拟返回状态不证明已送达。日志记录失败阶段、可能已发送与 `replayed=false`，不记录凭据、请求体或上游错误正文。
+   - 可重试网络错误（连接拒绝、DNS 等，`classifyTransportError` 为 502）可切下一 target；`context.DeadlineExceeded`、请求可能已发出后的网络层超时（504，如等待响应头超时）与 `context.Canceled`（499）均不可重试，防止重复推理或扣费。唯一例外（2026-10-12 确认）：可证明发生在发送任何请求字节之前的超时（拨号阶段 `net.OpError`、TLS 握手超时，见 `isPreSendTransportError`）按网络错误 failover 并降级该 target。2026-10-20 起拨号超时为 8s；真实拨号超时同时匹配 `context.DeadlineExceeded`，故 `isPreSendTransportError` 须在 attempt 与父上下文均有效时先识别 dial `OpError`，并在错误分支 `cancel()` 之前判定；父取消/deadline 或 attempt 超时仍为 499/504、不 failover。保留 `TestServiceTimeoutDoesNotRetryOrMute`、`TestCoreReviewNetworkTimeoutRetriesOnlyBeforeSend`。该红线约束的是“没有终态响应”的超时与取消；上游已返回 4xx/5xx 终态状态码（如 429、402）后，按既有规则做的有限同 key 重试或换 key 不属于超时重试，即使读取错误体前缀时上下文到期也一样：按既有拒绝响应契约处理，不扩大允许重试的状态及分类范围。
+   - 上述拒绝响应例外仅在父请求 `r.Context()` 仍有效时成立。父请求取消或 deadline 后停止同 key 退避、换 key、全池耗尽补发及 failover；HTTP 429 与 GLM 瞬时 SSE 的 1 秒退避可中途取消，不为未执行的重试解除 exhausted。父取消沿用 499/canceled，父 deadline 沿用 504/failure，不因父上下文结束 mute target。429/402 状态本身不能绝对证明上游未推理或未扣费。
+   - 客户端断开时的用量结算（2026-10-20 确认，底层规则，与协议/传输无关）：中断就是中断，客户端取消照常立即取消上游，不排空、不重试、不重放。上游请求可能已发出（已发送请求字节或 WS 已发 `response.create`）而尚未取得该协议官方最终用量字段时，记 0 token、`incomplete`、`cost_incomplete` 的用量事件，诊断 `client_disconnected_no_usage`，部分观察值清零；写 Warn 日志（不含正文/凭据）并累计 `usage_client_gone_no_usage`。断开前已取得最终用量的按官方字段完整记账。可证明未发送字节的取消不写事件。非客户端原因（上游出错/断流、超时、观察或解码失败、缺终态或缺官方最终用量、Claude 重叠守卫终止、WS 终态失败）同样清零，诊断 `upstream_interrupted_no_usage`，日志带 `cause`，计数 `usage_upstream_interrupted_no_usage`；原有具体诊断保留并追加。官方最终用量：Responses/Anthropic 为 finalUsage；Gemini 为带 usageMetadata 的块到达时所有已见 candidate 都有 finishReason；Chat 等 SSE 为 `[DONE]`，或带 usage 的块到达时所有已见 choice（按 index 跟踪）都有 finish_reason（含 choices 为空的末尾 usage 块）；非流式为完整 body 的 usage。完整返回但无 usage（`missing_usage`）、已取得最终用量但数值冲突、非 2xx 拒绝维持原状。“可能已发出”以 HTTP `GotConn` 或 WS 已发 create 为界。一个客户端请求至多一条用量事件：响应头前已发出但随后重试/failover 的尝试只写 Warn（`will_retry=true`）并计数，由最终结果结算；最终响应不被观察（`responseObservesUsage` 为假：非 2xx 且非 WS 已发 generation）时，之前已发出且无官方用量的尝试仍记一条 0 token 不完整事件（`upstream_interrupted_no_usage`），最终非 2xx 本身不计费，没有已发出尝试时不记。待结算事件的 model 用请求循环传入的 upstreamModel（与正常事件同一口径，不带 ModelPrefix）。各路径共用 `settleNoOfficialUsage`。WS 收到终态帧（failed/incomplete/error）但无 usage 时与 HTTP 一致，按完整无 usage 处理。已取得官方最终用量后才发生的断开或中断记官方值（不降级），追加 `client_disconnected_after_final_usage` / `interrupted_after_final_usage`；观察失败、解码校验错误与 Claude 重叠守卫不属此类。待结算 0 事件使用已发送那次尝试自身的 path 与协议。两条 Warn 日志为中英双语，按 msg 检索的告警需同步。
+   - 父上下文结束时，已有成功响应或已发送生成的 WS 响应仍走既有用量结算，不完整时也须记录事件；禁止的是后续重试，不能丢弃已知用量。WS 本地响应仍走既有完成路径，不为未发送的生成新增用量事件。退避期间 key 保持 exhausted，因此同目标其他请求可能选择其他 key 或走既有耗尽处理；这是不为未执行重试 unmark 的结果，不另改并发策略。
+   - 非 2xx 的 4 KiB 错误体前缀读取失败记录 `partial_error_body`，仅含 request_id、target、status、bytes_read 与受控 error_category；不记录正文、原始 error 字符串、凭据或 URL。正常 EOF 与无错误的长度限界不记录该诊断；日志不改变前缀回放、原有拒绝分类或有限重试策略。真实 HTTP 回归见 `non2xx_context_test.go`。
+   - 切 key 或 target 时须释放旧请求的响应体、上下文与并发占用；每次选中的 target 都须通过其准入检查。
+   - 改动前先跑 `go test ./internal/proxy/ -run 'Retry|Timeout|Failover|GLM|Admission' -v -count=1`；改动后完成本目录全量回归。
+2. **路径感知路由**：目标选择顺序是「model 过滤 → 请求 schema 过滤」；调整 `internal/config/endpoint_type.go` 的 `RequestSchemas` 能力声明或 `path_capability.go` 的请求 schema 分类，会直接改变线上路由结果，必须补对应测试。
+3. **连接粘连降级**：粘连目标不可用或路径不兼容时必须降级为轮询，不能让请求失败。
+4. **净化仅限 Azure**：`sanitize.go` 的字段白名单只对 `azure_openai` 生效；给其他 endpoint_type 加请求体改写要走 `provider_profile.go` / `custom_inject.go`，不要扩散白名单逻辑。
+5. **配置热更新与目标熔断**：同名目标的上游连接身份变化，或生效后的 `Paused` 从 true 变 false（含池恢复），须分叉新的 `targetHealthState`，清除冷却、连续失败和探针租约，保留分叉时的累计计数及成功/失败观测时间。身份字段为 `endpoint_type`、`endpoint`、`auth_mode`、`allow_bearer_passthrough`、合并去重后的凭据集合、`custom_headers`、`custom_body`、`model_prefix`、`openai_prefix`、`anthropic_prefix`、`prefer_websocket`；仅重排凭据不重置，路径前缀按现有归一化结果比较。`usage_adapter`、`model_mappings`、`max_concurrency`、`pool`、`key_reset_time` 等非身份编辑、暂停及编辑其他目标继续共享原熔断状态；池恢复但目标仍暂停时不重置。旧代际在途结果只结算其原 health 对象，不得重新静默新身份或释放新身份探针；同身份代际仍须保留迟到结果及 successor 探针保护。keyPool、并发占用、runtimeWindow 与 AIMD 沿用原共享规则，不新增重试。新增 `Target` 导出字段须在 `TestHealthIdentityFieldClassificationExhaustive` 分类，并验证对应的重置或保留边界。
+
+## 计费类型与厂商特殊处理
+
+- 持久化目标的 `usage_adapter` 必须显式选择 `standard`（原厂规则）、`qwen`、`glm`、`deepseek`、`kimi`、`openrouter` 或 `minimax`，共七项，新建无默认值。它是用量/缓存、厂商错误、限流与额度处理的唯一选择依据；运行时不根据 host 或模型白名单推断，不接受 `auto`。`endpoint_type` 仍只决定认证、路径和协议能力。
+- `standard` 按实际请求协议使用 OpenAI、Anthropic 或 Gemini 原厂用量解析器，即使目标使用厂商官方域名也不启用厂商 Patch。显式厂商选择适用于该目标的所有模型及转发网关。Gemini 用量始终保持原生解析，但厂商错误策略仍按显式选择执行。
+- Qwen 显式/隐式缓存按实际出站请求的 `cache_control` 或 Responses 的 `x-dashscope-session-cache` 判定，不依赖模型名；显式缓存读是缓存总量的子集。缺少请求上下文且上游报告缓存时，保留用量并标记 `missing_cache_request_context`、费用不完整。所选 DeepSeek 的 Anthropic 请求仅在模型带 `claude-` 前缀时提示价格映射风险。
+- Kimi Chat 的顶层 `usage.cached_tokens` 是嵌套 `prompt_tokens_details.cached_tokens` 的别名；仅出现顶层时补读，同时出现但不一致时标记冲突，不重复计数。`prompt_tokens` 包含缓存读、缓存写与普通输入。缓存写的 5m/1h 子集只按实际出站 Chat 请求 `prompt_cache_options.ttl` 判断；有效对象请求省略 TTL 时默认 5m。缺少或无效上下文、无效 TTL，以及 Responses 缓存写缺少已证实的 TTL 时，保留总量并标记 `unknown_cache_write_ttl`、费用不完整，不猜测。Anthropic 与 Gemini 原生用量不变。
+- Kimi 错误仅匹配结构化 `error.type` 与对应 HTTP 状态：429 的 `exceeded_current_quota_error` 按 `quota_exceeded` 处理，跳过同 key 重试；无 `key_reset_time` 时人工恢复，配置重置时间时沿用自动恢复。401 的 `invalid_authentication_error` / `incorrect_api_key_error` 按无效 key 处理。429 的 `rate_limit_reached_error` / `engine_overloaded_error` 仍是现有有限重试与短冷却，不是额度耗尽；403、500、未知类型不新增规则，通用 402 不变。message/content/code 中的同名文本不触发 Kimi 策略。
+- Kimi 合同来源（2026-10-12 文档核对，非真实 API 验收）：[错误码](https://platform.kimi.com/docs/api/errors)、[Chat](https://platform.kimi.com/docs/api/chat)。此 Patch 不注入 `include_usage`，不转换协议，不增加 endpoint type 或模型白名单，不修改线上 ACL/配置；旧目标的 `standard` 不迁移成 `kimi`。
+- JSON 与 SSE 的 finish reason 使用同一规则：通用 `error` 表示失败；`network_error`、`sensitive` 仅对所选 GLM 表示失败；`insufficient_system_resource`、`aborted` 仅对所选 DeepSeek 表示失败（[Chat 文档](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion)，2026-10-20 核对，非真实 API 验收）。无论是否失败，保留原始原因及已报告用量。通用 `type:error`、`response.failed` 行为不变。
+- OpenAI 兼容实际请求协议的 JSON/SSE 顶层标准错误 envelope（非空 `error` 对象含有效 `message`、`type` 或 `code`）记为业务失败，后续 usage 或成功终态不得清除失败；保留用量、HTTP 状态和响应字节，不新增重试、failover 或封 key。此规则不按 host、模型名或 `usage_adapter` 启用，不递归搜索生成内容。通用规则不读 OpenRouter `error.metadata`、不识别 MiniMax `base_resp`；只有显式选择对应 Patch 时由厂商规则读取。Anthropic/Gemini 原生生命周期规则不变。
+- OpenRouter 错误 Patch（2026-10-13 文档核对，非真实 API 验收）：402 的 `openrouter_in_flight_budget`（或缺少 limit_source 且 reason 为 `in_flight_budget_exhausted`）记 `rate_limited`；`weight_exceeds_budget` 透传，其余 402 记 `billing_error`。403 只认 metadata.limit_source 的 `openrouter_key_limit`、`openrouter_guardrail_budget`、`openrouter_workspace_budget`，记 `quota_exceeded`；moderation、文本和其他 403 不触发。401 按状态记 `invalid_token`；429 保留通用处理，408/5xx 不新增重试。200+error 只走通用 F8。此 Patch 不读 Retry-After、resets_at 或 cost，用量仍走原厂解析。
+- MiniMax 错误 Patch 仅处理 OpenAI 兼容 Chat Completions 的非流式 HTTP 200 `application/json`：顶层数字 `base_resp.status_code` 中，1004/2049 为 `invalid_token`，1008 为 `billing_error`，2056 为 `quota_exceeded`，1002/1041/2045 为 `rate_limited`。此范围内非零码使 usage 生命周期保持 failed；未知码不封、不换 key、原样透传。未编码 JSON 仅探测完整的 4 KiB 前缀；仅在上下文仍有效、读取无错误且完整 JSON 命中已知码时直接换 key，不 sleep。全 key 耗尽进入允许的 failover，否则返回映射错误；该拒绝路径不返回原始 200 体，与 GLM 一致。探测期间上下文中断（含子请求超时）则保留 HTTP 200 和已读前缀（可能含原拒绝码），不新增 504、不封 key、不重试；既有 `writeResponse` 仍可保留已知用量（如 7/3 token），但响应复制中断会标记用量不完整，并沿用响应体关闭释放占用。SSE 不探测 `base_resp`，非 2xx 不读取厂商业务码，两者均走原厂规则；Anthropic Messages、Responses 与其他请求协议也不启用此判定。不探测 WS 升级后的响应，不新增 endpoint_type，不迁移旧目标，用量仍走原厂解析。
+- MiniMax 来源：[官方错误码页](https://platform.minimaxi.com/docs/api-reference/errorcode)、[OpenAI 兼容 Chat OpenAPI](https://platform.minimaxi.com/docs/api-reference/text-chat-openai)、[Anthropic 兼容协议](https://platform.minimaxi.com/docs/api-reference/text-chat-anthropic)，核对日期 2026-10-13；文档核对不等于真实 API 验收。2056 表示 M Plan 的 5 小时窗口与周窗口资源限制，到期恢复，响应不提供恢复时间。HTTP 200 带 `Content-Encoding` 时跳过错误探测，安全透传，此次响应的换 key Patch 不生效。
+- 2056 的代理侧恢复策略与 Kimi 一致：按 `quota_exceeded` 进入 `keyPool.markExhaustedWithError`；目标有有效未来 reset time 时记 `quota_exceeded_subscription`，到时自动恢复。未配置、无效或已过期时记 `quota_exceeded_api`，需人工唤醒，或配置有效重置时间按既有 keypool 规则恢复；代理不根据 2056 猜测 M Plan 窗口结束时间。
+- 热修改计费类型后，新请求使用新策略；已有 key 的冷却、封禁和恢复规则不变，不清空运行态。bbolt 的迁移与校验保证持久化目标使用显式值；仅内存构造目标的空值按 `standard` 兼容。非空未知值（含旧 `auto`）仍跳过目标并记录 Error，不猜测 host。
+
+## 新增 / 调整 endpoint_type 时本目录的配套改动
+
+1. `internal/config/endpoint_type.go` 的 `endpointTypes` 表追加展示元数据、原生协议、兼容请求 schema 及策略标识（SSOT，先做）；跨 provider 的 config 级枚举放 `internal/config/schema.go`，计价、额度、目标状态、角色等由各自领域包声明，经 `/admin/data/schema` 汇总下发。
+2. 默认 ProviderRegistry 与目标路径过滤从该声明派生；复用已有策略时无需再次登记 endpoint type，新增策略时在 `provider_profile.go` 绑定实现。
+3. 原生 `Protocols` 与兼容 `RequestSchemas` 分开：兼容请求表示透传能力，不证明协议转换；dual 的 Responses 还受每目标 `supports_responses` 开关限制。
+4. `internal/catalog`：补模型数据。
+5. 补对应协议、认证、路径与 metadata 深拷贝回归（参考 `provider_profile_test.go` / `path_capability_test.go`）。
+
+## 测试要求
+
+- Service 拥有的 HTTP Transport 禁止内置 gzip 自动解压（它只看首个编码字段），由代理复现默认协商：缺少 `Accept-Encoding`、无 `Range` 且不是 HEAD 时补 gzip，仅在全部响应字段声明单 gzip 且正文非零长度、不是 101/隧道等可写正文时进行延迟透明解压；错误保持发送后的读取失败。普通请求、模型测试、探测与 WS 握手/HTTP 回退使用同一判据。明确关闭压缩的自定义 Transport 与不透明 RoundTripper 保留调用者策略，不额外推断；显式客户端编码不触发这条透明解压。
+- 响应编码判定须合并全部 `Content-Encoding` 字段值，保留列表中的空值；单一编码大小写和两侧空白兼容，重复/叠加/未知编码不按首值或原始正文猜测。客户端显式指定编码或响应声明未知/多值编码时，普通 HTTP 的编码头和原始字节保持透传，用量观察失败标记不完整，trace 不误解码。非 2xx 的正文分类只读 identity 或成功 gzip 解码的前缀，既有 HTTP 状态规则不变；MiniMax 带编码时不探测，Claude 重叠守卫只处理可信 identity；GLM HTTP 200+SSE 探测与 HTTP 429 正文细化也只读可信 identity，其他编码的 429 保留通用有限重试与冷却。原生 WS 的未知编码 HTTP 回退在读取阶段失败，不把未解码正文转换为 frame、不重放生成，底层响应体关闭一次；未知编码握手正文不作为完整分类 envelope。
+- 压缩响应改动须覆盖 JSON/SSE 的精确用量、`standard` 与显式 Patch、原始字节/编码头透传及损坏/截断/取消。用量观察不得套用 trace 的正文长度上限；zstd 的 8 MiB 窗口限制也不是输出总量上限；首帧为单段帧且声明大小在 8–64 MiB 时按声明大小放宽，超限在帧头阶段拒绝并标记不完整。br 仅用于用量与 trace 观察解码；非 2xx 分类、GLM/MiniMax/Claude 守卫与原生 WS 回退的编码边界不变。SSE 在干净 EOF 时，最后一个事件即使缺少结尾空行，只要数据完整（`[DONE]` 或可完整解析的 JSON）即按已分派处理；数据不完整或解码/读取出错仍判失败。未知编码不猜测、不按模型名选择解码，不因观察失败扩大重试范围。
+- 本目录测试即回归红线，改动后必须全绿：`go test ./internal/proxy/ -count=1`。
+- 只验编译不跑用例：`go test -run NONE ./internal/proxy/`。
+- 涉及限流/冷却的改动，额外关注 `keypool_test.go`、`glm_ratelimit_test.go`。
+- 性能敏感路径（转发热路径）受 `perf_regression_test.go` 与 `perf_body_benchmark_test.go` 守护，勿引入每请求的重量级分配。
+- 请求入口规范化（2026-10-20，安全红线）：读完请求体后、extractModel/ACL 之前，对受保护顶层成员（`json_members.go` 的 `protectedRequestMembers`：路由/计费/流式/WS 信封/输入与预算/服务端状态等，multipart 另加图像参数）按 encoding/json 大小写折叠规则统一：保留最后一个精确同名成员，删除其余重复与全部大小写变体，只有变体时全部删除；JSON、multipart（透传按字节删段、转 JSON 以规范化表单为输入）、urlencoded（按解码后的键比较，只删对应 `k=v` 段；urlencoded 请求体不做模型名改写，为既有缺口）与原生 WS 每个 create 都覆盖，ACL、计费与上游读到同一值；无冲突时零改写；日志只记成员名与删除个数，计数 `request_members_normalized`。`custom_body` 不得配置受保护成员的大小写变体。新增受保护键或新入口须补“取第一个/取最后/struct 折叠”三种 oracle 的一致性测试。嵌套计价成员（`nested_members.go`，2026-10-20）：`stream_options.{include_usage,include_obfuscation}`、`prompt_cache_options.ttl`、顶层/`system[*]`/`messages[*]`/`messages[*].content[*]`/`tools[*]` 的 `cache_control`（及其 `type`/`ttl`）与 `messages[*].content` 在同一次扫描中按相同规则规范化，只删字节、无冲突零改写，报告路径形如 `messages[].content[].cache_control`；`rewriteTopLevelJSON` 仍只做顶层兜底，嵌套只在请求入口执行。请求体类型由 `request_body_kind.go` 的 `classifyRequestBody` 按 `mime.ParseMediaType` 精确判定（参数无法解析时取 `;` 前的媒体类型），extractModel、规范化与 needsMultipartConvert 共用；urlencoded 声明下正文去掉前导 Unicode 空白与 UTF-8 BOM 后以 `{` 开头时，`json.Valid`（不带 BOM）即按 JSON 处理，入口在歧义检查后把 `r.Header` 的 Content-Type 改为 `application/json`（保留 charset，丢弃其他参数），failover、换 key、trace 与用量解析都用改写后的值；非法、近似 JSON 或带 BOM 返回 400 `ambiguous_request_body`；其余 urlencoded 只按表单读取；所有 multipart 读取（extractModel、规范化、needsMultipartConvert、convertMultipartToJSON、prepareTargetBody）统一使用 `classifyRequestBody` 返回的原始 boundary、不修剪；multipart 声明下正文以 `{` 开头、boundary 为空/缺失/含首尾空白、原始 Content-Type 参数（`rawMediaParams` 按原文扫描）中出现 `boundary*`/`boundary*N`（大小写不敏感）、引号内 boundary 含反斜杠、boundary 原值不是 1–70 个 RFC 2046 bchars（不以空格结尾）或与 mime 解析值不等、preamble 非空白、行首 `--<boundary>` 不是 Go 认可的分隔或结束行（CRLF 表单中仅前置 LF、位于结束行之后亦同；CRLF 表单中任一 part 头部块（含结束空行）有不以 CRLF 结尾的行同样 400，不保留 bare-LF 例外；见 `multipartStrayDelimiter` 与 `FuzzMultipartStrayDelimiter` 双向对照）、Content-Type 参数无法解析，或任一 part 的 Content-Disposition 非恰好一个/无法解析/非 form-data/含 `name*`/`name*N` 参数时，返回 400 `ambiguous_request_body` 且不转发。multipart 中字段名属于受保护表单字段集合（`protectedFormFieldIndex`：受保护成员加图像参数，大小写折叠）的非文件分段，带任何 Content-Transfer-Encoding、Content-Type 无法解析或出现多次、charset 不是 utf-8/us-ascii 时同样 400（代理读原始字节，而 `NextPart` 会解 quoted-printable、busboy 会按 charset 解码）；正文非空且 Content-Type 头多于一个时 400 `ambiguous_request_body`（原生 WS create 始终单值）。请求正文非空且合并后的 Content-Encoding 含 identity 以外编码时返回 415 `unsupported_content_encoding`（附 `Accept-Encoding: identity`），不转发；代理不解压请求体，原生 WS create 已删除该头。
+- 连接层（2026-10-20）：唯一 `wireTransport` 指针身份不变（gzip 判据依赖）；`TLSClientConfig.ClientSessionCache`（256，HTTP 与 WS 共用）必须与 `ForceAttemptHTTP2: true` 同时设置，否则 h2 被静默关闭；HTTP/2 PING 30s/15s；拨号超时 8s、KeepAlive 30s。
+- 请求体改写为字节级：顶层 JSON 索引器只替换顶层 `model` 值、插入 `include_usage`，其余成员原始字节、顺序、转义保留；顶层路由成员重复时回退旧 re-marshal 实现，无效 JSON 原样透传；`custom_inject.go` 仍整体 re-marshal。WS 请求与事件同样按原始字节编辑顶层成员（`type`/`stream`/`background`/`stream_id`），不再重新序列化；WS 终态判定沿用旧 struct 解码语义。改动扫描器须保留与 `encoding/json` 的差分 fuzz。
+- 用量解析器要求传入不可变的出站 body；计价投影在发送期间并行计算，join 时校验切片身份。2MB 响应捕获仅在 `responseCaptureNeeded`（trace 开启、≥400、WS）时启用，新增读取捕获内容的位置须同步该函数；trace 关闭零采集。转发先写客户端再写用量观察者；SSE 响应头提前 flush。
+- 上游 WS 池（2026-10-20）：`/admin/metrics` 的 `responses_ws` 提供命中/握手/回退/预热计数与 dns/tcp/tls/upgrade 握手分段直方图，相邻握手变化头只记头名。新鲜备用 lane 预热（按 provider 认证头精确匹配凭据退役，迟到的不可用回调先复查 key 状态）：每客户端至多 1 条、只用身份头、`responseID` 为空；新请求等待在途备用拨号至多 200ms 后自行拨号，备用拨号结果不得让前台失败或变慢；配置变更、BlockKey、keypool 判耗尽/屏蔽时取消在途备用并退役空闲备用；名额让出顺序为空闲备用→在途备用→最久未用 lane；`prewarm_handshake_*` 与前台 `handshake_*` 直方图分开；后台拨号的任何结果不得进入 keypool、熔断或 unsupported 记忆，失败按 key 退避 1 分钟；续接请求绝不使用备用 lane。池内连接在锁外关闭。原生会话在无进行中 turn 且上游空闲 30s 时 ping 上游，失败关闭连接，下一轮按既有规则（新连接或 409）。
+- 观察解码预算（2026-10-20）：br 与 zstd 共用全局预算（默认 512 MiB，环境变量 `LLMS_OBSERVATION_DECODE_BUDGET_MB`）。br 开流即按窗口预留 1.2×((1<<WBITS)+256 KiB)（解码器可能在首个 metablock 头就分配整个窗口，逐步预留会滞后），large-window 拒绝，512 MiB 下 lgwin 22 约 100 路、lgwin 24 约 26 路；zstd 单段帧 >8 MiB 按 FCS 预留，不足回落 8 MiB 上限。预留失败按观察失败记 0（cause=observation_failed），转发字节不变；`usageObservationEnabled()` 为真时 `forwardRequest` 从上游 Accept-Encoding 去掉 br（保留其他编码与 q 值，含 `*` 时追加 `br;q=0`，变空设为 `identity` 而非删头——删头会触发 `doHTTP` 透明 gzip 改变透传字节），防客户端借预算耗尽规避计费；`/admin/metrics` 的 `observation_budget` 提供容量、占用与按编码的耗尽计数，耗尽告警每 10s 至多一条。
+- 落库（2026-10-20）：用量先同步追加并 fsync 恢复日志，再由后台批量提交 bbolt（`RecordBatch` 按 RecordID 幂等），额度内存计数仍在 handler 返回前同步更新；请求完成统计入有界队列异步写，满则丢弃并计入 `record_failures`；`MaxBatchDelay=2ms`。额度校准（DrainClient）等待该客户端排队事件由写入器批量提交（最多 10s，超时本轮校准放弃、保留现有计数、该客户端准入按校准失败语义暂时拦截并退避重试，不丢账不重复），仅写入失败或遗留（foreign）事件逐条重放；无 foreign 行时回放与校准不读整个 journal。`cmd/proxy` 以 `os.Exit(run())` 退出，所有 defer 在出错路径同样执行。关停顺序（正常与启动出错路径一致）：停止接收并等待 handler → 排空 WS → `proxyService.Close` → 排空用量与统计队列（总超时 30s，超时记 Error，剩余用量留在 journal 待下次 Replay）→ Replay → 关闭 bbolt。统计写失败日志每 10s 至多一条并带 `dropped`；`/admin/metrics` 的 `persistence` 提供 `usage_async_pending`、`usage_async_deferred`、`request_stats_dropped`。
+- 请求完成统计由 `SetRequestStatsRecorder` 独立注入：Service 调用（原生 WS 按有效 create 轮次）结束后只记一次，重试不另计；不含 Service 前鉴权/IP 拒绝、健康/管理/ping、升级/会话控制及无效或鉴权复核拒绝消息。保留原有指标、健康和用量结算，统计写失败不得改变响应或额度。SSE 完整终态与 usage 是否存在分别判断；终态缺失为失败，有终态无 usage 可成功。总览查询仅覆盖最近 72 小时已结束分钟，详见 README 的请求完成统计口径。

@@ -1,0 +1,35 @@
+# Pre-merge 质量门：main 的每次 push / PR 都必须通过构建、vet 与全量单测。
+# （docker-build.yml 只在 tag 推送时打包镜像，不承担验收职责。）
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 文档同步契约校验（AGENTS.md 为规范源）
+        run: make check-docs
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: 单元测试
+        run: go test ./...
+
+      - name: 脚本语法冒烟
+        run: bash -n scripts/check-agents-docs.sh

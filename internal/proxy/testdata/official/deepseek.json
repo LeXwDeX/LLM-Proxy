@@ -1,0 +1,1859 @@
+[
+  {
+    "name": "chat-normal",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "chat-stream-lifecycle",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "stream": true
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": ": keepalive\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70}}\n\ndata: [DONE]\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "chat-explicit-zero",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0,\"prompt_cache_hit_tokens\":0,\"prompt_cache_miss_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "chat-missing-usage",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":null}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "observed_fields": 0
+    }
+  },
+  {
+    "name": "chat-interrupted-stream",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "stream": true
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": ": keepalive\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "cost_incomplete": false,
+      "usage_diagnostic": "interrupted_after_final_usage"
+    }
+  },
+  {
+    "name": "chat-http-400",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 400,
+    "want": {}
+  },
+  {
+    "name": "chat-http-401",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 401,
+    "want": {}
+  },
+  {
+    "name": "chat-http-403",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 403,
+    "want": {}
+  },
+  {
+    "name": "chat-http-429",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"rate_limit_error\"}}",
+    "content_type": "application/json",
+    "status": 429,
+    "want": {}
+  },
+  {
+    "name": "chat-http-500",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 500,
+    "want": {}
+  },
+  {
+    "name": "chat-http-503",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 503,
+    "want": {}
+  },
+  {
+    "name": "chat-reasoning-subset",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 4,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "chat-finish-length",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "length"
+    }
+  },
+  {
+    "name": "chat-finish-content_filter",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"content_filter\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "content_filter"
+    }
+  },
+  {
+    "name": "chat-finish-tool_calls",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\\\"北京\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "tool_calls"
+    }
+  },
+  {
+    "name": "chat-finish-aborted",
+    "source": "https://api-docs.deepseek.com/zh-cn/api/create-chat-completion",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"aborted\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "aborted",
+      "response_status": "failed"
+    }
+  },
+  {
+    "name": "chat-stream-finish-aborted",
+    "source": "https://api-docs.deepseek.com/zh-cn/api/create-chat-completion",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "stream": true
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": ": keepalive\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"aborted\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70}}\n\ndata: [DONE]\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "aborted",
+      "response_status": "failed"
+    }
+  },
+  {
+    "name": "chat-tool-roundtrip",
+    "source": "https://api-docs.deepseek.com/api/create-chat-completion/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/chat/completions",
+    "upstream_path": "/v1/chat/completions",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "type": "function",
+              "function": {
+                "name": "lookup",
+                "arguments": "{\"city\":\"北京\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call_1",
+          "content": "晴"
+        }
+      ],
+      "max_tokens": 64,
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"你好 OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_cache_hit_tokens\":30,\"prompt_cache_miss_tokens\":70}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "responses-normal",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"output\":[{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"你好 OK\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":100,\"output_tokens\":10,\"total_tokens\":110,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":0}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "responses-stream-lifecycle",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false,
+      "stream": true
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"in_progress\",\"error\":null,\"incomplete_details\":null,\"output\":[],\"usage\":null}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_contract\",\"output_index\":0,\"content_index\":0,\"delta\":\"你好 OK\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"output\":[{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"你好 OK\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":100,\"output_tokens\":10,\"total_tokens\":110,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "responses-explicit-zero",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"output\":[{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"你好 OK\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "responses-missing-usage",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"output\":[{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"你好 OK\",\"annotations\":[]}]}],\"usage\":null}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "observed_fields": 0
+    }
+  },
+  {
+    "name": "responses-interrupted-stream",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false,
+      "stream": true
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"in_progress\",\"error\":null,\"incomplete_details\":null,\"output\":[],\"usage\":null}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_contract\",\"output_index\":0,\"content_index\":0,\"delta\":\"你好 OK\"}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true
+    }
+  },
+  {
+    "name": "responses-http-400",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 400,
+    "want": {}
+  },
+  {
+    "name": "responses-http-401",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 401,
+    "want": {}
+  },
+  {
+    "name": "responses-http-403",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 403,
+    "want": {}
+  },
+  {
+    "name": "responses-http-429",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"rate_limit_error\"}}",
+    "content_type": "application/json",
+    "status": 429,
+    "want": {}
+  },
+  {
+    "name": "responses-http-500",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 500,
+    "want": {}
+  },
+  {
+    "name": "responses-http-503",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"}}",
+    "content_type": "application/json",
+    "status": 503,
+    "want": {}
+  },
+  {
+    "name": "responses-incomplete",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"incomplete\",\"error\":null,\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"你好 OK\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":100,\"output_tokens\":10,\"total_tokens\":110,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":0}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "response_status": "incomplete"
+    }
+  },
+  {
+    "name": "responses-incomplete-stream",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false,
+      "stream": true
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"sequence_number\":1,\"response\":{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"incomplete\",\"error\":null,\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"你好 OK\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":100,\"output_tokens\":10,\"total_tokens\":110,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "response_status": "incomplete"
+    }
+  },
+  {
+    "name": "responses-failed",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"failed\"},\"incomplete_details\":null,\"output\":[],\"usage\":null}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "response_status": "failed"
+    }
+  },
+  {
+    "name": "responses-failed-stream",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false,
+      "stream": true
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"failed\"},\"incomplete_details\":null,\"output\":[],\"usage\":null}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "response_status": "failed"
+    }
+  },
+  {
+    "name": "responses-tool-roundtrip",
+    "source": "https://api-docs.deepseek.com/guides/responses_api/",
+    "endpoint_type": "dual_protocol",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "",
+    "client_path": "/v1/responses",
+    "upstream_path": "/v1/responses",
+    "request": {
+      "model": "deepseek-flash",
+      "input": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好，回答 OK。"
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "call_id": "call_1",
+          "name": "lookup",
+          "arguments": "{}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_1",
+          "output": "晴"
+        }
+      ],
+      "max_output_tokens": 64,
+      "store": false,
+      "tools": [
+        {
+          "type": "function",
+          "name": "lookup",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ]
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"resp_contract\",\"object\":\"response\",\"created_at\":1,\"model\":\"deepseek-flash\",\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"output\":[{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"你好 OK\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":100,\"output_tokens\":10,\"total_tokens\":110,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":0}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-normal",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-stream-lifecycle",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好 OK\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":10}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-explicit-zero",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-missing-usage",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":null}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "observed_fields": 0
+    }
+  },
+  {
+    "name": "messages-interrupted-stream",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好 OK\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true
+    }
+  },
+  {
+    "name": "messages-http-400",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 400,
+    "want": {}
+  },
+  {
+    "name": "messages-http-401",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 401,
+    "want": {}
+  },
+  {
+    "name": "messages-http-403",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 403,
+    "want": {}
+  },
+  {
+    "name": "messages-http-429",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"rate_limit_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 429,
+    "want": {}
+  },
+  {
+    "name": "messages-http-500",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 500,
+    "want": {}
+  },
+  {
+    "name": "messages-http-503",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"error\":{\"message\":\"contract upstream error\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}",
+    "content_type": "application/json",
+    "status": 503,
+    "want": {}
+  },
+  {
+    "name": "messages-stop-max_tokens",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"max_tokens\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "max_tokens"
+    }
+  },
+  {
+    "name": "messages-stop-tool_use",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"lookup\",\"input\":{\"city\":\"北京\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "tool_use"
+    }
+  },
+  {
+    "name": "messages-stop-stop_sequence",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise."
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"stop_sequence\",\"stop_sequence\":\"END\",\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false,
+      "finish_reason": "stop_sequence"
+    }
+  },
+  {
+    "name": "messages-tool-signature-roundtrip",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "consider",
+              "signature": "opaque-signature"
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_1",
+              "name": "lookup",
+              "input": {
+                "city": "北京"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_1",
+              "content": "晴"
+            }
+          ]
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "tools": [
+        {
+          "name": "lookup",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"text\",\"text\":\"你好 OK\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":10,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "deepseek",
+      "input_tokens": 70,
+      "output_tokens": 10,
+      "cached_tokens": 30,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 0,
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "messages-stream-error",
+    "source": "https://api-docs.deepseek.com/guides/anthropic_api/",
+    "endpoint_type": "claude",
+    "adapter": "deepseek",
+    "model": "deepseek-flash",
+    "base_path": "/anthropic",
+    "client_path": "/v1/messages",
+    "upstream_path": "/anthropic/v1/messages",
+    "request": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_tokens": 64,
+      "system": "Be concise.",
+      "stream": true
+    },
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "auth_header": "X-Api-Key",
+    "auth_value": "upstream-secret",
+    "response": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_contract\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":70,\"output_tokens\":1,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":0}}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "incomplete",
+      "cost_incomplete": true,
+      "response_status": "failed"
+    }
+  }
+]

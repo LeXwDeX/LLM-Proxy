@@ -1,0 +1,20 @@
+# Test-only upstream. This image does not contain or start the proxy.
+ARG GO_VERSION=1.24.2
+FROM golang:${GO_VERSION}-bookworm AS build
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/fakellm ./cmd/fakellm
+COPY internal/fakellm ./internal/fakellm
+ARG LLMS_SOURCE_COMMIT=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.revision=${LLMS_SOURCE_COMMIT}" -o /fakellm ./cmd/fakellm
+
+FROM scratch
+ARG LLMS_SOURCE_COMMIT=dev
+LABEL org.opencontainers.image.title="LLMs Proxy test fakellm" \
+      org.opencontainers.image.revision=${LLMS_SOURCE_COMMIT}
+COPY --from=build /fakellm /fakellm
+USER 65532:65532
+EXPOSE 9000
+ENTRYPOINT ["/fakellm"]
+CMD ["-legacy-mock"]
