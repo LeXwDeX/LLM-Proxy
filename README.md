@@ -207,7 +207,8 @@ Upstream API credentials and client access keys are kept only in protected local
 
 - **Specifications live in Issues.** Each independently verifiable goal gets a GitHub Issue (managed with SpecGit) stating Why / Scope / Approach / Acceptance; progress, blockers and evidence links are kept there. Pull Requests reference it with `Closes #N` or `Refs #N`.
 - **Feature branches into `dev`.** Work on a feature branch and open a Pull Request targeting `dev`; do not push directly to `dev` or `main`. Fill in the [PR template](.github/pull_request_template.md): summary and linked Issue, TDD evidence, gates run, unverified scope, and whether billing, protocols or compatibility are affected.
-- **`main` is fast-forward only.** After `dev` passes acceptance, `main` is fast-forwarded to the accepted `dev` commit and tagged; nothing is committed or merged on `main` separately.
+- **`main` is fast-forward only.** After `dev` passes acceptance, `main` is fast-forwarded to the accepted `dev` commit; nothing is committed or merged on `main` separately.
+- **Tag last.** A version tag and GitHub Release are created only after both staging acceptance and the production smoke test of the same image have passed, never earlier.
 - **TDD for behavior changes.** First add a test that fails for the right reason, then change the implementation and show the same test passing. Behavior-preserving refactors and documentation-only changes need no artificial failure, but must state the checks that were run.
 - **Run the gates locally first**, with the Go version declared in `go.mod`, using the same commands as CI.
 
