@@ -217,6 +217,15 @@ func openAIChatUsage(u Usage, flavor string, stream bool) map[string]any {
 	case FlavorKimi:
 		m["cached_tokens"] = u.CachedRead
 		prompt["cache_write_tokens"] = u.CacheWrite + u.CacheWr1h
+	case FlavorGemini:
+		// Gemini OpenAI compatibility (https://ai.google.dev/gemini-api/docs/openai)
+		// reports reasoning and text as disjoint output parts. Shape follows a
+		// redacted real response observed 2026-10-20 (contract assumption, not an
+		// official example).
+		m["prompt_tokens_details"] = map[string]any{"cached_tokens": u.CachedRead,
+			"cache_write_tokens": u.CacheWrite + u.CacheWr1h, "text_tokens": u.Input}
+		m["completion_tokens_details"] = map[string]any{"reasoning_tokens": u.Reasoning,
+			"text_tokens": max(0, u.Output-u.Reasoning)}
 	case FlavorGLM:
 		if stream {
 			// GLM documents cache details for non-stream replies only.
