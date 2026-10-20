@@ -115,21 +115,42 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 
 ## 开发与测试流程
 
-1. 先查重并明确问题、范围和验收条件，再在隔离分支实施，通过 Pull Request 合入 `main`；保留当前工作区的用户改动。
-2. 按 TDD 验证本地行为：先建立能复现问题的用例，再修改实现；验证范围覆盖受影响行为及直接消费者。
-3. 运行本地项目门禁；本地可运行的必需门禁不得留给远端 CI 首次发现。GitHub Actions（`.github/workflows/ci.yml`）在 push 与 PR 时运行文档检查、`go vet`、`go build` 与 `go test`。
-4. 发布镜像时，部署与已验证提交完全一致的不可变镜像，不以 `latest` 或重新构建的镜像替代已验证制品。上线前备份配置与 bbolt 数据库；若新实例已写入数据，不能用旧数据库覆盖新数据。
+1. 先查重并明确问题、范围和验收条件，再在隔离分支实施；保留当前工作区的用户改动。
+2. 规格用 GitHub Issue 记录（SpecGit 管理）：每个可独立验证的目标对应一个 Issue，写明 Why / Scope / Approach / Acceptance，进度、阻塞与证据链接也记在 Issue；PR 用 `Closes #N` 或 `Refs #N` 关联。
+3. 按 TDD 验证本地行为：行为变更必须先建立能复现问题、且因正确原因失败的用例，再修改实现并确认通过；验证范围覆盖受影响行为及直接消费者。保持行为不变的重构与仅文档改动不需要人为制造失败用例，但要写明已跑的检查。
+4. 运行本地项目门禁；本地可运行的必需门禁不得留给远端 CI 首次发现。本地使用 `go.mod` 声明的 Go 版本，与 CI 一致。
+5. 功能分支以 Pull Request 合入 `dev`，不直接推送 `dev` 或 `main`。PR 按 [`.github/pull_request_template.md`](.github/pull_request_template.md) 填写说明、关联 Issue、TDD 证据（先失败的测试与修复后的通过）、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
+6. `dev` 验收通过后，`main` 只以 fast-forward 前进到已验收的 `dev` 提交并打 tag；不在 `main` 上单独提交或产生合并提交。
+7. 发布镜像时，部署与已验证提交完全一致的不可变镜像，不以 `latest` 或重新构建的镜像替代已验证制品。上线前备份配置与 bbolt 数据库；若新实例已写入数据，不能用旧数据库覆盖新数据。
+
+### CI 必需检查
+
+GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推送到 `dev`、`main` 以及目标为 `dev`、`main` 的 PR 上运行。只用 GitHub 托管 runner，不读取任何 secret；同一 ref 的新运行会取消旧运行。下列 job 名称是 `dev` 与 `main` 分支保护的必需检查，须保持稳定；改名或拆分时同步分支保护与本节：
+
+| job | 命令 |
+|---|---|
+| `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...` |
+| `race` | `go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...` |
+| `e2e` | `make e2e` |
+| `integration` | `make integration` |
+| `admin-ui` | `node scripts/testing/admin_ui_test.cjs` |
+| `scripts` | 受跟踪的 `scripts/**/test_*.py` 与 `scripts/test_*.py` Python 单测（`python3 -m unittest`） |
+
+`.github/workflows/docker-build.yml` 是可选的手动镜像构建，不属于必需检查；发布默认只附源码包。
 
 常用本地命令：
 
 ```sh
 make test                 # check-docs + go test ./...
 go vet ./...
+go vet -tags=e2e ./test/e2e/
 go build ./...            # 与 CI 一致的编译检查
+go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
 make build                # 先尝试联网更新模型目录，再构建 bin/llms-proxy
 make integration          # go test -tags=integration ./test/...
 make e2e                  # 真实代理二进制 + 进程内虚假上游 internal/fakellm，不调用真实模型
 node scripts/testing/admin_ui_test.cjs # 管理前端模块行为门禁
+python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_image_tag
 ```
 
 改动行为后按影响范围执行相应门禁。仅在用户明确说不跑测试时才跳过，并如实说明未验证范围。`scripts/check-agents-docs.sh` 检查 `AGENTS.md` 存在；不要求存在 `CLAUDE.md`。不要把未执行的门禁描述为通过。
@@ -144,3 +165,10 @@ node scripts/testing/admin_ui_test.cjs # 管理前端模块行为门禁
 - 测试环境和正式环境使用各自的配置、数据库及卷；禁止共用 bbolt 文件或为了测试停止正式服务。
 - 不执行删除数据卷、清理用户文件、重置管理员、覆盖生产数据库等破坏性操作，除非用户对该具体操作给出明确授权。
 - 修改 `internal/proxy/` 或 `internal/admin/` 前，先阅读对应目录中的 `AGENTS.md`。
+
+
+<!-- specgit:project:v2:start -->
+## SpecGit 2
+
+Read project-root `.agents/skills/specgit-native/SKILL.md` before work; if missing, initialize with the shared `specgit init` CLI or restore an existing integration with `specgit setup` ([installation](https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md)).
+<!-- specgit:project:v2:end -->

@@ -1,29 +1,50 @@
-# Pre-merge 质量门：main 的每次 push / PR 都必须通过构建、vet 与全量单测。
-# （docker-build.yml 只在 tag 推送时打包镜像，不承担验收职责。）
+# Pre-merge 质量门：推送到 dev / main，以及目标为 dev / main 的 Pull Request 都必须通过。
+#
+# job 名称是分支保护的必需检查名，保持稳定：test、race、e2e、integration、admin-ui、scripts。
+# 改名或拆分 job 时须同步分支保护与 README / AGENTS.md 中的检查列表。
+#
+# 约束：只用 GitHub 托管 runner，不读取任何 secret；action 固定到提交 SHA（注释为对应版本）。
+# 每个 job 的命令都可在本地以同一命令复现（Go 版本取自 go.mod）。
+# docker-build.yml 是可选的手动镜像构建，不承担验收职责。
 name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [dev, main]
   pull_request:
-    branches: [main, master]
+    branches: [dev, main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
+    name: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: 文档同步契约校验（AGENTS.md 为规范源）
-        run: make check-docs
+      - name: 文档契约校验（AGENTS.md 为规范源）
+        run: |
+          make check-docs
+          bash -n scripts/check-agents-docs.sh
 
       - name: go vet
-        run: go vet ./...
+        run: |
+          go vet ./...
+          go vet -tags=e2e ./test/e2e/
 
       - name: go build
         run: go build ./...
@@ -31,5 +52,97 @@ jobs:
       - name: 单元测试
         run: go test ./...
 
-      - name: 脚本语法冒烟
-        run: bash -n scripts/check-agents-docs.sh
+  race:
+    name: race
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: race 检测
+        run: >-
+          go test -race -count=1
+          ./internal/proxy/... ./internal/nosql/... ./internal/usage/...
+          ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
+
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 真实代理二进制 + 进程内 fakellm；不调用真实模型，不需要任何密钥。
+      - name: make e2e
+        run: make e2e
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make integration
+        run: make integration
+
+  admin-ui:
+    name: admin-ui
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      # 只用 Node 内置模块运行管理前端脚本，无需安装依赖。
+      - name: 管理前端模块行为门禁
+        run: node scripts/testing/admin_ui_test.cjs
+
+  scripts:
+    name: scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # 运行仓库中受跟踪的全部 Python 脚本单测；一个都找不到时失败，避免空跑通过。
+      - name: Python 脚本单测
+        run: |
+          modules=$(git ls-files 'scripts/**/test_*.py' 'scripts/test_*.py' | sort -u | sed -e 's/\.py$//' -e 's#/#.#g')
+          if [ -z "$modules" ]; then
+            echo "no Python script tests found" >&2
+            exit 1
+          fi
+          echo "$modules" | xargs python3 -m unittest -v

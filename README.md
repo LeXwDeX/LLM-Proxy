@@ -188,6 +188,9 @@ Configuration only expresses a request preference; it cannot prove that the upst
 ```sh
 make test
 go vet ./...
+go vet -tags=e2e ./test/e2e/
+go build ./...
+go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
 make integration
 node scripts/testing/admin_ui_test.cjs
 make e2e
@@ -199,6 +202,27 @@ python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_im
 `make e2e` builds the real proxy binary and connects it to the in-process deterministic fake upstream `internal/fakellm`, without calling any real model. For the admin frontend test tooling, see the [testing notes](scripts/testing/README.md).
 
 Upstream API credentials and client access keys are kept only in protected local configuration or environment variables; they are not committed to Git, not passed as command-line arguments, and not printed to logs. Checks that were not run must be explicitly marked as unverified.
+
+## Contributing
+
+- **Specifications live in Issues.** Each independently verifiable goal gets a GitHub Issue (managed with SpecGit) stating Why / Scope / Approach / Acceptance; progress, blockers and evidence links are kept there. Pull Requests reference it with `Closes #N` or `Refs #N`.
+- **Feature branches into `dev`.** Work on a feature branch and open a Pull Request targeting `dev`; do not push directly to `dev` or `main`. Fill in the [PR template](.github/pull_request_template.md): summary and linked Issue, TDD evidence, gates run, unverified scope, and whether billing, protocols or compatibility are affected.
+- **`main` is fast-forward only.** After `dev` passes acceptance, `main` is fast-forwarded to the accepted `dev` commit and tagged; nothing is committed or merged on `main` separately.
+- **TDD for behavior changes.** First add a test that fails for the right reason, then change the implementation and show the same test passing. Behavior-preserving refactors and documentation-only changes need no artificial failure, but must state the checks that were run.
+- **Run the gates locally first**, with the Go version declared in `go.mod`, using the same commands as CI.
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on pushes to `dev` and `main` and on Pull Requests targeting them, uses only GitHub-hosted runners and no secrets, and cancels superseded runs on the same ref. These job names are the required status checks for `dev` and `main` and are kept stable:
+
+| Job | Command |
+|---|---|
+| `test` | `make check-docs`, `go vet ./...`, `go vet -tags=e2e ./test/e2e/`, `go build ./...`, `go test ./...` |
+| `race` | `go test -race -count=1` over `internal/proxy`, `internal/nosql`, `internal/usage`, `internal/quota`, `internal/admin` and `cmd/proxy` |
+| `e2e` | `make e2e` |
+| `integration` | `make integration` |
+| `admin-ui` | `node scripts/testing/admin_ui_test.cjs` |
+| `scripts` | Python unit tests for the tracked `scripts/**/test_*.py` and `scripts/test_*.py` (`python3 -m unittest`) |
+
+`.github/workflows/docker-build.yml` is an optional, manually run image build and is not a required check; releases attach only the source archives by default.
 
 ## License
 

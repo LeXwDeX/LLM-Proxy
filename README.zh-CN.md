@@ -188,6 +188,9 @@ requires_openai_auth = false
 ```sh
 make test
 go vet ./...
+go vet -tags=e2e ./test/e2e/
+go build ./...
+go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
 make integration
 node scripts/testing/admin_ui_test.cjs
 make e2e
@@ -199,6 +202,27 @@ python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_im
 `make e2e` 编译真实代理二进制，对接进程内确定性虚假上游 `internal/fakellm`，不调用任何真实模型。管理前端测试工具见 [测试说明](scripts/testing/README.md)。
 
 上游 API 凭据和客户端访问密钥只保存在受保护的本地配置或环境变量中；不提交到 Git，不写入命令行参数，也不打印到日志。未执行的检查必须明确标记为未验证。
+
+## 贡献流程
+
+- **规格记在 Issue。** 每个可独立验证的目标对应一个 GitHub Issue（由 SpecGit 管理），写明 Why / Scope / Approach / Acceptance；进度、阻塞与证据链接也记在其中。Pull Request 用 `Closes #N` 或 `Refs #N` 关联。
+- **功能分支合入 `dev`。** 在功能分支上开发，以 Pull Request 合入 `dev`；不直接推送 `dev` 或 `main`。按 [PR 模板](.github/pull_request_template.md) 填写说明与关联 Issue、TDD 证据、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
+- **`main` 只做 fast-forward。** `dev` 验收通过后，`main` 以 fast-forward 前进到已验收的 `dev` 提交并打 tag；不在 `main` 上单独提交或合并。
+- **行为变更遵循 TDD。** 先补一个因正确原因失败的测试，再修改实现，并展示同一测试通过。保持行为不变的重构和仅文档改动不需要人为制造失败，但要写明已跑的检查。
+- **先在本地跑门禁**，使用 `go.mod` 声明的 Go 版本和与 CI 相同的命令。
+
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推送到 `dev`、`main` 以及目标为二者的 Pull Request 上运行，只用 GitHub 托管 runner，不使用任何 secret，同一 ref 上的新运行会取消旧运行。以下 job 名称是 `dev` 与 `main` 的必需检查，保持稳定：
+
+| Job | 命令 |
+|---|---|
+| `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...` |
+| `race` | 对 `internal/proxy`、`internal/nosql`、`internal/usage`、`internal/quota`、`internal/admin` 与 `cmd/proxy` 执行 `go test -race -count=1` |
+| `e2e` | `make e2e` |
+| `integration` | `make integration` |
+| `admin-ui` | `node scripts/testing/admin_ui_test.cjs` |
+| `scripts` | 受跟踪的 `scripts/**/test_*.py` 与 `scripts/test_*.py` Python 单测（`python3 -m unittest`） |
+
+`.github/workflows/docker-build.yml` 是可选的手动镜像构建，不属于必需检查；发布默认只附源码包。
 
 ## 许可证
 
