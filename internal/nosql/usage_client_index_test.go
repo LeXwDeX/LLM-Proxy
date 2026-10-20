@@ -34,7 +34,15 @@ func TestUsageClientIndexMigrationCompletesUnderContinuousWrites(t *testing.T) {
 		events[i] = usage.Event{Timestamp: base.Add(time.Duration(i) * time.Second), ClientName: fmt.Sprintf("client-%d", i%80), Model: "qwen-max", InputTokens: 1}
 	}
 	putLegacyClientEvents(t, db, events)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// The deadline only guards against starvation. The race detector slows
+	// both the writer and the migration several times over (about 3s alone
+	// becomes about 7s alone and more under package-parallel load), so the
+	// guard scales with it instead of measuring instrumentation overhead.
+	deadline := 10 * time.Second
+	if raceEnabled {
+		deadline *= 3
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	done := make(chan error, 1)
 	store := NewUsageStore(db)
