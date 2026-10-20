@@ -89,9 +89,17 @@ func (t *usageTokens) finalizeOpenAIImagePartitions(m map[string]any, op config.
 			t.conflict("image_text_partition_mismatch")
 		}
 	}
+	// Providers disagree on whether output text_tokens include reasoning. Accept
+	// either partition: reasoning inside text (image = output - text), or
+	// reasoning disjoint from text as the Gemini OpenAI-compatible layer reports
+	// it (image + reasoning = output - text). Reasoning remains an output subset;
+	// totals are not changed and any other split is still a conflict.
 	if _, present := od["text_tokens"]; present {
 		text := t.count(od, "text_tokens", 0)
-		if text > t.OutputTokens || t.ImageOutputTokens != t.OutputTokens-text {
+		remainder := t.OutputTokens - text
+		included := t.ImageOutputTokens == remainder
+		disjoint := t.ReasoningTokens > 0 && t.ImageOutputTokens+t.ReasoningTokens == remainder
+		if text > t.OutputTokens || !included && !disjoint {
 			t.conflict("image_output_text_partition_mismatch")
 		}
 	}

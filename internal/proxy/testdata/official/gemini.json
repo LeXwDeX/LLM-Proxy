@@ -765,5 +765,85 @@
       "reasoning_tokens": 4,
       "cost_incomplete": true
     }
+  },
+  {
+    "name": "gemini-openai-compat-chat-reasoning-disjoint",
+    "source": "https://ai.google.dev/gemini-api/docs/openai",
+    "endpoint_type": "openai",
+    "adapter": "standard",
+    "model": "gemini-2.5-flash",
+    "base_path": "/v1beta/openai",
+    "client_path": "/chat/completions",
+    "upstream_path": "/v1beta/openai/chat/completions",
+    "request": {
+      "model": "gemini-2.5-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_completion_tokens": 64
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "{\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"gemini-2.5-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":25,\"total_tokens\":33,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"text_tokens\":8},\"completion_tokens_details\":{\"reasoning_tokens\":24,\"text_tokens\":1}}}",
+    "content_type": "application/json",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_openai",
+      "input_tokens": 8,
+      "output_tokens": 25,
+      "cached_tokens": 0,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 24,
+      "image_output_tokens": 0,
+      "usage_diagnostic": "",
+      "cost_incomplete": false
+    }
+  },
+  {
+    "name": "gemini-openai-compat-chat-stream-reasoning-disjoint",
+    "source": "https://ai.google.dev/gemini-api/docs/openai",
+    "endpoint_type": "openai",
+    "adapter": "standard",
+    "model": "gemini-2.5-flash",
+    "base_path": "/v1beta/openai",
+    "client_path": "/chat/completions",
+    "upstream_path": "/v1beta/openai/chat/completions",
+    "request": {
+      "model": "gemini-2.5-flash",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好，回答 OK。"
+        }
+      ],
+      "max_completion_tokens": 64,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    "headers": {},
+    "auth_header": "Authorization",
+    "auth_value": "Bearer upstream-secret",
+    "response": "data: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gemini-2.5-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"chatcmpl-contract\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gemini-2.5-flash\",\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":25,\"total_tokens\":33,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"text_tokens\":8},\"completion_tokens_details\":{\"reasoning_tokens\":24,\"text_tokens\":1}}}\n\ndata: [DONE]\n\n",
+    "content_type": "text/event-stream",
+    "status": 200,
+    "want": {
+      "usage_status": "complete",
+      "usage_adapter": "standard_openai",
+      "input_tokens": 8,
+      "output_tokens": 25,
+      "cached_tokens": 0,
+      "cache_creation_tokens": 0,
+      "reasoning_tokens": 24,
+      "image_output_tokens": 0,
+      "usage_diagnostic": "",
+      "cost_incomplete": false
+    }
   }
 ]
