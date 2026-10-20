@@ -1,6 +1,6 @@
 module github.com/LeXwDeX/LLM-Proxy
 
-go 1.24.2
+go 1.27.2
 
 require (
 	github.com/andybalholm/brotli v1.2.6

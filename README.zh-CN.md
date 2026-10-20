@@ -44,7 +44,7 @@ LLMs Proxy 是一个 Go HTTP 服务，为客户端提供统一的模型 API 入�
 
 ## 环境要求
 
-- Go 版本以 [`go.mod`](go.mod) 为准（当前声明 Go 1.24.2）。
+- Go 版本以 [`go.mod`](go.mod) 为准（当前声明 Go 1.27.2）。
 - Docker/Compose 仅在使用容器部署时需要。
 - 上游 API 凭据和客户端访问密钥应通过受保护的本地配置或环境注入；不要提交到 Git。
 
