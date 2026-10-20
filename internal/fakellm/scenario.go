@@ -238,10 +238,8 @@ func ParseDirective(text string) (*Scenario, error) {
 		case "pricing":
 			s.PricingPreset = val
 		case "iterations":
-			if val != "message" && val != "advisor" {
-				err = fmt.Errorf("fakellm directive iterations=%q: want message or advisor", val)
-			}
 			s.Iterations = val
+			err = validateIterations(s)
 		case "preset":
 			s.Preset = strings.ToLower(val)
 		case "code":
@@ -337,4 +335,17 @@ func legacyMode(mode string) (*Scenario, bool) {
 		return &Scenario{DelayMS: 5000}, true
 	}
 	return nil, false
+}
+
+// validateIterations accepts only the documented iterations shapes; directives
+// and /_control JSON share it. Unset keeps the default without iterations.
+func validateIterations(sc *Scenario) error {
+	if sc == nil {
+		return nil
+	}
+	switch sc.Iterations {
+	case "", "message", "advisor":
+		return nil
+	}
+	return fmt.Errorf("fakellm iterations=%q: want message or advisor", sc.Iterations)
 }

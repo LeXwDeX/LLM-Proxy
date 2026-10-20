@@ -71,11 +71,13 @@ var claudeIterationCounters = [...]string{"input_tokens", "output_tokens", "cach
 //   - on-demand compaction: top-level is zero, usage only in the compaction item
 //     https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand
 //   - server-side fallback: "fallback_message" items are billed at the
-//     fallback model price; top-level covers only the returned attempt.
+//     fallback model price; top-level covers only the returned attempt
+//     https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
 //
 // Priority: multi_model_iterations > compaction_iterations >
 // unknown_usage_iterations > iterations_usage_mismatch. Items without a type,
-// with an unknown type, invalid counters or non-object items have unknown
+// with an unknown type, invalid counters, a non-string or empty model, or
+// non-object items have unknown
 // attribution and stay conservative. Applies to every target parsed by the
 // Anthropic rule; it never infers anything from host or model name.
 func claudeIterationsIncomplete(iterations []any, top map[string]any) string {
@@ -99,9 +101,11 @@ func claudeIterationsIncomplete(iterations []any, top map[string]any) string {
 			unknown = true
 		}
 		if v, present := item["model"]; present {
+			// A non-string or empty model is unknown attribution, not "no
+			// model seen yet".
 			name, ok := v.(string)
 			switch {
-			case !ok:
+			case !ok || name == "":
 				unknown = true
 			case model == "":
 				model = name

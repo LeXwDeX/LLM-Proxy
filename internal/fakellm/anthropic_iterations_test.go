@@ -52,3 +52,27 @@ func TestAnthropicUsageIterations(t *testing.T) {
 		t.Fatalf("bad iterations directive: %d %s", resp.StatusCode, b)
 	}
 }
+
+// /_control JSON validates iterations like the directive path; an unset value
+// keeps the default response without iterations.
+func TestAnthropicUsageIterationsControl(t *testing.T) {
+	_, ts := newTestServer(t)
+	for _, body := range []string{`{"scenario":{"iterations":"compaction"}}`, `{"keys":{"k":{"iterations":"bogus"}}}`} {
+		resp, b := post(t, ts.URL+"/_control", body, nil)
+		if resp.StatusCode != 400 || !strings.Contains(string(b), "iterations") {
+			t.Fatalf("%s: %d %s", body, resp.StatusCode, b)
+		}
+	}
+	msg := `{"model":"claude","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
+	_, b := post(t, ts.URL+"/v1/messages", msg, nil)
+	if dig(decode(t, b), "usage/iterations") != nil {
+		t.Fatalf("default carries iterations: %s", b)
+	}
+	if resp, b := post(t, ts.URL+"/_control", `{"scenario":{"iterations":"advisor"}}`, nil); resp.StatusCode != 200 {
+		t.Fatalf("valid control: %d %s", resp.StatusCode, b)
+	}
+	_, b = post(t, ts.URL+"/v1/messages", msg, nil)
+	if items, _ := dig(decode(t, b), "usage/iterations").([]any); len(items) != 2 {
+		t.Fatalf("advisor control: %s", b)
+	}
+}

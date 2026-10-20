@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -697,12 +698,12 @@ func (s *Server) serveControl(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := validateResponseEncoding(cmd.Scenario); err != nil {
+	if err := errors.Join(validateResponseEncoding(cmd.Scenario), validateIterations(cmd.Scenario)); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()}, nil)
 		return
 	}
 	for _, sc := range cmd.Keys {
-		if err := validateResponseEncoding(sc); err != nil {
+		if err := errors.Join(validateResponseEncoding(sc), validateIterations(sc)); err != nil {
 			writeJSON(w, 400, map[string]any{"error": err.Error()}, nil)
 			return
 		}

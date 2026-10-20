@@ -58,6 +58,10 @@ func TestClaudeUsageIterations(t *testing.T) {
 		{"string_count", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":"70","output_tokens":10}]`, 70, 10, 0, true, "unknown_usage_iterations"},
 		{"overflow_count", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":9223372036854775808,"output_tokens":10}]`, 70, 10, 0, true, "unknown_usage_iterations"},
 		{"sum_overflow", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":9223372036854775807,"output_tokens":5},{"type":"message","input_tokens":9223372036854775807,"output_tokens":5}]`, 70, 10, 0, true, "iterations_usage_mismatch"},
+		// An empty model is not "no model seen yet": it is unknown in either order.
+		{"empty_model_single", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","model":"","input_tokens":70,"output_tokens":10}]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		{"empty_model_first", `"input_tokens":30,"output_tokens":6,"iterations":[{"type":"message","model":"","input_tokens":10,"output_tokens":2},{"type":"message","model":"claude-x","input_tokens":20,"output_tokens":4}]`, 30, 6, 0, true, "unknown_usage_iterations"},
+		{"empty_model_last", `"input_tokens":30,"output_tokens":6,"iterations":[{"type":"message","model":"claude-x","input_tokens":10,"output_tokens":2},{"type":"message","model":"","input_tokens":20,"output_tokens":4}]`, 30, 6, 0, true, "unknown_usage_iterations"},
 		{"non_string_model", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","model":7,"input_tokens":70,"output_tokens":10}]`, 70, 10, 0, true, "unknown_usage_iterations"},
 		// Priority: multi_model > compaction > unknown > mismatch.
 		{"priority_multi_model_over_compaction", `"input_tokens":10,"output_tokens":2,"iterations":[{"type":"compaction","input_tokens":5,"output_tokens":1},` + advisorItem + `,{"type":"message","input_tokens":10,"output_tokens":2}]`, 10, 2, 0, true, "multi_model_iterations"},
