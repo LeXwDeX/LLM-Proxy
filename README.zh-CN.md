@@ -207,7 +207,8 @@ python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_im
 
 - **规格记在 Issue。** 每个可独立验证的目标对应一个 GitHub Issue（由 SpecGit 管理），写明 Why / Scope / Approach / Acceptance；进度、阻塞与证据链接也记在其中。Pull Request 用 `Closes #N` 或 `Refs #N` 关联。
 - **功能分支合入 `dev`。** 在功能分支上开发，以 Pull Request 合入 `dev`；不直接推送 `dev` 或 `main`。按 [PR 模板](.github/pull_request_template.md) 填写说明与关联 Issue、TDD 证据、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
-- **`main` 只做 fast-forward。** `dev` 验收通过后，`main` 以 fast-forward 前进到已验收的 `dev` 提交并打 tag；不在 `main` 上单独提交或合并。
+- **`main` 只做 fast-forward。** `dev` 验收通过后，`main` 以 fast-forward 前进到已验收的 `dev` 提交；不在 `main` 上单独提交或合并。
+- **最后打 tag。** 测试环境全量验收和生产环境同一镜像的发布冒烟都通过后，才打版本 tag、发布 GitHub Release，绝不提前。
 - **行为变更遵循 TDD。** 先补一个因正确原因失败的测试，再修改实现，并展示同一测试通过。保持行为不变的重构和仅文档改动不需要人为制造失败，但要写明已跑的检查。
 - **先在本地跑门禁**，使用 `go.mod` 声明的 Go 版本和与 CI 相同的命令。
 
