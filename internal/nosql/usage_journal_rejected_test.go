@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -141,7 +142,7 @@ func TestUsageJournalMovesPermanentRejectionsToSidecar(t *testing.T) {
 				t.Fatalf("sidecar entries=%d, want 1: %+v", len(rejected), rejected)
 			}
 			entry := rejected[0]
-			if entry.Line != line || entry.Reason != tc.reason || entry.RecordID != event.RecordID ||
+			if string(entry.Line) != line || entry.Reason != tc.reason || entry.RecordID != event.RecordID ||
 				entry.Client != event.ClientName || entry.Error == "" || entry.RejectedAt.IsZero() {
 				t.Fatalf("sidecar entry=%+v, want original line and reason %q", entry, tc.reason)
 			}
@@ -262,5 +263,69 @@ func TestAsyncJournalConflictMovesToSidecarOnDrain(t *testing.T) {
 	}
 	if got := clientInputTokens(t, store, conflicting.ClientName, conflicting.Timestamp); got != fixedPlainEvent().InputTokens {
 		t.Fatalf("committed tokens=%d, want %d", got, fixedPlainEvent().InputTokens)
+	}
+}
+
+// TestRejectedSidecarKeepsRawBytesAcrossFailedRewrites: a permanently
+// rejected line with invalid UTF-8 is preserved byte for byte, and while the
+// journal rewrite keeps failing (here: a read-only directory) every tick
+// re-rejects the same line without growing the sidecar.
+func TestRejectedSidecarKeepsRawBytesAcrossFailedRewrites(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions do not restrict root")
+	}
+	logs := captureDefaultLog(t)
+	store := NewUsageStore(testDB(t))
+	event := fixedIdentityBundle()
+	event.Components = append(event.Components, event.Components[0])
+	line := strings.Replace(journalLine(t, event), `"req-fixed"`, "\"req-\xff\xfe-fixed\"", 1)
+	if !strings.Contains(line, "\xff\xfe") {
+		t.Fatal("fixture lacks invalid UTF-8")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.journal")
+	mustWriteFile(t, path, line+"\n")
+	mustWriteFile(t, path+".rejected", "")
+	journal, err := NewUsageJournal(store, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	for tick := 0; tick < 3; tick++ {
+		if _, err := journal.Replay(); err == nil {
+			t.Fatalf("tick %d: rewrite in a read-only directory reported success", tick)
+		}
+		if got := journalContent(t, path); got != line {
+			t.Fatalf("tick %d: pending line changed or dropped: %q", tick, got)
+		}
+		if rejected := readRejectedSidecar(t, path); len(rejected) != 1 {
+			t.Fatalf("tick %d: sidecar entries=%d, want 1", tick, len(rejected))
+		}
+	}
+	if rejected := readRejectedSidecar(t, path); !bytes.Equal([]byte(rejected[0].Line), []byte(line)) {
+		t.Fatalf("sidecar line not byte-identical:\n got %q\nwant %q", rejected[0].Line, line)
+	}
+	output := logs.String()
+	if strings.Contains(output, "moved to the rejected sidecar") || !strings.Contains(output, "journal rewrite failed") {
+		t.Fatalf("failed rewrite logged as a completed move:\n%s", output)
+	}
+
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.Replay(); err != nil {
+		t.Fatalf("replay after the directory recovered: %v", err)
+	}
+	if got := journalContent(t, path); got != "" {
+		t.Fatalf("line still pending after a successful rewrite: %q", got)
+	}
+	if rejected := readRejectedSidecar(t, path); len(rejected) != 1 {
+		t.Fatalf("sidecar entries=%d after recovery, want 1", len(rejected))
+	}
+	if !strings.Contains(logs.String(), "moved to the rejected sidecar") {
+		t.Fatalf("completed move not logged:\n%s", logs.String())
 	}
 }

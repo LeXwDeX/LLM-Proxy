@@ -302,7 +302,7 @@ func assertBundleReaders(t *testing.T, got bundleReaderReport, readable []usage.
 
 func assertBundleJournalEmpty(t *testing.T, dir string) {
 	t.Helper()
-	for _, name := range []string{"usage.journal", "usage.journal.corrupt"} {
+	for _, name := range []string{"usage.journal", "usage.journal.corrupt", "usage.journal.rejected"} {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)

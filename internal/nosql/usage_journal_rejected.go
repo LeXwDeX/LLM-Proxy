@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,14 +27,19 @@ const (
 )
 
 // rejectedUsageLine is one JSON line of the rejected sidecar. Line holds the
-// original journal line byte for byte.
+// original journal line byte for byte (base64 in JSON), so lines that are not
+// valid UTF-8 survive unchanged and deduplicate by the SHA-256 of those bytes.
 type rejectedUsageLine struct {
 	RejectedAt time.Time `json:"rejected_at"`
 	Reason     string    `json:"reason"`
 	Error      string    `json:"error"`
 	RecordID   string    `json:"record_id"`
 	Client     string    `json:"client"`
-	Line       string    `json:"line"`
+	Line       []byte    `json:"line"`
+}
+
+func rejectedLineDigest(line []byte) [sha256.Size]byte {
+	return sha256.Sum256(line)
 }
 
 // permanentUsageRejection classifies primary-store errors that no retry can
@@ -53,22 +59,23 @@ func permanentUsageRejection(err error) (string, bool) {
 }
 
 // rejectLocked durably appends rejected rows to the sidecar before the caller
-// may drop them from the journal. The sidecar stays a set keyed by original
-// line, so a retried rewrite or a restored journal does not duplicate entries.
+// may drop them from the journal. The sidecar stays a set keyed by the SHA-256
+// of each original line, so a failed rewrite that re-rejects the same line on
+// every tick, or a restored journal, never duplicates entries.
 func (j *UsageJournal) rejectLocked(entries []rejectedUsageLine) error {
 	path := j.path + usageJournalRejectedSuffix
 	existing, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	seen := make(map[string]struct{})
+	seen := make(map[[sha256.Size]byte]struct{})
 	for _, raw := range strings.Split(string(existing), "\n") {
 		if strings.TrimSpace(raw) == "" {
 			continue
 		}
 		var prior rejectedUsageLine
 		if json.Unmarshal([]byte(raw), &prior) == nil {
-			seen[prior.Line] = struct{}{}
+			seen[rejectedLineDigest(prior.Line)] = struct{}{}
 		}
 	}
 	var out []byte
@@ -78,7 +85,8 @@ func (j *UsageJournal) rejectLocked(entries []rejectedUsageLine) error {
 	}
 	appended := 0
 	for _, entry := range entries {
-		if _, dup := seen[entry.Line]; dup {
+		digest := rejectedLineDigest(entry.Line)
+		if _, dup := seen[digest]; dup {
 			continue
 		}
 		data, err := json.Marshal(entry)
@@ -86,7 +94,7 @@ func (j *UsageJournal) rejectLocked(entries []rejectedUsageLine) error {
 			return fmt.Errorf("encode rejected usage line: %w", err)
 		}
 		out = append(append(out, data...), '\n')
-		seen[entry.Line] = struct{}{}
+		seen[digest] = struct{}{}
 		appended++
 	}
 	if appended == 0 {

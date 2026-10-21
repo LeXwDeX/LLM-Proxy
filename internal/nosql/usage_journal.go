@@ -411,7 +411,7 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 				// set only after a durable sidecar copy exists (below).
 				rejected = append(rejected, rejectedUsageLine{
 					RejectedAt: time.Now().UTC(), Reason: reason, Error: err.Error(),
-					RecordID: event.RecordID, Client: strings.TrimSpace(event.ClientName), Line: entry.line,
+					RecordID: event.RecordID, Client: strings.TrimSpace(event.ClientName), Line: []byte(entry.line),
 				})
 				continue
 			}
@@ -426,7 +426,8 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 	j.mu.Lock()
 	var rewriteErr error
 	rewriteErrSet := false
-	var movedAside []rejectedUsageLine
+	var savedAside []rejectedUsageLine
+	rewritten := false
 	current, currentCorrupt, readErr := j.readLocked()
 	switch {
 	case readErr != nil:
@@ -450,7 +451,7 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 				}
 				replayErr = errors.Join(replayErr, fmt.Errorf("preserve permanently rejected journal lines: %w", err))
 			} else {
-				movedAside = rejected
+				savedAside = rejected
 			}
 		}
 		kept := make([]usage.Event, 0, len(current))
@@ -479,11 +480,18 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 			rewriteErr = fmt.Errorf("rewrite recovery journal: %w", err)
 		} else {
 			j.resetCompactionStateLocked(kept)
+			rewritten = true
 		}
 	}
 	j.mu.Unlock()
-	for _, entry := range movedAside {
-		j.errorLogger().Error("usage journal line permanently rejected by the ledger; moved to the rejected sidecar for manual review",
+	for _, entry := range savedAside {
+		if rewritten {
+			j.errorLogger().Error("usage journal line permanently rejected by the ledger; moved to the rejected sidecar for manual review",
+				"path", j.path+usageJournalRejectedSuffix, "record_id", entry.RecordID, "client", entry.Client,
+				"reason", entry.Reason, "error", entry.Error)
+			continue
+		}
+		j.errorLogger().Error("usage journal line permanently rejected by the ledger; saved to the rejected sidecar, but the journal rewrite failed and the line is still pending",
 			"path", j.path+usageJournalRejectedSuffix, "record_id", entry.RecordID, "client", entry.Client,
 			"reason", entry.Reason, "error", entry.Error)
 	}
