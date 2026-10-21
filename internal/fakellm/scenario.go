@@ -28,6 +28,12 @@ type Scenario struct {
 	// Iterations selects a documented Anthropic billing shape or an explicit
 	// malformed counterexample; validateIterations lists the supported modes.
 	Iterations string `json:"iterations,omitempty"`
+	// IterationModelPrefix is a synthetic, non-official contract assumption
+	// for proxy ModelPrefix tests: every echoed Anthropic model (top-level,
+	// fallback boundary and each usage.iterations item) is namespaced under this
+	// prefix unless it already carries it. Executor and compaction items echo
+	// the received request model. No provider is known to document this shape.
+	IterationModelPrefix string `json:"iteration_model_prefix,omitempty"`
 	// ChatTail selects a synthetic Chat stream tail. reprice_nonfinal appends a
 	// non-usage chunk with another model and service_tier after the official
 	// usage chunk and before [DONE]. It is a counterexample, not an OpenAI shape.
@@ -136,6 +142,7 @@ func (s *Scenario) merge(o *Scenario) {
 	}
 	str(&s.PricingPreset, o.PricingPreset)
 	str(&s.Iterations, o.Iterations)
+	str(&s.IterationModelPrefix, o.IterationModelPrefix)
 	str(&s.ChatTail, o.ChatTail)
 	num(&s.Status, o.Status)
 	str(&s.Preset, o.Preset)
@@ -250,6 +257,8 @@ func ParseDirective(text string) (*Scenario, error) {
 		case "iterations":
 			s.Iterations = val
 			err = validateIterations(s)
+		case "iteration_model_prefix":
+			s.IterationModelPrefix = val
 		case "chat_tail":
 			s.ChatTail = val
 			err = validateIterations(s)
