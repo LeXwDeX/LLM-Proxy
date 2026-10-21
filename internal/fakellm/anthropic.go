@@ -1,5 +1,7 @@
 package fakellm
 
+import "strings"
+
 // serveMessages mimics the Anthropic Messages API (also served by GLM,
 // DeepSeek and Qwen under their Anthropic-compatible prefixes).
 func (s *Server) serveMessages(c *call) {
@@ -26,6 +28,10 @@ func (s *Server) serveMessages(c *call) {
 			pricingPreset(c.sc.PricingPreset, resp["usage"].(map[string]any), true)
 			anthropicIterations(c.sc.Iterations, resp["usage"].(map[string]any))
 		}
+		anthropicIterationStop(c.sc.Iterations, resp)
+		if strings.HasPrefix(c.sc.Iterations, "fallback_") {
+			resp["model"] = "fake-fallback"
+		}
 		c.rec.Usage = &u
 		c.ok(200, resp)
 		return
@@ -34,6 +40,9 @@ func (s *Server) serveMessages(c *call) {
 	st := c.startSSE()
 	startUsage := anthropicUsage(u)
 	pricingPreset(c.sc.PricingPreset, startUsage, true)
+	if c.sc.Iterations == "cache_missing" {
+		delete(startUsage, "cache_read_input_tokens")
+	}
 	startUsage["output_tokens"] = 1
 	startUsage["output_tokens_details"] = map[string]any{"thinking_tokens": 0}
 	msg := map[string]any{"id": id, "type": "message", "role": "assistant", "model": model, "content": []any{},
@@ -78,6 +87,7 @@ func (s *Server) serveMessages(c *call) {
 		pricingPreset(c.sc.PricingPreset, delta["usage"].(map[string]any), true)
 		anthropicIterations(c.sc.Iterations, delta["usage"].(map[string]any))
 	}
+	anthropicIterationStop(c.sc.Iterations, delta["delta"].(map[string]any))
 	st.event("message_delta", delta)
 	st.event("message_stop", map[string]any{"type": "message_stop"})
 	if c.sc.NoUsage {

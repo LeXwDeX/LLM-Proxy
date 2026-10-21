@@ -13,22 +13,23 @@ import (
 // The observation pipe applies backpressure but never changes forwarded bytes.
 // Content is discarded by projection; only usage and lifecycle metadata survive.
 type usageStream struct {
-	writer          *io.PipeWriter
-	done            chan struct{}
-	tokens          usageTokens
-	model           string
-	found           bool
-	err             error
-	parser          usageParser
-	terminal        bool
-	streaming       bool
-	jsonResponse    bool
-	finalUsage      bool
-	responseStatus  string
-	finishReason    string
-	standardError   bool
-	snapshot        map[string]any
-	pricingEnvelope map[string]any
+	writer              *io.PipeWriter
+	done                chan struct{}
+	tokens              usageTokens
+	model               string
+	found               bool
+	err                 error
+	parser              usageParser
+	terminal            bool
+	streaming           bool
+	jsonResponse        bool
+	finalUsage          bool
+	responseStatus      string
+	finishReason        string
+	standardError       bool
+	snapshot            map[string]any
+	pricingEnvelope     map[string]any
+	claudeFinalEnvelope map[string]any
 	// finalSeen and finalTokens hold the protocol's official final usage as
 	// observed so far (see officialFinalUsage). Written by the observer
 	// goroutine; read only after Close.
@@ -284,11 +285,43 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 					if u.snapshot == nil {
 						u.snapshot = map[string]any{}
 					}
+					if u.parser.operation(m) == config.ProtocolAnthropicMessages {
+						typ := readString(payload["type"])
+						if typ == "" {
+							typ = event.event
+						}
+						// Only the official final delta can contribute iterations;
+						// each array is a whole snapshot, never a running sum.
+						if typ != "message_delta" || !u.finalUsage {
+							delete(m, "iterations")
+						} else {
+							delete(u.snapshot, "iterations")
+							iterations, _ := m["iterations"].([]any)
+							for _, raw := range iterations {
+								item, _ := raw.(map[string]any)
+								if item["type"] == "fallback_message" {
+									// Different returned attempt: none of the original
+									// executor's optional usage evidence belongs to it.
+									u.snapshot = map[string]any{}
+									break
+								}
+							}
+							u.claudeFinalEnvelope = payload
+						}
+					}
 					mergeUsageSnapshot(u.snapshot, m)
-					u.tokens, _, u.found = u.parser.parsePayload(map[string]any{"usage": u.snapshot, "model": u.model})
+					parsed := map[string]any{"usage": u.snapshot, "model": u.model}
+					if u.claudeFinalEnvelope != nil {
+						parsed["delta"] = u.claudeFinalEnvelope["delta"]
+					}
+					var parsedModel string
+					u.tokens, parsedModel, u.found = u.parser.parsePayload(parsed)
+					if u.tokens.billingModel != "" {
+						u.model = parsedModel
+					}
 					u.observeChoicesFinalUsage()
 				}
-				if u.snapshot != nil {
+				if u.snapshot != nil && u.tokens.billingModel == "" {
 					u.updatePricingContext()
 				}
 				u.captureFinalUsage()
@@ -611,6 +644,8 @@ func projectUsageObject(decoder *json.Decoder, wrappers bool) (map[string]any, e
 			if err = decoder.Decode(&value); err == nil {
 				payload[key] = value
 			}
+		case "stop_details":
+			payload[key], err = projectClaudeStopDetails(decoder)
 		case "choices", "candidates":
 			payload[key], err = projectUsageArray(decoder)
 		case "delta":
@@ -674,4 +709,43 @@ func projectUsageArray(decoder *json.Decoder) ([]any, error) {
 	}
 	_, err = decoder.Token()
 	return list, err
+}
+
+// Retain category and its presence/null distinction; discard explanation and
+// every other member so generated text cannot become billing evidence.
+func projectClaudeStopDetails(decoder *json.Decoder) (map[string]any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if token != json.Delim('{') {
+		if delim, ok := token.(json.Delim); ok && delim == '[' {
+			for decoder.More() {
+				if err := skipUsageValue(decoder); err != nil {
+					return nil, err
+				}
+			}
+			_, err = decoder.Token()
+		}
+		return nil, err
+	}
+	details := map[string]any{}
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		if token == "category" {
+			var value any
+			err = decoder.Decode(&value)
+			details["category"] = value
+		} else {
+			err = skipUsageValue(decoder)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	_, err = decoder.Token()
+	return details, err
 }

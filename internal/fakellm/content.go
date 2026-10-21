@@ -285,26 +285,104 @@ func anthropicUsage(u Usage) map[string]any {
 	}
 }
 
-// anthropicIterations adds usage.iterations after the top-level counters are
-// final. Streams carry it on message_delta only. Shapes follow the advisor
-// tool doc (https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool,
-// checked 2026-10-21): top-level counters are the sum of "message" items and
-// advisor items are excluded. This is documentation evidence, not acceptance
-// against a real Claude API.
+// anthropicIterations follows the official advisor, compaction and fallback
+// contracts checked 2026-10-21 (not a real API acceptance):
+// https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool
+// https://platform.claude.com/docs/en/build-with-claude/compaction-threshold
+// https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand
+// https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
+// Fixed extra counters (7/3, 11/2, 13/4) and fake model names are deterministic
+// fixture assumptions, not examples copied from the API. Earlier zero-output
+// attempts deliberately have no invented refusal category. Only final deltas
+// carry iterations; unknown/invalid/mismatch modes are explicit counterexamples.
 func anthropicIterations(mode string, usage map[string]any) {
 	if mode == "" {
 		return
+	}
+	if mode == "compaction_on_demand" {
+		for _, key := range []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"} {
+			usage[key] = int(0)
+		}
+		usage["cache_creation"] = map[string]any{"ephemeral_5m_input_tokens": int(0), "ephemeral_1h_input_tokens": int(0)}
+	}
+	if strings.HasPrefix(mode, "fallback_refusal_") || mode == "compaction_on_demand" {
+		usage["output_tokens"] = int(0)
+		usage["output_tokens_details"] = map[string]any{"thinking_tokens": int(0)}
 	}
 	executor := map[string]any{"type": "message"}
 	for _, key := range []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"} {
 		executor[key] = usage[key]
 	}
+	extra := func(typ string, in, out int) map[string]any {
+		return map[string]any{"type": typ, "input_tokens": in, "output_tokens": out, "cache_read_input_tokens": int(0), "cache_creation_input_tokens": int(0)}
+	}
 	items := []any{executor}
-	if mode == "advisor" {
-		items = append(items, map[string]any{"type": "advisor_message", "model": "fake-advisor", "input_tokens": 7,
-			"output_tokens": 3, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0})
+	switch mode {
+	case "advisor":
+		advisor := extra("advisor_message", 7, 3)
+		advisor["model"] = "fake-advisor"
+		items = append(items, advisor)
+	case "compaction":
+		items = []any{extra("compaction", 11, 2), executor}
+	case "compaction_on_demand":
+		items = []any{extra("compaction", 11, 2)}
+	case "fallback_output", "fallback_zero_unknown", "fallback_sticky", "fallback_chain", "fallback_chain_unknown", "fallback_refusal_free", "fallback_refusal_paid", "fallback_refusal_null", "fallback_refusal_missing_category":
+		executor["type"], executor["model"] = "fallback_message", "fake-fallback"
+		if mode == "fallback_output" {
+			items = []any{extra("message", 13, 4), executor}
+		}
+		if mode == "fallback_zero_unknown" {
+			items = []any{extra("message", 13, 0), executor}
+		}
+		if mode == "fallback_chain" || mode == "fallback_chain_unknown" {
+			first := extra("message", 13, 4)
+			if mode == "fallback_chain_unknown" {
+				first["output_tokens"] = 0
+			}
+			middle := extra("message", 5, 2)
+			middle["model"] = "fake-middle"
+			items = []any{first, middle, executor}
+		}
+	case "cache_missing", "cache_mismatch":
+		first, second := map[string]any{"type": "message"}, map[string]any{"type": "message"}
+		for _, key := range []string{"input_tokens", "output_tokens", "cache_creation_input_tokens"} {
+			n, _ := usage[key].(int)
+			first[key], second[key] = n/2, n-n/2
+		}
+		if mode == "cache_missing" {
+			delete(usage, "cache_read_input_tokens")
+			first["cache_read_input_tokens"] = int(100)
+		} else {
+			n, _ := usage["cache_read_input_tokens"].(int)
+			first["cache_read_input_tokens"] = n + 1
+		}
+		items = []any{first, second}
+	case "iterations_unknown":
+		executor["type"] = "unknown"
+	case "iterations_invalid":
+		executor["input_tokens"] = int(-1)
+	case "iterations_mismatch":
+		n, _ := usage["input_tokens"].(int)
+		executor["input_tokens"] = n + 1
 	}
 	usage["iterations"] = items
+}
+
+func anthropicIterationStop(mode string, envelope map[string]any) {
+	if !strings.HasPrefix(mode, "fallback_refusal_") {
+		return
+	}
+	envelope["stop_reason"] = "refusal"
+	details := map[string]any{}
+	switch mode {
+	case "fallback_refusal_free":
+		details["category"] = "cyber"
+	case "fallback_refusal_paid":
+		details["category"] = "bio"
+	case "fallback_refusal_null":
+		details["category"] = nil
+	}
+	envelope["stop_details"] = details
 }
 
 // geminiUsage renders usageMetadata; candidates exclude thoughts.

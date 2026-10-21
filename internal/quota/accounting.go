@@ -22,18 +22,48 @@ func (m *Manager) accountingGate(clientName string) *sync.RWMutex {
 // produce a charge that exists only in memory.
 // 额度体系 v2：池分层限额已退役，不再接收 pool 参数。
 func (m *Manager) RecordUsage(recorder usage.Recorder, event usage.Event) error {
+	event = usage.CloneEvent(event)
 	event.ClientName = strings.TrimSpace(event.ClientName)
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
 	gate := m.accountingGate(event.ClientName)
 	gate.RLock()
-	defer gate.RUnlock()
+	reconcile := false
+	defer func() {
+		gate.RUnlock()
+		if reconcile {
+			// Evaluate takes this gate exclusively and waits for every parallel
+			// record's increment before replacing counters from durable usage.
+			m.Evaluate(event.ClientName)
+		}
+	}()
 	resolver, _ := m.getResolver()
-	usage.CheckEventPrices(&event, resolver)
-	if err := recorder.Record(event); err != nil {
+	usage.CheckBundlePrices(&event, resolver)
+	added := true
+	var err error
+	if idempotent, ok := recorder.(usage.IdempotentRecorder); ok {
+		added, err = idempotent.RecordOnce(event)
+	} else {
+		err = recorder.Record(event)
+	}
+	if err != nil {
+		// A reported failure may follow a successful primary commit. Until an
+		// authoritative read settles that outcome, do not admit more requests
+		// against counters that may omit a durable bill.
+		m.calibrationFailed(event.ClientName, err)
 		return err
 	}
-	m.IncrementEvent(event)
+	if added {
+		for _, row := range usage.ExpandEvent(event) {
+			m.IncrementEvent(row)
+		}
+	}
+	// An idempotent retry can be the first acknowledged observation of an
+	// earlier uncertain commit. Reconcile after releasing the shared gate;
+	// blindly incrementing would double-charge already-accounted retries.
+	m.mu.RLock()
+	reconcile = m.calibrationErrors[event.ClientName] != ""
+	m.mu.RUnlock()
 	return nil
 }

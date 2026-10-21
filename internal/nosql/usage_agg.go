@@ -42,22 +42,65 @@ const quotaUsageAggBuiltMetaKey = "quota_usage_agg_built_at_v1"
 
 // AggCell is the persisted value of one hourly aggregation cell.
 type AggCell struct {
-	IncompleteUsageCount    int64 `json:"incomplete_usage_count,omitempty"`
-	IncompleteCostCount     int64 `json:"incomplete_cost_count,omitempty"`
-	Requests                int64 `json:"requests"`
-	Success                 int64 `json:"success"`
-	InputTokens             int64 `json:"input_tokens"`
-	OutputTokens            int64 `json:"output_tokens"`
-	CachedTokens            int64 `json:"cached_tokens"`
-	CacheCreationTokens     int64 `json:"cache_creation_tokens"`
+	RecordCount             int64              `json:"record_count,omitempty"`
+	NonBillable             *NonBillableTokens `json:"non_billable,omitempty"`
+	IncompleteUsageCount    int64              `json:"incomplete_usage_count,omitempty"`
+	IncompleteCostCount     int64              `json:"incomplete_cost_count,omitempty"`
+	Requests                int64              `json:"requests"`
+	Success                 int64              `json:"success"`
+	InputTokens             int64              `json:"input_tokens"`
+	OutputTokens            int64              `json:"output_tokens"`
+	CachedTokens            int64              `json:"cached_tokens"`
+	CacheCreationTokens     int64              `json:"cache_creation_tokens"`
+	ExplicitCacheReadTokens int64              `json:"explicit_cache_read_tokens,omitempty"`
+	ReasoningTokens         int64              `json:"reasoning_tokens,omitempty"`
+	CacheCreation5mTokens   int64              `json:"cache_creation_5m_tokens,omitempty"`
+	CacheCreation1hTokens   int64              `json:"cache_creation_1h_tokens,omitempty"`
+	ToolUsePromptTokens     int64              `json:"tool_use_prompt_tokens,omitempty"`
+	ImageInputTokens        int64              `json:"image_input_tokens,omitempty"`
+	CachedImageInputTokens  int64              `json:"cached_image_input_tokens,omitempty"`
+	ImageOutputTokens       int64              `json:"image_output_tokens,omitempty"`
+}
+
+// NonBillableTokens preserves observed usage excluded from the bill. A missing
+// subset on legacy cells means every observed token remains billable.
+type NonBillableTokens struct {
+	InputTokens             int64 `json:"input_tokens,omitempty"`
+	OutputTokens            int64 `json:"output_tokens,omitempty"`
+	CachedTokens            int64 `json:"cached_tokens,omitempty"`
+	CacheCreationTokens     int64 `json:"cache_creation_tokens,omitempty"`
 	ExplicitCacheReadTokens int64 `json:"explicit_cache_read_tokens,omitempty"`
-	ReasoningTokens         int64 `json:"reasoning_tokens,omitempty"`
 	CacheCreation5mTokens   int64 `json:"cache_creation_5m_tokens,omitempty"`
 	CacheCreation1hTokens   int64 `json:"cache_creation_1h_tokens,omitempty"`
-	ToolUsePromptTokens     int64 `json:"tool_use_prompt_tokens,omitempty"`
 	ImageInputTokens        int64 `json:"image_input_tokens,omitempty"`
 	CachedImageInputTokens  int64 `json:"cached_image_input_tokens,omitempty"`
 	ImageOutputTokens       int64 `json:"image_output_tokens,omitempty"`
+}
+
+func (cell AggCell) recordCount() int64 {
+	if cell.RecordCount > 0 {
+		return cell.RecordCount
+	}
+	return cell.Requests
+}
+
+func (cell *AggCell) addNonBillable(evt usage.Event) {
+	if !evt.NonBillable {
+		return
+	}
+	if cell.NonBillable == nil {
+		cell.NonBillable = &NonBillableTokens{}
+	}
+	cell.NonBillable.InputTokens += evt.InputTokens
+	cell.NonBillable.OutputTokens += evt.OutputTokens
+	cell.NonBillable.CachedTokens += evt.CachedTokens
+	cell.NonBillable.CacheCreationTokens += evt.CacheCreationTokens
+	cell.NonBillable.ExplicitCacheReadTokens += evt.ExplicitCacheReadTokens
+	cell.NonBillable.CacheCreation5mTokens += evt.CacheCreation5mTokens
+	cell.NonBillable.CacheCreation1hTokens += evt.CacheCreation1hTokens
+	cell.NonBillable.ImageInputTokens += evt.ImageInputTokens
+	cell.NonBillable.CachedImageInputTokens += evt.CachedImageInputTokens
+	cell.NonBillable.ImageOutputTokens += evt.ImageOutputTokens
 }
 
 // aggKey builds the composite key for an aggregation cell.
@@ -135,9 +178,11 @@ func bumpAgg(tx *bolt.Tx, evt usage.Event) error {
 			cell = AggCell{}
 		}
 	}
-	cell.Requests++
+	cell.RecordCount = cell.recordCount() + 1
+	cell.Requests += usage.RequestWeight(evt)
+	cell.addNonBillable(evt)
 	if isSuccessStatus(evt.StatusCode) {
-		cell.Success++
+		cell.Success += usage.RequestWeight(evt)
 	}
 	cell.InputTokens += evt.InputTokens
 	cell.OutputTokens += evt.OutputTokens
@@ -247,9 +292,11 @@ func bumpQuotaAgg(tx *bolt.Tx, evt usage.Event) error {
 			return fmt.Errorf("decode quota agg cell %q: %w", key, err)
 		}
 	}
-	cell.Requests++
+	cell.RecordCount = cell.recordCount() + 1
+	cell.Requests += usage.RequestWeight(evt)
+	cell.addNonBillable(evt)
 	if isSuccessStatus(evt.StatusCode) {
-		cell.Success++
+		cell.Success += usage.RequestWeight(evt)
 	}
 	cell.InputTokens += evt.InputTokens
 	cell.OutputTokens += evt.OutputTokens

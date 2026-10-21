@@ -109,7 +109,8 @@ func readCostRollups(tx *bolt.Tx, filter usage.Filter, from, to time.Time, stric
 	return result, nil
 }
 
-// assembleCostUnits preserves the old bidirectional request-count parity
+// assembleCostUnits preserves bidirectional record-count parity (legacy cells
+// use Requests). Supplementary rows contribute records but no requests to this
 // contract. Even events outside precise bounds count towards boundary-hour
 // parity, so missing/pruned history cannot silently reduce the bill.
 func assembleCostUnits(cells []TargetModelCell, events []usage.Event, filter usage.Filter, resolver usage.RateResolver, precise bool, allow costPairFilter) ([]CostUnit, error) {
@@ -121,7 +122,7 @@ func assembleCostUnits(cells []TargetModelCell, events []usage.Event, filter usa
 			continue
 		}
 		if usage.RequiresEventTimestampsFor(resolver, cell.Target, cell.Model) {
-			expected[string(quotaAggKey(cell.Hour, cell.Client, cell.Target, cell.Model))] = cell.Requests
+			expected[string(quotaAggKey(cell.Hour, cell.Client, cell.Target, cell.Model))] = cell.recordCount()
 		} else {
 			units = append(units, CostUnit{TargetModelCell: cell, At: cell.Hour})
 		}
@@ -142,7 +143,7 @@ func assembleCostUnits(cells []TargetModelCell, events []usage.Event, filter usa
 	}
 	for key, count := range expected {
 		if observed[key] != count {
-			return nil, fmt.Errorf("%w: raw request count %d differs from rollup count %d", ErrUsageHistoryIncomplete, observed[key], count)
+			return nil, fmt.Errorf("%w: raw record count %d differs from rollup count %d", ErrUsageHistoryIncomplete, observed[key], count)
 		}
 	}
 	for key, count := range observed {
@@ -154,11 +155,11 @@ func assembleCostUnits(cells []TargetModelCell, events []usage.Event, filter usa
 }
 
 func eventAggCell(e usage.Event) AggCell {
-	c := AggCell{Requests: 1, InputTokens: e.InputTokens, OutputTokens: e.OutputTokens, CachedTokens: e.CachedTokens, CacheCreationTokens: e.CacheCreationTokens,
+	c := AggCell{Requests: usage.RequestWeight(e), RecordCount: 1, InputTokens: e.InputTokens, OutputTokens: e.OutputTokens, CachedTokens: e.CachedTokens, CacheCreationTokens: e.CacheCreationTokens,
 		ExplicitCacheReadTokens: e.ExplicitCacheReadTokens, ReasoningTokens: e.ReasoningTokens, CacheCreation5mTokens: e.CacheCreation5mTokens, CacheCreation1hTokens: e.CacheCreation1hTokens, ToolUsePromptTokens: e.ToolUsePromptTokens,
 		ImageInputTokens: e.ImageInputTokens, CachedImageInputTokens: e.CachedImageInputTokens, ImageOutputTokens: e.ImageOutputTokens}
 	if isSuccessStatus(e.StatusCode) {
-		c.Success = 1
+		c.Success = usage.RequestWeight(e)
 	}
 	if e.UsageStatus == usage.UsageStatusIncomplete || e.UsageStatus == usage.UsageStatusConflict {
 		c.IncompleteUsageCount = 1
@@ -166,6 +167,7 @@ func eventAggCell(e usage.Event) AggCell {
 	if e.CostIncomplete {
 		c.IncompleteCostCount = 1
 	}
+	c.addNonBillable(e)
 	return c
 }
 

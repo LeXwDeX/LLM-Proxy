@@ -47,7 +47,7 @@ func TestAnthropicUsageIterations(t *testing.T) {
 			}
 		}
 	}
-	resp, b := post(t, ts.URL+"/v1/messages", `{"x":"[[fake iterations=compaction]]"}`, nil)
+	resp, b := post(t, ts.URL+"/v1/messages", `{"x":"[[fake iterations=bogus]]"}`, nil)
 	if resp.StatusCode != 400 || !strings.Contains(string(b), "iterations") {
 		t.Fatalf("bad iterations directive: %d %s", resp.StatusCode, b)
 	}
@@ -57,7 +57,7 @@ func TestAnthropicUsageIterations(t *testing.T) {
 // keeps the default response without iterations.
 func TestAnthropicUsageIterationsControl(t *testing.T) {
 	_, ts := newTestServer(t)
-	for _, body := range []string{`{"scenario":{"iterations":"compaction"}}`, `{"keys":{"k":{"iterations":"bogus"}}}`} {
+	for _, body := range []string{`{"scenario":{"iterations":"bogus"}}`, `{"keys":{"k":{"iterations":"bogus"}}}`} {
 		resp, b := post(t, ts.URL+"/_control", body, nil)
 		if resp.StatusCode != 400 || !strings.Contains(string(b), "iterations") {
 			t.Fatalf("%s: %d %s", body, resp.StatusCode, b)

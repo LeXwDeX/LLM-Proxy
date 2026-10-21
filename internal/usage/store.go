@@ -37,6 +37,12 @@ const (
 
 // Event is one usage record item.
 type Event struct {
+	Components              []Component     `json:"components,omitempty"`
+	Supplementary           bool            `json:"supplementary,omitempty"`
+	ParentRecordID          string          `json:"parent_record_id,omitempty"`
+	IterationType           string          `json:"iteration_type,omitempty"`
+	IterationIndex          int             `json:"iteration_index,omitempty"`
+	NonBillable             bool            `json:"non_billable,omitempty"`
 	PricingContext          *PricingContext `json:"pricing_context,omitempty"`
 	PricingRuleID           string          `json:"pricing_rule_id,omitempty"`
 	PricingRuleVersion      int             `json:"pricing_rule_version,omitempty"`
@@ -362,6 +368,13 @@ type Recorder interface {
 	Record(event Event) error
 }
 
+// IdempotentRecorder reports whether this call newly accepted a durable bundle.
+// Replays may repair persistence but must not charge live counters twice.
+type IdempotentRecorder interface {
+	Recorder
+	RecordOnce(event Event) (bool, error)
+}
+
 // --- Utility functions used by nosql.UsageStore and other aggregation code ---
 
 // FilterEvents filters events according to filter criteria.
@@ -433,7 +446,7 @@ func SortedDimensions(input map[string]*DimensionTotals) []DimensionTotals {
 // AddEventTotals adds one event's contribution to aggregate totals.
 func AddEventTotals(target *Totals, evt Event, resolver RateResolver) {
 	CheckEventPrices(&evt, resolver)
-	target.Requests++
+	target.Requests += RequestWeight(evt)
 	if evt.UsageStatus == UsageStatusIncomplete || evt.UsageStatus == UsageStatusConflict {
 		target.IncompleteUsageCount++
 	}
@@ -459,7 +472,7 @@ func AddEventTotals(target *Totals, evt Event, resolver RateResolver) {
 // to the RateResolver (which selects rates by target/model and the event's
 // historical timestamp).
 func EstimateEventCost(evt Event, resolver RateResolver) float64 {
-	if resolver == nil {
+	if resolver == nil || evt.NonBillable {
 		return 0
 	}
 	resolution := ResolveEventRate(evt, resolver)
@@ -523,6 +536,9 @@ func appendUsageDiagnostic(evt *Event, reason string) {
 // clears a protocol or audio diagnostic. Missing prices still yield estimates.
 func CheckImagePrices(evt *Event, resolver RateResolver) {
 	NormalizeImagePartitions(evt)
+	if evt.NonBillable {
+		return
+	}
 	var rate CostRates
 	if resolver != nil {
 		rate = ResolveEventRate(*evt, resolver).Rates
