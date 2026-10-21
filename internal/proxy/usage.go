@@ -53,7 +53,8 @@ type usageTokens struct {
 	invalidIterations bool
 	// unadmittedEchoes: explicit echoed component/fallback models outside the
 	// request's admission set; logged once when the bundle is recorded.
-	unadmittedEchoes []claudeEchoMismatch
+	unadmittedEchoes  []claudeEchoMismatch
+	unadmittedDropped int
 }
 
 type usageParser struct {

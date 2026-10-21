@@ -1431,21 +1431,30 @@ func (s *Service) recordParsedUsage(r *http.Request, target *Target, statusCode 
 		state.keyPool.recordTokens(keyIndex, totalTokens)
 	}
 
-	for _, echo := range tokens.unadmittedEchoes {
-		if s.logger == nil {
-			break
-		}
+	if s.logger != nil && (len(tokens.unadmittedEchoes) != 0 || tokens.unadmittedDropped != 0) {
+		requestID := appmiddleware.RequestIDFromContext(r.Context())
 		targetName := ""
 		if target != nil {
 			targetName = target.Name
 		}
 		// Attribution keeps the echoed spelling and never infers an identity.
-		s.logger.Warn("回显附属模型不在准入集合内 / echoed supplementary model not in admission set",
-			"request_id", appmiddleware.RequestIDFromContext(r.Context()),
-			"target", targetName,
-			"iteration_type", echo.iterationType,
-			"model", echo.model,
-		)
+		// The parser bounds and deduplicates these per request.
+		for _, echo := range tokens.unadmittedEchoes {
+			s.logger.Warn("回显附属模型不在准入集合内 / echoed supplementary model not in admission set",
+				"request_id", requestID,
+				"target", targetName,
+				"iteration_type", echo.iterationType,
+				"model", echo.model,
+			)
+		}
+		if tokens.unadmittedDropped != 0 {
+			s.logger.Warn("回显附属模型超出单请求日志上限，已汇总 / echoed supplementary models over per-request log limit; summarized",
+				"request_id", requestID,
+				"target", targetName,
+				"logged", len(tokens.unadmittedEchoes),
+				"dropped", tokens.unadmittedDropped,
+			)
+		}
 	}
 
 	if tokens.billingModel != "" {
