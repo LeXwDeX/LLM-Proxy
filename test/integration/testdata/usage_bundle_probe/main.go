@@ -17,6 +17,19 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+// readerResult reports the aggregate readers an operator sees (overview totals,
+// usage reports and the legacy quota fallback) as each pinned binary sees them.
+type readerResult struct {
+	CountTotal       int64
+	CountSuccess     int64
+	CountError       string
+	AggregateRequest int64
+	AggregateInput   int64
+	AggregateError   string
+	SumInput         int64
+	SumError         string
+}
+
 type priceResult struct {
 	Cost              float64
 	Requests          int64
@@ -145,9 +158,28 @@ func inspect(db *bolt.DB, store *nosql.UsageStore) error {
 		}
 		prices[mode] = result
 	}
+	readers := readerResult{}
+	if total, success, err := store.Count(from, to); err != nil {
+		readers.CountError = err.Error()
+	} else {
+		readers.CountTotal, readers.CountSuccess = total, success
+	}
+	if result, err := store.Aggregate(filter, "hour", nil); err != nil {
+		readers.AggregateError = err.Error()
+	} else {
+		readers.AggregateRequest, readers.AggregateInput = result.Totals.Requests, result.Totals.InputTokens
+	}
+	if totals, err := store.SumByClientRange(filter.ClientName, from, to); err != nil {
+		readers.SumError = err.Error()
+	} else {
+		for _, total := range totals {
+			readers.SumInput += total.InputTokens
+		}
+	}
 	return json.NewEncoder(os.Stdout).Encode(struct {
 		Events  []usage.Event
 		Rollups map[string][]json.RawMessage
 		Prices  map[string]priceResult
-	}{events, rollups, prices})
+		Readers readerResult
+	}{events, rollups, prices, readers})
 }
