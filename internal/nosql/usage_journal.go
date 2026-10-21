@@ -269,8 +269,13 @@ func (j *UsageJournal) recordSync(event usage.Event) error {
 // sibling quarantine file and excluded from the rewrite. The rewrite is
 // skipped when the quarantine write or the re-read fails, so corrupt lines
 // and concurrently appended records can never be lost by a partial recovery.
-// A record the primary store keeps rejecting stays queued and is reported
-// via the returned error without blocking the remaining events.
+// A record that fails transiently (I/O, a failed bbolt transaction) stays
+// queued and is reported via the returned error without blocking the
+// remaining events. A record the ledger permanently rejects (an identity
+// before the receipt watermark, a digest conflict with committed data, or an
+// invalid or partially committed bundle) is moved to the private ".rejected"
+// sidecar with its original line and reason, logged at ERROR, and no longer
+// blocks calibration; it is never charged or discarded automatically.
 func (j *UsageJournal) Replay() ([]string, error) {
 	// Events the asynchronous writer still owns are committed by the writer;
 	// replaying them here would only duplicate work and report recoveries
@@ -281,7 +286,9 @@ func (j *UsageJournal) Replay() ([]string, error) {
 // DrainClient makes all queued writes for a client visible to authoritative
 // quota calibration. A failed replay or a concurrent append prevents the
 // caller from replacing counters with an incomplete primary-store snapshot.
-// Other clients' rejected writes remain queued without blocking this client.
+// Other clients' failed writes remain queued without blocking this client.
+// Permanently rejected rows are moved to the sidecar (see Replay): they can
+// never reach the ledger the counters are rebuilt from, so they do not block.
 func (j *UsageJournal) DrainClient(clientName string) error {
 	clientName = strings.TrimSpace(clientName)
 	// Calibration needs every queued event of the client in the primary
@@ -354,12 +361,12 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 		j.mu.Unlock()
 		return nil, nil
 	}
-	events, corrupt, err := j.readLocked()
+	entries, corrupt, err := j.readEntriesLocked()
 	if err != nil {
 		j.mu.Unlock()
 		return nil, err
 	}
-	if len(events) == 0 && len(corrupt) == 0 {
+	if len(entries) == 0 && len(corrupt) == 0 {
 		j.mu.Unlock()
 		return nil, nil
 	}
@@ -367,8 +374,9 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 	if len(corrupt) > 0 {
 		quarantineErr = j.quarantineLocked(corrupt)
 	}
-	snapshot := make([]usage.Event, 0, len(events))
-	for _, event := range events {
+	snapshot := make([]journalEntry, 0, len(entries))
+	for _, entry := range entries {
+		event := entry.event
 		if _, done := j.committed[event.RecordID]; done {
 			continue
 		}
@@ -376,7 +384,7 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 			continue
 		}
 		if clientName == nil || strings.TrimSpace(event.ClientName) == *clientName {
-			snapshot = append(snapshot, event)
+			snapshot = append(snapshot, entry)
 		}
 	}
 	if len(snapshot) == 0 && len(corrupt) == 0 {
@@ -392,10 +400,21 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 	snapshotIDs := make(map[string]struct{}, len(snapshot))
 	pendingIDs := make(map[string]struct{})
 	var recovered []string
+	var rejected []rejectedUsageLine
 	var replayErr error
-	for _, event := range snapshot {
+	for _, entry := range snapshot {
+		event := entry.event
 		snapshotIDs[event.RecordID] = struct{}{}
 		if err := j.primary.Record(event); err != nil {
+			if reason, permanent := permanentUsageRejection(err); permanent {
+				// Retrying can never commit this row. It leaves the pending
+				// set only after a durable sidecar copy exists (below).
+				rejected = append(rejected, rejectedUsageLine{
+					RejectedAt: time.Now().UTC(), Reason: reason, Error: err.Error(),
+					RecordID: event.RecordID, Client: strings.TrimSpace(event.ClientName), Line: entry.line,
+				})
+				continue
+			}
 			pendingIDs[event.RecordID] = struct{}{}
 			if replayErr == nil {
 				replayErr = fmt.Errorf("replay usage event %s: %w", event.RecordID, err)
@@ -407,6 +426,7 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 	j.mu.Lock()
 	var rewriteErr error
 	rewriteErrSet := false
+	var movedAside []rejectedUsageLine
 	current, currentCorrupt, readErr := j.readLocked()
 	switch {
 	case readErr != nil:
@@ -421,6 +441,18 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 		// them for good.
 		rewriteErr = fmt.Errorf("quarantine corrupt journal lines: %w", quarantineErr)
 	default:
+		if len(rejected) > 0 {
+			if err := j.rejectLocked(rejected); err != nil {
+				// Without a durable sidecar copy the rows stay pending, and
+				// calibration for their clients stays fail-closed.
+				for _, entry := range rejected {
+					pendingIDs[entry.RecordID] = struct{}{}
+				}
+				replayErr = errors.Join(replayErr, fmt.Errorf("preserve permanently rejected journal lines: %w", err))
+			} else {
+				movedAside = rejected
+			}
+		}
 		kept := make([]usage.Event, 0, len(current))
 		for _, event := range current {
 			_, failed := pendingIDs[event.RecordID]
@@ -450,6 +482,11 @@ func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, err
 		}
 	}
 	j.mu.Unlock()
+	for _, entry := range movedAside {
+		j.errorLogger().Error("usage journal line permanently rejected by the ledger; moved to the rejected sidecar for manual review",
+			"path", j.path+usageJournalRejectedSuffix, "record_id", entry.RecordID, "client", entry.Client,
+			"reason", entry.Reason, "error", entry.Error)
+	}
 	if rewriteErr != nil {
 		replayErr = errors.Join(replayErr, rewriteErr)
 	}
@@ -661,6 +698,26 @@ func (j *UsageJournal) appendLinesLocked(line []byte) error {
 // warning; a corrupt line in the middle is returned for quarantine because it
 // may still hold a recoverable usage record.
 func (j *UsageJournal) readLocked() ([]usage.Event, []string, error) {
+	entries, corrupt, err := j.readEntriesLocked()
+	if err != nil {
+		return nil, nil, err
+	}
+	events := make([]usage.Event, len(entries))
+	for i, entry := range entries {
+		events[i] = entry.event
+	}
+	return events, corrupt, nil
+}
+
+// journalEntry pairs a replayable event with its original journal line, so a
+// permanently rejected row can be preserved byte for byte.
+type journalEntry struct {
+	event usage.Event
+	line  string
+}
+
+// readEntriesLocked is readLocked keeping each event's original line.
+func (j *UsageJournal) readEntriesLocked() ([]journalEntry, []string, error) {
 	j.fileReads.Add(1)
 	data, err := os.ReadFile(j.path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -671,7 +728,7 @@ func (j *UsageJournal) readLocked() ([]usage.Event, []string, error) {
 	}
 	endsWithNewline := strings.HasSuffix(string(data), "\n")
 	lines := strings.Split(string(data), "\n")
-	events := make([]usage.Event, 0, len(lines))
+	events := make([]journalEntry, 0, len(lines))
 	var corrupt []string
 	for lineNumber, line := range lines {
 		if strings.TrimSpace(line) == "" {
@@ -700,7 +757,7 @@ func (j *UsageJournal) readLocked() ([]usage.Event, []string, error) {
 			continue
 		}
 		event.RecordID = recordID.String()
-		events = append(events, event)
+		events = append(events, journalEntry{event: event, line: line})
 	}
 	return events, corrupt, nil
 }

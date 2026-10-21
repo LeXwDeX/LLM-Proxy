@@ -497,9 +497,10 @@ func decodeAggKey(key []byte) (aggCellEntry, error) {
 }
 
 // scanAggKeyRange visits one physical format within the inclusive [start, end]
-// hour prefix. All structural, hour and JSON failures abort the scan; no
-// partial result is returned to the caller.
-func scanAggKeyRange(tx *bolt.Tx, start, endPrefix string, fn func(aggCellEntry) error) error {
+// hour prefix. With a nil skip callback all structural, hour and JSON failures
+// abort the scan and no partial result is returned to the caller. A non-nil
+// skip callback receives each malformed key instead and the scan continues.
+func scanAggKeyRange(tx *bolt.Tx, start, endPrefix string, fn func(aggCellEntry) error, skip func(key []byte, err error)) error {
 	b := tx.Bucket([]byte(BucketUsageAggHourly))
 	if b == nil {
 		return nil
@@ -511,11 +512,17 @@ func scanAggKeyRange(tx *bolt.Tx, start, endPrefix string, fn func(aggCellEntry)
 			break
 		}
 		entry, err := decodeAggKey(k)
-		if err != nil {
-			return err
+		if err == nil {
+			if jsonErr := json.Unmarshal(v, &entry.cell); jsonErr != nil {
+				err = fmt.Errorf("usage aggregate: decode cell: %w", jsonErr)
+			}
 		}
-		if err := json.Unmarshal(v, &entry.cell); err != nil {
-			return fmt.Errorf("usage aggregate: decode cell: %w", err)
+		if err != nil {
+			if skip == nil {
+				return err
+			}
+			skip(k, err)
+			continue
 		}
 		if err := fn(entry); err != nil {
 			return err
@@ -527,16 +534,23 @@ func scanAggKeyRange(tx *bolt.Tx, start, endPrefix string, fn func(aggCellEntry)
 // aggCellIter visits both physical formats in one transaction. Hours are
 // truncated and both bounds are inclusive, matching every existing reader.
 func aggCellIter(tx *bolt.Tx, from, to time.Time, fn func(aggCellEntry) error) error {
+	return aggCellIterSkipping(tx, from, to, fn, nil)
+}
+
+// aggCellIterSkipping is aggCellIter with an optional skip callback for
+// malformed cells; see scanAggKeyRange. Only display totals may skip: billing
+// and quota readers keep the fail-closed nil callback.
+func aggCellIterSkipping(tx *bolt.Tx, from, to time.Time, fn func(aggCellEntry) error, skip func(key []byte, err error)) error {
 	from = from.UTC().Truncate(time.Hour)
 	to = to.UTC().Truncate(time.Hour)
 	if to.Before(from) {
 		return nil
 	}
 	fromHour, toHour := string(hourPrefix(from)), string(hourPrefix(to))
-	if err := scanAggKeyRange(tx, fromHour, toHour, fn); err != nil {
+	if err := scanAggKeyRange(tx, fromHour, toHour, fn, skip); err != nil {
 		return err
 	}
-	return scanAggKeyRange(tx, "v2|"+fromHour, "v2|"+toHour, fn)
+	return scanAggKeyRange(tx, "v2|"+fromHour, "v2|"+toHour, fn, skip)
 }
 
 // aggIter visits decodable cells whose hour bucket falls within [from, to].

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -25,8 +26,41 @@ const (
 
 // ErrUsageIdentityUnverified reports an explicit identity that predates
 // receipt tracking and has no retained raw record. It cannot be proven either
-// way, so recovery must leave it queued instead of creating a new charge.
+// way, so it is never charged automatically; journal recovery moves it to the
+// rejected sidecar for manual review.
 var ErrUsageIdentityUnverified = errors.New("usage identity predates receipt tracking and cannot be verified")
+
+// ErrUsageRecordConflict reports an explicit identity whose committed raw row
+// or receipt holds a different event digest. Retrying cannot change the
+// committed data, so the rejection is permanent.
+var ErrUsageRecordConflict = errors.New("usage record conflicts with committed event data")
+
+// ErrUsageBundleInvalid reports a bundle the ledger can never accept: its
+// payload fails validation, or only part of it is already committed.
+var ErrUsageBundleInvalid = errors.New("usage bundle cannot be committed")
+
+// usageKindError tags an error with a permanent rejection kind while keeping
+// the original message unchanged for callers and logs.
+type usageKindError struct {
+	kind error
+	err  error
+}
+
+func (e *usageKindError) Error() string   { return e.err.Error() }
+func (e *usageKindError) Unwrap() []error { return []error{e.err, e.kind} }
+
+func withUsageKind(kind, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &usageKindError{kind: kind, err: err}
+}
+
+// Receipt migration retry backoff after a failed attempt.
+const (
+	usageReceiptRetryMin = time.Second
+	usageReceiptRetryMax = time.Minute
+)
 
 // receiptState is the result of looking up one bundle row.
 type receiptState int
@@ -48,9 +82,11 @@ type usageReceipt struct {
 // completion marker, and a successful scan is skipped by later calls.
 //
 // The watermark is the end of the newest hour where retained raw records and
-// permanent hourly record counts disagree. An explicit identity in an older
-// hour with neither raw data nor a receipt cannot be proven committed or new,
-// so it is rejected. This scan runs once, not per request.
+// permanent hourly record counts disagree, or whose aggregate evidence cannot
+// be decoded. An explicit identity in an older hour with neither raw data nor
+// a receipt cannot be proven committed or new, so it is rejected. The result
+// is cached per store; a failed attempt is cached too and retried only after
+// an exponential backoff, so explicit writes never rescan the database each.
 func (s *UsageStore) EnsureUsageReceipts() error {
 	if s == nil || s.db == nil {
 		return errors.New("usage receipts: store is not initialized")
@@ -60,7 +96,35 @@ func (s *UsageStore) EnsureUsageReceipts() error {
 	if s.receiptsReady {
 		return nil
 	}
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	if s.receiptErr != nil && now().Before(s.receiptRetryAt) {
+		return s.receiptErr
+	}
+	err := s.ensureUsageReceiptsLocked()
+	if err == nil {
+		s.receiptsReady = true
+		s.receiptErr, s.receiptBackoff = nil, 0
+		return nil
+	}
+	s.receiptBackoff *= 2
+	if s.receiptBackoff < usageReceiptRetryMin {
+		s.receiptBackoff = usageReceiptRetryMin
+	}
+	if s.receiptBackoff > usageReceiptRetryMax {
+		s.receiptBackoff = usageReceiptRetryMax
+	}
+	s.receiptErr = err
+	s.receiptRetryAt = now().Add(s.receiptBackoff)
+	slog.Error("usage receipts: watermark migration failed; explicit writes stay blocked until a retry succeeds",
+		"retry_in", s.receiptBackoff.String(), "error", err)
+	return err
+}
 
+func (s *UsageStore) ensureUsageReceiptsLocked() error {
+	s.receiptScans.Add(1)
 	var watermark time.Time
 	done := false
 	if err := s.db.View(func(tx *bolt.Tx) error {
@@ -101,7 +165,6 @@ func (s *UsageStore) EnsureUsageReceipts() error {
 			return err
 		}
 	}
-	s.receiptsReady = true
 	return nil
 }
 
@@ -132,6 +195,12 @@ func decodeUsageReceiptWatermark(raw []byte) (time.Time, error) {
 // matched per exact v2 key as a lower bound and also projected into the same
 // historical space. Legacy four-segment keys never match a projection and stay
 // conservatively untrusted.
+//
+// v1.0.1 readers skipped undecodable cells and malformed keys, so an upgraded
+// ledger may still hold them. Such evidence cannot be counted: its hour is
+// marked untrusted (the watermark moves to at least that hour + 1h) and an
+// ERROR naming the bucket and key, never the value, is logged. A key without
+// any recognizable hour cannot bound an identity and is only logged.
 func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 	rawLegacy := make(map[string]int64)
 	rawV2 := make(map[string]int64)
@@ -155,13 +224,24 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 			untrusted = hour
 		}
 	}
-	markKey := func(key string) error {
-		hour, err := hourFromAggKey(key)
-		if err != nil {
-			return err
+	untrustedEvidence := func(bucket, key, reason string) {
+		hour, ok := untrustedAggHour(key)
+		if !ok {
+			slog.Error("usage receipts: aggregate key has no recognizable hour; it cannot be counted or attributed",
+				"bucket", bucket, "key", key, "reason", reason)
+			return
 		}
 		mark(hour)
-		return nil
+		slog.Error("usage receipts: undecodable aggregate evidence; hour treated as untrusted",
+			"bucket", bucket, "key", key, "hour", hour.Format(hourLayout), "reason", reason)
+	}
+	markKey := func(bucket, key string) {
+		hour, err := hourFromAggKey(key)
+		if err != nil {
+			untrustedEvidence(bucket, key, "invalid aggregate hour")
+			return
+		}
+		mark(hour)
 	}
 
 	// Historical cells are compared by their original bytes; current cells are
@@ -172,15 +252,17 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 	if bucket := tx.Bucket([]byte(BucketUsageAggHourly)); bucket != nil {
 		cursor := bucket.Cursor()
 		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			key := string(k)
 			entry, err := decodeAggKey(k)
 			if err != nil {
-				return time.Time{}, err
+				untrustedEvidence(BucketUsageAggHourly, key, err.Error())
+				continue
 			}
 			var cell AggCell
 			if err := json.Unmarshal(v, &cell); err != nil {
-				return time.Time{}, fmt.Errorf("usage receipts: decode hourly aggregate cell: %w", err)
+				untrustedEvidence(BucketUsageAggHourly, key, "decode hourly aggregate cell")
+				continue
 			}
-			key := string(k)
 			if strings.HasPrefix(key, "v2|") {
 				projected := string(legacyAggKey(entry.hour, entry.endpointType, entry.client, entry.model, entry.target))
 				expectedLegacy[projected] += cell.recordCount()
@@ -197,16 +279,12 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 	}
 	for key, want := range rawLegacy {
 		if expectedLegacy[key] != want {
-			if err := markKey(key); err != nil {
-				return time.Time{}, err
-			}
+			markKey(BucketUsageEvents, key)
 		}
 	}
 	for key, want := range expectedLegacy {
 		if rawLegacy[key] != want {
-			if err := markKey(key); err != nil {
-				return time.Time{}, err
-			}
+			markKey(BucketUsageAggHourly, key)
 		}
 	}
 
@@ -216,27 +294,25 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
 			key := string(k)
 			if _, err := hourFromAggKey(key); err != nil {
-				return time.Time{}, fmt.Errorf("usage receipts: invalid quota aggregate key: %w", err)
+				untrustedEvidence(BucketQuotaUsageAggHourly, key, "invalid quota aggregate key")
+				continue
 			}
 			var cell AggCell
 			if err := json.Unmarshal(v, &cell); err != nil {
-				return time.Time{}, fmt.Errorf("usage receipts: decode quota aggregate cell: %w", err)
+				untrustedEvidence(BucketQuotaUsageAggHourly, key, "decode quota aggregate cell")
+				continue
 			}
 			expectedQuota[key] += cell.recordCount()
 		}
 	}
 	for key, want := range rawQuota {
 		if expectedQuota[key] != want {
-			if err := markKey(key); err != nil {
-				return time.Time{}, err
-			}
+			markKey(BucketUsageEvents, key)
 		}
 	}
 	for key, want := range expectedQuota {
 		if rawQuota[key] != want {
-			if err := markKey(key); err != nil {
-				return time.Time{}, err
-			}
+			markKey(BucketQuotaUsageAggHourly, key)
 		}
 	}
 
@@ -248,6 +324,29 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("usage receipts: legacy watermark overflow")
 	}
 	return next.UTC(), nil
+}
+
+// untrustedAggHour recovers the hour a malformed aggregate key claims, so the
+// evidence still bounds the watermark. It accepts the hour segment of either
+// key format, then any parseable hour prefix of the key.
+func untrustedAggHour(key string) (time.Time, bool) {
+	text := key
+	if rest, ok := strings.CutPrefix(text, "v2|"); ok {
+		text = rest
+	}
+	candidates := []string{text}
+	if before, _, found := strings.Cut(text, "|"); found {
+		candidates = append(candidates, before)
+	}
+	if len(text) >= len(hourLayout) {
+		candidates = append(candidates, text[:len(hourLayout)])
+	}
+	for _, candidate := range candidates {
+		if hour, err := time.ParseInLocation(hourLayout, candidate, time.UTC); err == nil {
+			return hour.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func hourFromAggKey(key string) (time.Time, error) {
@@ -319,7 +418,7 @@ func lookupUsageIdentity(tx *bolt.Tx, key, digest []byte) (receiptState, usage.E
 	if raw == nil {
 		if hasReceipt {
 			if receipt.Digest != string(digest) {
-				return identityNew, usage.Event{}, nil, fmt.Errorf("usage record already exists with different event data")
+				return identityNew, usage.Event{}, nil, withUsageKind(ErrUsageRecordConflict, fmt.Errorf("usage record already exists with different event data"))
 			}
 			return identityReceipt, usage.Event{}, nil, nil
 		}
@@ -335,7 +434,7 @@ func lookupUsageIdentity(tx *bolt.Tx, key, digest []byte) (receiptState, usage.E
 		return identityNew, usage.Event{}, nil, err
 	}
 	if storedDigest != string(digest) {
-		return identityNew, usage.Event{}, nil, fmt.Errorf("usage record ID %q already exists with different event data", stored.RecordID)
+		return identityNew, usage.Event{}, nil, withUsageKind(ErrUsageRecordConflict, fmt.Errorf("usage record ID %q already exists with different event data", stored.RecordID))
 	}
 	if hasReceipt {
 		if receipt.Digest != storedDigest {
@@ -391,7 +490,7 @@ func recordUsageBundleTx(tx *bolt.Tx, rows []usage.Event, keys []string, explici
 		return false, nil
 	}
 	if committed > 0 {
-		return false, fmt.Errorf("usage bundle is partially committed and cannot be proven complete")
+		return false, withUsageKind(ErrUsageBundleInvalid, fmt.Errorf("usage bundle is partially committed and cannot be proven complete"))
 	}
 
 	if explicit {
