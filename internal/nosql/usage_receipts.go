@@ -103,7 +103,7 @@ func (s *UsageStore) EnsureUsageReceipts() error {
 	if s.receiptErr != nil && now().Before(s.receiptRetryAt) {
 		return s.receiptErr
 	}
-	err := s.ensureUsageReceiptsLocked()
+	err := s.ensureUsageReceiptsLocked(now())
 	if err == nil {
 		s.receiptsReady = true
 		s.receiptErr, s.receiptBackoff = nil, 0
@@ -123,7 +123,7 @@ func (s *UsageStore) EnsureUsageReceipts() error {
 	return err
 }
 
-func (s *UsageStore) ensureUsageReceiptsLocked() error {
+func (s *UsageStore) ensureUsageReceiptsLocked(scanTime time.Time) error {
 	s.receiptScans.Add(1)
 	var watermark time.Time
 	done := false
@@ -142,7 +142,7 @@ func (s *UsageStore) ensureUsageReceiptsLocked() error {
 			return err
 		}
 		var err error
-		watermark, err = computeUsageReceiptWatermark(tx)
+		watermark, err = computeUsageReceiptWatermark(tx, scanTime)
 		return err
 	}); err != nil {
 		return err
@@ -197,20 +197,38 @@ func decodeUsageReceiptWatermark(raw []byte) (time.Time, error) {
 // conservatively untrusted.
 //
 // v1.0.1 readers skipped undecodable cells and malformed keys, so an upgraded
-// ledger may still hold them. Such evidence cannot be counted: its hour is
-// marked untrusted (the watermark moves to at least that hour + 1h) and an
-// ERROR naming the bucket and key, never the value, is logged. A key without
-// any recognizable hour cannot bound an identity and is only logged.
-func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
+// ledger may still hold them. Such evidence cannot be counted, and only
+// matters if raw detail in its hour may have been removed by retention.
+// Retention (PruneEventsBefore, the only path that deletes raw rows, in every
+// released version) always deletes a complete key-ordered prefix below its
+// cutoff and quarantines undecodable rows only inside that prefix. So an hour
+// can hold pruned rows only if it is not after the earliest surviving raw row,
+// or not after other cleanup evidence: the newest receipt or quarantined key,
+// or the newest hour whose rollups count rows its raw detail lacks. Corrupt
+// evidence in such an hour marks it untrusted; corrupt evidence in a later
+// hour cannot hide pruned rows and is only logged. Without surviving raw
+// detail every hour may have been pruned. Raw rows outnumbering decodable
+// cells in an hour that holds corrupt evidence are explained by that evidence
+// and are not counted as cleanup evidence. Every decision is logged at ERROR
+// with the bucket and key, never the value.
+//
+// The watermark never passes the start of the scan hour: no identity created
+// after the scan can be rejected by corrupt or future-dated evidence.
+func computeUsageReceiptWatermark(tx *bolt.Tx, scanTime time.Time) (time.Time, error) {
 	rawLegacy := make(map[string]int64)
 	rawV2 := make(map[string]int64)
 	rawQuota := make(map[string]int64)
+	var earliestRaw time.Time
+	hasRaw := false
 	if raw := tx.Bucket([]byte(BucketUsageEvents)); raw != nil {
 		cursor := raw.Cursor()
 		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
 			var event usage.Event
 			if json.Unmarshal(v, &event) != nil {
 				continue
+			}
+			if hour := event.Timestamp.UTC().Truncate(time.Hour); !hasRaw || hour.Before(earliestRaw) {
+				earliestRaw, hasRaw = hour, true
 			}
 			rawLegacy[string(legacyAggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target))]++
 			rawV2[string(aggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target))]++
@@ -224,24 +242,20 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 			untrusted = hour
 		}
 	}
-	untrustedEvidence := func(bucket, key, reason string) {
-		hour, ok := untrustedAggHour(key)
-		if !ok {
-			slog.Error("usage receipts: aggregate key has no recognizable hour; it cannot be counted or attributed",
-				"bucket", bucket, "key", key, "reason", reason)
-			return
-		}
-		mark(hour)
-		slog.Error("usage receipts: undecodable aggregate evidence; hour treated as untrusted",
-			"bucket", bucket, "key", key, "hour", hour.Format(hourLayout), "reason", reason)
+
+	type corruptEvidence struct {
+		bucket, key, reason string
+		hour                time.Time
+		hourKnown           bool
 	}
-	markKey := func(bucket, key string) {
-		hour, err := hourFromAggKey(key)
-		if err != nil {
-			untrustedEvidence(bucket, key, "invalid aggregate hour")
-			return
+	var corrupt []corruptEvidence
+	corruptHours := make(map[time.Time]bool)
+	addCorrupt := func(bucket, key, reason string) {
+		hour, ok := untrustedAggHour(key)
+		corrupt = append(corrupt, corruptEvidence{bucket: bucket, key: key, reason: reason, hour: hour, hourKnown: ok})
+		if ok {
+			corruptHours[hour] = true
 		}
-		mark(hour)
 	}
 
 	// Historical cells are compared by their original bytes; current cells are
@@ -255,12 +269,12 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 			key := string(k)
 			entry, err := decodeAggKey(k)
 			if err != nil {
-				untrustedEvidence(BucketUsageAggHourly, key, err.Error())
+				addCorrupt(BucketUsageAggHourly, key, err.Error())
 				continue
 			}
 			var cell AggCell
 			if err := json.Unmarshal(v, &cell); err != nil {
-				untrustedEvidence(BucketUsageAggHourly, key, "decode hourly aggregate cell")
+				addCorrupt(BucketUsageAggHourly, key, "decode hourly aggregate cell")
 				continue
 			}
 			if strings.HasPrefix(key, "v2|") {
@@ -277,42 +291,85 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 			}
 		}
 	}
-	for key, want := range rawLegacy {
-		if expectedLegacy[key] != want {
-			markKey(BucketUsageEvents, key)
-		}
-	}
-	for key, want := range expectedLegacy {
-		if rawLegacy[key] != want {
-			markKey(BucketUsageAggHourly, key)
-		}
-	}
-
 	expectedQuota := make(map[string]int64)
 	if bucket := tx.Bucket([]byte(BucketQuotaUsageAggHourly)); bucket != nil {
 		cursor := bucket.Cursor()
 		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
 			key := string(k)
 			if _, err := hourFromAggKey(key); err != nil {
-				untrustedEvidence(BucketQuotaUsageAggHourly, key, "invalid quota aggregate key")
+				addCorrupt(BucketQuotaUsageAggHourly, key, "invalid quota aggregate key")
 				continue
 			}
 			var cell AggCell
 			if err := json.Unmarshal(v, &cell); err != nil {
-				untrustedEvidence(BucketQuotaUsageAggHourly, key, "decode quota aggregate cell")
+				addCorrupt(BucketQuotaUsageAggHourly, key, "decode quota aggregate cell")
 				continue
 			}
 			expectedQuota[key] += cell.recordCount()
 		}
 	}
-	for key, want := range rawQuota {
-		if expectedQuota[key] != want {
-			markKey(BucketUsageEvents, key)
+
+	// compare marks a count mismatch. Surplus raw rows in an hour with corrupt
+	// evidence are expected (the corrupt cell counts nothing) and say nothing
+	// about cleanup, so only the corrupt-evidence rule below decides that hour.
+	compare := func(bucket string, raw, expected map[string]int64) {
+		check := func(key string) {
+			rawCount, want := raw[key], expected[key]
+			if rawCount == want {
+				return
+			}
+			hour, err := hourFromAggKey(key)
+			if err != nil {
+				addCorrupt(bucket, key, "invalid aggregate hour")
+				return
+			}
+			if rawCount > want && corruptHours[hour] {
+				return
+			}
+			mark(hour)
+		}
+		for key := range raw {
+			check(key)
+		}
+		for key := range expected {
+			if _, seen := raw[key]; !seen {
+				check(key)
+			}
 		}
 	}
-	for key, want := range expectedQuota {
-		if rawQuota[key] != want {
-			markKey(BucketQuotaUsageAggHourly, key)
+	compare(BucketUsageAggHourly, rawLegacy, expectedLegacy)
+	compare(BucketQuotaUsageAggHourly, rawQuota, expectedQuota)
+
+	// Newest hour with cleanup evidence that does not depend on corrupt cells.
+	cleanedThrough := untrusted
+	for _, name := range []string{BucketUsageReceipts, BucketUsageEventsQuarantine} {
+		bucket := tx.Bucket([]byte(name))
+		if bucket == nil {
+			continue
+		}
+		cursor := bucket.Cursor()
+		for k, _ := cursor.Last(); k != nil; k, _ = cursor.Prev() {
+			if hour, ok := rawKeyHour(string(k)); ok {
+				if hour.After(cleanedThrough) {
+					cleanedThrough = hour
+				}
+				break
+			}
+		}
+	}
+
+	for _, evidence := range corrupt {
+		switch {
+		case !evidence.hourKnown:
+			slog.Error("usage receipts: aggregate key has no recognizable hour; it cannot be counted or attributed",
+				"bucket", evidence.bucket, "key", evidence.key, "reason", evidence.reason)
+		case !hasRaw || !evidence.hour.After(earliestRaw) || !evidence.hour.After(cleanedThrough):
+			mark(evidence.hour)
+			slog.Error("usage receipts: undecodable aggregate evidence in an hour retention may have cleaned; hour treated as untrusted",
+				"bucket", evidence.bucket, "key", evidence.key, "hour", evidence.hour.Format(hourLayout), "reason", evidence.reason)
+		default:
+			slog.Error("usage receipts: undecodable aggregate evidence after all cleanup evidence; it cannot hide pruned rows, watermark unchanged",
+				"bucket", evidence.bucket, "key", evidence.key, "hour", evidence.hour.Format(hourLayout), "reason", evidence.reason)
 		}
 	}
 
@@ -323,7 +380,26 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 	if !next.After(untrusted) {
 		return time.Time{}, fmt.Errorf("usage receipts: legacy watermark overflow")
 	}
+	if limit := scanTime.UTC().Truncate(time.Hour); next.After(limit) {
+		slog.Error("usage receipts: legacy watermark capped at the scan hour; untrusted evidence lies in the current or a future hour",
+			"untrusted_hour", untrusted.Format(hourLayout), "watermark", limit.Format(time.RFC3339))
+		next = limit
+	}
 	return next.UTC(), nil
+}
+
+// rawKeyHour parses the hour of a raw, receipt or quarantine key
+// ("<RFC3339Nano>_<record id>").
+func rawKeyHour(key string) (time.Time, bool) {
+	stamp, _, found := strings.Cut(key, "_")
+	if !found {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return at.UTC().Truncate(time.Hour), true
 }
 
 // untrustedAggHour recovers the hour a malformed aggregate key claims, so the
