@@ -12,7 +12,7 @@ import (
 // Issue #6: providers disagree on whether output text_tokens include reasoning.
 // OpenAI-style counters may report reasoning inside text; the Gemini OpenAI
 // compatibility layer reports them as disjoint parts (reasoning + text = output).
-// Both are valid partitions; real overage must still be a conflict.
+// Only Chat has evidence for disjoint reasoning; Responses stays conservative.
 func TestOpenAIOutputTextPartitionAcceptsReasoningSemantics(t *testing.T) {
 	imageOutRate := 40.0
 	rates := usage.CostRates{InputPer1MTokens: 1, OutputPer1MTokens: 10, ImageOutputPer1MTokens: &imageOutRate}
@@ -29,6 +29,8 @@ func TestOpenAIOutputTextPartitionAcceptsReasoningSemantics(t *testing.T) {
 		{"reasoning included in text", `{"reasoning_tokens":24,"text_tokens":25}`, 24, 0, ""},
 		{"image text reasoning disjoint", `{"reasoning_tokens":20,"text_tokens":1,"image_tokens":4}`, 20, 4, ""},
 		{"image plus text including reasoning", `{"reasoning_tokens":10,"text_tokens":20,"image_tokens":5}`, 10, 5, ""},
+		{"reasoning equals text", `{"reasoning_tokens":20,"text_tokens":20,"image_tokens":5}`, 20, 5, ""},
+		{"reasoning cannot fit in text", `{"reasoning_tokens":24,"text_tokens":1,"image_tokens":24}`, 24, 24, "image_output_text_partition_mismatch"},
 		{"disjoint overage", `{"reasoning_tokens":24,"text_tokens":2}`, 24, 0, "image_output_text_partition_mismatch"},
 		{"image disjoint overage", `{"reasoning_tokens":24,"text_tokens":1,"image_tokens":4}`, 24, 4, "image_output_text_partition_mismatch"},
 		{"disjoint shortfall", `{"reasoning_tokens":10,"text_tokens":1}`, 10, 0, "image_output_text_partition_mismatch"},
@@ -41,6 +43,10 @@ func TestOpenAIOutputTextPartitionAcceptsReasoningSemantics(t *testing.T) {
 			for _, stream := range []bool{false, true} {
 				name := tc.name + "/" + string(op) + map[bool]string{false: "/json", true: "/sse"}[stream]
 				t.Run(name, func(t *testing.T) {
+					conflict := tc.conflict
+					if op == config.ProtocolOpenAIResponses && (tc.name == "gemini disjoint reasoning" || tc.name == "image text reasoning disjoint") {
+						conflict = "image_output_text_partition_mismatch"
+					}
 					usageJSON := `{"prompt_tokens":8,"completion_tokens":25,"total_tokens":33,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0,"text_tokens":8},"completion_tokens_details":` + tc.details + `}`
 					var body, sse string
 					if op == config.ProtocolOpenAIResponses {
@@ -63,9 +69,9 @@ func TestOpenAIOutputTextPartitionAcceptsReasoningSemantics(t *testing.T) {
 					if !ok || got.InputTokens != 8 || got.OutputTokens != 25 || got.ReasoningTokens != tc.reasoning {
 						t.Fatalf("totals changed: %+v", got)
 					}
-					if tc.conflict != "" {
-						if got.status != usageStatusConflict || !got.costIncomplete || got.diagnostic != tc.conflict {
-							t.Fatalf("want conflict %q: status=%q incomplete=%v diagnostic=%q", tc.conflict, got.status, got.costIncomplete, got.diagnostic)
+					if conflict != "" {
+						if got.status != usageStatusConflict || !got.costIncomplete || got.diagnostic != conflict {
+							t.Fatalf("want conflict %q: status=%q incomplete=%v diagnostic=%q", conflict, got.status, got.costIncomplete, got.diagnostic)
 						}
 						return
 					}
@@ -111,7 +117,7 @@ func TestOpenAIImageOutputDerivationUnchangedByReasoningRule(t *testing.T) {
 }
 
 // Images keeps text + image = output even when reasoning is reported. The
-// Chat/Responses disjoint-reasoning allowance must not hide missing image usage.
+// Chat's disjoint-reasoning allowance must not hide missing image usage.
 func TestOpenAIImageOutputRejectsDisjointReasoningPartition(t *testing.T) {
 	body := `{"usage":{"input_tokens":8,"output_tokens":25,"output_tokens_details":{"text_tokens":1,"image_tokens":4,"reasoning_tokens":20}}}`
 	for _, chatKeys := range []bool{false, true} {
@@ -129,5 +135,32 @@ func TestOpenAIImageOutputRejectsDisjointReasoningPartition(t *testing.T) {
 				t.Fatalf("want Images partition conflict: status=%q incomplete=%v diagnostic=%q", got.status, got.costIncomplete, got.diagnostic)
 			}
 		})
+	}
+}
+
+func TestOpenAIImageOutputRequiresReasoningInsideText(t *testing.T) {
+	for _, details := range []string{
+		`{"reasoning_tokens":24,"text_tokens":1,"image_tokens":24}`,
+		`{"reasoning_tokens":24,"text_tokens":1}`,
+	} {
+		for _, chatKeys := range []bool{false, true} {
+			body := `{"usage":{"input_tokens":8,"output_tokens":25,"output_tokens_details":` + details + `}}`
+			if chatKeys {
+				body = strings.NewReplacer("input_tokens", "prompt_tokens", "output_tokens", "completion_tokens").Replace(body)
+			}
+			p := usageParser{protocol: config.ProtocolOpenAIImage}
+			got, _, ok := p.extractTokens("application/json", []byte(body))
+			if !ok || got.OutputTokens != 25 || got.ReasoningTokens != 24 || got.ImageOutputTokens != 24 || got.status != usageStatusConflict || !got.costIncomplete || got.diagnostic != "image_output_text_partition_mismatch" {
+				t.Fatalf("details=%s chatKeys=%v usage=%+v", details, chatKeys, got)
+			}
+		}
+	}
+}
+
+func TestOpenAIOutputReasoningDoesNotRelaxCachedPartition(t *testing.T) {
+	p := usageParser{protocol: config.ProtocolOpenAIChat}
+	got, _, ok := p.extractTokens("application/json", []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":25,"prompt_tokens_details":{"text_tokens":60,"image_tokens":40,"cached_tokens":10,"cached_tokens_details":{"text_tokens":7,"image_tokens":5}},"completion_tokens_details":{"text_tokens":1,"reasoning_tokens":24}}}`))
+	if !ok || got.InputTokens != 90 || got.CachedTokens != 10 || got.ImageInputTokens != 35 || got.CachedImageInputTokens != 5 || got.OutputTokens != 25 || got.ReasoningTokens != 24 || got.status != usageStatusConflict || !got.costIncomplete || got.diagnostic != "cached_image_text_partition_mismatch" {
+		t.Fatalf("usage=%+v", got)
 	}
 }

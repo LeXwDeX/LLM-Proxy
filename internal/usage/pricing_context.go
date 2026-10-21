@@ -68,7 +68,7 @@ func CheckEventPrices(evt *Event, resolver RateResolver) {
 	}
 	resolution := ResolveEventRate(*evt, resolver)
 	evt.PricingRuleID, evt.PricingRuleVersion = resolution.RuleID, resolution.Version
-	if (evt.Supplementary || evt.IterationType == "fallback_message") && !resolution.Found {
+	if resolver != nil && (evt.Supplementary || evt.IterationType == "fallback_message") && !resolution.Found {
 		evt.CostIncomplete = true
 		appendUsageDiagnostic(evt, "missing_iteration_price")
 	}

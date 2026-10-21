@@ -571,7 +571,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// every later body step: duplicates and case variants could otherwise let
 	// an upstream read a different model, tier or budget than the proxy
 	// authorized and billed. Native WS create turns arrive here too.
-	if normalized, changed := s.normalizeRequestMembers(r, bodyBytes); changed {
+	normalized, membersNormalized := s.normalizeRequestMembers(r, bodyBytes)
+	if membersNormalized {
 		bodyBytes = normalized
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		r.ContentLength = int64(len(bodyBytes))
@@ -737,26 +738,6 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if am := s.admissionManager.Load(); am != nil {
-			if !am.TryAcquire(target.Name) {
-				// Fast path failed → slow path: enqueue and wait.
-				if err := am.Wait(target.Name, r.Context()); err != nil {
-					if errors.Is(err, context.Canceled) {
-						completion = requeststats.Canceled
-					}
-					if errors.Is(err, admission.ErrQueueFull) {
-						s.logger.Warn("[admission] queue full", "target", target.Name)
-					}
-					writeUpstreamLimitedResponse(w, false, time.Time{})
-					s.metrics.totalFailures.Add(1)
-					requestOutcomeRecorded = true
-					return
-				}
-			}
-			// Token supply is time-based; ReleaseToken remains a compatibility no-op.
-			defer am.ReleaseToken(target.Name)
-		}
-
 		targetKey := strings.ToLower(target.Name)
 		if attempted == nil {
 			attempted = make(map[string]struct{})
@@ -812,6 +793,48 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Apply operator fields after sanitize, then rewrite from the original
 		// client model for this target alone (including failover attempts).
 		forwardBody = prepareTargetBody(target, r, forwardBody, requestedModel, upstreamModel)
+		var supplementaryModels []string
+		var supplementaryReport []memberNormalization
+		forwardBody, supplementaryModels, supplementaryReport = prepareSupplementaryAdmission(r.URL.Path, forwardBody)
+		if len(supplementaryReport) != 0 {
+			if !membersNormalized {
+				s.metrics.totalRequestMembersNormalized.Add(1)
+				membersNormalized = true
+			}
+			s.logNormalizedMembers(r, supplementaryReport)
+		}
+		// Check the same target and final wire identities, before consuming rate
+		// tokens or acquiring node/key occupancy. Failover assembles and checks anew.
+		if qm := s.quotaManager.Load(); qm != nil {
+			for _, supplementaryModel := range supplementaryModels {
+				if info, exceeded := qm.CheckTarget(principal.Name, target.Name, supplementaryModel); exceeded {
+					writeQuotaExceededResponse(w, info)
+					requestOutcomeRecorded = true
+					s.metrics.totalFailures.Add(1)
+					return
+				}
+			}
+		}
+
+		if am := s.admissionManager.Load(); am != nil {
+			if !am.TryAcquire(target.Name) {
+				// Fast path failed → slow path: enqueue and wait.
+				if err := am.Wait(target.Name, r.Context()); err != nil {
+					if errors.Is(err, context.Canceled) {
+						completion = requeststats.Canceled
+					}
+					if errors.Is(err, admission.ErrQueueFull) {
+						s.logger.Warn("[admission] queue full", "target", target.Name)
+					}
+					writeUpstreamLimitedResponse(w, false, time.Time{})
+					s.metrics.totalFailures.Add(1)
+					requestOutcomeRecorded = true
+					return
+				}
+			}
+			// Token supply is time-based; ReleaseToken remains a compatibility no-op.
+			defer am.ReleaseToken(target.Name)
+		}
 
 		startedAt := time.Now()
 		var resp *http.Response
@@ -1497,6 +1520,11 @@ func (s *Service) normalizeRequestMembers(r *http.Request, body []byte) ([]byte,
 		return body, false
 	}
 	s.metrics.totalRequestMembersNormalized.Add(1)
+	s.logNormalizedMembers(r, report)
+	return normalized, true
+}
+
+func (s *Service) logNormalizedMembers(r *http.Request, report []memberNormalization) {
 	members := make([]string, 0, len(report))
 	removed := 0
 	for _, entry := range report {
@@ -1514,7 +1542,6 @@ func (s *Service) normalizeRequestMembers(r *http.Request, body []byte) ([]byte,
 		"members", strings.Join(members, ","),
 		"removed", removed,
 	)
-	return normalized, true
 }
 
 // MetricsSnapshot returns a copy of the service-level metrics counters.

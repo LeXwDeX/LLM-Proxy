@@ -51,3 +51,9 @@ make e2e   # go test -tags=e2e -count=1 -v ./test/e2e/
 fakellm 的回复与 token 用量由请求字节确定性推导，行为可通过请求内 `[[fake k=v ...]]` 指令、`X-Fake-Scenario` 头或 `POST /_control` 控制；preset 只代表按官方文档建模的合同，不能替代真实厂商验收。独立进程入口为 `cmd/fakellm`（`go run ./cmd/fakellm -h` 查看参数），镜像为 `Dockerfile.fakellm`。
 
 `test/e2e/live_codex_test.go` 需要额外的 `live` 构建标签和操作者自行注入的环境变量，会调用真实模型，不属于 `make e2e`，也不进入 CI。
+
+## bundle 账本跨版本合同（make integration）
+
+`make integration` 包含 [`test/integration/usage_bundle_rollback_test.go`](../../test/integration/usage_bundle_rollback_test.go)，使用 [`test/integration/testdata/usage_bundle_probe/main.go`](../../test/integration/testdata/usage_bundle_probe/main.go) 分别链接当前工作区和两个固定历史提交的真实存储、journal 与计价实现，在临时目录核对 DB 已落库、仅 journal、已落库但日志未压缩、免费 root 混合旧记录，以及重复重放和继续写入。检查稳定价、精确价、条件价、记录/请求/token 计数、非计费子集和日志状态，并保留 v1.0.1 的不兼容反例。
+
+需要 `git`、`tar` 和含测试常量所固定两个提交对象的完整 Git 历史；缺少对象会使门禁失败，不得 SKIP。CI 的 `integration` checkout 使用 `fetch-depth: 0`。固定提交仅用于数据合同验证，不是生产安全回退制品；操作限制见 [README 的账本兼容说明](../../README.zh-CN.md#未发布-bundle-账本兼容与回退限制)。这些测试不调用真实模型，也不代表生产部署验收。

@@ -201,6 +201,21 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 	}
 	base := parseClaudeUsageCounters(top)
 	if !validClaudeIterationCounters(top, base) {
+		// Missing input cannot prove the full overlap plan. The documented last
+		// fallback still identifies whose observed output it is; never copy input
+		// from that iteration or price it with the executor's request context.
+		final, _ := raw[len(raw)-1].(map[string]any)
+		model := strings.ToLower(readString(final["model"]))
+		finalTokens := parseClaudeUsageCounters(final)
+		if _, input := top["input_tokens"]; !input && base.status != usageStatusConflict &&
+			base.fields&usageFieldOutput != 0 && final["type"] == "fallback_message" && model != "" &&
+			validClaudeIterationCounters(final, finalTokens) && finalTokens.OutputTokens == base.OutputTokens {
+			legacy.billingModel, legacy.iterationType, legacy.iterationIndex = model, "fallback_message", len(raw)-1
+			independent := usageParser{protocol: config.ProtocolAnthropicMessages}
+			legacy.pricingContext = independent.pricingContext(nil, top)
+			legacy.costIncomplete = true
+			appendTokenDiagnostic(&legacy, "missing_fallback_input_usage")
+		}
 		return legacy
 	}
 	executor := strings.ToLower(strings.TrimSpace(p.model))
@@ -367,11 +382,12 @@ func (p usageParser) claudeIterationComponent(item map[string]any, model, typ st
 
 // Refusal billing is official structured metadata, never explanation text.
 // Docs checked 2026-10-21: https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
-// Nonzero-output attempts are billed. A zero-output final refusal bills input
-// only for bio/frontier_llm/reasoning_extraction. Explicit null/other categories
-// are free; missing/invalid categories leave the charge unknown.
-func (p usageParser) finalizeClaudeFallbackBilling(t *usageTokens, payload map[string]any) {
-	if t.OutputTokens != 0 {
+// All refusals, not only fallback: bio/frontier_llm/reasoning_extraction bill
+// before output; "any other category, or ... null" is free. Issue #12 deliberately
+// defers unknown categories with a diagnostic because the billed list may change;
+// this is a local conservative policy, not a restriction in the official rule.
+func (p usageParser) finalizeClaudeRefusalBilling(t *usageTokens, payload map[string]any) {
+	if t.OutputTokens != 0 || t.fields&usageFieldOutput == 0 || t.status == usageStatusConflict {
 		return
 	}
 	envelope := pricingEnvelope(payload, config.ProtocolAnthropicMessages)
@@ -392,12 +408,17 @@ func (p usageParser) finalizeClaudeFallbackBilling(t *usageTokens, payload map[s
 			switch name {
 			case "bio", "frontier_llm", "reasoning_extraction":
 				t.nonBillable = false
+				return
+			case "cyber", "general_harms":
+				return
 			}
-			return
 		}
 	}
 	t.costIncomplete = true
 	if t.diagnostic == "" {
-		t.diagnostic = "unknown_fallback_refusal_billing"
+		t.diagnostic = "unknown_refusal_billing"
+		if t.billingModel != "" {
+			t.diagnostic = "unknown_fallback_refusal_billing"
+		}
 	}
 }

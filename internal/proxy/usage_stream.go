@@ -13,23 +13,25 @@ import (
 // The observation pipe applies backpressure but never changes forwarded bytes.
 // Content is discarded by projection; only usage and lifecycle metadata survive.
 type usageStream struct {
-	writer              *io.PipeWriter
-	done                chan struct{}
-	tokens              usageTokens
-	model               string
-	found               bool
-	err                 error
-	parser              usageParser
-	terminal            bool
-	streaming           bool
-	jsonResponse        bool
-	finalUsage          bool
-	responseStatus      string
-	finishReason        string
-	standardError       bool
-	snapshot            map[string]any
-	pricingEnvelope     map[string]any
-	claudeFinalEnvelope map[string]any
+	writer               *io.PipeWriter
+	done                 chan struct{}
+	tokens               usageTokens
+	model                string
+	found                bool
+	err                  error
+	parser               usageParser
+	terminal             bool
+	streaming            bool
+	jsonResponse         bool
+	finalUsage           bool
+	responseStatus       string
+	finishReason         string
+	standardError        bool
+	snapshot             map[string]any
+	pricingEnvelope      map[string]any
+	claudeFinalEnvelope  map[string]any
+	claudeLastDelta      map[string]any
+	claudeIterationsSeen bool
 	// finalSeen and finalTokens hold the protocol's official final usage as
 	// observed so far (see officialFinalUsage). Written by the observer
 	// goroutine; read only after Close.
@@ -174,6 +176,9 @@ func (u *usageStream) observeLifecycle(payload map[string]any, event string) {
 	case "error":
 		u.terminal = true
 		u.responseStatus = "failed"
+		if u.parser.operation(nil) == config.ProtocolAnthropicMessages {
+			u.standardError = true // A later message_stop cannot erase the failure.
+		}
 	case "image_generation.completed", "image_edit.completed":
 		// Image streams carry the usage on this event and send no [DONE].
 		u.terminal = true
@@ -267,6 +272,15 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 			if err == nil && payload != nil {
 				complete = true
 				u.observeLifecycle(payload, event.event)
+				usageEvent := event.event
+				// A message_stop also confirms the preceding delta when a compatible
+				// server omits stop_reason; an interrupted intermediate delta does not.
+				if u.parser.protocol == config.ProtocolAnthropicMessages &&
+					(readString(payload["type"]) == "message_stop" || (readString(payload["type"]) == "" && event.event == "message_stop")) &&
+					!u.finalUsage && u.claudeLastDelta != nil {
+					payload = u.claudeLastDelta
+					usageEvent = "message_stop"
+				}
 				m, model := usageEnvelope(payload)
 				if model != "" {
 					u.model = model
@@ -280,7 +294,13 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 					}
 				}
 				u.observePricingEnvelope(payload)
-				u.observeFinalUsage(payload, event.event, m)
+				u.observeFinalUsage(payload, usageEvent, m)
+				if u.parser.operation(m) == config.ProtocolAnthropicMessages &&
+					(readString(payload["type"]) == "message_delta" || (readString(payload["type"]) == "" && event.event == "message_delta")) {
+					payload["type"] = "message_delta"
+					u.claudeLastDelta = payload
+				}
+				claudeDiagnostic := ""
 				if m != nil {
 					if u.snapshot == nil {
 						u.snapshot = map[string]any{}
@@ -290,19 +310,34 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 						if typ == "" {
 							typ = event.event
 						}
-						// Only the official final delta can contribute iterations;
-						// each array is a whole snapshot, never a running sum.
+						// Remember early evidence, but never bill an intermediate array.
+						iterations, array := m["iterations"].([]any)
+						if len(iterations) > 0 {
+							u.claudeIterationsSeen = true
+						}
 						if typ != "message_delta" || !u.finalUsage {
-							delete(m, "iterations")
+							// Keep the last delta intact until message_stop can confirm it.
+							counters := make(map[string]any, len(m))
+							for key, value := range m {
+								if key != "iterations" {
+									counters[key] = value
+								}
+							}
+							m = counters
 						} else {
 							delete(u.snapshot, "iterations")
-							iterations, _ := m["iterations"].([]any)
+							if u.claudeIterationsSeen && !array {
+								claudeDiagnostic = "missing_final_iterations"
+							}
 							for _, raw := range iterations {
 								item, _ := raw.(map[string]any)
 								if item["type"] == "fallback_message" {
 									// Different returned attempt: none of the original
 									// executor's optional usage evidence belongs to it.
 									u.snapshot = map[string]any{}
+									if _, present := m["input_tokens"]; !present {
+										claudeDiagnostic = "missing_fallback_input_usage"
+									}
 									break
 								}
 							}
@@ -316,6 +351,10 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 					}
 					var parsedModel string
 					u.tokens, parsedModel, u.found = u.parser.parsePayload(parsed)
+					if claudeDiagnostic != "" {
+						u.tokens.costIncomplete = true
+						appendTokenDiagnostic(&u.tokens, claudeDiagnostic)
+					}
 					if u.tokens.billingModel != "" {
 						u.model = parsedModel
 					}
@@ -384,8 +423,8 @@ func (u *usageStream) observeChoicesFinalUsage() {
 
 // officialFinalUsage reports whether the protocol's official final usage has
 // been observed:
-//   - Responses (terminal event usage) and Anthropic (message_delta output)
-//     use finalUsage;
+//   - Responses (terminal event usage) and Anthropic (terminal message_delta
+//     output, or the last delta confirmed by message_stop) use finalUsage;
 //   - Gemini: a usageMetadata chunk after every candidate finished
 //     (choicesFinalUsage), or a terminal without candidates (blocked prompt,
 //     error envelope);
@@ -412,8 +451,8 @@ func (u *usageStream) officialFinalUsage() bool {
 }
 
 // captureFinalUsage snapshots the tokens at the event that completes (or
-// keeps) official final usage, before end-of-stream adjustments. A later
-// event that invalidates it (an Anthropic error) clears the snapshot.
+// keeps) official final usage, before end-of-stream adjustments. Response
+// failure is independent of confirmed usage and updates only its lifecycle.
 func (u *usageStream) captureFinalUsage() {
 	official := u.officialFinalUsage()
 	u.finalConflict = official && u.tokens.status == usageStatusConflict
@@ -427,7 +466,7 @@ func (u *usageStream) captureFinalUsage() {
 
 // Transport/generation termination is not evidence of a final usage snapshot.
 // Responses publishes it on the terminal response; Claude publishes cumulative
-// output on message_delta. A subsequent error invalidates preliminary counters.
+// output on the terminal message_delta. An error cannot revoke confirmed usage.
 func (u *usageStream) observeFinalUsage(payload map[string]any, event string, m map[string]any) {
 	typ := readString(payload["type"])
 	if typ == "" {
@@ -444,9 +483,14 @@ func (u *usageStream) observeFinalUsage(payload map[string]any, event string, m 
 	case config.ProtocolAnthropicMessages:
 		switch typ {
 		case "message_delta":
-			_, u.finalUsage = m["output_tokens"]
+			_, output := m["output_tokens"]
+			u.finalUsage = output && (readString(usageDetails(payload, "delta")["stop_reason"]) != "" || event == "message_stop")
 		case "error":
-			u.finalUsage = false
+			if u.finalSeen {
+				appendTokenDiagnostic(&u.tokens, diagnosticInterruptedAfterFinalUsage)
+			}
+			// Unconfirmed usage stays unconfirmed; message_stop must not promote it.
+			u.claudeLastDelta = nil
 		}
 	}
 }
