@@ -25,6 +25,9 @@ type Scenario struct {
 	Flavor string `json:"flavor,omitempty"`
 	// PricingPreset supplies response billing evidence independently of the request.
 	PricingPreset string `json:"pricing_preset,omitempty"`
+	// Iterations adds an Anthropic usage.iterations array: "message" (one
+	// executor item equal to top-level) or "advisor" (plus an advisor item).
+	Iterations string `json:"iterations,omitempty"`
 
 	// Status answers with this HTTP status and an error envelope instead of a
 	// reply. Preset picks a provider-specific error body (see presets.go).
@@ -125,6 +128,7 @@ func (s *Scenario) merge(o *Scenario) {
 		s.ResponseEncodingHeaders = append([]string{}, o.ResponseEncodingHeaders...)
 	}
 	str(&s.PricingPreset, o.PricingPreset)
+	str(&s.Iterations, o.Iterations)
 	num(&s.Status, o.Status)
 	str(&s.Preset, o.Preset)
 	str(&s.ErrCode, o.ErrCode)
@@ -233,6 +237,9 @@ func ParseDirective(text string) (*Scenario, error) {
 			setInt(&s.Status)
 		case "pricing":
 			s.PricingPreset = val
+		case "iterations":
+			s.Iterations = val
+			err = validateIterations(s)
 		case "preset":
 			s.Preset = strings.ToLower(val)
 		case "code":
@@ -328,4 +335,17 @@ func legacyMode(mode string) (*Scenario, bool) {
 		return &Scenario{DelayMS: 5000}, true
 	}
 	return nil, false
+}
+
+// validateIterations accepts only the documented iterations shapes; directives
+// and /_control JSON share it. Unset keeps the default without iterations.
+func validateIterations(sc *Scenario) error {
+	if sc == nil {
+		return nil
+	}
+	switch sc.Iterations {
+	case "", "message", "advisor":
+		return nil
+	}
+	return fmt.Errorf("fakellm iterations=%q: want message or advisor", sc.Iterations)
 }
