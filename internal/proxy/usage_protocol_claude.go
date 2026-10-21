@@ -9,10 +9,11 @@ import (
 )
 
 // Claude input_tokens excludes both cache partitions. TTL counters partition W.
-func parseClaudeUsage(m map[string]any) usageTokens {
+// modelPrefix is the target's ModelPrefix; see stripModelPrefix.
+func parseClaudeUsage(m map[string]any, modelPrefix string) usageTokens {
 	t := parseClaudeUsageCounters(m)
 	if iterations, ok := m["iterations"].([]any); ok && len(iterations) > 0 {
-		if reason := claudeIterationsIncomplete(iterations, m); reason != "" {
+		if reason := claudeIterationsIncomplete(iterations, m, modelPrefix); reason != "" {
 			t.costIncomplete = true
 			t.diagnostic = reason
 		}
@@ -90,8 +91,9 @@ var claudeIterationCounters = [...]string{"input_tokens", "output_tokens", "cach
 // with an unknown type, invalid or missing required counters, a non-string or
 // empty model, or non-object items have unknown
 // attribution and stay conservative. Applies to every target parsed by the
-// Anthropic rule; it never infers anything from host or model name.
-func claudeIterationsIncomplete(iterations []any, top map[string]any) string {
+// Anthropic rule; it never infers anything from host or model name. Echoed
+// models are compared after removing the target's own ModelPrefix (issue #36).
+func claudeIterationsIncomplete(iterations []any, top map[string]any, modelPrefix string) string {
 	var multiModel, compaction, unknown, mismatch bool
 	model := ""
 	var sums [len(claudeIterationCounters)]int64
@@ -119,8 +121,8 @@ func claudeIterationsIncomplete(iterations []any, top map[string]any) string {
 			case !ok || name == "":
 				unknown = true
 			case model == "":
-				model = name
-			case name != model:
+				model = stripModelPrefix(name, modelPrefix)
+			case stripModelPrefix(name, modelPrefix) != model:
 				multiModel = true
 			}
 		}
@@ -189,12 +191,53 @@ func claudeIterationsIncomplete(iterations []any, top map[string]any) string {
 	return ""
 }
 
+// stripModelPrefix removes the target's ModelPrefix (added only to the outbound
+// model) from a model name the upstream echoed. Only a complete,
+// case-insensitive prefix match that leaves a non-empty name is removed; any
+// other spelling difference (snapshot IDs, aliases) is never inferred.
+func stripModelPrefix(name, prefix string) string {
+	if prefix == "" || len(name) <= len(prefix) || !strings.EqualFold(name[:len(prefix)], prefix) {
+		return name
+	}
+	return name[len(prefix):]
+}
+
+// echoedModel is the lowercased attribution identity of an echoed model name.
+func (p usageParser) echoedModel(name string) string {
+	return strings.ToLower(stripModelPrefix(name, p.modelPrefix))
+}
+
+// claudeEchoMismatch names an echoed explicit model outside the request's
+// admission set. It is only logged; attribution keeps the echoed spelling.
+type claudeEchoMismatch struct{ iterationType, model string }
+
+// claudeAdmission is the set of model identities the request admission
+// checked on this target: the executor (upstream model) plus the explicit
+// advisor/fallback models of the final outbound body.
+func (p usageParser) claudeAdmission() []string {
+	_, models, _ := scanSupplementaryAdmission(p.requestBody)
+	return append([]string{p.model}, models...)
+}
+
+// admit returns the admission-side spelling for an echoed explicit model that
+// matches it case-insensitively (lowercased, like every usage model identity).
+// Otherwise the echoed spelling is kept and the mismatch recorded.
+func (t *usageTokens) admit(admission []string, echoed, typ string) string {
+	for _, model := range admission {
+		if model = strings.TrimSpace(model); model != "" && strings.EqualFold(model, echoed) {
+			return strings.ToLower(model)
+		}
+	}
+	t.unadmittedEchoes = append(t.unadmittedEchoes, claudeEchoMismatch{iterationType: typ, model: echoed})
+	return echoed
+}
+
 // parseClaudeIterationUsage expands only an entirely validated attribution plan.
 // The root's counters remain the top-level usage. Executor messages overlap that
 // root; compaction/advisor do not. Fallback instead overlaps only the last attempt.
 // Any unknown shape retains the issue #7 diagnostic and adds no guessed charges.
 func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel string) usageTokens {
-	legacy := parseClaudeUsage(top)
+	legacy := parseClaudeUsage(top, p.modelPrefix)
 	// invalid: the attribution plan is unverifiable, so it must not replace
 	// committed evidence. Legitimate cost_incomplete reasons are not invalid.
 	invalid := func() usageTokens {
@@ -222,11 +265,12 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 		// fallback still identifies whose observed output it is; never copy input
 		// from that iteration or price it with the executor's request context.
 		final, _ := raw[len(raw)-1].(map[string]any)
-		model := strings.ToLower(readString(final["model"]))
+		model := p.echoedModel(readString(final["model"]))
 		finalTokens := parseClaudeUsageCounters(final)
 		if _, input := top["input_tokens"]; !input && base.status != usageStatusConflict &&
 			base.fields&usageFieldOutput != 0 && final["type"] == "fallback_message" && model != "" &&
 			validClaudeIterationCounters(final, finalTokens) && finalTokens.OutputTokens == base.OutputTokens {
+			model = legacy.admit(p.claudeAdmission(), model, "fallback_message")
 			legacy.billingModel, legacy.iterationType, legacy.iterationIndex = model, "fallback_message", len(raw)-1
 			independent := usageParser{protocol: config.ProtocolAnthropicMessages}
 			legacy.pricingContext = independent.pricingContext(nil, top)
@@ -235,12 +279,15 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 		}
 		return legacy
 	}
+	// The request-side upstream model never carries ModelPrefix; the response
+	// envelope fallback is an echo and is compared without it.
 	executor := strings.ToLower(strings.TrimSpace(p.model))
 	if executor == "" {
-		executor = strings.ToLower(strings.TrimSpace(responseModel))
+		executor = p.echoedModel(strings.TrimSpace(responseModel))
 	}
 	items := make([]map[string]any, len(raw))
 	models := make([]string, len(raw))
+	explicit := make([]bool, len(raw))
 	messages := []any{}
 	hasFallback, hasAdditional := false, false
 	messagesMatchExecutor := true
@@ -262,7 +309,7 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 			if !ok || strings.TrimSpace(name) == "" {
 				return invalid()
 			}
-			model = strings.ToLower(strings.TrimSpace(name))
+			model, explicit[i] = p.echoedModel(strings.TrimSpace(name)), true
 		}
 		typ, _ := item["type"].(string)
 		switch typ {
@@ -290,7 +337,7 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 	// Keep the existing top-only diagnostics, but only a verified plan may
 	// replace committed evidence.
 	if !hasAdditional {
-		if !messagesMatchExecutor || claudeIterationsIncomplete(messages, top) != "" {
+		if !messagesMatchExecutor || claudeIterationsIncomplete(messages, top, p.modelPrefix) != "" {
 			return invalid()
 		}
 		return legacy
@@ -311,7 +358,7 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 			final[k] = v
 		}
 		final["type"] = "message"
-		if claudeIterationsIncomplete([]any{final}, top) != "" {
+		if claudeIterationsIncomplete([]any{final}, top, p.modelPrefix) != "" {
 			return invalid()
 		}
 	} else {
@@ -328,21 +375,27 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 			if base.InputTokens != 0 || base.OutputTokens != 0 || base.CachedTokens != 0 || base.CacheCreationTokens != 0 {
 				return invalid()
 			}
-		} else if claudeIterationsIncomplete(messages, top) != "" {
+		} else if claudeIterationsIncomplete(messages, top, p.modelPrefix) != "" {
 			return invalid()
 		}
 	}
 	totals := []int64{base.InputTokens, base.OutputTokens, base.CachedTokens, base.CacheCreationTokens, base.ReasoningTokens, base.CacheCreation5mTokens, base.CacheCreation1hTokens}
+	// Bill each explicit echo under the identity admission checked, so quota
+	// consumption lands on the same model group (issue #36).
+	admission := p.claudeAdmission()
 	for i, item := range items {
 		typ := item["type"].(string)
+		if !hasFallback && typ == "message" {
+			continue
+		}
+		if explicit[i] && models[i] != "" {
+			models[i] = base.admit(admission, models[i], typ)
+		}
 		if i == returned {
 			base.billingModel, base.iterationType, base.iterationIndex = models[i], typ, i
 			// The actual returned attempt has no evidence about its own request tier.
 			independent := usageParser{protocol: config.ProtocolAnthropicMessages}
 			base.pricingContext = independent.pricingContext(nil, top)
-			continue
-		}
-		if !hasFallback && typ == "message" {
 			continue
 		}
 		if models[i] == "" {

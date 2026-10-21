@@ -13,6 +13,13 @@ func prepareSupplementaryAdmission(path string, body []byte) ([]byte, []string, 
 	if requestSchemaForPath(path) != config.RequestSchemaAnthropic {
 		return body, nil, nil
 	}
+	return scanSupplementaryAdmission(body)
+}
+
+// scanSupplementaryAdmission normalizes the explicit supplementary members of
+// an Anthropic body and lists their model identities. Usage attribution reads
+// the same identities from the already-normalized forward body.
+func scanSupplementaryAdmission(body []byte) ([]byte, []string, []memberNormalization) {
 	members, ok := scanJSONObject(nil, body)
 	if !ok {
 		return body, nil, nil // Invalid fields/JSON remain the upstream's validation responsibility.
