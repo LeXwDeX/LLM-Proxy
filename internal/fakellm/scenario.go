@@ -25,8 +25,8 @@ type Scenario struct {
 	Flavor string `json:"flavor,omitempty"`
 	// PricingPreset supplies response billing evidence independently of the request.
 	PricingPreset string `json:"pricing_preset,omitempty"`
-	// Iterations adds an Anthropic usage.iterations array: "message" (one
-	// executor item equal to top-level) or "advisor" (plus an advisor item).
+	// Iterations selects a documented Anthropic billing shape or an explicit
+	// malformed counterexample; validateIterations lists the supported modes.
 	Iterations string `json:"iterations,omitempty"`
 
 	// Status answers with this HTTP status and an error envelope instead of a
@@ -344,8 +344,11 @@ func validateIterations(sc *Scenario) error {
 		return nil
 	}
 	switch sc.Iterations {
-	case "", "message", "advisor":
+	case "", "message", "advisor", "compaction", "compaction_on_demand",
+		"fallback_output", "fallback_zero_unknown", "fallback_sticky", "fallback_chain", "fallback_chain_unknown",
+		"fallback_refusal_free", "fallback_refusal_paid", "fallback_refusal_null", "fallback_refusal_missing_category",
+		"cache_missing", "cache_mismatch", "iterations_unknown", "iterations_invalid", "iterations_mismatch":
 		return nil
 	}
-	return fmt.Errorf("fakellm iterations=%q: want message or advisor", sc.Iterations)
+	return fmt.Errorf("fakellm iterations=%q: unknown Anthropic billing shape", sc.Iterations)
 }

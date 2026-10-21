@@ -34,9 +34,16 @@ func NewUsageStore(db *bolt.DB) *UsageStore {
 
 // Record appends one usage event AND bumps the hourly aggregation cell atomically.
 func (s *UsageStore) Record(event usage.Event) error {
-	key, err := normalizeUsageEvent(&event)
+	_, err := s.RecordOnce(event)
+	return err
+}
+
+// RecordOnce reports the insertion outcome from the same transaction that
+// writes the entire bundle, so callers can suppress duplicate live charges.
+func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
+	rows, keys, err := normalizeUsageBundle(event)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// P8：用 db.Batch 而非 db.Update —— bbolt 写事务全库串行且每次 commit 触发
 	// fsync，高并发下每请求一次同步 Update 会在全部成功请求上形成吞吐天花板。
@@ -45,9 +52,18 @@ func (s *UsageStore) Record(event usage.Event) error {
 	// 再由后台写入器调用 RecordBatch；本方法服务于回放与同步回退路径。
 	// 安全性：合并事务失败时整体回滚后逐个重试，bumpAgg 的 RMW 基于已提交
 	// 状态，不会双计。
-	return s.db.Batch(func(tx *bolt.Tx) error {
-		return recordUsageTx(tx, event, key)
+	added := false
+	err = s.db.Batch(func(tx *bolt.Tx) error {
+		// bbolt may retry this callback after a different batch member fails.
+		added = tx.Bucket([]byte(BucketUsageEvents)).Get([]byte(keys[0])) == nil
+		for i := range rows {
+			if err := recordUsageTx(tx, rows[i], keys[i]); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
+	return added && err == nil, err
 }
 
 // RecordBatch commits several usage events in one write transaction. It is
@@ -58,14 +74,15 @@ func (s *UsageStore) RecordBatch(events []usage.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
-	normalized := make([]usage.Event, len(events))
-	keys := make([]string, len(events))
-	for i, event := range events {
-		key, err := normalizeUsageEvent(&event)
+	var normalized []usage.Event
+	var keys []string
+	for _, event := range events {
+		rows, rowKeys, err := normalizeUsageBundle(event)
 		if err != nil {
 			return err
 		}
-		normalized[i], keys[i] = event, key
+		normalized = append(normalized, rows...)
+		keys = append(keys, rowKeys...)
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		for i := range normalized {
@@ -75,6 +92,68 @@ func (s *UsageStore) RecordBatch(events []usage.Event) error {
 		}
 		return nil
 	})
+}
+
+// normalizeUsageBundle keeps root metadata intact and expands every additional
+// row before opening a write transaction. A rejected component rejects its root.
+func normalizeUsageBundle(event usage.Event) ([]usage.Event, []string, error) {
+	event = usage.CloneEvent(event)
+	key, err := normalizeUsageEvent(&event)
+	if err != nil {
+		return nil, nil, err
+	}
+	if event.Supplementary && len(event.Components) > 0 {
+		return nil, nil, fmt.Errorf("supplementary usage cannot contain components")
+	}
+	seen := make(map[int]struct{}, len(event.Components))
+	for _, component := range event.Components {
+		if component.IterationIndex < 0 {
+			return nil, nil, fmt.Errorf("invalid usage iteration index")
+		}
+		if _, exists := seen[component.IterationIndex]; exists {
+			return nil, nil, fmt.Errorf("duplicate usage iteration index %d", component.IterationIndex)
+		}
+		seen[component.IterationIndex] = struct{}{}
+	}
+	rows := usage.ExpandEvent(event)
+	keys := make([]string, len(rows))
+	keys[0] = key
+	for i := 1; i < len(rows); i++ {
+		keys[i], err = normalizeUsageEvent(&rows[i])
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return rows, keys, nil
+}
+
+// RecordExists verifies a supplied stable identity against its complete stored
+// payload. It is used only by explicit journal retries, not ordinary requests.
+func (s *UsageStore) RecordExists(event usage.Event) (bool, error) {
+	rows, keys, err := normalizeUsageBundle(event)
+	if err != nil {
+		return false, err
+	}
+	data, err := json.Marshal(rows[0])
+	if err != nil {
+		return false, err
+	}
+	exists := false
+	err = s.db.View(func(tx *bolt.Tx) error {
+		if quarantine := tx.Bucket([]byte(BucketUsageEventsQuarantine)); quarantine != nil && quarantine.Get([]byte(keys[0])) != nil {
+			return fmt.Errorf("%w: usage record is quarantined pending reconciliation", ErrUsageClientIndexIncomplete)
+		}
+		stored := tx.Bucket([]byte(BucketUsageEvents)).Get([]byte(keys[0]))
+		if stored == nil {
+			return nil
+		}
+		if string(stored) != string(data) {
+			return fmt.Errorf("usage record ID %q already exists with different event data", event.RecordID)
+		}
+		exists = true
+		return nil
+	})
+	return exists, err
 }
 
 func normalizeUsageEvent(event *usage.Event) (string, error) {
@@ -424,7 +503,7 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 
 // addEventToTotals adds one raw event into a Totals accumulator (used by last_hour scan).
 func addEventToTotals(target *usage.Totals, evt usage.Event, cost float64) {
-	target.Requests++
+	target.Requests += usage.RequestWeight(evt)
 	if evt.UsageStatus == usage.UsageStatusIncomplete || evt.UsageStatus == usage.UsageStatusConflict {
 		target.IncompleteUsageCount++
 	}
@@ -548,6 +627,18 @@ func aggCellCost(cell AggCell, target string, hour time.Time, model string, reso
 	rate, ok := resolver.RateFor(target, model, hour)
 	if !ok {
 		return 0
+	}
+	if cell.NonBillable != nil {
+		cell.InputTokens = max(0, cell.InputTokens-cell.NonBillable.InputTokens)
+		cell.OutputTokens = max(0, cell.OutputTokens-cell.NonBillable.OutputTokens)
+		cell.CachedTokens = max(0, cell.CachedTokens-cell.NonBillable.CachedTokens)
+		cell.CacheCreationTokens = max(0, cell.CacheCreationTokens-cell.NonBillable.CacheCreationTokens)
+		cell.ExplicitCacheReadTokens = max(0, cell.ExplicitCacheReadTokens-cell.NonBillable.ExplicitCacheReadTokens)
+		cell.CacheCreation5mTokens = max(0, cell.CacheCreation5mTokens-cell.NonBillable.CacheCreation5mTokens)
+		cell.CacheCreation1hTokens = max(0, cell.CacheCreation1hTokens-cell.NonBillable.CacheCreation1hTokens)
+		cell.ImageInputTokens = max(0, cell.ImageInputTokens-cell.NonBillable.ImageInputTokens)
+		cell.CachedImageInputTokens = max(0, cell.CachedImageInputTokens-cell.NonBillable.CachedImageInputTokens)
+		cell.ImageOutputTokens = max(0, cell.ImageOutputTokens-cell.NonBillable.ImageOutputTokens)
 	}
 	return rate.CostFor(cell.InputTokens, cell.OutputTokens, cell.CachedTokens, cell.CacheCreationTokens, cell.ExplicitCacheReadTokens, cell.CacheCreation5mTokens, cell.CacheCreation1hTokens, cell.ImageInputTokens, cell.CachedImageInputTokens, cell.ImageOutputTokens)
 }

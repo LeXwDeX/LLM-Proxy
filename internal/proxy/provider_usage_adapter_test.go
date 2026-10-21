@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/url"
+	"reflect"
 	"testing"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
@@ -41,7 +42,7 @@ func TestOfficialProtocolUsageParsers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, _, found := tt.parser.extractTokens("application/json", []byte(tt.body))
 			got.pricingContext = nil // Token-only contract; pricing evidence is covered separately.
-			if !found || got != tt.want {
+			if !found || !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %+v found=%t, want %+v", got, found, tt.want)
 			}
 		})
@@ -68,7 +69,7 @@ func TestQwenUsageAdapterFiveDimensions(t *testing.T) {
 		want := usageTokens{InputTokens: 70, OutputTokens: 20, CachedTokens: 30,
 			fields: usageFieldInput | usageFieldOutput | usageFieldCached | usageFieldExplicitCacheRead, status: usageStatusComplete, adapter: usageAdapterQwen}
 		got.pricingContext = nil // Token-only contract; pricing evidence is covered separately.
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v want %+v", got, want)
 		}
 	})
@@ -83,7 +84,7 @@ func TestQwenUsageAdapterFiveDimensions(t *testing.T) {
 		want := usageTokens{InputTokens: 20, OutputTokens: 20, CachedTokens: 30, CacheCreationTokens: 50, ExplicitCacheReadTokens: 30,
 			fields: usageAllFields, status: usageStatusComplete, adapter: usageAdapterQwen}
 		got.pricingContext = nil // Token-only contract; pricing evidence is covered separately.
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v want %+v", got, want)
 		}
 	})
@@ -142,7 +143,7 @@ func TestVendorUsageAdapterIdentityGuards(t *testing.T) {
 				if patched {
 					want = configured
 				}
-				if got, matched := resolveUsageAdapter(configured, op); got != want || matched != patched {
+				if got, matched := resolveUsageAdapter(configured, op); !reflect.DeepEqual(got, want) || matched != patched {
 					t.Fatalf("adapter=%q matched=%v want=%q patched=%v", got, matched, want, patched)
 				}
 			})

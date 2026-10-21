@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -1391,6 +1392,28 @@ func (s *Service) recordUsageEvent(r *http.Request, target *Target, statusCode i
 	return tokens
 }
 
+// Key balancing measures observed work, including nonbillable attempts. Each
+// partition is counted once; reasoning, TTLs and image details are subsets.
+func reportedBundleTokenLoad(tokens usageTokens) int64 {
+	var total int64
+	add := func(counts ...int64) {
+		for _, n := range counts {
+			if n > math.MaxInt64-total {
+				total = math.MaxInt64
+				return
+			}
+			if n > 0 {
+				total += n
+			}
+		}
+	}
+	add(tokens.InputTokens, tokens.OutputTokens, tokens.CachedTokens, tokens.CacheCreationTokens, tokens.ToolUsePromptTokens)
+	for _, c := range tokens.components {
+		add(c.InputTokens, c.OutputTokens, c.CachedTokens, c.CacheCreationTokens, c.ToolUsePromptTokens)
+	}
+	return total
+}
+
 func (s *Service) recordParsedUsage(r *http.Request, target *Target, statusCode int, upstreamModel string, tokens usageTokens, parsedModel string, state *targetState, keyIndex int) {
 	recorder := s.currentUsageRecorder()
 	if recorder == nil || r == nil {
@@ -1404,16 +1427,23 @@ func (s *Service) recordParsedUsage(r *http.Request, target *Target, statusCode 
 
 	// 回写 token 用量到 keyPool，用于 token 感知调度
 	if state != nil && state.keyPool != nil && keyIndex >= 0 {
-		totalTokens := tokens.InputTokens + tokens.OutputTokens + tokens.CachedTokens + tokens.CacheCreationTokens + tokens.ToolUsePromptTokens
+		totalTokens := reportedBundleTokenLoad(tokens)
 		state.keyPool.recordTokens(keyIndex, totalTokens)
 	}
 
+	if tokens.billingModel != "" {
+		upstreamModel = tokens.billingModel
+	}
 	upstreamModel = strings.ToLower(strings.TrimSpace(upstreamModel))
 	if upstreamModel == "" {
 		upstreamModel = parsedModel // 仅在 caller 未传时兜底到响应体中的 model
 	}
 
 	evt := usage.Event{
+		Components:              tokens.components,
+		IterationType:           tokens.iterationType,
+		IterationIndex:          tokens.iterationIndex,
+		NonBillable:             tokens.nonBillable,
 		Timestamp:               time.Now().UTC(),
 		PricingContext:          tokens.pricingContext,
 		ClientName:              principal.Name,
@@ -1452,7 +1482,7 @@ func (s *Service) recordParsedUsage(r *http.Request, target *Target, statusCode 
 	if qm := s.quotaManager.Load(); qm != nil {
 		recordErr = qm.RecordUsage(recorder, evt)
 	} else {
-		usage.CheckEventPrices(&evt, nil)
+		usage.CheckBundlePrices(&evt, nil)
 		recordErr = recorder.Record(evt)
 	}
 	if recordErr != nil {

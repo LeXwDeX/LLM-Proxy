@@ -62,8 +62,16 @@ func ResolveEventRate(evt Event, resolver RateResolver) RateResolution {
 
 // CheckEventPrices records incomplete estimates without refusing usage records.
 func CheckEventPrices(evt *Event, resolver RateResolver) {
+	if evt.NonBillable {
+		NormalizeImagePartitions(evt)
+		return
+	}
 	resolution := ResolveEventRate(*evt, resolver)
 	evt.PricingRuleID, evt.PricingRuleVersion = resolution.RuleID, resolution.Version
+	if (evt.Supplementary || evt.IterationType == "fallback_message") && !resolution.Found {
+		evt.CostIncomplete = true
+		appendUsageDiagnostic(evt, "missing_iteration_price")
+	}
 	if !resolution.Complete {
 		evt.CostIncomplete = true
 		appendUsageDiagnostic(evt, resolution.Diagnostic)

@@ -54,6 +54,9 @@ type UsageJournal struct {
 	logger  *slog.Logger
 	mu      sync.Mutex
 	started sync.Once
+	// Explicit identity retries are uncommon and serialized separately. Ordinary
+	// request-generated identities keep the existing concurrent append path.
+	identityMu sync.Mutex
 
 	// Guarded by mu. owned holds events appended by the asynchronous path
 	// that the background writer still has to commit; committed holds events
@@ -134,6 +137,7 @@ func (j *UsageJournal) Record(event usage.Event) error {
 	if j == nil || j.primary == nil {
 		return errors.New("usage journal: recorder is not initialized")
 	}
+	event = usage.CloneEvent(event)
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	} else {
@@ -154,6 +158,73 @@ func (j *UsageJournal) Record(event usage.Event) error {
 		return j.recordAsync(j.async, event)
 	}
 	return j.recordSync(event)
+}
+
+// RecordOnce suppresses live recharging of an explicitly retried identity.
+// Ordinary requests have no RecordID yet and keep one append/fsync and enqueue.
+// Explicit retries validate both committed and pending payloads without an
+// unbounded in-memory identity cache. Production's UsageStore supplies the
+// narrow lookup; decorators accepting retry identities must forward it.
+func (j *UsageJournal) RecordOnce(event usage.Event) (bool, error) {
+	if j == nil || j.primary == nil {
+		return false, errors.New("usage journal: recorder is not initialized")
+	}
+	if strings.TrimSpace(event.RecordID) == "" {
+		err := j.Record(event)
+		return err == nil, err
+	}
+	rows, _, err := normalizeUsageBundle(event)
+	if err != nil {
+		return false, err
+	}
+	event = rows[0]
+	checker, ok := j.primary.(interface {
+		RecordExists(usage.Event) (bool, error)
+	})
+	if !ok {
+		return false, errors.New("usage journal: primary cannot verify retry identity")
+	}
+	j.identityMu.Lock()
+	defer j.identityMu.Unlock()
+	// Hold the file lock across the primary read and pending scan: compaction
+	// cannot remove a line between these two checks and hide its identity.
+	j.mu.Lock()
+	exists, err := checker.RecordExists(event)
+	if err != nil || exists {
+		j.mu.Unlock()
+		return false, err
+	}
+	pending, corrupt, err := j.readLocked()
+	j.mu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	if len(corrupt) > 0 {
+		return false, errors.New("usage journal: cannot verify retry identity in corrupt journal")
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return false, err
+	}
+	for _, prior := range pending {
+		if prior.RecordID != event.RecordID {
+			continue
+		}
+		priorRows, _, err := normalizeUsageBundle(prior)
+		if err != nil {
+			return false, err
+		}
+		priorData, err := json.Marshal(priorRows[0])
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(data, priorData) {
+			return false, fmt.Errorf("usage record ID %q already exists with different event data", event.RecordID)
+		}
+		return false, nil
+	}
+	err = j.Record(event)
+	return err == nil, err
 }
 
 func (j *UsageJournal) recordSync(event usage.Event) error {

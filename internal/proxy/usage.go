@@ -36,6 +36,10 @@ const (
 )
 
 type usageTokens struct {
+	components                                                        []usage.Component
+	billingModel, iterationType                                       string
+	iterationIndex                                                    int
+	nonBillable                                                       bool
 	InputTokens, OutputTokens, CachedTokens, CacheCreationTokens      int64
 	ExplicitCacheReadTokens, ReasoningTokens                          int64
 	CacheCreation5mTokens, CacheCreation1hTokens, ToolUsePromptTokens int64
@@ -148,7 +152,13 @@ func (p usageParser) parsePayload(payload map[string]any) (usageTokens, string, 
 		}
 	}
 	t, ok := p.parseMap(m, model)
-	t.pricingContext = p.pricingContext(payload, m)
+	if t.pricingContext == nil {
+		t.pricingContext = p.pricingContext(payload, m)
+	}
+	if t.billingModel != "" {
+		model = t.billingModel
+		p.finalizeClaudeFallbackBilling(&t, payload)
+	}
 	observer := usageStream{parser: p}
 	observer.observeLifecycle(payload, "")
 	t.responseStatus = observer.responseStatus
@@ -168,7 +178,7 @@ func (p usageParser) parseMap(m map[string]any, responseModel string) (usageToke
 	var t usageTokens
 	switch op {
 	case config.ProtocolAnthropicMessages:
-		t = parseClaudeUsage(m)
+		t = p.parseClaudeIterationUsage(m, responseModel)
 	case config.ProtocolGemini:
 		t = parseGeminiUsage(m)
 	default:

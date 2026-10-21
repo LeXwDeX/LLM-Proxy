@@ -8,14 +8,14 @@ import (
 
 // Issue #7: a real proxy process persists Claude usage.iterations judgments
 // for JSON and SSE. One executor "message" item equal to top-level keeps the
-// cost complete; an "advisor_message" item is a separately priced model and
-// stays conservative. Top-level counters are billed once either way. All
+// cost complete. Additional billable iterations are covered by the bundle
+// billing regression. Top-level counters are billed once. All
 // upstream calls terminate in the in-process deterministic fakellm server.
 func TestClaudeUsageIterationsPersisted(t *testing.T) {
 	for _, tc := range []struct {
 		mode, diagnostic string
 		incomplete       bool
-	}{{"message", "", false}, {"advisor", "multi_model_iterations", true}} {
+	}{{"message", "", false}} {
 		t.Run(tc.mode, func(t *testing.T) {
 			alias := "e2e-iterations-" + tc.mode
 			tg := target(t, map[string]any{"endpoint_type": "claude", "endpoint": expand("{A}/anthropic", alias).(string), "api_key": uniq("sk-fake-iterations"), "model_mappings": []any{map[string]any{"upstream": "Unfamiliar-Upstream", "fallback": alias}}})

@@ -857,8 +857,8 @@
       "cached_tokens": 412,
       "cache_creation_tokens": 0,
       "reasoning_tokens": 0,
-      "cost_incomplete": true,
-      "usage_diagnostic": "multi_model_iterations"
+      "cost_incomplete": false,
+      "usage_diagnostic": ""
     },
     "request_id_header": "request-id"
   },

@@ -10,8 +10,8 @@ import (
 // Claude usage.iterations contract (issue #7). Shapes follow the official
 // advisor tool, threshold/on-demand compaction and fallback docs checked
 // 2026-10-21; a documentation check is not acceptance against the real API.
-// Top-level counters are always billed as-is; iterations only decide whether
-// the cost is complete and which diagnostic explains it.
+// Top-level counters stay unchanged. Issue #8 separately bills proven additional
+// model usage; unknown attribution retains these conservative diagnostics.
 func TestClaudeUsageIterations(t *testing.T) {
 	const advisorItem = `{"type":"advisor_message","model":"claude-opus-5-5","input_tokens":823,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1612}`
 	const execA = `{"type":"message","input_tokens":412,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":89}`
@@ -49,7 +49,7 @@ func TestClaudeUsageIterations(t *testing.T) {
 		{"fully_reported_cache_creation_without_top", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":70,"output_tokens":10,"cache_creation_input_tokens":100}]`, 70, 10, 0, true, "unknown_usage_iterations"},
 		{"fully_reported_zero_cache_without_top", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":70,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}]`, 70, 10, 0, false, ""},
 		{"partially_reported_field_skipped", `"input_tokens":30,"output_tokens":6,"cache_read_input_tokens":99,"iterations":[{"type":"message","input_tokens":10,"output_tokens":2,"cache_read_input_tokens":1},{"type":"message","input_tokens":20,"output_tokens":4}]`, 30, 6, 99, false, ""},
-		{"advisor_doc_example", advisorTop + `,"iterations":[` + execA + `,` + advisorItem + `,` + execB + `]`, 1760, 531, 412, true, "multi_model_iterations"},
+		{"advisor_doc_example", advisorTop + `,"iterations":[` + execA + `,` + advisorItem + `,` + execB + `]`, 1760, 531, 412, false, ""},
 		{"fallback_message", `"input_tokens":10,"output_tokens":2,"iterations":[{"type":"message","input_tokens":5,"output_tokens":0},{"type":"fallback_message","model":"claude-fallback","input_tokens":10,"output_tokens":2}]`, 10, 2, 0, true, "multi_model_iterations"},
 		{"message_models_differ", `"input_tokens":30,"output_tokens":6,"iterations":[{"type":"message","model":"claude-a","input_tokens":10,"output_tokens":2},{"type":"message","model":"claude-b","input_tokens":20,"output_tokens":4}]`, 30, 6, 0, true, "multi_model_iterations"},
 		// Threshold compaction doc example.

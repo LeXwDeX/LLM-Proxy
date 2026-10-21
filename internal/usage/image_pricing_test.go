@@ -3,6 +3,7 @@ package usage
 import (
 	"encoding/json"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -45,7 +46,7 @@ func TestImageEventPartitionsNormalizedBeforePricing(t *testing.T) {
 	}
 	first := evt
 	CheckImagePrices(&evt, rates)
-	if evt != first {
+	if !reflect.DeepEqual(evt, first) {
 		t.Fatalf("normalization is not idempotent: before=%+v after=%+v", first, evt)
 	}
 }
