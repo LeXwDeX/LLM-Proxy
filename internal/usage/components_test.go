@@ -72,3 +72,63 @@ func TestFallbackRootMissingPriceIsIncomplete(t *testing.T) {
 		t.Fatalf("explicitly free fallback requires no model price: %+v", free)
 	}
 }
+
+func TestBundlePricesNilResolverDoesNotDiagnoseMissingIterationPrice(t *testing.T) {
+	for _, rootType := range []string{"", "fallback_message"} {
+		for _, tc := range []struct {
+			name     string
+			resolver RateResolver
+			missing  bool
+		}{
+			{name: "nil"},
+			{name: "missing", resolver: CostTable{}, missing: true},
+			{name: "priced", resolver: CostTable{"executor": {}, "advisor": {}}},
+		} {
+			t.Run(rootType+"/"+tc.name, func(t *testing.T) {
+				event := Event{Model: "executor", IterationType: rootType, InputTokens: 100,
+					Components: []Component{
+						{Model: "advisor", IterationType: "advisor", InputTokens: 200},
+						{Model: "free", IterationType: "fallback_message", InputTokens: 300, NonBillable: true},
+					}}
+				CheckBundlePrices(&event, tc.resolver)
+				var total Totals
+				for _, row := range ExpandEvent(event) {
+					wantMissing := tc.missing && !row.NonBillable && (row.Supplementary || rootType == "fallback_message")
+					if row.CostIncomplete != wantMissing || strings.Contains(row.UsageDiagnostic, "missing_iteration_price") != wantMissing {
+						t.Errorf("row=%+v, want missing price=%t", row, wantMissing)
+					}
+					AddEventTotals(&total, row, tc.resolver)
+				}
+				var wantIncomplete int64
+				if tc.missing {
+					wantIncomplete = 1
+					if rootType == "fallback_message" {
+						wantIncomplete++
+					}
+				}
+				if total.IncompleteCostCount != wantIncomplete || total.Requests != 1 || total.InputTokens != 600 {
+					t.Fatalf("totals=%+v, want incomplete=%d, one request and all tokens", total, wantIncomplete)
+				}
+			})
+		}
+	}
+}
+
+func TestNilResolverRetainsImagePriceAndPartitionChecks(t *testing.T) {
+	for _, free := range []bool{false, true} {
+		for _, imageTokens := range []int64{50, 150} {
+			event := Event{Model: "advisor", Supplementary: true, NonBillable: free,
+				InputTokens: 100, ImageInputTokens: imageTokens}
+			CheckEventPrices(&event, nil)
+			conflict := imageTokens > event.InputTokens
+			if event.ImageInputTokens != min(imageTokens, event.InputTokens) ||
+				(event.UsageStatus == UsageStatusConflict) != conflict ||
+				strings.Contains(event.UsageDiagnostic, "image_partition_exceeds_total") != conflict ||
+				strings.Contains(event.UsageDiagnostic, "missing_image_input_price") != !free ||
+				strings.Contains(event.UsageDiagnostic, "missing_iteration_price") ||
+				event.CostIncomplete != (!free || conflict) {
+				t.Errorf("free=%t imageTokens=%d: image checks changed: %+v", free, imageTokens, event)
+			}
+		}
+	}
+}

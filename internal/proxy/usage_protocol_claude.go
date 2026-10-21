@@ -195,12 +195,44 @@ func claudeIterationsIncomplete(iterations []any, top map[string]any) string {
 // Any unknown shape retains the issue #7 diagnostic and adds no guessed charges.
 func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel string) usageTokens {
 	legacy := parseClaudeUsage(top)
+	// invalid: the attribution plan is unverifiable, so it must not replace
+	// committed evidence. Legitimate cost_incomplete reasons are not invalid.
+	invalid := func() usageTokens {
+		legacy.invalidIterations = true
+		return legacy
+	}
 	raw, ok := top["iterations"].([]any)
-	if !ok || len(raw) == 0 {
+	if !ok {
+		if _, present := top["iterations"]; present {
+			// null, objects and scalars cannot prove a complete plan.
+			return invalid()
+		}
+		return legacy
+	}
+	if len(raw) == 0 {
 		return legacy
 	}
 	base := parseClaudeUsageCounters(top)
 	if !validClaudeIterationCounters(top, base) {
+		if base.status != usageStatusConflict && base.fields&(usageFieldInput|usageFieldOutput) == usageFieldInput|usageFieldOutput {
+			// Valid counters whose cost context overflows.
+			return invalid()
+		}
+		// Missing input cannot prove the full overlap plan. The documented last
+		// fallback still identifies whose observed output it is; never copy input
+		// from that iteration or price it with the executor's request context.
+		final, _ := raw[len(raw)-1].(map[string]any)
+		model := strings.ToLower(readString(final["model"]))
+		finalTokens := parseClaudeUsageCounters(final)
+		if _, input := top["input_tokens"]; !input && base.status != usageStatusConflict &&
+			base.fields&usageFieldOutput != 0 && final["type"] == "fallback_message" && model != "" &&
+			validClaudeIterationCounters(final, finalTokens) && finalTokens.OutputTokens == base.OutputTokens {
+			legacy.billingModel, legacy.iterationType, legacy.iterationIndex = model, "fallback_message", len(raw)-1
+			independent := usageParser{protocol: config.ProtocolAnthropicMessages}
+			legacy.pricingContext = independent.pricingContext(nil, top)
+			legacy.costIncomplete = true
+			appendTokenDiagnostic(&legacy, "missing_fallback_input_usage")
+		}
 		return legacy
 	}
 	executor := strings.ToLower(strings.TrimSpace(p.model))
@@ -215,20 +247,20 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 	for i, value := range raw {
 		item, ok := value.(map[string]any)
 		if !ok {
-			return legacy
+			return invalid()
 		}
 		tokens := parseClaudeUsageCounters(item)
 		if !validClaudeIterationCounters(item, tokens) {
-			return legacy
+			return invalid()
 		}
 		if _, nested := item["iterations"]; nested {
-			return legacy
+			return invalid()
 		}
 		model := executor
 		if value, present := item["model"]; present {
 			name, ok := value.(string)
 			if !ok || strings.TrimSpace(name) == "" {
-				return legacy
+				return invalid()
 			}
 			model = strings.ToLower(strings.TrimSpace(name))
 		}
@@ -241,33 +273,37 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 			messages = append(messages, item)
 		case "compaction":
 			if model == "" {
-				return legacy
+				return invalid()
 			}
 			hasAdditional = true
 		case "advisor_message", "fallback_message":
 			if _, present := item["model"]; !present || model == "" {
-				return legacy
+				return invalid()
 			}
 			hasAdditional = true
 			hasFallback = hasFallback || typ == "fallback_message"
 		default:
-			return legacy
+			return invalid()
 		}
 		items[i], models[i] = item, model
 	}
-	// Keep the existing top-only handling and diagnostics for ordinary messages.
+	// Keep the existing top-only diagnostics, but only a verified plan may
+	// replace committed evidence.
 	if !hasAdditional {
+		if !messagesMatchExecutor || claudeIterationsIncomplete(messages, top) != "" {
+			return invalid()
+		}
 		return legacy
 	}
 	returned := -1
 	if hasFallback {
 		returned = len(items) - 1
 		if items[returned]["type"] != "fallback_message" {
-			return legacy
+			return invalid()
 		}
 		for _, item := range items {
 			if item["type"] != "message" && item["type"] != "fallback_message" {
-				return legacy
+				return invalid()
 			}
 		}
 		final := make(map[string]any, len(items[returned]))
@@ -276,24 +312,24 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 		}
 		final["type"] = "message"
 		if claudeIterationsIncomplete([]any{final}, top) != "" {
-			return legacy
+			return invalid()
 		}
 	} else {
 		if !messagesMatchExecutor {
-			return legacy
+			return invalid()
 		}
 		if len(messages) == 0 {
 			// The on-demand compaction contract is the only zero-executor shape.
 			for _, item := range items {
 				if item["type"] != "compaction" {
-					return legacy
+					return invalid()
 				}
 			}
 			if base.InputTokens != 0 || base.OutputTokens != 0 || base.CachedTokens != 0 || base.CacheCreationTokens != 0 {
-				return legacy
+				return invalid()
 			}
 		} else if claudeIterationsIncomplete(messages, top) != "" {
-			return legacy
+			return invalid()
 		}
 	}
 	totals := []int64{base.InputTokens, base.OutputTokens, base.CachedTokens, base.CacheCreationTokens, base.ReasoningTokens, base.CacheCreation5mTokens, base.CacheCreation1hTokens}
@@ -310,7 +346,7 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 			continue
 		}
 		if models[i] == "" {
-			return legacy
+			return invalid()
 		}
 		component := p.claudeIterationComponent(item, models[i], typ, i)
 		if hasFallback && component.OutputTokens == 0 {
@@ -323,7 +359,7 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 		}
 		for k, n := range []int64{component.InputTokens, component.OutputTokens, component.CachedTokens, component.CacheCreationTokens, component.ReasoningTokens, component.CacheCreation5mTokens, component.CacheCreation1hTokens} {
 			if n > math.MaxInt64-totals[k] {
-				return legacy
+				return invalid()
 			}
 			totals[k] += n
 		}
@@ -367,11 +403,12 @@ func (p usageParser) claudeIterationComponent(item map[string]any, model, typ st
 
 // Refusal billing is official structured metadata, never explanation text.
 // Docs checked 2026-10-21: https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
-// Nonzero-output attempts are billed. A zero-output final refusal bills input
-// only for bio/frontier_llm/reasoning_extraction. Explicit null/other categories
-// are free; missing/invalid categories leave the charge unknown.
-func (p usageParser) finalizeClaudeFallbackBilling(t *usageTokens, payload map[string]any) {
-	if t.OutputTokens != 0 {
+// All refusals, not only fallback: bio/frontier_llm/reasoning_extraction bill
+// before output; "any other category, or ... null" is free. Issue #12 deliberately
+// defers unknown categories with a diagnostic because the billed list may change;
+// this is a local conservative policy, not a restriction in the official rule.
+func (p usageParser) finalizeClaudeRefusalBilling(t *usageTokens, payload map[string]any) {
+	if t.OutputTokens != 0 || t.fields&usageFieldOutput == 0 || t.status == usageStatusConflict {
 		return
 	}
 	envelope := pricingEnvelope(payload, config.ProtocolAnthropicMessages)
@@ -392,12 +429,17 @@ func (p usageParser) finalizeClaudeFallbackBilling(t *usageTokens, payload map[s
 			switch name {
 			case "bio", "frontier_llm", "reasoning_extraction":
 				t.nonBillable = false
+				return
+			case "cyber", "general_harms":
+				return
 			}
-			return
 		}
 	}
 	t.costIncomplete = true
 	if t.diagnostic == "" {
-		t.diagnostic = "unknown_fallback_refusal_billing"
+		t.diagnostic = "unknown_refusal_billing"
+		if t.billingModel != "" {
+			t.diagnostic = "unknown_fallback_refusal_billing"
+		}
 	}
 }

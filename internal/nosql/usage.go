@@ -3,10 +3,12 @@ package nosql
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,13 +20,19 @@ import (
 // UsageStore manages usage events backed by bbolt.
 // It implements the usage.Recorder interface.
 //
-// Raw detail, two hourly rollups, and a derived client/time index are involved:
-//   - usage_events     : raw event detail (RFC3339Nano + uuid key)  → for List()
-//   - usage_agg_hourly : pre-aggregated hourly rollups               → for Summary/Aggregate/Count
+// Raw detail, two hourly rollups, a derived client/time index, and digest
+// receipts for pruned identities are involved:
+//   - usage_events          : raw event detail (RFC3339Nano + uuid key)  → for List()
+//   - usage_agg_hourly      : pre-aggregated hourly rollups               → for Summary/Aggregate/Count
+//   - usage_record_receipts : versioned digests retained after raw pruning
 //
-// Record() writes all of them in the same write tx so they stay consistent.
+// Record() writes all affected records in the same write tx so they stay consistent.
 type UsageStore struct {
 	db *bolt.DB
+	// receiptMu serializes the one-time legacy coverage scan. receiptsReady is
+	// guarded by receiptMu and stays false when a scan fails so it can retry.
+	receiptMu     sync.Mutex
+	receiptsReady bool
 }
 
 // NewUsageStore creates a new bbolt-backed usage store.
@@ -41,27 +49,33 @@ func (s *UsageStore) Record(event usage.Event) error {
 // RecordOnce reports the insertion outcome from the same transaction that
 // writes the entire bundle, so callers can suppress duplicate live charges.
 func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
+	explicit := strings.TrimSpace(event.RecordID) != ""
+	if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
+		return false, err
+	}
 	rows, keys, err := normalizeUsageBundle(event)
 	if err != nil {
 		return false, err
+	}
+	if explicit {
+		if err := s.EnsureUsageReceipts(); err != nil {
+			return false, err
+		}
 	}
 	// P8：用 db.Batch 而非 db.Update —— bbolt 写事务全库串行且每次 commit 触发
 	// fsync，高并发下每请求一次同步 Update 会在全部成功请求上形成吞吐天花板。
 	// Batch 将并发调用合并为单次 commit（≤MaxBatchDelay/≤1000 条，见 OpenDB）。
 	// 生产请求路径不再同步等待这里：UsageJournal 异步模式先同步追加恢复日志，
 	// 再由后台写入器调用 RecordBatch；本方法服务于回放与同步回退路径。
-	// 安全性：合并事务失败时整体回滚后逐个重试，bumpAgg 的 RMW 基于已提交
-	// 状态，不会双计。
+	// 安全性：合并事务失败时整体回滚后逐个重试，身份判定基于已提交状态，
+	// 不会双计。
 	added := false
 	err = s.db.Batch(func(tx *bolt.Tx) error {
 		// bbolt may retry this callback after a different batch member fails.
-		added = tx.Bucket([]byte(BucketUsageEvents)).Get([]byte(keys[0])) == nil
-		for i := range rows {
-			if err := recordUsageTx(tx, rows[i], keys[i]); err != nil {
-				return err
-			}
-		}
-		return nil
+		added = false
+		var err error
+		added, err = recordUsageBundleTx(tx, rows, keys, explicit)
+		return err
 	})
 	return added && err == nil, err
 }
@@ -69,24 +83,38 @@ func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
 // RecordBatch commits several usage events in one write transaction. It is
 // all-or-nothing: any rejected event rolls the whole batch back so the caller
 // can retry the events individually. Identical replays are idempotent by
-// RecordID, exactly like Record.
+// the stable Timestamp and RecordID pair, exactly like Record.
 func (s *UsageStore) RecordBatch(events []usage.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
-	var normalized []usage.Event
-	var keys []string
+	type normalizedBundle struct {
+		rows     []usage.Event
+		keys     []string
+		explicit bool
+	}
+	var bundles []normalizedBundle
+	needWatermark := false
 	for _, event := range events {
-		rows, rowKeys, err := normalizeUsageBundle(event)
+		explicit := strings.TrimSpace(event.RecordID) != ""
+		if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
+			return err
+		}
+		rows, keys, err := normalizeUsageBundle(event)
 		if err != nil {
 			return err
 		}
-		normalized = append(normalized, rows...)
-		keys = append(keys, rowKeys...)
+		bundles = append(bundles, normalizedBundle{rows: rows, keys: keys, explicit: explicit})
+		needWatermark = needWatermark || explicit
+	}
+	if needWatermark {
+		if err := s.EnsureUsageReceipts(); err != nil {
+			return err
+		}
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for i := range normalized {
-			if err := recordUsageTx(tx, normalized[i], keys[i]); err != nil {
+		for _, bundle := range bundles {
+			if _, err := recordUsageBundleTx(tx, bundle.rows, bundle.keys, bundle.explicit); err != nil {
 				return err
 			}
 		}
@@ -127,30 +155,68 @@ func normalizeUsageBundle(event usage.Event) ([]usage.Event, []string, error) {
 	return rows, keys, nil
 }
 
-// RecordExists verifies a supplied stable identity against its complete stored
-// payload. It is used only by explicit journal retries, not ordinary requests.
+// RecordExists verifies every row of a supplied stable bundle identity against
+// retained raw detail or its pruned receipt. It is used only by explicit
+// journal retries, not ordinary requests.
 func (s *UsageStore) RecordExists(event usage.Event) (bool, error) {
+	if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
+		return false, err
+	}
 	rows, keys, err := normalizeUsageBundle(event)
 	if err != nil {
 		return false, err
 	}
-	data, err := json.Marshal(rows[0])
-	if err != nil {
+	if err := s.EnsureUsageReceipts(); err != nil {
 		return false, err
 	}
 	exists := false
 	err = s.db.View(func(tx *bolt.Tx) error {
-		if quarantine := tx.Bucket([]byte(BucketUsageEventsQuarantine)); quarantine != nil && quarantine.Get([]byte(keys[0])) != nil {
-			return fmt.Errorf("%w: usage record is quarantined pending reconciliation", ErrUsageClientIndexIncomplete)
+		quarantine := tx.Bucket([]byte(BucketUsageEventsQuarantine))
+		for _, key := range keys {
+			if quarantine != nil && quarantine.Get([]byte(key)) != nil {
+				return fmt.Errorf("%w: usage record is quarantined pending reconciliation", ErrUsageClientIndexIncomplete)
+			}
 		}
-		stored := tx.Bucket([]byte(BucketUsageEvents)).Get([]byte(keys[0]))
-		if stored == nil {
+		committed := 0
+		for i := range rows {
+			digest, err := usage.RetryEquivalentDigest(rows[i])
+			if err != nil {
+				return err
+			}
+			state, _, _, err := lookupUsageIdentity(tx, []byte(keys[i]), []byte(digest))
+			if err != nil {
+				return err
+			}
+			if state != identityNew {
+				committed++
+			}
+		}
+		if committed == len(rows) {
+			exists = true
 			return nil
 		}
-		if string(stored) != string(data) {
-			return fmt.Errorf("usage record ID %q already exists with different event data", event.RecordID)
+		if committed > 0 {
+			return fmt.Errorf("usage bundle is partially committed and cannot be proven complete")
 		}
-		exists = true
+		meta := tx.Bucket([]byte(BucketMeta))
+		if meta == nil {
+			return errors.New("usage receipts: meta bucket missing")
+		}
+		if meta.Get([]byte(usageReceiptsWatermarkDoneKey)) == nil {
+			return errors.New("usage receipts: legacy watermark was not established")
+		}
+		watermark, err := decodeUsageReceiptWatermark(meta.Get([]byte(usageReceiptsWatermarkKey)))
+		if err != nil {
+			return err
+		}
+		if watermark.IsZero() {
+			return nil
+		}
+		for _, row := range rows {
+			if row.Timestamp.Before(watermark) {
+				return fmt.Errorf("%w: record %q before %s", ErrUsageIdentityUnverified, row.RecordID, watermark.Format(time.RFC3339Nano))
+			}
+		}
 		return nil
 	})
 	return exists, err
@@ -158,6 +224,9 @@ func (s *UsageStore) RecordExists(event usage.Event) (bool, error) {
 
 func normalizeUsageEvent(event *usage.Event) (string, error) {
 	usage.NormalizeImagePartitions(event)
+	if err := usage.ValidateExplicitRecordIdentity(*event); err != nil {
+		return "", err
+	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
@@ -179,40 +248,6 @@ func normalizeUsageEvent(event *usage.Event) (string, error) {
 	event.Target = strings.TrimSpace(event.Target)
 	event.Path = strings.TrimSpace(event.Path)
 	return usageKey(event.Timestamp, event.RecordID), nil
-}
-
-func recordUsageTx(tx *bolt.Tx, event usage.Event, key string) error {
-	if quarantine := tx.Bucket([]byte(BucketUsageEventsQuarantine)); quarantine != nil && quarantine.Get([]byte(key)) != nil {
-		// The original write may already be represented in permanent
-		// rollups. A journal replay cannot resurrect and count it twice.
-		return fmt.Errorf("%w: usage record is quarantined pending reconciliation", ErrUsageClientIndexIncomplete)
-	}
-	// 1. Append raw detail.
-	b := tx.Bucket([]byte(BucketUsageEvents))
-	data, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("marshal usage event: %w", err)
-	}
-	if existing := b.Get([]byte(key)); existing != nil {
-		if string(existing) != string(data) {
-			return fmt.Errorf("usage record ID %q already exists with different event data", event.RecordID)
-		}
-		return addClientEventIndex(tx, event, []byte(key), data)
-	}
-	if err := b.Put([]byte(key), data); err != nil {
-		return err
-	}
-	// 2. Bump both general and quota-specific hourly aggregation cells.
-	if err := bumpAgg(tx, event); err != nil {
-		return err
-	}
-	if err := bumpQuotaAgg(tx, event); err != nil {
-		return err
-	}
-	if err := addClientEventIndex(tx, event, []byte(key), data); err != nil {
-		return err
-	}
-	return bumpRawRevision(tx)
 }
 
 // List returns events matching the filter, sorted by timestamp descending.
@@ -249,22 +284,22 @@ func (s *UsageStore) List(filter usage.Filter) ([]usage.Event, error) {
 }
 
 // Count returns total and success request counts within the given time range.
-//
-// New implementation: scans the hourly agg bucket — bounded to ~hours-in-range cells
-// times unique (et,client,model) combos per hour. For 72h window this is typically
-// < 1000 cells vs. previously scanning every event in that window.
+// It reads both physical aggregate key formats and only needs hour and totals,
+// so structurally valid legacy keys stay counted even when their dimensions are
+// ambiguous. Any malformed key or cell fails the whole read.
 func (s *UsageStore) Count(from, to time.Time) (total, success int64, err error) {
-	from = from.UTC()
-	to = to.UTC()
-
 	err = s.db.View(func(tx *bolt.Tx) error {
-		return aggIter(tx, from, to, func(_ time.Time, _, _, _, _ string, cell AggCell) error {
-			total += cell.Requests
-			success += cell.Success
+		total, success = 0, 0
+		return aggCellIter(tx, from, to, func(entry aggCellEntry) error {
+			total += entry.cell.Requests
+			success += entry.cell.Success
 			return nil
 		})
 	})
-	return
+	if err != nil {
+		return 0, 0, err
+	}
+	return total, success, nil
 }
 
 // Aggregate aggregates usage in requested time buckets, served from the hourly agg bucket.
@@ -316,7 +351,8 @@ func (s *UsageStore) Aggregate(filter usage.Filter, groupBy string, costs usage.
 				return nil
 			}
 
-			cost := aggCellCost(cell, "", hour, model, costs)
+			cost, missingPrice := aggCellCost(cell, "", hour, model, costs)
+			cell.IncompleteCostCount += missingPrice
 			addCellToTotals(&result.Totals, cell, cost)
 
 			bucketStart := bucketStartFromHour(hour, groupBy)
@@ -406,6 +442,7 @@ func (s *UsageStore) summaryRead(now time.Time, costs usage.RateResolver, hooks 
 		return usage.SummaryResult{}, err
 	}
 	for _, event := range data.raw {
+		usage.CheckEventPrices(&event, costs)
 		addEventToTotals(&result.LastHour, event, usageEstimateEventCost(event, costs))
 	}
 	for _, cell := range data.units {
@@ -436,9 +473,15 @@ func (s *UsageStore) summaryRead(now time.Time, costs usage.RateResolver, hooks 
 // Returns the number of deleted events. The hourly agg bucket is intentionally
 // kept (tiny cells, long-term stats). Stable-price reads remain available;
 // exact sub-hour pricing fails explicitly if its required raw history was pruned.
-// Undecodable records are moved losslessly to quarantine instead of blocking
-// subsequent batches. Their unknown ownership invalidates indexed reads globally.
+// Each decoded event writes a normalized digest receipt in the same transaction
+// before its raw row is removed, so a later replay cannot resurrect pruned
+// detail or double-count its permanent rollups. Undecodable records are moved
+// losslessly to quarantine instead of blocking subsequent batches. Their unknown
+// ownership invalidates indexed reads globally.
 func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, error) {
+	if err := s.EnsureUsageReceipts(); err != nil {
+		return 0, err
+	}
 	if batchSize <= 0 {
 		batchSize = 5000
 	}
@@ -473,6 +516,13 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 					quarantined++
 				} else {
 					if err := removeClientEventIndex(tx, k, data); err != nil {
+						return err
+					}
+					digest, err := usage.RetryEquivalentDigest(event)
+					if err != nil {
+						return err
+					}
+					if err := writeUsageReceipt(tx, k, digest); err != nil {
 						return err
 					}
 				}
@@ -619,28 +669,64 @@ func addSuccessfulCellToTotals(target *usage.Totals, cell AggCell, cost float64)
 	target.EstimatedCost += cost
 }
 
-// aggCellCost computes estimated cost for one agg cell given its model.
-func aggCellCost(cell AggCell, target string, hour time.Time, model string, resolver usage.RateResolver) float64 {
+// aggCellCost computes estimated cost for one agg cell given its model. The
+// second result is the number of rows whose iteration price is now missing; it
+// is query-derived and must never be written back to stored rollups.
+func aggCellCost(cell AggCell, target string, hour time.Time, model string, resolver usage.RateResolver) (float64, int64) {
 	if resolver == nil {
-		return 0
+		return 0, 0
 	}
 	rate, ok := resolver.RateFor(target, model, hour)
 	if !ok {
-		return 0
+		return 0, cell.missingIterationPriceCount()
 	}
-	if cell.NonBillable != nil {
-		cell.InputTokens = max(0, cell.InputTokens-cell.NonBillable.InputTokens)
-		cell.OutputTokens = max(0, cell.OutputTokens-cell.NonBillable.OutputTokens)
-		cell.CachedTokens = max(0, cell.CachedTokens-cell.NonBillable.CachedTokens)
-		cell.CacheCreationTokens = max(0, cell.CacheCreationTokens-cell.NonBillable.CacheCreationTokens)
-		cell.ExplicitCacheReadTokens = max(0, cell.ExplicitCacheReadTokens-cell.NonBillable.ExplicitCacheReadTokens)
-		cell.CacheCreation5mTokens = max(0, cell.CacheCreation5mTokens-cell.NonBillable.CacheCreation5mTokens)
-		cell.CacheCreation1hTokens = max(0, cell.CacheCreation1hTokens-cell.NonBillable.CacheCreation1hTokens)
-		cell.ImageInputTokens = max(0, cell.ImageInputTokens-cell.NonBillable.ImageInputTokens)
-		cell.CachedImageInputTokens = max(0, cell.CachedImageInputTokens-cell.NonBillable.CachedImageInputTokens)
-		cell.ImageOutputTokens = max(0, cell.ImageOutputTokens-cell.NonBillable.ImageOutputTokens)
+	cell = cell.billable()
+	return rate.CostFor(cell.InputTokens, cell.OutputTokens, cell.CachedTokens, cell.CacheCreationTokens, cell.ExplicitCacheReadTokens, cell.CacheCreation5mTokens, cell.CacheCreation1hTokens, cell.ImageInputTokens, cell.CachedImageInputTokens, cell.ImageOutputTokens), 0
+}
+
+// billable removes observed non-billable tokens from the cell without changing
+// the cost formula or price selection.
+func (cell AggCell) billable() AggCell {
+	if cell.NonBillable == nil {
+		return cell
 	}
-	return rate.CostFor(cell.InputTokens, cell.OutputTokens, cell.CachedTokens, cell.CacheCreationTokens, cell.ExplicitCacheReadTokens, cell.CacheCreation5mTokens, cell.CacheCreation1hTokens, cell.ImageInputTokens, cell.CachedImageInputTokens, cell.ImageOutputTokens)
+	cell.InputTokens = max(0, cell.InputTokens-cell.NonBillable.InputTokens)
+	cell.OutputTokens = max(0, cell.OutputTokens-cell.NonBillable.OutputTokens)
+	cell.CachedTokens = max(0, cell.CachedTokens-cell.NonBillable.CachedTokens)
+	cell.CacheCreationTokens = max(0, cell.CacheCreationTokens-cell.NonBillable.CacheCreationTokens)
+	cell.ExplicitCacheReadTokens = max(0, cell.ExplicitCacheReadTokens-cell.NonBillable.ExplicitCacheReadTokens)
+	cell.CacheCreation5mTokens = max(0, cell.CacheCreation5mTokens-cell.NonBillable.CacheCreation5mTokens)
+	cell.CacheCreation1hTokens = max(0, cell.CacheCreation1hTokens-cell.NonBillable.CacheCreation1hTokens)
+	cell.ImageInputTokens = max(0, cell.ImageInputTokens-cell.NonBillable.ImageInputTokens)
+	cell.CachedImageInputTokens = max(0, cell.CachedImageInputTokens-cell.NonBillable.CachedImageInputTokens)
+	cell.ImageOutputTokens = max(0, cell.ImageOutputTokens-cell.NonBillable.ImageOutputTokens)
+	return cell
+}
+
+func (cell AggCell) hasBillableTokens() bool {
+	cell = cell.billable()
+	return cell.InputTokens > 0 || cell.OutputTokens > 0 || cell.CachedTokens > 0 ||
+		cell.CacheCreationTokens > 0 || cell.ExplicitCacheReadTokens > 0 ||
+		cell.CacheCreation5mTokens > 0 || cell.CacheCreation1hTokens > 0 ||
+		cell.ImageInputTokens > 0 || cell.CachedImageInputTokens > 0 || cell.ImageOutputTokens > 0
+}
+
+// missingIterationPriceCount reports rows that would be incomplete if their
+// price disappeared. Legacy cells lack per-row coverage, so they contribute at
+// most one conservative marker. Rows already counted as incomplete are never
+// counted again.
+func (cell AggCell) missingIterationPriceCount() int64 {
+	total := cell.recordCount()
+	legacyUnknown := cell.PriceCoverageRecordCount == 0 || cell.PriceCoverageRecordCount < total
+	missing := cell.IterationPriceCompleteCount
+	if legacyUnknown && cell.hasBillableTokens() {
+		missing++
+	}
+	limit := total
+	if legacyUnknown && limit == 0 {
+		limit = 1
+	}
+	return max(0, min(missing, limit-cell.IncompleteCostCount))
 }
 
 func usageSortedDimensions(input map[string]*usage.DimensionTotals) []usage.DimensionTotals {

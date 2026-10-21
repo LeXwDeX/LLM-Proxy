@@ -29,10 +29,12 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 	"github.com/go-chi/chi/v5"
+	bolt "go.etcd.io/bbolt"
 )
 
 // testStores creates a bbolt DB and all stores for testing.
 type testStores struct {
+	db               *bolt.DB
 	clientStore      *nosql.ClientStore
 	clientQuotaStore *nosql.ClientQuotaStore
 	modelGroupStore  *nosql.ModelGroupStore
@@ -58,6 +60,7 @@ func setupTestStores(t *testing.T, tempDir string) testStores {
 	}
 	t.Cleanup(func() { db.Close() })
 	return testStores{
+		db:               db,
 		clientStore:      nosql.NewClientStore(db),
 		clientQuotaStore: nosql.NewClientQuotaStore(db),
 		modelGroupStore:  nosql.NewModelGroupStore(db),

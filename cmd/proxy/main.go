@@ -156,18 +156,11 @@ func run(args []string) int {
 		appLogger.Error("failed to initialize usage recovery journal", "path", dbPath+".usage-journal.jsonl", "error", err)
 		return 1
 	}
-	if recoveredClients, err := usageJournal.Replay(); err != nil {
-		// Individual records that keep failing must not take the whole proxy
-		// down: they stay queued in the journal and every retry tick reports
-		// the failure until the underlying cause is resolved.
-		appLogger.Error("usage journal recovery left events pending; continuing startup",
-			"error", err)
-	} else if len(recoveredClients) > 0 {
-		appLogger.Info("recovered pending usage events before startup", "clients", len(recoveredClients))
-	}
 
 	// One-shot backfill of hourly usage aggregation (idempotent via meta marker).
 	// Must run BEFORE proxy starts accepting traffic so reads see consistent agg data.
+	// It also runs before journal recovery: the receipt watermark compares raw
+	// detail with permanent rollups, so those rollups must already exist.
 	backfillStart := time.Now()
 	if err := nosql.BackfillUsageAgg(db); err != nil {
 		appLogger.Error("usage agg backfill failed", "error", err)
@@ -178,6 +171,23 @@ func run(args []string) int {
 		return 1
 	}
 	appLogger.Info("usage agg backfill done", "duration", time.Since(backfillStart).String())
+
+	// Establish the conservative legacy boundary before any receipt can be
+	// written. A failure does not block ordinary traffic; explicit recovery and
+	// retention pruning retry the migration and keep uncertain events queued.
+	if err := usageStore.EnsureUsageReceipts(); err != nil {
+		appLogger.Warn("usage receipt migration incomplete; uncertain legacy retries will stay queued", "error", err)
+	}
+
+	if recoveredClients, err := usageJournal.Replay(); err != nil {
+		// Individual records that keep failing must not take the whole proxy
+		// down: they stay queued in the journal and every retry tick reports
+		// the failure until the underlying cause is resolved.
+		appLogger.Error("usage journal recovery left events pending; continuing startup",
+			"error", err)
+	} else if len(recoveredClients) > 0 {
+		appLogger.Info("recovered pending usage events before startup", "clients", len(recoveredClients))
+	}
 
 	// Create all bbolt-backed stores.
 	clientStore := nosql.NewClientStore(db)

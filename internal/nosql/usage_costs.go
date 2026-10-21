@@ -290,7 +290,9 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 			}
 			u.CostUSD = usage.EstimateEventCost(*u.Event, resolver)
 		} else {
-			u.CostUSD = aggCellCost(u.AggCell, u.Target, u.At, u.Model, resolver)
+			var missingPrice int64
+			u.CostUSD, missingPrice = aggCellCost(u.AggCell, u.Target, u.At, u.Model, resolver)
+			u.IncompleteCostCount += missingPrice
 		}
 	}
 	if err := ctx.Err(); err != nil {

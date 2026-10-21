@@ -258,6 +258,13 @@ func TestReviewBundleUncertainCommitAndJournalFailureRetry(t *testing.T) {
 	if err := m.RecordUsage(journal, event); err != nil {
 		t.Fatal(err)
 	}
+	if status := m.Status("alice"); status.CalibrationError == "" || bundleUsed(m) != 0 {
+		t.Fatalf("uncertain commit must remain blocked until authoritative retry: %+v", status)
+	}
+	expireCalibrationBackoff(m)
+	if err := m.RecordUsage(journal, event); err != nil {
+		t.Fatal(err)
+	}
 	if got := bundleUsed(m); got != 12 {
 		t.Fatalf("durable retry not reflected in live quota: got %v, want 12", got)
 	}
@@ -325,6 +332,13 @@ func TestBundlePersistenceFailureBlocksAdmissionAndRetryReconciles(t *testing.T)
 				case <-time.After(5 * time.Second):
 					t.Fatal("retry reconciliation deadlocked")
 				}
+				if info, blocked := m.CheckTarget("alice", "anthropic", "executor"); !blocked || info.Scope != ScopeAccounting {
+					t.Fatalf("retry within backoff cleared unsettled accounting: %+v blocked=%t", info, blocked)
+				}
+				expireCalibrationBackoff(m)
+				if err := m.RecordUsage(journal, event); err != nil {
+					t.Fatal(err)
+				}
 				want = 12
 			} else {
 				// No caller identity means there is no retry token. The existing
@@ -359,6 +373,13 @@ func TestBundleAlreadyAccountedRetryAfterCalibrationErrorDoesNotDoubleCharge(t *
 		t.Fatal(err)
 	}
 	m.calibrationFailed("alice", errors.New("transient authoritative read failure"))
+	if err := m.RecordUsage(m.usageStore, event); err != nil {
+		t.Fatal(err)
+	}
+	if status := m.Status("alice"); status.CalibrationError == "" || bundleUsed(m) != 12 {
+		t.Fatalf("backed-off retry must retain the error and prior charge: %+v", status)
+	}
+	expireCalibrationBackoff(m)
 	if err := m.RecordUsage(m.usageStore, event); err != nil {
 		t.Fatal(err)
 	}

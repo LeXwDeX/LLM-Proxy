@@ -2,6 +2,7 @@ package nosql
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -16,8 +17,9 @@ import (
 // 预聚合层（hourly bucket）
 //
 // 设计：
-//   - key  = "<2006-01-02T15>|<endpoint_type>|<client>|<model>"
-//     timestamp 用截断到小时的字典序友好格式（UTC）；分隔符 '|' 不会出现在小时格式串中。
+//   - 新 key = "v2|<2006-01-02T15>|hex(endpoint_type)|hex(client)|hex(model)|hex(target)"
+//     维度用十六进制编码，含 '|' 或 '%' 的客户/模型/目标不会再产生歧义。
+//   - 旧 key 继续可读，但旧 4/5 段维度仍按历史约定解释。
 //   - val  = JSON{requests, success, input_tokens, output_tokens, cached_tokens}
 //   - 写：Record() 在同一 bbolt 写事务内 read-modify-write 累加。
 //   - 读：Summary/Aggregate/Count 仅扫此 bucket，避免百万级明细扫描 + Unmarshal。
@@ -42,24 +44,32 @@ const quotaUsageAggBuiltMetaKey = "quota_usage_agg_built_at_v1"
 
 // AggCell is the persisted value of one hourly aggregation cell.
 type AggCell struct {
-	RecordCount             int64              `json:"record_count,omitempty"`
-	NonBillable             *NonBillableTokens `json:"non_billable,omitempty"`
-	IncompleteUsageCount    int64              `json:"incomplete_usage_count,omitempty"`
-	IncompleteCostCount     int64              `json:"incomplete_cost_count,omitempty"`
-	Requests                int64              `json:"requests"`
-	Success                 int64              `json:"success"`
-	InputTokens             int64              `json:"input_tokens"`
-	OutputTokens            int64              `json:"output_tokens"`
-	CachedTokens            int64              `json:"cached_tokens"`
-	CacheCreationTokens     int64              `json:"cache_creation_tokens"`
-	ExplicitCacheReadTokens int64              `json:"explicit_cache_read_tokens,omitempty"`
-	ReasoningTokens         int64              `json:"reasoning_tokens,omitempty"`
-	CacheCreation5mTokens   int64              `json:"cache_creation_5m_tokens,omitempty"`
-	CacheCreation1hTokens   int64              `json:"cache_creation_1h_tokens,omitempty"`
-	ToolUsePromptTokens     int64              `json:"tool_use_prompt_tokens,omitempty"`
-	ImageInputTokens        int64              `json:"image_input_tokens,omitempty"`
-	CachedImageInputTokens  int64              `json:"cached_image_input_tokens,omitempty"`
-	ImageOutputTokens       int64              `json:"image_output_tokens,omitempty"`
+	RecordCount int64 `json:"record_count,omitempty"`
+	// PriceCoverageRecordCount counts rows written with coverage metadata.
+	// A zero or partial count marks legacy or mixed cells whose coverage is
+	// unknown, so a later missing price is reported conservatively.
+	PriceCoverageRecordCount int64 `json:"price_coverage_record_count,omitempty"`
+	// IterationPriceCompleteCount counts billable supplementary/fallback rows
+	// that had a price when written. A later missing price makes exactly these
+	// rows incomplete; it never includes rows already marked incomplete.
+	IterationPriceCompleteCount int64              `json:"iteration_price_complete_count,omitempty"`
+	NonBillable                 *NonBillableTokens `json:"non_billable,omitempty"`
+	IncompleteUsageCount        int64              `json:"incomplete_usage_count,omitempty"`
+	IncompleteCostCount         int64              `json:"incomplete_cost_count,omitempty"`
+	Requests                    int64              `json:"requests"`
+	Success                     int64              `json:"success"`
+	InputTokens                 int64              `json:"input_tokens"`
+	OutputTokens                int64              `json:"output_tokens"`
+	CachedTokens                int64              `json:"cached_tokens"`
+	CacheCreationTokens         int64              `json:"cache_creation_tokens"`
+	ExplicitCacheReadTokens     int64              `json:"explicit_cache_read_tokens,omitempty"`
+	ReasoningTokens             int64              `json:"reasoning_tokens,omitempty"`
+	CacheCreation5mTokens       int64              `json:"cache_creation_5m_tokens,omitempty"`
+	CacheCreation1hTokens       int64              `json:"cache_creation_1h_tokens,omitempty"`
+	ToolUsePromptTokens         int64              `json:"tool_use_prompt_tokens,omitempty"`
+	ImageInputTokens            int64              `json:"image_input_tokens,omitempty"`
+	CachedImageInputTokens      int64              `json:"cached_image_input_tokens,omitempty"`
+	ImageOutputTokens           int64              `json:"image_output_tokens,omitempty"`
 }
 
 // NonBillableTokens preserves observed usage excluded from the bill. A missing
@@ -84,6 +94,16 @@ func (cell AggCell) recordCount() int64 {
 	return cell.Requests
 }
 
+// addPriceCoverage records which rows carry enough evidence to distinguish a
+// later missing iteration price from a row that was already incomplete or
+// outside the iteration-price check.
+func (cell *AggCell) addPriceCoverage(evt usage.Event) {
+	cell.PriceCoverageRecordCount++
+	if !evt.NonBillable && (evt.Supplementary || evt.IterationType == "fallback_message") && !evt.CostIncomplete {
+		cell.IterationPriceCompleteCount++
+	}
+}
+
 func (cell *AggCell) addNonBillable(evt usage.Event) {
 	if !evt.NonBillable {
 		return
@@ -103,14 +123,9 @@ func (cell *AggCell) addNonBillable(evt usage.Event) {
 	cell.NonBillable.ImageOutputTokens += evt.ImageOutputTokens
 }
 
-// aggKey builds the composite key for an aggregation cell.
-//
-// Key format: hour|endpoint_type|client|model|target (5 segments).
-// Legacy keys (pre-B1) carry only 4 segments without target; parseAggKey
-// accepts both so historical data keeps serving reads. Legacy cells resolve
-// to target="" which lands in the "ungrouped" bucket for group statistics.
-func aggKey(t time.Time, endpointType, client, model, target string) []byte {
-	hour := t.UTC().Truncate(time.Hour).Format(hourLayout)
+// normalizeAggDimensions applies the one canonical form shared by the versioned
+// write key and the legacy projection used by receipt migration.
+func normalizeAggDimensions(endpointType, client, model, target string) (string, string, string, string) {
 	et := strings.ToLower(strings.TrimSpace(endpointType))
 	c := strings.TrimSpace(client)
 	m := strings.ToLower(strings.TrimSpace(model))
@@ -124,31 +139,32 @@ func aggKey(t time.Time, endpointType, client, model, target string) []byte {
 	if tg == "" {
 		tg = "unknown"
 	}
-	// Note: et may be empty (legacy events without endpoint_type). Keep as empty segment.
-	return []byte(hour + "|" + et + "|" + c + "|" + m + "|" + tg)
+	// et may be empty (legacy events without endpoint_type). Keep it empty.
+	return et, c, m, tg
 }
 
-// parseAggKey decomposes a key back into (hour, endpoint_type, client, model, target).
-// Returns ok=false if the key is malformed. 4-segment legacy keys (no target)
-// yield target="" — the honest value for pre-B1 history, grouped as ungrouped.
-func parseAggKey(key []byte) (hour time.Time, endpointType, client, model, target string, ok bool) {
-	parts := strings.Split(string(key), "|")
-	switch len(parts) {
-	case 4:
-		// legacy pre-B1 key: hour|et|client|model
-	case 5:
-		// current key: hour|et|client|model|target
-	default:
-		return time.Time{}, "", "", "", "", false
-	}
-	t, err := time.ParseInLocation(hourLayout, parts[0], time.UTC)
-	if err != nil {
-		return time.Time{}, "", "", "", "", false
-	}
-	if len(parts) == 5 {
-		target = parts[4]
-	}
-	return t, parts[1], parts[2], parts[3], target, true
+// aggKey builds the versioned hourly cell key:
+//
+//	v2|hour|hex(endpoint_type)|hex(client)|hex(model)|hex(target)
+//
+// Hex encoding keeps every dimension unambiguous, including literal '|' and
+// percent-like text. The version sits before the hour so it cannot collide
+// with historical keys that start with the hour.
+func aggKey(t time.Time, endpointType, client, model, target string) []byte {
+	et, c, m, tg := normalizeAggDimensions(endpointType, client, model, target)
+	hour := t.UTC().Truncate(time.Hour).Format(hourLayout)
+	return []byte("v2|" + hour + "|" + hex.EncodeToString([]byte(et)) + "|" +
+		hex.EncodeToString([]byte(c)) + "|" + hex.EncodeToString([]byte(m)) + "|" +
+		hex.EncodeToString([]byte(tg)))
+}
+
+// legacyAggKey builds the pre-v2 key. Receipt migration uses it to project raw
+// rows into historical key space, and tests use it to model old cells. New
+// writes never use it.
+func legacyAggKey(t time.Time, endpointType, client, model, target string) []byte {
+	et, c, m, tg := normalizeAggDimensions(endpointType, client, model, target)
+	hour := t.UTC().Truncate(time.Hour).Format(hourLayout)
+	return []byte(hour + "|" + et + "|" + c + "|" + m + "|" + tg)
 }
 
 // hourPrefix returns the hour-bucket-truncated key prefix for time t (used as Seek bound).
@@ -174,11 +190,13 @@ func bumpAgg(tx *bolt.Tx, evt usage.Event) error {
 	var cell AggCell
 	if existing := b.Get(key); existing != nil {
 		if err := json.Unmarshal(existing, &cell); err != nil {
-			// Corrupt cell: reset rather than abort (defensive).
-			cell = AggCell{}
+			// The permanent ledger cannot be repaired by overwriting it: abort
+			// and roll back the caller's transaction instead.
+			return fmt.Errorf("decode agg cell: %w", err)
 		}
 	}
 	cell.RecordCount = cell.recordCount() + 1
+	cell.addPriceCoverage(evt)
 	cell.Requests += usage.RequestWeight(evt)
 	cell.addNonBillable(evt)
 	if isSuccessStatus(evt.StatusCode) {
@@ -293,6 +311,7 @@ func bumpQuotaAgg(tx *bolt.Tx, evt usage.Event) error {
 		}
 	}
 	cell.RecordCount = cell.recordCount() + 1
+	cell.addPriceCoverage(evt)
 	cell.Requests += usage.RequestWeight(evt)
 	cell.addNonBillable(evt)
 	if isSuccessStatus(evt.StatusCode) {
@@ -403,39 +422,133 @@ func splitLegacyQuotaKey(key string) (string, string) {
 	return parts[0], parts[1]
 }
 
-// aggIter visits all cells whose hour bucket falls within [from, to] inclusive.
-// fn receives the parsed dimensions (target="" for legacy 4-segment keys) and
-// the cell value. Returning an error stops iteration.
-func aggIter(tx *bolt.Tx, from, to time.Time, fn func(hour time.Time, endpointType, client, model, target string, cell AggCell) error) error {
+// aggCellEntry is one physical hourly cell. dimsOK is false for a historical
+// key whose extra separators make its dimensions unknowable; total-only readers
+// may still use hour and cell.
+type aggCellEntry struct {
+	hour         time.Time
+	endpointType string
+	client       string
+	model        string
+	target       string
+	dimsOK       bool
+	cell         AggCell
+}
+
+func parseAggHour(hour string) (time.Time, error) {
+	t, err := time.ParseInLocation(hourLayout, hour, time.UTC)
+	if err != nil || t.Format(hourLayout) != hour {
+		return time.Time{}, fmt.Errorf("usage aggregate: invalid hour")
+	}
+	return t, nil
+}
+
+// decodeAggKey parses both physical key formats. Errors never include the raw
+// key so dimension-bearing values cannot leak through logs. A legacy key with
+// more than five segments is structurally valid but unresolvable.
+func decodeAggKey(key []byte) (aggCellEntry, error) {
+	text := string(key)
+	if strings.HasPrefix(text, "v2|") {
+		parts := strings.Split(text, "|")
+		if len(parts) != 6 {
+			return aggCellEntry{}, fmt.Errorf("usage aggregate: invalid v2 key")
+		}
+		hour, err := parseAggHour(parts[1])
+		if err != nil {
+			return aggCellEntry{}, err
+		}
+		decoded := make([]string, 4)
+		for i, part := range parts[2:] {
+			raw, err := hex.DecodeString(part)
+			if err != nil || hex.EncodeToString(raw) != part {
+				return aggCellEntry{}, fmt.Errorf("usage aggregate: invalid v2 dimension encoding")
+			}
+			decoded[i] = string(raw)
+		}
+		return aggCellEntry{
+			hour: hour, endpointType: decoded[0], client: decoded[1],
+			model: decoded[2], target: decoded[3], dimsOK: true,
+		}, nil
+	}
+
+	parts := strings.Split(text, "|")
+	if len(parts) < 4 {
+		return aggCellEntry{}, fmt.Errorf("usage aggregate: invalid legacy key")
+	}
+	if len(text) <= len(hourLayout) || text[len(hourLayout)] != '|' {
+		return aggCellEntry{}, fmt.Errorf("usage aggregate: invalid legacy key")
+	}
+	hour, err := time.ParseInLocation(hourLayout, text[:len(hourLayout)], time.UTC)
+	if err != nil {
+		return aggCellEntry{}, fmt.Errorf("usage aggregate: invalid legacy hour")
+	}
+	entry := aggCellEntry{hour: hour}
+	if len(parts) > 5 {
+		return entry, nil
+	}
+	entry.dimsOK = true
+	entry.endpointType = parts[1]
+	entry.client = parts[2]
+	entry.model = parts[3]
+	if len(parts) == 5 {
+		entry.target = parts[4]
+	}
+	return entry, nil
+}
+
+// scanAggKeyRange visits one physical format within the inclusive [start, end]
+// hour prefix. All structural, hour and JSON failures abort the scan; no
+// partial result is returned to the caller.
+func scanAggKeyRange(tx *bolt.Tx, start, endPrefix string, fn func(aggCellEntry) error) error {
 	b := tx.Bucket([]byte(BucketUsageAggHourly))
 	if b == nil {
 		return nil
 	}
-	c := b.Cursor()
-
-	startKey := hourPrefix(from)
-	// endPrefix is the inclusive last hour; we stop when key > endPrefix + sentinel.
-	// "|" (0x7C) sorts before "}" (0x7D), so endPrefix+"}" is a clean upper bound for
-	// any key starting with endPrefix + "|...".
-	endStop := append(hourPrefix(to), '}')
-
-	for k, v := c.Seek(startKey); k != nil; k, v = c.Next() {
-		if string(k) > string(endStop) {
+	cursor := b.Cursor()
+	endStop := endPrefix + "}"
+	for k, v := cursor.Seek([]byte(start)); k != nil; k, v = cursor.Next() {
+		if string(k) > endStop {
 			break
 		}
-		hour, et, client, model, target, ok := parseAggKey(k)
-		if !ok {
-			continue
+		entry, err := decodeAggKey(k)
+		if err != nil {
+			return err
 		}
-		var cell AggCell
-		if err := json.Unmarshal(v, &cell); err != nil {
-			continue
+		if err := json.Unmarshal(v, &entry.cell); err != nil {
+			return fmt.Errorf("usage aggregate: decode cell: %w", err)
 		}
-		if err := fn(hour, et, client, model, target, cell); err != nil {
+		if err := fn(entry); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// aggCellIter visits both physical formats in one transaction. Hours are
+// truncated and both bounds are inclusive, matching every existing reader.
+func aggCellIter(tx *bolt.Tx, from, to time.Time, fn func(aggCellEntry) error) error {
+	from = from.UTC().Truncate(time.Hour)
+	to = to.UTC().Truncate(time.Hour)
+	if to.Before(from) {
+		return nil
+	}
+	fromHour, toHour := string(hourPrefix(from)), string(hourPrefix(to))
+	if err := scanAggKeyRange(tx, fromHour, toHour, fn); err != nil {
+		return err
+	}
+	return scanAggKeyRange(tx, "v2|"+fromHour, "v2|"+toHour, fn)
+}
+
+// aggIter visits decodable cells whose hour bucket falls within [from, to].
+// An ambiguous legacy key fails explicitly rather than silently omitting
+// stored usage.
+func aggIter(tx *bolt.Tx, from, to time.Time, fn func(hour time.Time, endpointType, client, model, target string, cell AggCell) error) error {
+	return aggCellIter(tx, from, to, func(entry aggCellEntry) error {
+		if !entry.dimsOK {
+			return fmt.Errorf("usage aggregate: legacy key has more than five segments; dimensions cannot be recovered")
+		}
+		return fn(entry.hour, entry.endpointType, entry.client, entry.model, entry.target, entry.cell)
+	})
 }
 
 const usageBackfillBatchSize = 5000
@@ -1073,40 +1186,10 @@ func (s *UsageStore) SumByClientRange(client string, from, to time.Time) (map[st
 		return result, nil
 	}
 
-	fromHour := from.Format(hourLayout)
-	toHour := to.Format(hourLayout)
-
 	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(BucketUsageAggHourly))
-		if b == nil {
-			return nil
-		}
-		curs := b.Cursor()
-		// Upper-bound: same sentinel pattern as aggIter — "}" (ASCII 125) sits strictly
-		// after "|" (ASCII 124), so endPrefix+"}" is greater than every key "endPrefix|...".
-		endStop := append([]byte(toHour), '}')
-
-		for k, v := curs.Seek([]byte(fromHour)); k != nil; k, v = curs.Next() {
-			if string(k) > string(endStop) {
-				break
-			}
-			hour, et, kClient, model, _, ok := parseAggKey(k)
-			if !ok {
-				continue
-			}
-			kHour := hour.Format(hourLayout)
-			if kHour < fromHour || kHour > toHour {
-				if kHour > toHour {
-					break
-				}
-				continue
-			}
+		return aggIter(tx, from, to, func(_ time.Time, et, kClient, model, _ string, cell AggCell) error {
 			if kClient != client {
-				continue
-			}
-			var cell AggCell
-			if err := json.Unmarshal(v, &cell); err != nil {
-				continue
+				return nil
 			}
 			groupKey := et + ":" + model
 			totals := result[groupKey]
@@ -1123,10 +1206,13 @@ func (s *UsageStore) SumByClientRange(client string, from, to time.Time) (map[st
 			totals.CachedImageInputTokens += cell.CachedImageInputTokens
 			totals.ImageOutputTokens += cell.ImageOutputTokens
 			result[groupKey] = totals
-		}
-		return nil
+			return nil
+		})
 	})
-	return result, err
+	if err != nil {
+		return map[string]UsageTotals{}, err
+	}
+	return result, nil
 }
 
 // SumByClientHourlyTargets 按 (小时桶, target) 双层分组聚合指定 client 的小时格，
@@ -1142,31 +1228,10 @@ func (s *UsageStore) SumByClientHourlyTargets(client string, from, to time.Time)
 		return result, nil
 	}
 
-	fromHour := from.Format(hourLayout)
-	toHour := to.Format(hourLayout)
-
 	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(BucketUsageAggHourly))
-		if b == nil {
-			return nil
-		}
-		curs := b.Cursor()
-		endStop := append([]byte(toHour), '}')
-
-		for k, v := curs.Seek([]byte(fromHour)); k != nil; k, v = curs.Next() {
-			if string(k) > string(endStop) {
-				break
-			}
-			hour, et, kClient, model, target, ok := parseAggKey(k)
-			if !ok {
-				continue
-			}
+		return aggIter(tx, from, to, func(hour time.Time, et, kClient, model, target string, cell AggCell) error {
 			if kClient != client {
-				continue
-			}
-			var cell AggCell
-			if err := json.Unmarshal(v, &cell); err != nil {
-				continue
+				return nil
 			}
 			hk := hour.Format(hourLayout)
 			byTarget := result[hk]
@@ -1194,11 +1259,15 @@ func (s *UsageStore) SumByClientHourlyTargets(client string, from, to time.Time)
 			totals.CachedImageInputTokens += cell.CachedImageInputTokens
 			totals.ImageOutputTokens += cell.ImageOutputTokens
 			inner[groupKey] = totals
-		}
-		return nil
+			return nil
+		})
 	})
-	return result, err
+	if err != nil {
+		return map[string]map[string]map[string]UsageTotals{}, err
+	}
+	return result, nil
 }
+
 func (s *UsageStore) SumByClientTargetRange(client string, from, to time.Time) (map[string]map[string]UsageTotals, error) {
 	client = strings.TrimSpace(client)
 	result := make(map[string]map[string]UsageTotals)
@@ -1208,39 +1277,10 @@ func (s *UsageStore) SumByClientTargetRange(client string, from, to time.Time) (
 		return result, nil
 	}
 
-	fromHour := from.Format(hourLayout)
-	toHour := to.Format(hourLayout)
-
 	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(BucketUsageAggHourly))
-		if b == nil {
-			return nil
-		}
-		curs := b.Cursor()
-		endStop := append([]byte(toHour), '}')
-
-		for k, v := curs.Seek([]byte(fromHour)); k != nil; k, v = curs.Next() {
-			if string(k) > string(endStop) {
-				break
-			}
-			hour, et, kClient, model, target, ok := parseAggKey(k)
-			_ = hour
-			if !ok {
-				continue
-			}
-			kHour := hour.Format(hourLayout)
-			if kHour < fromHour || kHour > toHour {
-				if kHour > toHour {
-					break
-				}
-				continue
-			}
+		return aggIter(tx, from, to, func(_ time.Time, et, kClient, model, target string, cell AggCell) error {
 			if kClient != client {
-				continue
-			}
-			var cell AggCell
-			if err := json.Unmarshal(v, &cell); err != nil {
-				continue
+				return nil
 			}
 			inner := result[target]
 			if inner == nil {
@@ -1262,8 +1302,11 @@ func (s *UsageStore) SumByClientTargetRange(client string, from, to time.Time) (
 			totals.CachedImageInputTokens += cell.CachedImageInputTokens
 			totals.ImageOutputTokens += cell.ImageOutputTokens
 			inner[groupKey] = totals
-		}
-		return nil
+			return nil
+		})
 	})
-	return result, err
+	if err != nil {
+		return map[string]map[string]UsageTotals{}, err
+	}
+	return result, nil
 }

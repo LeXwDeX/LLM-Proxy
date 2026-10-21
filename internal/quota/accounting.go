@@ -24,6 +24,9 @@ func (m *Manager) accountingGate(clientName string) *sync.RWMutex {
 func (m *Manager) RecordUsage(recorder usage.Recorder, event usage.Event) error {
 	event = usage.CloneEvent(event)
 	event.ClientName = strings.TrimSpace(event.ClientName)
+	if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
+		return err
+	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
@@ -33,9 +36,9 @@ func (m *Manager) RecordUsage(recorder usage.Recorder, event usage.Event) error 
 	defer func() {
 		gate.RUnlock()
 		if reconcile {
-			// Evaluate takes this gate exclusively and waits for every parallel
-			// record's increment before replacing counters from durable usage.
-			m.Evaluate(event.ClientName)
+			// Share admission's single-flight/backoff; the retry takes this gate
+			// exclusively before replacing counters from durable usage.
+			m.retryCalibrationIfDue(event.ClientName)
 		}
 	}()
 	resolver, _ := m.getResolver()
@@ -60,7 +63,7 @@ func (m *Manager) RecordUsage(recorder usage.Recorder, event usage.Event) error 
 		}
 	}
 	// An idempotent retry can be the first acknowledged observation of an
-	// earlier uncertain commit. Reconcile after releasing the shared gate;
+	// earlier uncertain commit. Retry calibration after releasing the shared gate;
 	// blindly incrementing would double-charge already-accounted retries.
 	m.mu.RLock()
 	reconcile = m.calibrationErrors[event.ClientName] != ""

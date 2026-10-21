@@ -28,6 +28,10 @@ type Scenario struct {
 	// Iterations selects a documented Anthropic billing shape or an explicit
 	// malformed counterexample; validateIterations lists the supported modes.
 	Iterations string `json:"iterations,omitempty"`
+	// ChatTail selects a synthetic Chat stream tail. reprice_nonfinal appends a
+	// non-usage chunk with another model and service_tier after the official
+	// usage chunk and before [DONE]. It is a counterexample, not an OpenAI shape.
+	ChatTail string `json:"chat_tail,omitempty"`
 
 	// Status answers with this HTTP status and an error envelope instead of a
 	// reply. Preset picks a provider-specific error body (see presets.go).
@@ -100,6 +104,9 @@ type UsageSpec struct {
 	CacheWr1h  *int `json:"cw1h,omitempty"`      // 1-hour cache writes (subset of Input)
 	Reasoning  *int `json:"reasoning,omitempty"` // reasoning tokens (subset of Output)
 	Images     *int `json:"images,omitempty"`    // generated images
+	// Optional OpenAI output partitions, including deliberately inconsistent counts.
+	OutputText  *int `json:"text_out,omitempty"`
+	OutputImage *int `json:"image_out,omitempty"`
 }
 
 func (s *Scenario) merge(o *Scenario) {
@@ -129,6 +136,7 @@ func (s *Scenario) merge(o *Scenario) {
 	}
 	str(&s.PricingPreset, o.PricingPreset)
 	str(&s.Iterations, o.Iterations)
+	str(&s.ChatTail, o.ChatTail)
 	num(&s.Status, o.Status)
 	str(&s.Preset, o.Preset)
 	str(&s.ErrCode, o.ErrCode)
@@ -171,6 +179,8 @@ func (s *Scenario) merge(o *Scenario) {
 		pick(&u.CacheWr1h, o.Usage.CacheWr1h)
 		pick(&u.Reasoning, o.Usage.Reasoning)
 		pick(&u.Images, o.Usage.Images)
+		pick(&u.OutputText, o.Usage.OutputText)
+		pick(&u.OutputImage, o.Usage.OutputImage)
 	}
 }
 
@@ -240,6 +250,9 @@ func ParseDirective(text string) (*Scenario, error) {
 		case "iterations":
 			s.Iterations = val
 			err = validateIterations(s)
+		case "chat_tail":
+			s.ChatTail = val
+			err = validateIterations(s)
 		case "preset":
 			s.Preset = strings.ToLower(val)
 		case "code":
@@ -291,6 +304,10 @@ func ParseDirective(text string) (*Scenario, error) {
 			setUsage(&s.ensureUsage().Reasoning)
 		case "usage.images":
 			setUsage(&s.ensureUsage().Images)
+		case "usage.text_out":
+			setUsage(&s.ensureUsage().OutputText)
+		case "usage.image_out":
+			setUsage(&s.ensureUsage().OutputImage)
 		case "ws_terminal_response":
 			if !json.Valid([]byte(val)) {
 				err = fmt.Errorf("fakellm directive ws_terminal_response=%q: invalid JSON", val)
@@ -337,16 +354,31 @@ func legacyMode(mode string) (*Scenario, bool) {
 	return nil, false
 }
 
-// validateIterations accepts only the documented iterations shapes; directives
-// and /_control JSON share it. Unset keeps the default without iterations.
+// validateIterations accepts only the documented iterations shapes and the
+// synthetic Chat tail counterexample; directives and /_control JSON share it.
+// Unset keeps the default without iterations.
 func validateIterations(sc *Scenario) error {
 	if sc == nil {
 		return nil
 	}
-	switch sc.Iterations {
+	switch sc.ChatTail {
+	case "", "reprice_nonfinal":
+	default:
+		return fmt.Errorf("fakellm chat_tail=%q: unknown Chat tail shape", sc.ChatTail)
+	}
+	mode, _ := anthropicTail(sc.Iterations)
+	if mode == "replace_empty_iterations" {
+		return nil
+	}
+	switch mode {
 	case "", "message", "advisor", "compaction", "compaction_on_demand",
 		"fallback_output", "fallback_zero_unknown", "fallback_sticky", "fallback_chain", "fallback_chain_unknown",
 		"fallback_refusal_free", "fallback_refusal_paid", "fallback_refusal_null", "fallback_refusal_missing_category",
+		"refusal_free", "refusal_general_harms", "refusal_paid", "refusal_frontier", "refusal_reasoning", "refusal_null",
+		"refusal_unknown", "refusal_missing_category", "refusal_missing_output", "refusal_nonzero", "refusal_nonrefusal",
+		"message_refusal_free", "advisor_refusal_free", "compaction_refusal_free", "fallback_refusal_unknown",
+		"fallback_missing_input", "advisor_early_only",
+		"advisor_then_error", "advisor_refusal_free_then_error", "advisor_intermediate_then_error", "advisor_stop_then_error",
 		"cache_missing", "cache_mismatch", "iterations_unknown", "iterations_invalid", "iterations_mismatch":
 		return nil
 	}

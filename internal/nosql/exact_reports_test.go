@@ -558,7 +558,7 @@ func BenchmarkExactCostConsumers(b *testing.B) {
 							b.Fatal(err)
 						}
 						for _, c := range cells {
-							_ = aggCellCost(c.AggCell, c.Target, c.Hour, c.Model, r)
+							_, _ = aggCellCost(c.AggCell, c.Target, c.Hour, c.Model, r)
 						}
 					}
 				case "report_legacy_exact_two_scans":
