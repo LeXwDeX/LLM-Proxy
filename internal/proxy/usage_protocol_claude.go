@@ -3,6 +3,7 @@ package proxy
 import (
 	"math"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
@@ -121,8 +122,8 @@ func claudeIterationsIncomplete(iterations []any, top map[string]any, modelPrefi
 			case !ok || name == "":
 				unknown = true
 			case model == "":
-				model = stripModelPrefix(name, modelPrefix)
-			case stripModelPrefix(name, modelPrefix) != model:
+				model = name
+			case !sameEchoedModel(name, model, modelPrefix):
 				multiModel = true
 			}
 		}
@@ -202,6 +203,16 @@ func stripModelPrefix(name, prefix string) string {
 	return name[len(prefix):]
 }
 
+// sameEchoedModel compares two echoed spellings: the raw spellings first, and
+// only when they differ, with the target's ModelPrefix removed from either.
+func sameEchoedModel(a, b, prefix string) bool {
+	if a == b {
+		return true
+	}
+	sa, sb := stripModelPrefix(a, prefix), stripModelPrefix(b, prefix)
+	return sa == b || a == sb || sa == sb
+}
+
 // echoedModel is the lowercased attribution identity of an echoed model name.
 func (p usageParser) echoedModel(name string) string {
 	return strings.ToLower(stripModelPrefix(name, p.modelPrefix))
@@ -211,6 +222,41 @@ func (p usageParser) echoedModel(name string) string {
 // admission set. It is only logged; attribution keeps the echoed spelling.
 type claudeEchoMismatch struct{ iterationType, model string }
 
+// The upstream controls how many iterations a response carries; one request
+// logs at most this many distinct mismatches, each model truncated.
+const (
+	claudeEchoWarnLimit      = 3
+	claudeEchoWarnModelBytes = 128
+)
+
+// truncateUTF8 cuts s to at most n bytes without splitting a UTF-8 sequence.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// noteUnadmitted records one mismatch for logging: duplicates of a recorded
+// (iteration_type, model) are ignored and occurrences beyond the limit are
+// only counted.
+func (t *usageTokens) noteUnadmitted(typ, model string) {
+	model = truncateUTF8(model, claudeEchoWarnModelBytes)
+	for _, e := range t.unadmittedEchoes {
+		if e.iterationType == typ && e.model == model {
+			return
+		}
+	}
+	if len(t.unadmittedEchoes) >= claudeEchoWarnLimit {
+		t.unadmittedDropped++
+		return
+	}
+	t.unadmittedEchoes = append(t.unadmittedEchoes, claudeEchoMismatch{iterationType: typ, model: model})
+}
+
 // claudeAdmission is the set of model identities the request admission
 // checked on this target: the executor (upstream model) plus the explicit
 // advisor/fallback models of the final outbound body.
@@ -219,17 +265,22 @@ func (p usageParser) claudeAdmission() []string {
 	return append([]string{p.model}, models...)
 }
 
-// admit returns the admission-side spelling for an echoed explicit model that
-// matches it case-insensitively (lowercased, like every usage model identity).
-// Otherwise the echoed spelling is kept and the mismatch recorded.
-func (t *usageTokens) admit(admission []string, echoed, typ string) string {
-	for _, model := range admission {
-		if model = strings.TrimSpace(model); model != "" && strings.EqualFold(model, echoed) {
-			return strings.ToLower(model)
+// admit returns the admission-side spelling (lowercased, like every usage model
+// identity) for an explicit echo. The raw echo is compared first: explicit
+// supplementary models leave unprefixed, so a client-written spelling that
+// starts with the prefix was admitted as is. Only a miss compares the
+// prefix-stripped echo. Otherwise the stripped echo is kept and the mismatch
+// noted for logging.
+func (t *usageTokens) admit(admission []string, raw, stripped, typ string) string {
+	for _, echoed := range []string{raw, stripped} {
+		for _, model := range admission {
+			if model = strings.TrimSpace(model); model != "" && strings.EqualFold(model, echoed) {
+				return strings.ToLower(model)
+			}
 		}
 	}
-	t.unadmittedEchoes = append(t.unadmittedEchoes, claudeEchoMismatch{iterationType: typ, model: echoed})
-	return echoed
+	t.noteUnadmitted(typ, stripped)
+	return stripped
 }
 
 // parseClaudeIterationUsage expands only an entirely validated attribution plan.
@@ -265,12 +316,13 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 		// fallback still identifies whose observed output it is; never copy input
 		// from that iteration or price it with the executor's request context.
 		final, _ := raw[len(raw)-1].(map[string]any)
+		rawModel := strings.ToLower(readString(final["model"]))
 		model := p.echoedModel(readString(final["model"]))
 		finalTokens := parseClaudeUsageCounters(final)
 		if _, input := top["input_tokens"]; !input && base.status != usageStatusConflict &&
 			base.fields&usageFieldOutput != 0 && final["type"] == "fallback_message" && model != "" &&
 			validClaudeIterationCounters(final, finalTokens) && finalTokens.OutputTokens == base.OutputTokens {
-			model = legacy.admit(p.claudeAdmission(), model, "fallback_message")
+			model = legacy.admit(p.claudeAdmission(), rawModel, model, "fallback_message")
 			legacy.billingModel, legacy.iterationType, legacy.iterationIndex = model, "fallback_message", len(raw)-1
 			independent := usageParser{protocol: config.ProtocolAnthropicMessages}
 			legacy.pricingContext = independent.pricingContext(nil, top)
@@ -280,13 +332,15 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 		return legacy
 	}
 	// The request-side upstream model never carries ModelPrefix; the response
-	// envelope fallback is an echo and is compared without it.
+	// envelope fallback is an echo and is compared without it. Item echoes match
+	// the executor by raw spelling first, then without the prefix.
 	executor := strings.ToLower(strings.TrimSpace(p.model))
 	if executor == "" {
 		executor = p.echoedModel(strings.TrimSpace(responseModel))
 	}
 	items := make([]map[string]any, len(raw))
 	models := make([]string, len(raw))
+	raws := make([]string, len(raw))
 	explicit := make([]bool, len(raw))
 	messages := []any{}
 	hasFallback, hasAdditional := false, false
@@ -303,18 +357,19 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 		if _, nested := item["iterations"]; nested {
 			return invalid()
 		}
-		model := executor
+		model, rawModel := executor, executor
 		if value, present := item["model"]; present {
 			name, ok := value.(string)
 			if !ok || strings.TrimSpace(name) == "" {
 				return invalid()
 			}
+			rawModel = strings.ToLower(strings.TrimSpace(name))
 			model, explicit[i] = p.echoedModel(strings.TrimSpace(name)), true
 		}
 		typ, _ := item["type"].(string)
 		switch typ {
 		case "message":
-			if executor != "" && model != executor {
+			if executor != "" && rawModel != executor && model != executor {
 				messagesMatchExecutor = false
 			}
 			messages = append(messages, item)
@@ -332,7 +387,7 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 		default:
 			return invalid()
 		}
-		items[i], models[i] = item, model
+		items[i], models[i], raws[i] = item, model, rawModel
 	}
 	// Keep the existing top-only diagnostics, but only a verified plan may
 	// replace committed evidence.
@@ -389,7 +444,7 @@ func (p usageParser) parseClaudeIterationUsage(top map[string]any, responseModel
 			continue
 		}
 		if explicit[i] && models[i] != "" {
-			models[i] = base.admit(admission, models[i], typ)
+			models[i] = base.admit(admission, raws[i], models[i], typ)
 		}
 		if i == returned {
 			base.billingModel, base.iterationType, base.iterationIndex = models[i], typ, i

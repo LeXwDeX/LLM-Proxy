@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -247,5 +249,139 @@ func TestClaudeModelPrefixIterationBundleAndWarn(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Review of #36: the proxy prefixes only the top-level model; explicit
+// supplementary models leave as written. A client that writes the prefix (or a
+// name that merely starts with it) was admitted under that exact spelling, so
+// an echo of that spelling must bill it unchanged and without a warning. Only
+// when the raw echo misses is the prefix-stripped echo compared.
+func TestClaudeIterationsRawEchoMatchesFirst(t *testing.T) {
+	const top = `"input_tokens":7,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0`
+	item := func(typ, model string, in, out int) string {
+		return `{"type":"` + typ + `","model":"` + model + `","input_tokens":` + strconv.Itoa(in) + `,"output_tokens":` + strconv.Itoa(out) + `,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}`
+	}
+	iter := func(items ...string) string { return top + `,"iterations":[` + strings.Join(items, ",") + `]` }
+	for _, tc := range []struct {
+		name, prefix, executor, body, topModel, usage string
+		want                                          prefixIterationWant
+	}{
+		{"client_prefixed_advisor", "Vendor/", "test-model",
+			`{"tools":[{"type":"advisor_20260301","name":"advisor","model":"Vendor/Adv"}]}`, "Vendor/test-model",
+			iter(item("message", "Vendor/test-model", 7, 2), item("advisor_message", "Vendor/Adv", 3, 1)),
+			prefixIterationWant{components: []string{"advisor_message:vendor/adv"}}},
+		{"client_prefixed_fallback", "Vendor/", "test-model",
+			`{"fallbacks":[{"model":"Vendor/FB"}]}`, "Vendor/FB",
+			iter(item("message", "Vendor/test-model", 5, 1), item("fallback_message", "Vendor/FB", 7, 2)),
+			prefixIterationWant{billingModel: "vendor/fb", components: []string{"message:test-model"}}},
+		{"substring_prefix_advisor", "claude-", "claude-sonnet",
+			`{"tools":[{"type":"advisor_20260301","name":"advisor","model":"claude-opus"}]}`, "claude-sonnet",
+			iter(item("message", "claude-sonnet", 7, 2), item("advisor_message", "claude-opus", 3, 1)),
+			prefixIterationWant{components: []string{"advisor_message:claude-opus"}}},
+		{"substring_prefix_wire_echo", "claude-", "claude-sonnet",
+			`{"tools":[{"type":"advisor_20260301","name":"advisor","model":"claude-opus"}]}`, "claude-claude-sonnet",
+			iter(item("message", "claude-claude-sonnet", 7, 2), item("advisor_message", "claude-opus", 3, 1)),
+			prefixIterationWant{components: []string{"advisor_message:claude-opus"}}},
+		{"substring_prefix_fallback", "claude-", "claude-sonnet",
+			`{"fallbacks":[{"model":"claude-fb"}]}`, "claude-fb",
+			iter(item("message", "claude-sonnet", 5, 1), item("fallback_message", "claude-fb", 7, 2)),
+			prefixIterationWant{billingModel: "claude-fb", components: []string{"message:claude-sonnet"}}},
+		{"substring_prefix_compaction", "claude-", "claude-sonnet", `{}`, "claude-sonnet",
+			iter(item("compaction", "claude-sonnet", 11, 2), item("message", "claude-sonnet", 7, 2)),
+			prefixIterationWant{components: []string{"compaction:claude-sonnet"}}},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", tc.name, stream), func(t *testing.T) {
+				r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+				target := &Target{Name: "prefix", EndpointType: config.EndpointTypeClaude, ModelPrefix: tc.prefix}
+				p := newTargetUsageParser(r, target, tc.executor, []byte(tc.body), nil)
+				var tokens usageTokens
+				if stream {
+					u := newUsageStream("text/event-stream", "", p)
+					_, _ = io.WriteString(u, `data: {"type":"message_start","message":{"model":"`+tc.topModel+`","usage":{"input_tokens":7,"output_tokens":0}}}`+"\n\n"+
+						`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{`+tc.usage+`}}`+"\n\n"+"data: {\"type\":\"message_stop\"}\n\n")
+					u.Close()
+					tokens = u.tokens
+				} else {
+					tokens, _, _ = p.extractTokens("application/json", []byte(`{"type":"message","model":"`+tc.topModel+`","stop_reason":"end_turn","usage":{`+tc.usage+`}}`))
+				}
+				checkPrefixIteration(t, tokens, tc.want)
+				if len(tokens.unadmittedEchoes) != 0 || tokens.unadmittedDropped != 0 {
+					t.Fatalf("admitted echo warned: %+v dropped=%d", tokens.unadmittedEchoes, tokens.unadmittedDropped)
+				}
+			})
+		}
+	}
+	// Missing-input fallback uses the same order.
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	p := newTargetUsageParser(r, &Target{Name: "prefix", EndpointType: config.EndpointTypeClaude, ModelPrefix: "Vendor/"}, "test-model", []byte(`{"fallbacks":[{"model":"Vendor/FB"}]}`), nil)
+	tokens, _, _ := p.extractTokens("application/json", []byte(`{"type":"message","model":"Vendor/FB","stop_reason":"end_turn","usage":{"output_tokens":2,"iterations":[{"type":"message","model":"Vendor/test-model","input_tokens":5,"output_tokens":1},{"type":"fallback_message","model":"Vendor/FB","input_tokens":7,"output_tokens":2}]}}`))
+	if tokens.billingModel != "vendor/fb" || len(tokens.unadmittedEchoes) != 0 {
+		t.Fatalf("missing-input fallback billingModel=%q echoes=%+v", tokens.billingModel, tokens.unadmittedEchoes)
+	}
+}
+
+// The upstream controls how many unadmitted echoes a response carries. One
+// request logs at most a few distinct (iteration_type, model) pairs, each
+// model truncated on a UTF-8 boundary, plus one summary with the dropped count.
+func TestClaudeUnadmittedEchoWarnIsBounded(t *testing.T) {
+	long := strings.Repeat("模", 100) // 300 bytes
+	items := []string{`{"type":"message","input_tokens":7,"output_tokens":2}`}
+	for _, model := range []string{long, long, "rogue-1", "rogue-1", "rogue-2"} {
+		items = append(items, `{"type":"advisor_message","model":"`+model+`","input_tokens":1,"output_tokens":1}`)
+	}
+	for i := 3; i < 500; i++ {
+		items = append(items, `{"type":"advisor_message","model":"rogue-`+strconv.Itoa(i)+`","input_tokens":1,"output_tokens":1}`)
+	}
+	payload := `{"type":"message","model":"test-model","stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"iterations":[` + strings.Join(items, ",") + `]}}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, payload)
+	}))
+	defer up.Close()
+	cfg := &config.Config{Server: config.ServerConfig{RequestTimeoutSeconds: 10}, Targets: []config.Target{{
+		Name: "bounded", EndpointType: config.EndpointTypeClaude, Endpoint: up.URL, APIKey: "fixture",
+		ModelMappings: []config.ModelMapping{{Upstream: "test-model"}},
+	}}}
+	logs := &rejectionLog{}
+	s, err := NewService(cfg, slog.New(slog.NewJSONHandler(logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	events := &goneEventRecorder{}
+	s.SetUsageRecorder(events)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, goneRequest(t, "/v1/messages", `{"model":"test-model","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if got := events.snapshot(); len(got) != 1 || len(got[0].Components) != 502 || got[0].Components[0].Model != long {
+		t.Fatalf("attribution must keep every component and the full echo: %d", len(got))
+	}
+	var detail, summary []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var entry map[string]any
+		if json.Unmarshal([]byte(line), &entry) != nil {
+			continue
+		}
+		msg, _ := entry["msg"].(string)
+		switch {
+		case strings.Contains(msg, "echoed supplementary model not in admission set"):
+			detail = append(detail, entry)
+		case strings.Contains(msg, "echoed supplementary models over per-request log limit"):
+			summary = append(summary, entry)
+		}
+	}
+	if len(detail) != 3 || len(summary) != 1 {
+		t.Fatalf("detail=%d summary=%d: %s", len(detail), len(summary), logs.String())
+	}
+	want := strings.Repeat("模", 42) // 126 bytes: the 43rd rune would cross 128
+	if detail[0]["model"] != want || detail[1]["model"] != "rogue-1" || detail[2]["model"] != "rogue-2" {
+		t.Fatalf("detail models: %v %v %v", detail[0]["model"], detail[1]["model"], detail[2]["model"])
+	}
+	if summary[0]["dropped"] != float64(497) {
+		t.Fatalf("summary=%v", summary[0])
 	}
 }

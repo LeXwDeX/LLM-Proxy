@@ -27,10 +27,13 @@ func TestClaudeIterationModelPrefixBilling(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, targetPrefix, echoPrefix, mode string
-		root                                 row
-		rootCached                           int64
-		diagnostic                           string
-		child                                *row
+		// Client-written supplementary spellings (default fake-advisor /
+		// fake-fallback). They leave unprefixed and are admitted as written.
+		clientAdvisor, clientFallback string
+		root                          row
+		rootCached                    int64
+		diagnostic                    string
+		child                         *row
 	}{
 		{name: "advisor", targetPrefix: "Vendor/", echoPrefix: "Vendor/", mode: "advisor",
 			root: row{"unfamiliar-upstream", "", 70, 20}, rootCached: 30, child: &row{"fake-advisor", "advisor_message", 7, 3}},
@@ -40,6 +43,10 @@ func TestClaudeIterationModelPrefixBilling(t *testing.T) {
 			root: row{"unfamiliar-upstream", "", 0, 0}, child: &row{"unfamiliar-upstream", "compaction", 11, 2}},
 		{name: "fallback", targetPrefix: "Vendor/", echoPrefix: "Vendor/", mode: "fallback_output",
 			root: row{"fake-fallback", "fallback_message", 70, 20}, rootCached: 30, child: &row{"unfamiliar-upstream", "message", 13, 4}},
+		{name: "client_prefixed_advisor", targetPrefix: "Vendor/", echoPrefix: "Vendor/", mode: "advisor", clientAdvisor: "Vendor/fake-advisor",
+			root: row{"unfamiliar-upstream", "", 70, 20}, rootCached: 30, child: &row{"vendor/fake-advisor", "advisor_message", 7, 3}},
+		{name: "client_prefixed_fallback", targetPrefix: "Vendor/", echoPrefix: "Vendor/", mode: "fallback_output", clientFallback: "Vendor/fake-fallback",
+			root: row{"vendor/fake-fallback", "fallback_message", 70, 20}, rootCached: 30, child: &row{"unfamiliar-upstream", "message", 13, 4}},
 		{name: "no_prefix_target", targetPrefix: "", echoPrefix: "Vendor/", mode: "advisor",
 			root: row{"unfamiliar-upstream", "", 70, 20}, rootCached: 30, diagnostic: "multi_model_iterations"},
 		{name: "other_prefix_echo", targetPrefix: "Vendor/", echoPrefix: "Other/", mode: "advisor",
@@ -47,15 +54,22 @@ func TestClaudeIterationModelPrefixBilling(t *testing.T) {
 	} {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%v", tc.name, stream), func(t *testing.T) {
+				advisorModel, fallbackModel := tc.clientAdvisor, tc.clientFallback
+				if advisorModel == "" {
+					advisorModel = "fake-advisor"
+				}
+				if fallbackModel == "" {
+					fallbackModel = "fake-fallback"
+				}
 				alias := uniq("e2e-prefix-iteration")
 				spec := map[string]any{"endpoint_type": "claude", "endpoint": w.urlA + "/anthropic", "api_key": uniq("sk-fake-prefix-iteration"),
 					"model_mappings": []any{map[string]any{"upstream": "Unfamiliar-Upstream", "fallback": alias},
-						map[string]any{"upstream": "fake-advisor", "fallback": uniq("e2e-prefix-advisor")}, map[string]any{"upstream": "fake-fallback", "fallback": uniq("e2e-prefix-fallback")}}}
+						map[string]any{"upstream": advisorModel, "fallback": uniq("e2e-prefix-advisor")}, map[string]any{"upstream": fallbackModel, "fallback": uniq("e2e-prefix-fallback")}}}
 				if tc.targetPrefix != "" {
 					spec["model_prefix"] = tc.targetPrefix
 				}
 				tg := target(t, spec)
-				models := []string{"Unfamiliar-Upstream", "fake-advisor", "fake-fallback"}
+				models := []string{"Unfamiliar-Upstream", advisorModel, fallbackModel}
 				rates := []usage.CostRates{exec, adv, fb}
 				groups := make([]string, len(models))
 				for i, model := range models {
@@ -78,8 +92,8 @@ func TestClaudeIterationModelPrefixBilling(t *testing.T) {
 				directive := "[[fake iterations=" + tc.mode + " iteration_model_prefix=" + tc.echoPrefix + " pricing=standard usage.in=100 usage.out=20 usage.cached=30 usage.cw=0 usage.cw1h=0 usage.reasoning=0]]"
 				body := expand(messagesBody(directive, stream), alias).(map[string]any)
 				// Explicit supplementary identities are what admission checks.
-				body["tools"] = []any{map[string]any{"type": "advisor_20260301", "name": "advisor", "model": "fake-advisor"}}
-				body["fallbacks"] = []any{map[string]any{"model": "fake-fallback"}}
+				body["tools"] = []any{map[string]any{"type": "advisor_20260301", "name": "advisor", "model": advisorModel}}
+				body["fallbacks"] = []any{map[string]any{"model": fallbackModel}}
 				seq := w.fakeA.LastSeq()
 				response, raw := call(t, key, "POST", "/v1/messages", body, nil)
 				if response.StatusCode != 200 {
@@ -119,7 +133,7 @@ func TestClaudeIterationModelPrefixBilling(t *testing.T) {
 					t.Fatalf("model %q has no group", model)
 				}
 				rootRate := exec
-				if tc.root.model == "fake-fallback" {
+				if strings.EqualFold(tc.root.model, fallbackModel) {
 					rootRate = fb
 				}
 				add(tc.root.model, rootRate.CostFor(tc.root.in, tc.root.out, tc.rootCached, 0))
@@ -128,7 +142,7 @@ func TestClaudeIterationModelPrefixBilling(t *testing.T) {
 						t.Fatalf("child=%+v root=%+v", child, root)
 					}
 					childRate := exec
-					if tc.child.model == "fake-advisor" {
+					if strings.EqualFold(tc.child.model, advisorModel) {
 						childRate = adv
 					}
 					add(tc.child.model, childRate.CostFor(tc.child.in, tc.child.out, 0, 0))
