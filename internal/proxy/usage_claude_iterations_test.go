@@ -36,7 +36,18 @@ func TestClaudeUsageIterations(t *testing.T) {
 		{"output_mismatch", `"input_tokens":1760,"cache_read_input_tokens":412,"cache_creation_input_tokens":0,"output_tokens":530,"iterations":[` + execA + `,` + execB + `]`, 1760, 530, 412, true, "iterations_usage_mismatch"},
 		{"cache_read_mismatch", `"input_tokens":1760,"cache_read_input_tokens":400,"cache_creation_input_tokens":0,"output_tokens":531,"iterations":[` + execA + `,` + execB + `]`, 1760, 531, 400, true, "iterations_usage_mismatch"},
 		{"cache_creation_mismatch", `"input_tokens":70,"output_tokens":10,"cache_creation_input_tokens":0,"iterations":[{"type":"message","input_tokens":70,"output_tokens":10,"cache_creation_input_tokens":5}]`, 70, 10, 0, true, "iterations_usage_mismatch"},
-		// A counter not reported by every message item is not compared.
+		// Missing cache counters are unknown, not zero. A partial sum below or
+		// equal to the known top-level count is possible; an excess is not.
+		{"partially_reported_cache_read_exceeds_top", `"input_tokens":70,"output_tokens":10,"cache_read_input_tokens":0,"iterations":[{"type":"message","input_tokens":30,"output_tokens":5,"cache_read_input_tokens":100},{"type":"message","input_tokens":40,"output_tokens":5}]`, 70, 10, 0, true, "iterations_usage_mismatch"},
+		{"partially_reported_cache_creation_exceeds_top", `"input_tokens":70,"output_tokens":10,"cache_creation_input_tokens":2,"iterations":[{"type":"message","input_tokens":30,"output_tokens":5},{"type":"message","input_tokens":40,"output_tokens":5,"cache_creation_input_tokens":3}]`, 70, 10, 0, true, "iterations_usage_mismatch"},
+		{"partially_reported_cache_read_equals_top", `"input_tokens":70,"output_tokens":10,"cache_read_input_tokens":100,"iterations":[{"type":"message","input_tokens":30,"output_tokens":5,"cache_read_input_tokens":100},{"type":"message","input_tokens":40,"output_tokens":5}]`, 70, 10, 100, false, ""},
+		{"partially_reported_cache_without_top", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":30,"output_tokens":5,"cache_read_input_tokens":100},{"type":"message","input_tokens":40,"output_tokens":5}]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		{"partially_reported_cache_creation_without_top", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":30,"output_tokens":5,"cache_creation_input_tokens":100},{"type":"message","input_tokens":40,"output_tokens":5}]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		{"partial_zero_cache_without_top", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":30,"output_tokens":5,"cache_read_input_tokens":0},{"type":"message","input_tokens":40,"output_tokens":5}]`, 70, 10, 0, false, ""},
+		{"partial_zero_cache_creation_without_top", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":30,"output_tokens":5,"cache_creation_input_tokens":0},{"type":"message","input_tokens":40,"output_tokens":5}]`, 70, 10, 0, false, ""},
+		{"fully_reported_cache_without_top", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":70,"output_tokens":10,"cache_read_input_tokens":100}]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		{"fully_reported_cache_creation_without_top", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":70,"output_tokens":10,"cache_creation_input_tokens":100}]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		{"fully_reported_zero_cache_without_top", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":70,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}]`, 70, 10, 0, false, ""},
 		{"partially_reported_field_skipped", `"input_tokens":30,"output_tokens":6,"cache_read_input_tokens":99,"iterations":[{"type":"message","input_tokens":10,"output_tokens":2,"cache_read_input_tokens":1},{"type":"message","input_tokens":20,"output_tokens":4}]`, 30, 6, 99, false, ""},
 		{"advisor_doc_example", advisorTop + `,"iterations":[` + execA + `,` + advisorItem + `,` + execB + `]`, 1760, 531, 412, true, "multi_model_iterations"},
 		{"fallback_message", `"input_tokens":10,"output_tokens":2,"iterations":[{"type":"message","input_tokens":5,"output_tokens":0},{"type":"fallback_message","model":"claude-fallback","input_tokens":10,"output_tokens":2}]`, 10, 2, 0, true, "multi_model_iterations"},
@@ -53,6 +64,13 @@ func TestClaudeUsageIterations(t *testing.T) {
 		{"non_string_type", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":1,"input_tokens":70,"output_tokens":10}]`, 70, 10, 0, true, "unknown_usage_iterations"},
 		{"non_object_item", `"input_tokens":70,"output_tokens":10,"iterations":["message"]`, 70, 10, 0, true, "unknown_usage_iterations"},
 		{"null_item", `"input_tokens":70,"output_tokens":10,"iterations":[null]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		// Executor input/output are mandatory; absence cannot establish a
+		// complete breakdown, while explicit zero remains valid.
+		{"message_without_counts", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message"}]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		{"message_missing_input", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","output_tokens":10}]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		{"message_missing_output", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":70}]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		{"message_partially_reported_input", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":30,"output_tokens":5},{"type":"message","output_tokens":5}]`, 70, 10, 0, true, "unknown_usage_iterations"},
+		{"zero_count_message", `"input_tokens":0,"output_tokens":0,"iterations":[{"type":"message","input_tokens":0,"output_tokens":0}]`, 0, 0, 0, false, ""},
 		{"negative_count", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":-1,"output_tokens":10}]`, 70, 10, 0, true, "unknown_usage_iterations"},
 		{"fraction_count", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":70,"output_tokens":1.5}]`, 70, 10, 0, true, "unknown_usage_iterations"},
 		{"string_count", `"input_tokens":70,"output_tokens":10,"iterations":[{"type":"message","input_tokens":"70","output_tokens":10}]`, 70, 10, 0, true, "unknown_usage_iterations"},

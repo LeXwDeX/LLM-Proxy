@@ -76,8 +76,8 @@ var claudeIterationCounters = [...]string{"input_tokens", "output_tokens", "cach
 //
 // Priority: multi_model_iterations > compaction_iterations >
 // unknown_usage_iterations > iterations_usage_mismatch. Items without a type,
-// with an unknown type, invalid counters, a non-string or empty model, or
-// non-object items have unknown
+// with an unknown type, invalid or missing required counters, a non-string or
+// empty model, or non-object items have unknown
 // attribution and stay conservative. Applies to every target parsed by the
 // Anthropic rule; it never infers anything from host or model name.
 func claudeIterationsIncomplete(iterations []any, top map[string]any) string {
@@ -119,6 +119,9 @@ func claudeIterationsIncomplete(iterations []any, top map[string]any) string {
 			messages++
 			for i, key := range claudeIterationCounters {
 				if _, present := item[key]; !present {
+					if key == "input_tokens" || key == "output_tokens" {
+						unknown = true
+					}
 					continue
 				}
 				reported[i]++
@@ -135,13 +138,30 @@ func claudeIterationsIncomplete(iterations []any, top map[string]any) string {
 			unknown = true
 		}
 	}
-	// Only counters reported by every executor item are compared with top-level.
+	// A complete sum must equal top-level. A partial sum is only a lower
+	// bound, and can disprove consistency only against a reported top-level
+	// count; missing optional counters must not be inferred as zero.
 	for i, key := range claudeIterationCounters {
-		if messages == 0 || reported[i] != messages {
+		if messages == 0 || reported[i] == 0 {
 			continue
 		}
+		if key == "cache_read_input_tokens" || key == "cache_creation_input_tokens" {
+			if _, present := top[key]; !present {
+				// Known positive cache usage cannot be priced from a missing
+				// top-level counter, even if other iterations omit it too.
+				if sums[i] > 0 {
+					unknown = true
+				}
+				continue
+			}
+		}
 		var observed usageTokens
-		if observed.count(top, key, 0) != sums[i] {
+		topCount := observed.count(top, key, 0)
+		if reported[i] == messages {
+			if topCount != sums[i] {
+				mismatch = true
+			}
+		} else if _, present := top[key]; present && sums[i] > topCount {
 			mismatch = true
 		}
 	}
