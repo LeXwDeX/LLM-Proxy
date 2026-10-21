@@ -109,3 +109,25 @@ func TestOpenAIImageOutputDerivationUnchangedByReasoningRule(t *testing.T) {
 		t.Fatalf("usage=%+v", got)
 	}
 }
+
+// Images keeps text + image = output even when reasoning is reported. The
+// Chat/Responses disjoint-reasoning allowance must not hide missing image usage.
+func TestOpenAIImageOutputRejectsDisjointReasoningPartition(t *testing.T) {
+	body := `{"usage":{"input_tokens":8,"output_tokens":25,"output_tokens_details":{"text_tokens":1,"image_tokens":4,"reasoning_tokens":20}}}`
+	for _, chatKeys := range []bool{false, true} {
+		t.Run(map[bool]string{false: "image keys", true: "compatible chat keys"}[chatKeys], func(t *testing.T) {
+			payload := body
+			if chatKeys {
+				payload = strings.NewReplacer("input_tokens", "prompt_tokens", "output_tokens", "completion_tokens").Replace(payload)
+			}
+			p := usageParser{protocol: config.ProtocolOpenAIImage}
+			got, _, ok := p.extractTokens("application/json", []byte(payload))
+			if !ok || got.InputTokens != 8 || got.OutputTokens != 25 || got.ImageOutputTokens != 4 || got.ReasoningTokens != 20 {
+				t.Fatalf("totals changed: %+v", got)
+			}
+			if got.status != usageStatusConflict || !got.costIncomplete || got.diagnostic != "image_output_text_partition_mismatch" {
+				t.Fatalf("want Images partition conflict: status=%q incomplete=%v diagnostic=%q", got.status, got.costIncomplete, got.diagnostic)
+			}
+		})
+	}
+}
