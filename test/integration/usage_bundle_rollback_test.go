@@ -19,8 +19,15 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 )
 
-// These are data-contract targets, NOT approved production rollback artifacts.
-// b36b544 still contains other known bugs; v1.0.1 must not read bundle ledgers.
+// These are pinned data-contract test targets, NOT rollback targets. No older
+// binary can be rolled back to in place after #32: b36b544 replays journals,
+// reads raw rows and prices bundles, but its aggregate readers (Count,
+// Aggregate, SumByClientRange) cannot parse v2 hourly cells and silently return
+// zero for them without an error; v1.0.1 additionally misprices bundles. A
+// rollback can only restore the complete, consistent pre-upgrade backup set
+// (database, recovery journal and its sidecars, configuration, migration
+// snapshots) and discard everything the new instance wrote, after confirming
+// that data may be discarded. b36b544 still contains other known bugs.
 const (
 	bundleCompatibleSHA   = "b36b5445853c33ee0b804de46d42f6d8a1b152fa"
 	bundleIncompatibleSHA = "0e7ebfd2a987356d715ac6fdc8418f215e8907fb"
@@ -39,6 +46,19 @@ type bundleProbeReport struct {
 		Error             string
 		HistoryIncomplete bool
 	}
+	Readers bundleReaderReport
+}
+
+// bundleReaderReport mirrors the probe's aggregate reader results.
+type bundleReaderReport struct {
+	CountTotal       int64
+	CountSuccess     int64
+	CountError       string
+	AggregateRequest int64
+	AggregateInput   int64
+	AggregateError   string
+	SumInput         int64
+	SumError         string
 }
 
 func TestUsageBundleRollbackContract(t *testing.T) {
@@ -70,7 +90,10 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			dir := t.TempDir()
 			event := rollbackBundle(scenario.freeRoot)
-			var expected []usage.Event
+			// expected holds every stored row; oldVisible only the rows an old
+			// binary wrote in the historical aggregate key format, which is
+			// all b36b544's aggregate readers can see.
+			var expected, oldVisible []usage.Event
 			if scenario.legacy {
 				legacy := event
 				legacy.RecordID = "00000000-0000-4000-8000-000000000002"
@@ -78,6 +101,7 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 				// Real v1.0.1 creates the legacy cells without record_count.
 				runBundleProbe(t, incompatible, dir, "record", legacy)
 				expected = append(expected, legacy)
+				oldVisible = append(oldVisible, legacy)
 			}
 			if scenario.committed {
 				runBundleProbe(t, current, dir, "record", event)
@@ -91,7 +115,10 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 					t.Fatalf("missing durable journal: %v", err)
 				}
 				if !scenario.committed {
-					assertBundleReport(t, inspectBundle(t, current, dir), nil, 0, scenario.legacyUsageRows)
+					assertBundleReport(t, inspectBundle(t, current, dir), nil, 0, scenario.legacyUsageRows, nil)
+					// The compatible binary replays the journal below and
+					// writes historical-format cells for the bundle.
+					oldVisible = append(oldVisible, usage.ExpandEvent(event)...)
 				}
 				for attempt := 0; attempt < 2; attempt++ {
 					if attempt > 0 {
@@ -109,12 +136,12 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 						t.Fatalf("recovered clients=%v", recovered)
 					}
 					assertBundleJournalEmpty(t, dir)
-					assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost, scenario.legacyUsageRows)
-					assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost, scenario.legacyUsageRows)
+					assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost, scenario.legacyUsageRows, oldVisible)
+					assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost, scenario.legacyUsageRows, expected)
 				}
 			} else {
-				assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost, scenario.legacyUsageRows)
-				assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost, scenario.legacyUsageRows)
+				assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost, scenario.legacyUsageRows, oldVisible)
+				assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost, scenario.legacyUsageRows, expected)
 			}
 
 			// Overwrite the SAME hour/model cells using the fixed older source.
@@ -123,20 +150,48 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 			continued.Timestamp = continued.Timestamp.Add(time.Minute)
 			runBundleProbe(t, compatible, dir, "record", continued)
 			expected = append(expected, usage.ExpandEvent(continued)...)
+			oldVisible = append(oldVisible, usage.ExpandEvent(continued)...)
 			// The fixed older source rewrites the old cell with record_count,
 			// so every expanded row is provable again at this step.
-			assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost+scenario.appendCost, 0)
-			assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost+scenario.appendCost, 0)
+			assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost+scenario.appendCost, 0, oldVisible)
+			assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost+scenario.appendCost, 0, expected)
 			assertBundleJournalEmpty(t, dir)
 		})
 	}
+
+	// Counterexample for #13/#35: after #32 b36b544 is not a rollback target
+	// either. Its raw reads and pricing still see the bundle, but every
+	// aggregate reader silently reports zero for v2 cells (nil error).
+	t.Run("b36b544_cannot_read_v2_rollups", func(t *testing.T) {
+		dir := t.TempDir()
+		event := rollbackBundle(false)
+		runBundleProbe(t, current, dir, "record", event)
+		rows := usage.ExpandEvent(event)
+		assertBundleReport(t, inspectBundle(t, current, dir), rows, 12, 0, rows)
+		old := inspectBundle(t, compatible, dir)
+		assertBundleReport(t, old, rows, 12, 0, nil)
+		if old.Readers != (bundleReaderReport{}) {
+			t.Fatalf("b36b544 aggregate readers saw v2 cells: %+v", old.Readers)
+		}
+		var stored int64
+		for _, cell := range old.Rollups[nosql.BucketUsageAggHourly] {
+			stored += cell.Requests
+		}
+		if stored != 1 {
+			t.Fatalf("v2 rollup bytes missing from the database: requests=%d", stored)
+		}
+		t.Logf("%s: raw rows=%d, stored rollup requests=%d, aggregate readers=%+v", bundleCompatibleSHA, len(old.Events), stored, old.Readers)
+	})
 
 	t.Run("v1_0_1_is_not_a_rollback_target", func(t *testing.T) {
 		dir := t.TempDir()
 		event := rollbackBundle(false)
 		runBundleProbe(t, current, dir, "record", event)
-		assertBundleReport(t, inspectBundle(t, current, dir), usage.ExpandEvent(event), 12, 0)
+		assertBundleReport(t, inspectBundle(t, current, dir), usage.ExpandEvent(event), 12, 0, usage.ExpandEvent(event))
 		old := inspectBundle(t, incompatible, dir)
+		if old.Readers != (bundleReaderReport{}) {
+			t.Fatalf("v1.0.1 aggregate readers saw v2 cells: %+v", old.Readers)
+		}
 		stable, exact := old.Prices["stable"], old.Prices["exact"]
 		if stable.Error != "" || stable.Cost != 27 || stable.Requests != 1 || stable.InputTokens != 6_000_000 {
 			t.Fatalf("expected v1.0.1 overcharge (27, not 12), got %+v", stable)
@@ -145,7 +200,7 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 			t.Fatalf("expected typed ErrUsageHistoryIncomplete from record parity, got %+v", exact)
 		}
 		t.Logf("%s: stable cost=%g requests=%d tokens=%d; exact=%s", bundleIncompatibleSHA, stable.Cost, stable.Requests, stable.InputTokens, exact.Error)
-		assertBundleReport(t, inspectBundle(t, current, dir), usage.ExpandEvent(event), 12, 0)
+		assertBundleReport(t, inspectBundle(t, current, dir), usage.ExpandEvent(event), 12, 0, usage.ExpandEvent(event))
 	})
 }
 
@@ -166,9 +221,12 @@ func rollbackBundle(freeRoot bool) usage.Event {
 
 // legacyUsageRows counts rows written by binaries that predate record_count.
 // Their cells carry tokens and request totals but no row count, so the usage
-// aggregate ledger alone cannot prove those rows.
-func assertBundleReport(t *testing.T, got bundleProbeReport, want []usage.Event, cost float64, legacyUsageRows int64) {
+// aggregate ledger alone cannot prove those rows. readable lists the rows the
+// inspecting binary's aggregate readers can parse: every row for the current
+// binary, only historical-format cells for b36b544.
+func assertBundleReport(t *testing.T, got bundleProbeReport, want []usage.Event, cost float64, legacyUsageRows int64, readable []usage.Event) {
 	t.Helper()
+	assertBundleReaders(t, got.Readers, readable)
 	want = append([]usage.Event{}, want...)
 	byID := func(a, b usage.Event) int { return strings.Compare(a.RecordID, b.RecordID) }
 	slices.SortFunc(want, byID)
@@ -218,6 +276,28 @@ func assertBundleReport(t *testing.T, got bundleProbeReport, want []usage.Event,
 		}
 	}
 	t.Logf("cost=%g records=%d requests=%d observed_tokens=%d non_billable_tokens=%d (stable/exact/conditional)", cost, len(want), requests, tokens, freeTokens)
+}
+
+// assertBundleReaders checks Count, Aggregate and SumByClientRange totals
+// against the rows the binary can read. All three must succeed, so a binary
+// that cannot parse a cell under-reports silently instead of failing.
+func assertBundleReaders(t *testing.T, got bundleReaderReport, readable []usage.Event) {
+	t.Helper()
+	var requests, tokens int64
+	for _, event := range readable {
+		if !event.Supplementary {
+			requests++
+		}
+		tokens += event.InputTokens
+	}
+	want := bundleReaderReport{
+		CountTotal: requests, CountSuccess: requests,
+		AggregateRequest: requests, AggregateInput: tokens,
+		SumInput: tokens,
+	}
+	if got != want {
+		t.Fatalf("aggregate readers=%+v, want %+v", got, want)
+	}
 }
 
 func assertBundleJournalEmpty(t *testing.T, dir string) {
