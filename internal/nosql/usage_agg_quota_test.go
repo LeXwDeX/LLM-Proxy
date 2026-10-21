@@ -442,14 +442,10 @@ func TestSumByClientRangeCorruptValue(t *testing.T) {
 	from := time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 6, 8, 11, 0, 0, 0, time.UTC)
 	result, err := store.SumByClientRange("alice", from, to)
-	if err != nil {
-		t.Fatalf("err: %v", err)
+	if err == nil {
+		t.Fatal("corrupt cell was silently skipped")
 	}
-	// Should find only the valid record, skipping corrupt one.
-	if len(result) != 1 {
-		t.Fatalf("expected 1 entry, got %d: %v", len(result), result)
-	}
-	if totals := result["openai:gpt-4"]; totals.InputTokens != 100 {
-		t.Errorf("InputTokens: got %d, want 100", totals.InputTokens)
+	if len(result) != 0 {
+		t.Fatalf("corrupt cell returned partial result: %v", result)
 	}
 }

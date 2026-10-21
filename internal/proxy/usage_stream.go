@@ -34,6 +34,9 @@ type usageStream struct {
 	claudeFinalEnvelope  map[string]any
 	claudeLastDelta      map[string]any
 	claudeIterationsSeen bool
+	// interruptedAfterFinal survives accepted replacements: a lifecycle
+	// marker, not replaceable accounting evidence.
+	interruptedAfterFinal bool
 	// finalSeen and finalTokens hold the committed official final usage.
 	// Non-final frames never revoke or recompute them; Close reconciles the
 	// working copy to this snapshot. Written by the observer goroutine; read
@@ -378,6 +381,7 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 						u.claudeLastDelta = payload
 					}
 					claudeDiagnostic := ""
+					invalidFinalIterations := false
 					if m != nil {
 						if u.snapshot == nil {
 							u.snapshot = map[string]any{}
@@ -403,7 +407,8 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 								m = counters
 							} else {
 								delete(u.snapshot, "iterations")
-								if u.claudeIterationsSeen && !array {
+								invalidFinalIterations = u.claudeIterationsSeen && !array
+								if invalidFinalIterations {
 									claudeDiagnostic = "missing_final_iterations"
 								}
 								for _, raw := range iterations {
@@ -432,12 +437,15 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 							u.tokens.costIncomplete = true
 							appendTokenDiagnostic(&u.tokens, claudeDiagnostic)
 						}
+						if invalidFinalIterations {
+							u.tokens.invalidIterations = true
+						}
 						if u.tokens.billingModel != "" {
 							u.model = parsedModel
 						}
 						u.observeChoicesFinalUsage()
 					}
-					if candidate && u.tokens.status != usageStatusComplete {
+					if candidate && (u.tokens.status != usageStatusComplete || u.tokens.invalidIterations) {
 						u.snapshot, u.claudeLastDelta, u.claudeFinalEnvelope, u.pricingEnvelope = candidateBase.snapshot, candidateBase.lastDelta, candidateBase.finalEnvelope, candidateBase.pricing
 						u.tokens, u.model, u.found, u.claudeIterationsSeen = candidateBase.tokens, candidateBase.model, candidateBase.found, candidateBase.iterations
 						u.finalUsage = previousFinalUsage
@@ -561,6 +569,9 @@ func (u *usageStream) captureFinalUsage(final bool) {
 	if u.finalSeen && u.tokens.status != usageStatusComplete {
 		return
 	}
+	if u.interruptedAfterFinal {
+		appendTokenDiagnostic(&u.tokens, diagnosticInterruptedAfterFinalUsage)
+	}
 	u.finalConflict = false
 	u.finalSeen = true
 	u.finalTokens = u.tokens
@@ -615,6 +626,7 @@ func (u *usageStream) observeFinalUsage(payload map[string]any, event string, m 
 			return final
 		case "error":
 			if u.finalSeen {
+				u.interruptedAfterFinal = true
 				appendTokenDiagnostic(&u.tokens, diagnosticInterruptedAfterFinalUsage)
 			}
 			// Unconfirmed usage stays unconfirmed; message_stop must not promote it.

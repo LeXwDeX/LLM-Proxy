@@ -508,6 +508,264 @@ func TestClaudeRejectedFinalCandidateBilling(t *testing.T) {
 	}
 }
 
+// A later final whose top-level counters are valid but whose iteration
+// attribution/counters cannot be verified is not replacement evidence. The
+// negative advisor counter, unknown type, missing model, unproven sum and
+// overflow all leave the committed bundle and its cost untouched.
+func TestClaudeInvalidIterationCandidateKeepsConfirmed(t *testing.T) {
+	candidate := func(iterations string) string {
+		return `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"iterations":` + iterations + `}}` + "\n\n"
+	}
+	for _, tc := range []struct{ name, frame string }{
+		{"negative_advisor_input", candidate(`[{"type":"message","input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"advisor_message","model":"advisor","input_tokens":-1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}]`)},
+		{"unknown_iteration_type", candidate(`[{"type":"message","input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"future_kind","model":"advisor","input_tokens":1,"output_tokens":1}]`)},
+		{"missing_advisor_model", candidate(`[{"type":"message","input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"advisor_message","input_tokens":1,"output_tokens":1}]`)},
+		{"iteration_sum_mismatch", candidate(`[{"type":"message","input_tokens":13,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"advisor_message","model":"advisor","input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}]`)},
+		{"counter_overflow", candidate(`[{"type":"message","input_tokens":9223372036854775807,"output_tokens":1,"cache_read_input_tokens":1,"cache_creation_input_tokens":0}]`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := snapshotStart + snapshotFinal + tc.frame + snapshotStop
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, wire)
+			}))
+			defer upstream.Close()
+			s, store := ledgerService(t, upstream.URL)
+			serveSnapshot(t, s, wire, "/v1/messages", `{"model":"test-model","stream":true,"max_tokens":100,"messages":[]}`)
+			rows, cost := snapshotLedger(t, store)
+			if len(rows) != 2 || math.Abs(cost-.000072) > 1e-12 {
+				t.Fatalf("invalid candidate replaced the bundle: records=%d cost=%.9f %+v", len(rows), cost, rows)
+			}
+			root, children := rootAndChildren(t, rows)
+			if root.InputTokens != 7 || root.OutputTokens != 2 || root.UsageStatus != usageStatusComplete || root.CostIncomplete || len(children) != 1 || children[0].Model != "advisor" || children[0].InputTokens != 3 || children[0].OutputTokens != 1 || children[0].CostIncomplete {
+				t.Fatalf("root=%+v children=%+v", root, children)
+			}
+		})
+	}
+}
+
+// A valid later final that is merely cost-incomplete (server tool charges) is
+// still replacement evidence: #30 rejects invalid attribution, not every
+// cost-incomplete snapshot.
+func TestClaudeCostIncompleteFinalReplacesConfirmed(t *testing.T) {
+	final := `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"iterations":[],"server_tool_use":{"web_search_requests":1}}}` + "\n\n"
+	wire := snapshotStart + snapshotFinal + final + snapshotStop
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, wire)
+	}))
+	defer upstream.Close()
+	s, store := ledgerService(t, upstream.URL)
+	serveSnapshot(t, s, wire, "/v1/messages", `{"model":"test-model","stream":true,"max_tokens":100,"messages":[]}`)
+	rows, cost := snapshotLedger(t, store)
+	if len(rows) != 1 || math.Abs(cost-.000038) > 1e-12 {
+		t.Fatalf("records=%d cost=%.9f want 1/.000038: %+v", len(rows), cost, rows)
+	}
+	root, children := rootAndChildren(t, rows)
+	if root.InputTokens != 11 || root.OutputTokens != 4 || root.UsageStatus != usageStatusComplete || !root.CostIncomplete || !hasGoneDiagnostic(root.UsageDiagnostic, "server_tool_charges") || len(children) != 0 {
+		t.Fatalf("root=%+v children=%+v", root, children)
+	}
+}
+
+// The rejected iteration candidate must not leave model, cache or pricing
+// evidence behind for the following valid final.
+func TestClaudeInvalidIterationCandidateLeavesNoResidue(t *testing.T) {
+	const invalid = `data: {"type":"message_delta","model":"mutated","service_tier":"priority","speed":"fast","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":1000,"cache_creation_input_tokens":1000,"cache_creation":{"ephemeral_5m_input_tokens":1000,"ephemeral_1h_input_tokens":0},"service_tier":"priority","speed":"fast","iterations":[{"type":"message","input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"advisor_message","model":"advisor","input_tokens":-1,"output_tokens":1}]}}` + "\n\n"
+	const recovery = `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":7,"output_tokens":4,"iterations":[]}}` + "\n\n"
+	wire := snapshotStart + snapshotFinal + invalid + recovery + snapshotStop
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, wire)
+	}))
+	defer upstream.Close()
+	s, store := ledgerService(t, upstream.URL)
+	serveSnapshot(t, s, wire, "/v1/messages", `{"model":"test-model","stream":true,"max_tokens":100,"messages":[]}`)
+	rows, cost := snapshotLedger(t, store)
+	if len(rows) != 1 || math.Abs(cost-.00003) > 1e-12 {
+		t.Fatalf("records=%d cost=%.9f want 1/.00003: %+v", len(rows), cost, rows)
+	}
+	root, children := rootAndChildren(t, rows)
+	if len(children) != 0 || root.Model != "test-model" || root.ResponseModel != "test-model" || root.InputTokens != 7 || root.OutputTokens != 4 || root.CachedTokens != 0 || root.CacheCreationTokens != 0 || root.CacheCreation5mTokens != 0 || root.CacheCreation1hTokens != 0 || root.UsageStatus != usageStatusComplete || root.CostIncomplete {
+		t.Fatalf("root=%+v children=%+v", root, children)
+	}
+	c := root.PricingContext
+	if c == nil || c.ResponseServiceTier.State != usage.PricingValueMissing || c.ActualServiceTier != "" || c.ResponseSpeed.State != usage.PricingValueMissing || c.ActualSpeed != "" {
+		t.Fatalf("rejected iteration pricing leaked: %+v", c)
+	}
+}
+
+// After-final lifecycle markers are independent of replaceable accounting
+// evidence: an accepted later final keeps them, a rejected candidate keeps
+// them, and a clean replacement gains none.
+func TestClaudeInterruptedMarkerSurvivesAcceptedFinal(t *testing.T) {
+	const replacement = `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"iterations":[{"type":"message","input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"advisor_message","model":"advisor","input_tokens":5,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}]}}` + "\n\n"
+	const rejected = `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"iterations":[{"type":"message","input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"advisor_message","model":"advisor","input_tokens":-1,"output_tokens":1}]}}` + "\n\n"
+	for _, tc := range []struct {
+		name, wire string
+		failed     bool
+		diagnostic string
+		rootIn     int64
+		rootOut    int64
+		childIn    int64
+		childOut   int64
+		cost       float64
+	}{
+		{"error_then_accepted_final", snapshotStart + snapshotFinal + snapshotError + replacement + snapshotStop, true, diagnosticInterruptedAfterFinalUsage, 11, 4, 5, 2, .000128},
+		{"clean_accepted_final", snapshotStart + snapshotFinal + replacement + snapshotStop, false, "", 11, 4, 5, 2, .000128},
+		{"error_then_rejected_final", snapshotStart + snapshotFinal + snapshotError + rejected + snapshotStop, true, diagnosticInterruptedAfterFinalUsage, 7, 2, 3, 1, .000072},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, tc.wire)
+			}))
+			defer upstream.Close()
+			s, store := ledgerService(t, upstream.URL)
+			serveSnapshot(t, s, tc.wire, "/v1/messages", `{"model":"test-model","stream":true,"max_tokens":100,"messages":[]}`)
+			rows, cost := snapshotLedger(t, store)
+			if len(rows) != 2 || math.Abs(cost-tc.cost) > 1e-12 {
+				t.Fatalf("records=%d cost=%.9f want 2/%.9f: %+v", len(rows), cost, tc.cost, rows)
+			}
+			root, children := rootAndChildren(t, rows)
+			if root.InputTokens != tc.rootIn || root.OutputTokens != tc.rootOut || root.UsageStatus != usageStatusComplete || root.CostIncomplete {
+				t.Fatalf("root=%+v", root)
+			}
+			if len(children) != 1 || children[0].InputTokens != tc.childIn || children[0].OutputTokens != tc.childOut || children[0].Model != "advisor" {
+				t.Fatalf("children=%+v", children)
+			}
+			if tc.diagnostic == "" {
+				if hasGoneDiagnostic(root.UsageDiagnostic, diagnosticInterruptedAfterFinalUsage) || hasGoneDiagnostic(root.UsageDiagnostic, diagnosticUpstreamInterruptedNoUsage) {
+					t.Fatalf("clean replacement diagnostic=%q", root.UsageDiagnostic)
+				}
+			} else if !hasGoneDiagnostic(root.UsageDiagnostic, tc.diagnostic) || hasGoneDiagnostic(root.UsageDiagnostic, diagnosticUpstreamInterruptedNoUsage) {
+				t.Fatalf("diagnostic=%q want %s", root.UsageDiagnostic, tc.diagnostic)
+			}
+			if gotFailed := root.ResponseStatus == "failed"; gotFailed != tc.failed {
+				t.Fatalf("failed=%v want %v: %+v", gotFailed, tc.failed, root)
+			}
+		})
+	}
+}
+
+// Without a committed snapshot the first final keeps the conservative legacy
+// usage: an unverifiable iteration still prices the valid root counters and
+// names the uncertainty. Only replacement is rejected.
+func TestClaudeFirstInvalidIterationFinalKeepsLegacyUsage(t *testing.T) {
+	const first = `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"iterations":[{"type":"message","input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},{"type":"advisor_message","model":"advisor","input_tokens":-1,"output_tokens":1}]}}` + "\n\n"
+	p := usageParser{protocol: config.ProtocolAnthropicMessages, model: "test-model"}
+	u := newUsageStream("text/event-stream", "", p)
+	_, _ = io.WriteString(u, snapshotStart+first+snapshotStop)
+	u.Close()
+	if !u.finalSeen || u.tokens.InputTokens != 11 || u.tokens.OutputTokens != 4 || u.tokens.status != usageStatusComplete || !u.tokens.costIncomplete || len(u.tokens.components) != 0 {
+		t.Fatalf("first final not conservative: %+v", u.tokens)
+	}
+	if !hasTokenDiagnostic(u.tokens, "multi_model_iterations") {
+		t.Fatalf("diagnostic=%q want multi_model_iterations", u.tokens.diagnostic)
+	}
+}
+
+// A replacement final that cannot prove a complete, valid attribution plan is
+// rejected: iterations absent/null/non-array after early evidence, a
+// message-only sum mismatch, or a message-only model mismatch.
+func TestClaudeUnprovableReplacementIterationsKeepConfirmed(t *testing.T) {
+	usage := func(iterations string) string {
+		return `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0` + iterations + `}}` + "\n\n"
+	}
+	for _, tc := range []struct{ name, frame string }{
+		{"null_iterations", usage(`,"iterations":null`)},
+		{"object_iterations", usage(`,"iterations":{"type":"message"}`)},
+		{"missing_iterations", usage("")},
+		{"message_sum_mismatch", usage(`,"iterations":[{"type":"message","input_tokens":13,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}]`)},
+		{"message_model_mismatch", usage(`,"iterations":[{"type":"message","model":"other","input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}]`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := snapshotStart + snapshotFinal + tc.frame + snapshotStop
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, wire)
+			}))
+			defer upstream.Close()
+			s, store := ledgerService(t, upstream.URL)
+			serveSnapshot(t, s, wire, "/v1/messages", `{"model":"test-model","stream":true,"max_tokens":100,"messages":[]}`)
+			rows, cost := snapshotLedger(t, store)
+			if len(rows) != 2 || math.Abs(cost-.000072) > 1e-12 {
+				t.Fatalf("unprovable candidate replaced the bundle: records=%d cost=%.9f %+v", len(rows), cost, rows)
+			}
+			root, children := rootAndChildren(t, rows)
+			if root.InputTokens != 7 || root.OutputTokens != 2 || root.UsageStatus != usageStatusComplete || root.CostIncomplete || len(children) != 1 || children[0].InputTokens != 3 || children[0].OutputTokens != 1 {
+				t.Fatalf("root=%+v children=%+v", root, children)
+			}
+		})
+	}
+}
+
+// A verified message-only replacement is legitimate; the ordinary final
+// without iterations and the first null-iterations final keep top-only usage.
+func TestClaudeLegalMessageOnlyAndUnseenIterationsFinals(t *testing.T) {
+	for _, tc := range []struct {
+		name, wire string
+		rows       int
+		in, out    int64
+		cost       float64
+	}{
+		{"message_only_replacement", snapshotStart + snapshotFinal + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"iterations":[{"type":"message","input_tokens":11,"output_tokens":4,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}]}}` + "\n\n" + snapshotStop, 1, 11, 4, .000038},
+		{"ordinary_final_without_iterations", snapshotStart + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":7,"output_tokens":2}}` + "\n\n" + snapshotStop, 1, 7, 2, .000022},
+		{"first_final_null_iterations", snapshotStart + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"iterations":null}}` + "\n\n" + snapshotStop, 1, 11, 4, .000038},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, tc.wire)
+			}))
+			defer upstream.Close()
+			s, store := ledgerService(t, upstream.URL)
+			serveSnapshot(t, s, tc.wire, "/v1/messages", `{"model":"test-model","stream":true,"max_tokens":100,"messages":[]}`)
+			rows, cost := snapshotLedger(t, store)
+			if len(rows) != tc.rows || math.Abs(cost-tc.cost) > 1e-12 {
+				t.Fatalf("records=%d cost=%.9f want %d/%.9f: %+v", len(rows), cost, tc.rows, tc.cost, rows)
+			}
+			root, children := rootAndChildren(t, rows)
+			if root.InputTokens != tc.in || root.OutputTokens != tc.out || root.UsageStatus != usageStatusComplete || root.CostIncomplete || root.UsageDiagnostic != "" || len(children) != 0 {
+				t.Fatalf("root=%+v children=%+v", root, children)
+			}
+		})
+	}
+}
+
+// The omitted-iterations candidate must not leave model, cache or pricing
+// evidence behind for the following valid final.
+func TestClaudeOmittedIterationsCandidateLeavesNoResidue(t *testing.T) {
+	const invalid = `data: {"type":"message_delta","model":"mutated","service_tier":"priority","speed":"fast","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":4,"cache_read_input_tokens":1000,"cache_creation_input_tokens":1000,"cache_creation":{"ephemeral_5m_input_tokens":1000,"ephemeral_1h_input_tokens":0},"service_tier":"priority","speed":"fast"}}` + "\n\n"
+	const recovery = `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":7,"output_tokens":4,"iterations":[]}}` + "\n\n"
+	wire := snapshotStart + snapshotFinal + invalid + recovery + snapshotStop
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, wire)
+	}))
+	defer upstream.Close()
+	s, store := ledgerService(t, upstream.URL)
+	serveSnapshot(t, s, wire, "/v1/messages", `{"model":"test-model","stream":true,"max_tokens":100,"messages":[]}`)
+	rows, cost := snapshotLedger(t, store)
+	if len(rows) != 1 || math.Abs(cost-.00003) > 1e-12 {
+		t.Fatalf("records=%d cost=%.9f want 1/.00003: %+v", len(rows), cost, rows)
+	}
+	root, children := rootAndChildren(t, rows)
+	if len(children) != 0 || root.Model != "test-model" || root.ResponseModel != "test-model" || root.InputTokens != 7 || root.OutputTokens != 4 || root.CachedTokens != 0 || root.CacheCreationTokens != 0 || root.CacheCreation5mTokens != 0 || root.CacheCreation1hTokens != 0 || root.UsageStatus != usageStatusComplete || root.CostIncomplete {
+		t.Fatalf("root=%+v children=%+v", root, children)
+	}
+	c := root.PricingContext
+	if c == nil || c.ResponseServiceTier.State != usage.PricingValueMissing || c.ActualServiceTier != "" || c.ResponseSpeed.State != usage.PricingValueMissing || c.ActualSpeed != "" {
+		t.Fatalf("rejected iteration pricing leaked: %+v", c)
+	}
+}
+
 func TestOpenAIRejectedFinalSnapshotKeepsModelTierAndBilling(t *testing.T) {
 	for _, tc := range []struct{ name, path, wire string }{
 		{"chat", "/v1/chat/completions",
