@@ -269,7 +269,9 @@ func (c coefficientResolver) RateFor(target, model string, at time.Time) (CostRa
 	return rates.Scaled(factor), true
 }
 
-// Totals is aggregated usage and estimated cost.
+// Totals is aggregated usage and estimated cost. The incomplete counts are
+// per stored record, not per request: a request whose fallback attempt left a
+// zero-output record contributes two records.
 type Totals struct {
 	IncompleteUsageCount    int64   `json:"incomplete_usage_count,omitempty"`
 	IncompleteCostCount     int64   `json:"incomplete_cost_count,omitempty"`
