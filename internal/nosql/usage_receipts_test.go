@@ -1,10 +1,12 @@
 package nosql
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -529,45 +531,302 @@ func TestReceiptWatermarkNoFalseRejectWhenHistoryIntact(t *testing.T) {
 	}
 }
 
-func TestJournalReplayAfterPruneDoesNotDoubleCount(t *testing.T) {
-	db := testDB(t)
-	store := NewUsageStore(db)
+func fixedPlainEvent() usage.Event {
 	event := fixedIdentityBundle()
-	path := filepath.Join(t.TempDir(), "usage-journal.jsonl")
-	journal, err := NewUsageJournal(&commitThenFailUsageRecorder{
-		next:      store,
-		err:       errors.New("isolated uncertain commit"),
-		failFirst: true,
-	}, path, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := journal.Record(event); err != nil {
-		t.Fatal(err)
-	}
-	if err := journal.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.PruneEventsBefore(event.Timestamp.Add(time.Hour), 10); err != nil {
-		t.Fatal(err)
-	}
+	event.Components = nil
+	return event
+}
 
-	restarted, err := NewUsageJournal(store, path, nil)
-	if err != nil {
-		t.Fatal(err)
+var replayCosts = usage.CostTable{
+	"executor": {InputPer1MTokens: 2},
+	"advisor":  {InputPer1MTokens: 5},
+}
+
+func costUnitTotal(units []CostUnit) float64 {
+	var total float64
+	for _, unit := range units {
+		total += unit.CostUSD
 	}
-	defer restarted.Close()
-	clients, err := restarted.Replay()
-	if err != nil {
-		t.Fatalf("replay after prune: %v", err)
+	return total
+}
+
+// Pause before the primary write to exercise retention during replay.
+type gatedUsageRecorder struct {
+	next    usage.Recorder
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (r *gatedUsageRecorder) Record(event usage.Event) error {
+	r.once.Do(func() {
+		close(r.entered)
+		<-r.release
+	})
+	return r.next.Record(event)
+}
+
+func TestJournalReplayAfterPruneDoesNotDoubleCount(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		event       func() usage.Event
+		wantCost    float64
+		wantRecords int64
+	}{
+		{"plain", fixedPlainEvent, 2, 1},
+		{"bundle", fixedIdentityBundle, 12, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := tc.event()
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, "usage.db")
+			journalPath := filepath.Join(dir, "usage-journal.jsonl")
+			db, err := OpenDB(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if db != nil {
+					db.Close()
+				}
+			}()
+			store := NewUsageStore(db)
+			journal, err := NewUsageJournal(&commitThenFailUsageRecorder{
+				next:      store,
+				err:       errors.New("isolated uncertain commit"),
+				failFirst: true,
+			}, journalPath, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := journal.Record(event); err != nil {
+				t.Fatal(err)
+			}
+			if err := journal.Close(); err != nil {
+				t.Fatal(err)
+			}
+			deleted, err := store.PruneEventsBefore(event.Timestamp.Add(time.Hour), 10)
+			if err != nil || deleted != int(tc.wantRecords) {
+				t.Fatalf("prune: deleted=%d err=%v", deleted, err)
+			}
+			if receipts := usageReceiptCount(t, db); receipts != int(tc.wantRecords) {
+				t.Fatalf("receipts after prune=%d, want %d", receipts, tc.wantRecords)
+			}
+			from, to := event.Timestamp.Truncate(time.Hour), event.Timestamp.Add(time.Hour)
+			filter := usage.Filter{From: &from, To: &to}
+			beforeAgg, err := store.Aggregate(filter, "hour", replayCosts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeUnits, err := store.ReadCostUnits(context.Background(), filter, replayCosts, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if beforeAgg.Totals.Requests != 1 || beforeAgg.Totals.EstimatedCost != tc.wantCost {
+				t.Fatalf("pre-replay aggregate requests/cost=%+v, want requests=1 cost=%v", beforeAgg.Totals, tc.wantCost)
+			}
+			if cost := costUnitTotal(beforeUnits); cost != tc.wantCost {
+				t.Fatalf("pre-replay cost units=%v, want %v", cost, tc.wantCost)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			db, err = OpenDB(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store = NewUsageStore(db)
+			restarted, err := NewUsageJournal(store, journalPath, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restarted.Close()
+
+			clients, err := restarted.Replay()
+			if err != nil {
+				t.Fatalf("replay after prune: %v", err)
+			}
+			if len(clients) != 1 || clients[0] != "alice" {
+				t.Fatalf("recovered clients=%v", clients)
+			}
+			for i := 0; i < 2; i++ {
+				if clients, err := restarted.Replay(); err != nil || len(clients) != 0 {
+					t.Fatalf("replay %d: clients=%v err=%v", i+2, clients, err)
+				}
+			}
+			if raw, agg := usageRecordCounts(t, db); raw != 0 || agg != tc.wantRecords {
+				t.Fatalf("replay after prune resurrected accounting: raw=%d agg=%d", raw, agg)
+			}
+			if receipts := usageReceiptCount(t, db); receipts != int(tc.wantRecords) {
+				t.Fatalf("receipts after replay=%d, want %d", receipts, tc.wantRecords)
+			}
+			afterAgg, err := store.Aggregate(filter, "hour", replayCosts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterUnits, err := store.ReadCostUnits(context.Background(), filter, replayCosts, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(beforeAgg, afterAgg) || !reflect.DeepEqual(beforeUnits, afterUnits) {
+				t.Fatalf("replay changed retained accounting: agg=%+v units=%+v", afterAgg.Totals, afterUnits)
+			}
+		})
 	}
-	if len(clients) != 1 || clients[0] != "alice" {
-		t.Fatalf("recovered clients=%v", clients)
-	}
-	if raw, agg := usageRecordCounts(t, db); raw != 0 || agg != 2 {
-		t.Fatalf("replay after prune double-counted: raw=%d agg=%d", raw, agg)
-	}
-	if clients, err := restarted.Replay(); err != nil || len(clients) != 0 {
-		t.Fatalf("second replay: clients=%v err=%v", clients, err)
+}
+
+func TestJournalReplayInterleavedWithPruneAndNewRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		event       func() usage.Event
+		wantCost    float64
+		wantRecords int64
+	}{
+		{"plain", fixedPlainEvent, 2, 1},
+		{"bundle", fixedIdentityBundle, 12, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := tc.event()
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, "usage.db")
+			journalPath := filepath.Join(dir, "usage-journal.jsonl")
+			db, err := OpenDB(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if db != nil {
+					db.Close()
+				}
+			}()
+			store := NewUsageStore(db)
+			journal, err := NewUsageJournal(&commitThenFailUsageRecorder{
+				next:      store,
+				err:       errors.New("isolated uncertain commit"),
+				failFirst: true,
+			}, journalPath, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := journal.Record(original); err != nil {
+				t.Fatal(err)
+			}
+			if err := journal.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			release := make(chan struct{})
+			unblock := func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}
+			gate := &gatedUsageRecorder{next: store, entered: make(chan struct{}), release: release}
+			replaying, err := NewUsageJournal(gate, journalPath, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			done := make(chan struct{})
+			var replayErr error
+			go func() {
+				defer close(done)
+				_, replayErr = replaying.Replay()
+			}()
+			defer func() {
+				unblock()
+				select {
+				case <-done:
+					if err := replaying.Close(); err != nil {
+						t.Errorf("close replay journal: %v", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Error("replay goroutine did not exit")
+				}
+			}()
+			select {
+			case <-gate.entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("replay did not pause before the primary write")
+			}
+
+			deleted, err := store.PruneEventsBefore(original.Timestamp.Add(time.Hour), 10)
+			if err != nil || deleted != int(tc.wantRecords) {
+				t.Fatalf("prune: deleted=%d err=%v", deleted, err)
+			}
+			if receipts := usageReceiptCount(t, db); receipts != int(tc.wantRecords) {
+				t.Fatalf("receipts after interleaved prune=%d, want %d", receipts, tc.wantRecords)
+			}
+
+			fresh := fixedPlainEvent()
+			fresh.RecordID = fixedLaterRecordID
+			fresh.Timestamp = original.Timestamp.Add(2 * time.Hour)
+			fresh.RequestID = "req-fresh"
+			if err := store.Record(fresh); err != nil {
+				t.Fatal(err)
+			}
+
+			unblock()
+			select {
+			case <-done:
+				if replayErr != nil {
+					t.Fatalf("replay: %v", replayErr)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("replay did not finish after release")
+			}
+
+			if raw, agg := usageRecordCounts(t, db); raw != 1 || agg != tc.wantRecords+1 {
+				t.Fatalf("interleaved replay resurrection: raw=%d agg=%d", raw, agg)
+			}
+			if receipts := usageReceiptCount(t, db); receipts != int(tc.wantRecords) {
+				t.Fatalf("receipts after interleaved replay=%d, want %d", receipts, tc.wantRecords)
+			}
+			from := original.Timestamp.Truncate(time.Hour)
+			to := fresh.Timestamp.Add(time.Hour)
+			filter := usage.Filter{From: &from, To: &to}
+			wantCost := tc.wantCost + 2
+			agg, err := store.Aggregate(filter, "hour", replayCosts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if agg.Totals.Requests != 2 || agg.Totals.EstimatedCost != wantCost {
+				t.Fatalf("interleaved aggregate requests/cost=%+v, want requests=2 cost=%v", agg.Totals, wantCost)
+			}
+			units, err := store.ReadCostUnits(context.Background(), filter, replayCosts, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cost := costUnitTotal(units); cost != wantCost {
+				t.Fatalf("interleaved cost units=%v, want %v", cost, wantCost)
+			}
+			rows, err := store.List(usage.Filter{ClientName: "alice"})
+			if err != nil || len(rows) != 1 || rows[0].RecordID != fixedLaterRecordID {
+				t.Fatalf("new record lost or replaced: rows=%+v err=%v", rows, err)
+			}
+
+			beforeAgg, beforeUnits := agg, units
+			if clients, err := replaying.Replay(); err != nil || len(clients) != 0 {
+				t.Fatalf("second replay: clients=%v err=%v", clients, err)
+			}
+			again, err := store.Aggregate(filter, "hour", replayCosts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			againUnits, err := store.ReadCostUnits(context.Background(), filter, replayCosts, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(beforeAgg, again) || !reflect.DeepEqual(beforeUnits, againUnits) ||
+				again.Totals.Requests != 2 || again.Totals.EstimatedCost != wantCost {
+				t.Fatalf("second replay changed accounting: agg=%+v units=%+v", again.Totals, againUnits)
+			}
+			if raw, aggCount := usageRecordCounts(t, db); raw != 1 || aggCount != tc.wantRecords+1 {
+				t.Fatalf("second replay changed rows: raw=%d agg=%d", raw, aggCount)
+			}
+		})
 	}
 }
