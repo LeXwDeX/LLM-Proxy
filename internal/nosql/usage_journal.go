@@ -47,7 +47,7 @@ const usageJournalMaxTailRepair = 1 << 20
 //   - asynchronous write-ahead (EnableAsyncCommit): Record returns after the
 //     event is synced to the journal; a background writer batches the primary
 //     commits and compacts committed lines away. A crash before that commit is
-//     recovered by the startup Replay, idempotently by RecordID.
+//     recovered by startup Replay with the same Timestamp and RecordID.
 type UsageJournal struct {
 	primary usage.Recorder
 	path    string
@@ -154,6 +154,10 @@ func (j *UsageJournal) Record(event usage.Event) error {
 			return fmt.Errorf("usage journal: invalid record ID: %w", err)
 		}
 		event.RecordID = recordID.String()
+	}
+	// Reject permanently invalid bundles before journaling, without replacing the payload.
+	if _, _, err := normalizeUsageBundle(event); err != nil {
+		return err
 	}
 	j.asyncMu.RLock()
 	defer j.asyncMu.RUnlock()

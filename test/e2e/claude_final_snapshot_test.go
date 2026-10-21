@@ -57,26 +57,34 @@ func TestClaudeConfirmedFinalSnapshotE2E(t *testing.T) {
 	advisor := usage.CostRates{InputPer1MTokens: 10, OutputPer1MTokens: 20}
 	fallback := usage.CostRates{InputPer1MTokens: 30, OutputPer1MTokens: 40, CacheReadPer1MToken: 2}
 	for _, tc := range []struct {
-		mode         string
-		rows         int
-		rootModel    string
-		rootIn       int64
-		rootOut      int64
-		rootCached   int64
-		rootFree     bool
-		childModel   string
-		childIn      int64
-		childOut     int64
-		diagnostic   string
-		failed       bool
-		expectedCost float64
+		mode           string
+		rows           int
+		rootModel      string
+		rootIn         int64
+		rootOut        int64
+		rootCached     int64
+		rootFree       bool
+		childModel     string
+		childIn        int64
+		childOut       int64
+		diagnostic     string
+		failed         bool
+		costIncomplete bool
+		incompleteRows int64
+		expectedCost   float64
 	}{
-		{"advisor_tail_nonfinal", 2, "unfamiliar-upstream", 70, 20, 30, false, "fake-advisor", 7, 3, "interrupted_after_final_usage", false, .000365},
-		{"advisor_tail_empty_stop", 2, "unfamiliar-upstream", 70, 20, 30, false, "fake-advisor", 7, 3, "", false, .000365},
-		{"advisor_tail_error_empty_stop", 2, "unfamiliar-upstream", 70, 20, 30, false, "fake-advisor", 7, 3, "interrupted_after_final_usage", true, .000365},
-		{"advisor_refusal_free_tail_nonfinal", 2, "unfamiliar-upstream", 70, 0, 30, true, "fake-advisor", 7, 3, "interrupted_after_final_usage", false, .00013},
-		{"replace_empty_iterations", 1, "unfamiliar-upstream", 70, 20, 30, false, "", 0, 0, "", false, .000235},
-		{"fallback_output_tail_nonfinal", 2, "fake-fallback", 70, 20, 30, false, "unfamiliar-upstream", 13, 4, "interrupted_after_final_usage", false, .003002},
+		{"advisor_tail_nonfinal", 2, "unfamiliar-upstream", 70, 20, 30, false, "fake-advisor", 7, 3, "interrupted_after_final_usage", false, false, 0, .000365},
+		{"advisor_tail_empty_stop", 2, "unfamiliar-upstream", 70, 20, 30, false, "fake-advisor", 7, 3, "", false, false, 0, .000365},
+		{"advisor_tail_error_empty_stop", 2, "unfamiliar-upstream", 70, 20, 30, false, "fake-advisor", 7, 3, "interrupted_after_final_usage", true, false, 0, .000365},
+		{"advisor_refusal_free_tail_nonfinal", 2, "unfamiliar-upstream", 70, 0, 30, true, "fake-advisor", 7, 3, "interrupted_after_final_usage", false, false, 0, .00013},
+		{"replace_empty_iterations", 1, "unfamiliar-upstream", 70, 20, 30, false, "", 0, 0, "", false, false, 0, .000235},
+		{"fallback_output_tail_nonfinal", 2, "fake-fallback", 70, 20, 30, false, "unfamiliar-upstream", 13, 4, "interrupted_after_final_usage", false, false, 0, .003002},
+		{"advisor_tail_invalid_iteration_retry", 2, "unfamiliar-upstream", 70, 20, 30, false, "fake-advisor", 7, 3, "", false, false, 0, .000365},
+		{"advisor_tail_omitted_iterations_retry", 2, "unfamiliar-upstream", 70, 20, 30, false, "fake-advisor", 7, 3, "", false, false, 0, .000365},
+		{"advisor_tail_message_mismatch_retry", 2, "unfamiliar-upstream", 70, 20, 30, false, "fake-advisor", 7, 3, "", false, false, 0, .000365},
+		{"advisor_tail_error_retry_final", 1, "unfamiliar-upstream", 50, 9, 0, false, "", 0, 0, "interrupted_after_final_usage", true, false, 0, .000136},
+		{"advisor_tail_retry_final", 1, "unfamiliar-upstream", 50, 9, 0, false, "", 0, 0, "", false, false, 0, .000136},
+		{"advisor_tail_cost_incomplete_retry", 1, "unfamiliar-upstream", 50, 9, 0, false, "", 0, 0, "server_tool_charges", false, true, 1, .000136},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			_, up, _, requests := compressionUpstream(t)
@@ -107,10 +115,14 @@ func TestClaudeConfirmedFinalSnapshotE2E(t *testing.T) {
 					root = &rows[i]
 				}
 			}
-			if root == nil || root.Model != tc.rootModel || root.InputTokens != tc.rootIn || root.OutputTokens != tc.rootOut || root.CachedTokens != tc.rootCached || root.NonBillable != tc.rootFree || root.UsageStatus != usage.UsageStatusComplete || root.CostIncomplete || (root.ResponseStatus == "failed") != tc.failed {
+			if root == nil || root.Model != tc.rootModel || root.InputTokens != tc.rootIn || root.OutputTokens != tc.rootOut || root.CachedTokens != tc.rootCached || root.NonBillable != tc.rootFree || root.UsageStatus != usage.UsageStatusComplete || root.CostIncomplete != tc.costIncomplete || (root.ResponseStatus == "failed") != tc.failed {
 				t.Fatalf("root=%+v failed=%v", root, tc.failed)
 			}
-			if tc.diagnostic != "" && !strings.Contains(root.UsageDiagnostic, tc.diagnostic) {
+			if tc.diagnostic == "" {
+				if root.UsageDiagnostic != "" {
+					t.Fatalf("unexpected diagnostic=%q", root.UsageDiagnostic)
+				}
+			} else if !strings.Contains(root.UsageDiagnostic, tc.diagnostic) {
 				t.Fatalf("root diagnostic=%q want %s", root.UsageDiagnostic, tc.diagnostic)
 			}
 			if tc.rows == 1 {
@@ -128,8 +140,8 @@ func TestClaudeConfirmedFinalSnapshotE2E(t *testing.T) {
 			if err := json.Unmarshal(aggregate, &result); err != nil {
 				t.Fatal(err)
 			}
-			if result.Totals.Requests != 1 || math.Abs(result.Totals.EstimatedCost-tc.expectedCost) > 1e-12 || result.Totals.IncompleteCostCount != 0 {
-				t.Fatalf("aggregate=%+v cost=%g want=%g", result.Totals, result.Totals.EstimatedCost, tc.expectedCost)
+			if result.Totals.Requests != 1 || math.Abs(result.Totals.EstimatedCost-tc.expectedCost) > 1e-12 || result.Totals.IncompleteCostCount != tc.incompleteRows {
+				t.Fatalf("aggregate=%+v cost=%g want=%g incomplete=%d", result.Totals, result.Totals.EstimatedCost, tc.expectedCost, tc.incompleteRows)
 			}
 			if got := fmt.Sprintf("%.9f", result.Totals.EstimatedCost); got != fmt.Sprintf("%.9f", tc.expectedCost) {
 				t.Fatalf("cost=%s want %.9f", got, tc.expectedCost)

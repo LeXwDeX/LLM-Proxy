@@ -138,6 +138,67 @@ func TestSupplementaryAdmissionExhaustedGroup(t *testing.T) {
 	}
 }
 
+// /v1/messages/count_tokens is an Anthropic request schema, so explicit
+// supplementary models are checked at the same target before occupancy.
+// Requests without supplementary fields are not extra-checked.
+func TestSupplementaryAdmissionAppliesToCountTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields, model string
+		rejected            bool
+	}{
+		{"explicit_advisor", `,"tools":[{"type":"advisor_20260301","name":"advisor","model":"Advisor-Model"}]`, "Advisor-Model", true},
+		{"explicit_fallback", `,"fallbacks":[{"model":"Fallback-Model"}]`, "Fallback-Model", true},
+		{"no_supplementary", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int64
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"input_tokens":1}`)
+			}))
+			defer upstream.Close()
+			svc, err := NewService(&config.Config{Targets: []config.Target{{Name: "upstream", EndpointType: "claude", Endpoint: upstream.URL,
+				APIKeys: []string{"test-upstream-key", "test-upstream-key-2"}, ModelMappings: []config.ModelMapping{{Upstream: "Executor-Model", Fallback: "executor"}}}}}, newTestLogger())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer svc.Close()
+			qm := supplementaryQuota(t, []string{"upstream"}, 1, 1, 1, true)
+			svc.SetQuotaManager(qm)
+			am := admission.NewManager(newTestLogger(), admission.Options{RInit: 1, RMin: 1, RMax: 1})
+			svc.SetAdmissionManager(am)
+			state := svc.targetOrder[0]
+			before := state.Stats()
+			got := supplementaryRequest(t, svc, "/v1/messages/count_tokens", tc.fields)
+			if _, exceeded := qm.CheckTarget("tester", "upstream", "Advisor-Model"); !exceeded {
+				t.Fatal("fixture: group A must be exhausted")
+			}
+			if !tc.rejected {
+				if got.Code != http.StatusOK || hits.Load() != 1 {
+					t.Fatalf("status=%d hits=%d body=%s", got.Code, hits.Load(), got.Body.String())
+				}
+				return
+			}
+			info, _ := qm.CheckTarget("tester", "upstream", tc.model)
+			want := httptest.NewRecorder()
+			writeQuotaExceededResponse(want, info)
+			if got.Code != want.Code || got.Body.String() != want.Body.String() {
+				t.Fatalf("status=%d body=%s want %s", got.Code, got.Body.String(), want.Body.String())
+			}
+			if hits.Load() != 0 || state.inFlightCount() != 0 || state.keyPool.inFlight[0] != 0 || state.keyPool.inFlight[1] != 0 {
+				t.Fatalf("rejection reached upstream=%d inflight=%d keys=%d/%d", hits.Load(), state.inFlightCount(), state.keyPool.inFlight[0], state.keyPool.inFlight[1])
+			}
+			if state.probeSlotBusy(time.Now()) || state.Stats() != before {
+				t.Fatal("quota rejection retained probe or changed target health")
+			}
+			if !am.TryAcquire("upstream") {
+				t.Fatal("quota rejection consumed the target's initial rate token")
+			}
+		})
+	}
+}
+
 func TestSupplementaryAdmissionFinalBody(t *testing.T) {
 	advisor := `,"tools":[{"type":"advisor_20260301","name":"advisor","model":"Advisor-Model"}]`
 	for _, tc := range []struct {

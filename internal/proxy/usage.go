@@ -48,6 +48,9 @@ type usageTokens struct {
 	status, adapter, diagnostic, responseStatus, finishReason         string
 	costIncomplete                                                    bool
 	pricingContext                                                    *usage.PricingContext
+	// invalidIterations: an unverifiable attribution plan cannot replace a
+	// committed final; first-final handling stays conservative.
+	invalidIterations bool
 }
 
 type usageParser struct {

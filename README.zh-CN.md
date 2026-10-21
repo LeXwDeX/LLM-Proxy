@@ -50,11 +50,13 @@ LLMs Proxy 是一个 Go HTTP 服务，为客户端提供统一的模型 API 入�
 
 ### 未发布 bundle 账本兼容与回退限制
 
+新小时用量聚合使用带版本号、维度十六进制编码的键。已有 cell 不重写，读取在同一事务中扫描两种格式。总请求计数包含结构合法但维度分隔符有歧义的旧 cell；需要维度的旧读取方法对此明确报错，不再静默漏算。旧四／五段键沿用历史解释，raw 已清理时不能恢复丢失的归属。收据迁移核对旧／新格式合计记录数、新格式精确维度的下界及独立额度索引。旧二进制不理解新键，即使较窄的数据合同测试通过，也不是安全的原地降级制品。
+
 未发布的 bundle 账本保存 root 与关联附属记录、各自的计价证据、非计费 token 子集及聚合记录数。**含 bundle 数据的数据库或恢复日志禁止原地回退到 v1.0.1（`0e7ebfd`）**：旧版读取不保留该合同，可能多收费或返回 `ErrUsageHistoryIncomplete`。[Issue #13 方案 B](https://github.com/LeXwDeX/LLM-Proxy/issues/13#issuecomment-6306613243) 记录了这一限制。`b36b5445853c33ee0b804de46d42f6d8a1b152fa` 仅是固定的数据合同测试目标，不是已发布或生产安全的回退制品；它不能证明旧二进制能安全读取、拒绝或回退收据数据，其其他已知旧 bug 仍须处置。不理解收据的旧二进制不能承诺阻止启动或安全回滚。上线前须准备并验证能识别收据和 meta 标记的不可变兼容回退制品，记录其 digest。
 
 1. 停止新写入，排空在途请求和排队写入。
 2. 保留数据库、恢复 journal、其 `.corrupt` 文件、配置及迁移快照的一致集。
-3. 在隔离副本上使用兼容版本执行 `Replay`，核对记录数、请求数、token、费用及待处理/隔离日志。HTTP 健康检查正常不代表 replay 成功。
+3. 在隔离副本上使用兼容版本执行 `Replay`，核对记录数、请求数、token、费用及待处理/隔离日志。重放身份由记录时间与 `RecordID` 共同确定，两者都须保持稳定；仅凭 `RecordID` 不能在不同时间之间去重。HTTP 健康检查正常不代表 replay 成功。
 
 不得手工清理日志、用旧库覆盖新账，或拼接旧数据库与当前 journal。[跨版本集成测试](test/integration/usage_bundle_rollback_test.go) 验证固定版本间的稳定价、精确价、条件价、重放幂等及继续写入，不代表生产部署验收。
 
@@ -129,7 +131,9 @@ OpenAI 兼容请求的 JSON 或 SSE 数据帧中，顶层 `error` 为含有效 `
 
 目标的 `usage_adapter` 显式选项为 `standard`、`qwen`、`glm`、`deepseek`、`kimi`、`openrouter`、`minimax`，不按 host 或模型名推断。OpenRouter 与 MiniMax 只增加错误 Patch，用量仍按实际协议使用原厂解析器。OpenRouter 通过结构化预算来源区分临时限流、额度和余额，普通 403 文本不触发；MiniMax 仅在非流式 Chat Completions HTTP 200 JSON 中读取顶层 `base_resp` 数字业务码，已知认证/额度/限流码直接换 key，未知非零码透传并记 usage failed。MiniMax 全 key 耗尽时允许 failover，否则返回映射错误而非原始 200 体。2056 在代理侧按 `quota_exceeded` 处理：未配置有效未来重置时间时记为 `quota_exceeded_api`，需人工唤醒，或配置有效重置时间按既有 keypool 规则恢复（与 Kimi 一致）；不会自行推算 M Plan 窗口。流式、非 2xx、Anthropic Messages 和 Responses 均走原厂规则，不以 `base_resp` 触发 Patch。依据 [MiniMax Chat OpenAPI](https://platform.minimaxi.com/docs/api-reference/text-chat-openai) 与 [官方错误码页](https://platform.minimaxi.com/docs/api-reference/errorcode)，核对日期 2026-10-13；文档核对不等于真实 API 验收。完整判据与不做项见 [代理层约束](internal/proxy/AGENTS.md)。
 
-计费只依据上游官方返回的 token 用量字段，不估算、不补算，也不重放请求。客户端中途断开或取消时，代理照常立即取消上游，不重试、不重放；若此时尚未取得该协议的官方最终用量字段，且上游请求可能已发出，则记一条 0 token、状态为不完整的用量事件，诊断为 `client_disconnected_no_usage`（管理端口径说明中显示为“连接断开，未获取到计费字段”），已观察到的部分 token 也不计入；同时写一条 Warn 日志并累计计数 `usage_client_gone_no_usage`。可证明尚未向上游发送任何字节的取消不写用量事件。该规则与协议和传输方式（HTTP、SSE、WebSocket）无关；因此统计会少于厂商官方账单中这部分中断请求的用量，属于预期。上游原因（出错、断流、超时、解码失败、缺少终态或官方最终用量）造成的中断同样记 0 token，诊断为 `upstream_interrupted_no_usage`，计数 `usage_upstream_interrupted_no_usage`；两类计数均可在 `/admin/metrics` 与总览中查看。官方最终用量一经提交，后续非终态或空尾部帧不得覆盖或重算 token、模型、组件和计价上下文；仅生命周期状态与诊断可更新，新的合法最终快照可整体替换已提交快照。一个客户端请求至多对应一个用量 bundle，由持久化层原子展开为 root 和关联附属记录，仅 root 计入请求数；期间会重试或切换目标的失败尝试只写日志与计数。
+计费只依据上游官方返回的 token 用量字段，不估算、不补算，也不重放请求。客户端中途断开或取消时，代理照常立即取消上游，不重试、不重放；若此时尚未取得该协议的官方最终用量字段，且上游请求可能已发出，则记一条 0 token、状态为不完整的用量事件，诊断为 `client_disconnected_no_usage`（管理端口径说明中显示为“连接断开，未获取到计费字段”），已观察到的部分 token 也不计入；同时写一条 Warn 日志并累计计数 `usage_client_gone_no_usage`。可证明尚未向上游发送任何字节的取消不写用量事件。该规则与协议和传输方式（HTTP、SSE、WebSocket）无关；因此统计会少于厂商官方账单中这部分中断请求的用量，属于预期。上游原因（出错、断流、超时、解码失败、缺少终态或官方最终用量）造成的中断同样记 0 token，诊断为 `upstream_interrupted_no_usage`，计数 `usage_upstream_interrupted_no_usage`；两类计数均可在 `/admin/metrics` 与总览中查看。官方最终用量一经提交，后续非终态或空尾部帧不得覆盖或重算 token、模型、组件和计价上下文；仅生命周期状态与诊断可更新，新的合法最终快照可整体替换已提交快照。一个客户端请求至多对应一个用量 bundle，由持久化层原子展开为 root 和关联附属记录，仅 root 计入请求数；期间会重试或切换目标的失败尝试只写日志与计数。Anthropic 请求中显式声明的 advisor 与 fallback 模型，即使在不产生生成响应的路径（如 `/v1/messages/count_tokens`）也按同一 target 做额度检查；未声明附属模型的请求不追加检查。
+
+Anthropic 最终快照替换还要求 iteration 计数、求和及模型归属可验证。已观察到非空 iterations 后，缺失、null 或非数组的替换候选不能丢弃已提交的 bundle。显式 `[]` 及合法但费用不完整的快照（如 server-tool 费用）仍可替换。首个 final 的保守处理不变。`interrupted_after_final_usage` 诊断跨后续合法替换保留，干净替换不会生成该标记。
 
 统计不保存身份、请求正文或密钥，也不参与计费、额度、重试或健康结算。写入失败会记录日志，并在总览通过本进程 `record_failures` 提示样本可能不完整；没有恢复日志，写入失败和进程崩溃期间不保证计数完整。读取失败显示不可用，不回退到旧数据。兼容字段 `success_rate`、`requests_72h`、`success_72h` 仍以用量事件为样本，并通过 `legacy_sample_basis: "usage_events"` 标明口径。
 

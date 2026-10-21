@@ -124,11 +124,17 @@ func decodeUsageReceiptWatermark(raw []byte) (time.Time, error) {
 }
 
 // computeUsageReceiptWatermark compares retained raw row counts with permanent
-// hourly record counts. Any mismatch makes that hour untrustworthy. Legacy
-// four-segment aggregate keys carry no target and cannot be matched row by
-// row, so their hours are conservatively untrusted.
+// hourly record counts. Any mismatch makes that hour untrustworthy. Aggregate
+// dimensions are joined with '|' without escaping, so a client name, model or
+// target may itself contain that separator and a valid historical key can have
+// more than five segments. Historical cells are matched by their original
+// bytes against the legacy projection of each raw row. Versioned cells are
+// matched per exact v2 key as a lower bound and also projected into the same
+// historical space. Legacy four-segment keys never match a projection and stay
+// conservatively untrusted.
 func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
-	rawAgg := make(map[string]int64)
+	rawLegacy := make(map[string]int64)
+	rawV2 := make(map[string]int64)
 	rawQuota := make(map[string]int64)
 	if raw := tx.Bucket([]byte(BucketUsageEvents)); raw != nil {
 		cursor := raw.Cursor()
@@ -137,7 +143,8 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 			if json.Unmarshal(v, &event) != nil {
 				continue
 			}
-			rawAgg[string(aggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target))]++
+			rawLegacy[string(legacyAggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target))]++
+			rawV2[string(aggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target))]++
 			rawQuota[string(quotaAggKey(event.Timestamp, event.ClientName, event.Target, event.Model))]++
 		}
 	}
@@ -148,80 +155,108 @@ func computeUsageReceiptWatermark(tx *bolt.Tx) (time.Time, error) {
 			untrusted = hour
 		}
 	}
+	markKey := func(key string) error {
+		hour, err := hourFromAggKey(key)
+		if err != nil {
+			return err
+		}
+		mark(hour)
+		return nil
+	}
 
+	// Historical cells are compared by their original bytes; current cells are
+	// projected into historical key space. Counts accumulate per key so two
+	// different v2 dimensions that share one legacy projection cannot cancel a
+	// missing row. The per-v2 lower bound adds the dimension-level check.
+	expectedLegacy := make(map[string]int64)
 	if bucket := tx.Bucket([]byte(BucketUsageAggHourly)); bucket != nil {
 		cursor := bucket.Cursor()
 		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
-			hour, endpointType, client, model, target, ok := parseAggKey(k)
-			if !ok {
-				return time.Time{}, fmt.Errorf("usage receipts: invalid hourly aggregate key")
+			entry, err := decodeAggKey(k)
+			if err != nil {
+				return time.Time{}, err
 			}
 			var cell AggCell
 			if err := json.Unmarshal(v, &cell); err != nil {
 				return time.Time{}, fmt.Errorf("usage receipts: decode hourly aggregate cell: %w", err)
 			}
-			key := string(aggKey(hour, endpointType, client, model, target))
-			legacy := len(strings.Split(string(k), "|")) == 4 || target == ""
-			if legacy || rawAgg[key] != cell.recordCount() {
-				mark(hour)
+			key := string(k)
+			if strings.HasPrefix(key, "v2|") {
+				projected := string(legacyAggKey(entry.hour, entry.endpointType, entry.client, entry.model, entry.target))
+				expectedLegacy[projected] += cell.recordCount()
+				if rawV2[key] < cell.recordCount() {
+					mark(entry.hour)
+				}
+				continue
 			}
-			delete(rawAgg, key)
+			expectedLegacy[key] += cell.recordCount()
+			if len(strings.Split(key, "|")) == 4 {
+				mark(entry.hour)
+			}
 		}
 	}
-	for key := range rawAgg {
-		hour, err := hourFromAggKey(key)
-		if err != nil {
-			return time.Time{}, err
+	for key, want := range rawLegacy {
+		if expectedLegacy[key] != want {
+			if err := markKey(key); err != nil {
+				return time.Time{}, err
+			}
 		}
-		mark(hour)
+	}
+	for key, want := range expectedLegacy {
+		if rawLegacy[key] != want {
+			if err := markKey(key); err != nil {
+				return time.Time{}, err
+			}
+		}
 	}
 
+	expectedQuota := make(map[string]int64)
 	if bucket := tx.Bucket([]byte(BucketQuotaUsageAggHourly)); bucket != nil {
 		cursor := bucket.Cursor()
 		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
-			parts := strings.SplitN(string(k), "|", 4)
-			if len(parts) != 4 {
-				return time.Time{}, fmt.Errorf("usage receipts: invalid quota aggregate key")
-			}
-			hour, err := time.ParseInLocation(hourLayout, parts[0], time.UTC)
-			if err != nil {
-				return time.Time{}, fmt.Errorf("usage receipts: parse quota aggregate hour: %w", err)
+			key := string(k)
+			if _, err := hourFromAggKey(key); err != nil {
+				return time.Time{}, fmt.Errorf("usage receipts: invalid quota aggregate key: %w", err)
 			}
 			var cell AggCell
 			if err := json.Unmarshal(v, &cell); err != nil {
 				return time.Time{}, fmt.Errorf("usage receipts: decode quota aggregate cell: %w", err)
 			}
-			if rawQuota[string(k)] != cell.recordCount() {
-				mark(hour)
-			}
-			delete(rawQuota, string(k))
+			expectedQuota[key] += cell.recordCount()
 		}
 	}
-	for key := range rawQuota {
-		parts := strings.SplitN(key, "|", 4)
-		if len(parts) != 4 {
-			return time.Time{}, fmt.Errorf("usage receipts: invalid raw quota aggregate key")
+	for key, want := range rawQuota {
+		if expectedQuota[key] != want {
+			if err := markKey(key); err != nil {
+				return time.Time{}, err
+			}
 		}
-		hour, err := time.ParseInLocation(hourLayout, parts[0], time.UTC)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("usage receipts: parse raw quota aggregate hour: %w", err)
+	}
+	for key, want := range expectedQuota {
+		if rawQuota[key] != want {
+			if err := markKey(key); err != nil {
+				return time.Time{}, err
+			}
 		}
-		mark(hour)
 	}
 
 	if untrusted.IsZero() {
 		return time.Time{}, nil
 	}
-	return untrusted.Add(time.Hour).UTC(), nil
+	next := untrusted.Add(time.Hour)
+	if !next.After(untrusted) {
+		return time.Time{}, fmt.Errorf("usage receipts: legacy watermark overflow")
+	}
+	return next.UTC(), nil
 }
 
 func hourFromAggKey(key string) (time.Time, error) {
-	if len(key) < len(hourLayout) {
+	if len(key) <= len(hourLayout) || key[len(hourLayout)] != '|' {
 		return time.Time{}, fmt.Errorf("usage receipts: invalid aggregate key")
 	}
 	hour, err := time.ParseInLocation(hourLayout, key[:len(hourLayout)], time.UTC)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("usage receipts: parse aggregate hour: %w", err)
+	if err != nil || hour.Format(hourLayout) != key[:len(hourLayout)] {
+		return time.Time{}, fmt.Errorf("usage receipts: invalid aggregate hour")
 	}
 	return hour, nil
 }

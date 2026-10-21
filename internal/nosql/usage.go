@@ -83,7 +83,7 @@ func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
 // RecordBatch commits several usage events in one write transaction. It is
 // all-or-nothing: any rejected event rolls the whole batch back so the caller
 // can retry the events individually. Identical replays are idempotent by
-// RecordID, exactly like Record.
+// the stable Timestamp and RecordID pair, exactly like Record.
 func (s *UsageStore) RecordBatch(events []usage.Event) error {
 	if len(events) == 0 {
 		return nil
@@ -284,22 +284,22 @@ func (s *UsageStore) List(filter usage.Filter) ([]usage.Event, error) {
 }
 
 // Count returns total and success request counts within the given time range.
-//
-// New implementation: scans the hourly agg bucket — bounded to ~hours-in-range cells
-// times unique (et,client,model) combos per hour. For 72h window this is typically
-// < 1000 cells vs. previously scanning every event in that window.
+// It reads both physical aggregate key formats and only needs hour and totals,
+// so structurally valid legacy keys stay counted even when their dimensions are
+// ambiguous. Any malformed key or cell fails the whole read.
 func (s *UsageStore) Count(from, to time.Time) (total, success int64, err error) {
-	from = from.UTC()
-	to = to.UTC()
-
 	err = s.db.View(func(tx *bolt.Tx) error {
-		return aggIter(tx, from, to, func(_ time.Time, _, _, _, _ string, cell AggCell) error {
-			total += cell.Requests
-			success += cell.Success
+		total, success = 0, 0
+		return aggCellIter(tx, from, to, func(entry aggCellEntry) error {
+			total += entry.cell.Requests
+			success += entry.cell.Success
 			return nil
 		})
 	})
-	return
+	if err != nil {
+		return 0, 0, err
+	}
+	return total, success, nil
 }
 
 // Aggregate aggregates usage in requested time buckets, served from the hourly agg bucket.

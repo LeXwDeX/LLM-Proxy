@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -671,6 +672,321 @@ func TestJournalReplayAfterPruneDoesNotDoubleCount(t *testing.T) {
 			}
 			if !reflect.DeepEqual(beforeAgg, afterAgg) || !reflect.DeepEqual(beforeUnits, afterUnits) {
 				t.Fatalf("replay changed retained accounting: agg=%+v units=%+v", afterAgg.Totals, afterUnits)
+			}
+		})
+	}
+}
+
+// legacyDelimiterEvent is one plain event whose client name contains the
+// hourly aggregate separator. The old writer accepted such names and wrote a
+// six-segment aggregate key.
+func legacyDelimiterEvent() usage.Event {
+	event := fixedPlainEvent()
+	event.ClientName = "team|api"
+	return event
+}
+
+func receiptWatermark(t *testing.T, db *bolt.DB) time.Time {
+	t.Helper()
+	var watermark time.Time
+	if err := db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketMeta)).Get([]byte(usageReceiptsWatermarkKey))
+		if len(raw) == 0 {
+			return nil
+		}
+		var err error
+		watermark, err = time.Parse(time.RFC3339Nano, string(raw))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return watermark
+}
+
+// moveAggCellToLegacy replaces the current v2 cell for event with the exact
+// legacy key an old writer produced, leaving raw rows untouched.
+func moveAggCellToLegacy(t *testing.T, db *bolt.DB, event usage.Event) {
+	t.Helper()
+	if err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(BucketUsageAggHourly))
+		v2 := aggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target)
+		data := b.Get(v2)
+		if data == nil {
+			return errors.New("v2 aggregate cell missing")
+		}
+		legacy := legacyAggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target)
+		if err := b.Put(legacy, append([]byte(nil), data...)); err != nil {
+			return err
+		}
+		return b.Delete(v2)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLegacyDelimiterClientAggregateKeyMigration covers an old database whose
+// client name contains the aggregate separator. Such a key has six segments and
+// must not block receipt migration: matching the original key proves retained
+// rows, while a pruned hour stays conservatively untrusted.
+func TestLegacyDelimiterClientAggregateKeyMigration(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		target        string
+		pruneRaw      bool
+		wantWatermark bool
+	}{
+		{name: "raw retained", target: "anthropic"},
+		{name: "raw pruned", target: "anthropic", pruneRaw: true, wantWatermark: true},
+		{name: "empty target retained", target: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "usage.db")
+			db, err := OpenDB(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closed := false
+			t.Cleanup(func() {
+				if !closed {
+					db.Close()
+				}
+			})
+
+			store := NewUsageStore(db)
+			event := legacyDelimiterEvent()
+			event.Target = tc.target
+			if err := store.Record(event); err != nil {
+				t.Fatal(err)
+			}
+			moveAggCellToLegacy(t, db, event)
+			if parts := len(strings.Split(string(legacyAggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target)), "|")); parts != 6 {
+				t.Fatalf("legacy fixture wrote %d aggregate segments, want 6", parts)
+			}
+			if tc.pruneRaw {
+				deleteUsageRawAndIndex(t, db, event)
+			}
+			resetReceiptTracking(t, db)
+
+			if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
+				t.Fatalf("migrate delimiter-bearing aggregate key: %v", err)
+			}
+			if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
+				t.Fatalf("repeated migration: %v", err)
+			}
+			hour := event.Timestamp.Truncate(time.Hour)
+			wantWatermark := time.Time{}
+			if tc.wantWatermark {
+				wantWatermark = hour.Add(time.Hour)
+			}
+			if got := receiptWatermark(t, db); !got.Equal(wantWatermark) {
+				t.Fatalf("watermark=%v, want %v", got, wantWatermark)
+			}
+
+			wantRaw, wantAgg := 1, int64(1)
+			if tc.pruneRaw {
+				wantRaw = 0
+			}
+			added, err := NewUsageStore(db).RecordOnce(event)
+			if tc.pruneRaw {
+				if !errors.Is(err, ErrUsageIdentityUnverified) || added {
+					t.Fatalf("unproven pruned identity: added=%v err=%v", added, err)
+				}
+			} else if err != nil || added {
+				t.Fatalf("retained raw identity: added=%v err=%v", added, err)
+			}
+			if raw, agg := usageRecordCounts(t, db); raw != wantRaw || agg != wantAgg {
+				t.Fatalf("identity replay changed accounting: raw=%d agg=%d", raw, agg)
+			}
+
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			closed = true
+			db, err = OpenDB(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closed = false
+			if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
+				t.Fatalf("migration after reopen: %v", err)
+			}
+			if got := receiptWatermark(t, db); !got.Equal(wantWatermark) {
+				t.Fatalf("reopened watermark=%v, want %v", got, wantWatermark)
+			}
+
+			fresh := fixedPlainEvent()
+			fresh.RecordID = fixedLaterRecordID
+			fresh.ClientName = "bob"
+			fresh.Timestamp = hour.Add(2 * time.Hour)
+			added, err = NewUsageStore(db).RecordOnce(fresh)
+			if err != nil || !added {
+				t.Fatalf("new client after migration: added=%v err=%v", added, err)
+			}
+			beforeRaw, beforeAgg := usageRecordCounts(t, db)
+			added, err = NewUsageStore(db).RecordOnce(fresh)
+			if err != nil || added {
+				t.Fatalf("new client replay: added=%v err=%v", added, err)
+			}
+			if raw, agg := usageRecordCounts(t, db); raw != beforeRaw || agg != beforeAgg {
+				t.Fatalf("new client replay changed accounting: raw=%d agg=%d", raw, agg)
+			}
+			if raw, agg := usageRecordCounts(t, db); raw != wantRaw+1 || agg != 2 {
+				t.Fatalf("new client accounting: raw=%d agg=%d", raw, agg)
+			}
+		})
+	}
+}
+
+// TestAsyncJournalContinuesAfterLegacyDelimiterMigration verifies an unrelated
+// new client keeps the asynchronous journal path, replay and pruning after the
+// legacy delimiter-bearing key was accepted.
+func TestAsyncJournalContinuesAfterLegacyDelimiterMigration(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		pruneRaw bool
+	}{
+		{name: "raw retained"},
+		{name: "raw pruned", pruneRaw: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, "usage.db")
+			journalPath := filepath.Join(dir, "usage-journal.jsonl")
+			db, err := OpenDB(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			store := NewUsageStore(db)
+
+			legacy := legacyDelimiterEvent()
+			if err := store.Record(legacy); err != nil {
+				t.Fatal(err)
+			}
+			moveAggCellToLegacy(t, db, legacy)
+			if tc.pruneRaw {
+				deleteUsageRawAndIndex(t, db, legacy)
+			}
+			resetReceiptTracking(t, db)
+			if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
+				t.Fatalf("migrate delimiter-bearing aggregate key: %v", err)
+			}
+
+			journal, err := NewUsageJournal(store, journalPath, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := journal.EnableAsyncCommit(UsageJournalAsyncOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			fresh := fixedPlainEvent()
+			fresh.RecordID = ""
+			fresh.ClientName = "bob"
+			fresh.Timestamp = legacy.Timestamp.Add(2 * time.Hour)
+			if err := journal.Record(fresh); err != nil {
+				t.Fatalf("async journal after migration: %v", err)
+			}
+			journal.Flush()
+			if err := journal.Close(); err != nil {
+				t.Fatalf("close async journal: %v", err)
+			}
+
+			wantRaw := 2
+			if tc.pruneRaw {
+				wantRaw = 1
+			}
+			if raw, agg := usageRecordCounts(t, db); raw != wantRaw || agg != 2 {
+				t.Fatalf("async write after migration: raw=%d agg=%d", raw, agg)
+			}
+
+			replay, err := NewUsageJournal(store, journalPath, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer replay.Close()
+			clients, err := replay.Replay()
+			if err != nil || len(clients) != 0 {
+				t.Fatalf("replay after migration: clients=%v err=%v", clients, err)
+			}
+			if raw, agg := usageRecordCounts(t, db); raw != wantRaw || agg != 2 {
+				t.Fatalf("replay double counted: raw=%d agg=%d", raw, agg)
+			}
+
+			deleted, err := store.PruneEventsBefore(legacy.Timestamp.Add(3*time.Hour), 10)
+			if err != nil {
+				t.Fatalf("prune after migration: %v", err)
+			}
+			if deleted != wantRaw {
+				t.Fatalf("prune deleted=%d, want %d", deleted, wantRaw)
+			}
+			if raw, _ := usageRecordCounts(t, db); raw != 0 {
+				t.Fatalf("prune retained %d raw rows", raw)
+			}
+		})
+	}
+}
+
+// TestLegacyFourSegmentAggregateKeyIsConservative keeps pre-B1 keys acceptable
+// while marking their hour untrusted, because row-by-row proof is impossible.
+func TestLegacyFourSegmentAggregateKeyIsConservative(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	event := fixedPlainEvent()
+	if err := store.Record(event); err != nil {
+		t.Fatal(err)
+	}
+	hour := event.Timestamp.Truncate(time.Hour)
+	if err := db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(BucketUsageAggHourly))
+		if err := bucket.Delete(aggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target)); err != nil {
+			return err
+		}
+		return bucket.Put([]byte(hour.Format(hourLayout)+"|claude|alice|executor"), []byte(`{"record_count":1}`))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resetReceiptTracking(t, db)
+	if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
+		t.Fatalf("legacy four-segment key rejected: %v", err)
+	}
+	if got, want := receiptWatermark(t, db), hour.Add(time.Hour); !got.Equal(want) {
+		t.Fatalf("legacy four-segment watermark=%v, want %v", got, want)
+	}
+	added, err := store.RecordOnce(event)
+	if err != nil || added {
+		t.Fatalf("retained raw evidence lost to a legacy cell: added=%v err=%v", added, err)
+	}
+}
+
+// TestReceiptWatermarkStillRejectsMalformedAggregate keeps explicit failures
+// for impossible key shapes; only separator-bearing dimensions become valid.
+func TestReceiptWatermarkStillRejectsMalformedAggregate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value []byte
+	}{
+		{"too few segments", "2026-10-21T09|claude|alice", []byte(`{"record_count":1}`)},
+		{"invalid hour", "not-an-hour|claude|alice|executor|anthropic", []byte(`{"record_count":1}`)},
+		{"hour without separator", "2026-10-21T09x|claude|alice|executor", []byte(`{"record_count":1}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			if err := db.Update(func(tx *bolt.Tx) error {
+				return tx.Bucket([]byte(BucketUsageAggHourly)).Put([]byte(tc.key), tc.value)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := NewUsageStore(db).EnsureUsageReceipts(); err == nil {
+				t.Fatalf("malformed aggregate key %q was accepted", tc.key)
+			}
+			if err := db.View(func(tx *bolt.Tx) error {
+				if tx.Bucket([]byte(BucketMeta)).Get([]byte(usageReceiptsWatermarkDoneKey)) != nil {
+					t.Fatal("rejected migration published a completion marker")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

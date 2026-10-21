@@ -45,12 +45,15 @@ node scripts/testing/usage_table_browser_test.cjs
 以下用例在 `go test ./internal/...` 中运行，不调用真实模型：
 
 - `internal/nosql/usage_receipts_test.go`：`TestPrunedBundleRetryDoesNotResurrectOrDoubleCount`、`TestLegacyPrunedDatabaseRejectsUnverifiedIdentity`、`TestJournalReplayAfterPruneDoesNotDoubleCount`、`TestReceiptWatermarkMarksMissingAggregateCell`、`TestReceiptBucketRecreationRequiresNewWatermark`、`TestPruneFailsClosedWithoutReceiptBucket`。
+- 同文件的 `TestLegacyDelimiterClientAggregateKeyMigration` 与 `TestAsyncJournalContinuesAfterLegacyDelimiterMigration` 验证旧聚合维度含 `|` 时迁移、重开、异步 journal 写入、回放与清理；保留或已清理 raw 均覆盖，仍按原始键核对计数并保守拒绝无法证明的历史身份。
 - `internal/nosql/usage_identity_test.go`：`TestRecordOnceRejectsExplicitIdentityWithoutTimestamp`、`TestRecordOnceRetryIgnoresOnlyDerivedPricingRuleMetadata`、`TestUsageJournalPendingRetryIgnoresDerivedPricingMetadata`。
 - `internal/proxy/usage_final_snapshot_test.go`：`TestClaudeConfirmedFinalSnapshotSurvivesUntrustedTail`、`TestClaudeInvalidLaterFinalDoesNotOverwriteConfirmed`；`internal/fakellm/anthropic_final_tail_test.go`：`TestAnthropicFinalSnapshotTailModes`。
 - `internal/quota/accounting_identity_test.go`：`TestRecordUsageRejectsExplicitIdentityWithoutTimestampWithoutSideEffects`、`TestRecordUsageRetryIgnoresPricingRuleVersion`。
 - `internal/nosql/usage_price_coverage_test.go`：`TestStableAggregateReportsMissingSupplementaryIterationPrice`、`TestStableAggregateIterationPriceScope`、`TestStableAggregatePriceRecoveryDoesNotPersistDerivedIncomplete`、`TestMixedLegacyAndNewCellIsNotAssumedCovered`、`TestStablePriceCoverageSurvivesClearedRawHistory`，以及 Summary、ReadCostUnits、模型组消费者的缺价计数回归。
 
 以上用例覆盖工作区当前合同，不代表部署或真实上游验收。
+
+`internal/nosql/usage_agg_v2_test.go` 覆盖版本化聚合键、旧／新格式混合读取、receipt 数量核对、回放与 backfill 边界；`internal/admin/overview_usage_count_test.go` 回读管理总览，确保含歧义分隔符的旧 cell 不丢失总请求计数。旧歧义维度不恢复，需要维度的读取明确失败。跨版本用例只核对其列出的数据合同，不能证明旧二进制支持新聚合键或安全降级。
 
 ## 虚假上游端到端（make e2e）
 
@@ -61,6 +64,8 @@ make e2e   # go test -tags=e2e -count=1 -v ./test/e2e/
 套件编译真实代理二进制，在进程内启动确定性虚假上游 `internal/fakellm`，经管理 API 创建 target、池、客户端与职级后以客户端身份发请求，核对上游实际收到的内容（路径、认证、模型名大小写）、客户端响应和 usage 事件的计费回读。覆盖原厂与 Patch 厂商矩阵（含 `standard` 反例）、Responses WebSocket、key 池限流轮换与耗尽、失败切换与取消不重试，以及 JSON/SSE 响应压缩。`TestKnownGaps` 以 SKIP 列出已知兼容缺口及观测值，`-v` 输出即当前清单。
 
 当前新增的最终快照合同用例为 `TestClaudeConfirmedFinalSnapshotE2E`（[`test/e2e/claude_final_snapshot_test.go`](../../test/e2e/claude_final_snapshot_test.go)），子用例 `advisor_tail_nonfinal`、`advisor_tail_empty_stop`、`advisor_tail_error_empty_stop`、`advisor_refusal_free_tail_nonfinal`、`replace_empty_iterations`、`fallback_output_tail_nonfinal`。它核对 root/附属记录、模型、token、诊断、失败状态和聚合费用；尾部帧是合成反例，不是官方 Claude 序列。
+
+同一表还覆盖 `advisor_tail_invalid_iteration_retry`、`advisor_tail_omitted_iterations_retry`、`advisor_tail_message_mismatch_retry`、`advisor_tail_error_retry_final`、`advisor_tail_retry_final` 和 `advisor_tail_cost_incomplete_retry`。这些合成指令验证非法或无法证明的 iteration 候选不能丢弃已确认组件，合法替换仍更新费用，error 诊断跨替换保留，并核对费用不完整计数；不表示真实上游曾返回这些序列。
 
 同文件的 `TestClaudeInvalidFinalTailRecoveryE2E` 验证无效终态不能污染后续合法终态；[`TestChatFinalSnapshotTailE2E`](../../test/e2e/chat_final_snapshot_test.go) 验证无 usage 的 Chat 尾帧不能改写已确认档位和费用。对应合成指令为 `iterations=advisor_tail_invalid_final_retry` 和 `chat_tail=reprice_nonfinal`，不是原厂正常输出合同。
 

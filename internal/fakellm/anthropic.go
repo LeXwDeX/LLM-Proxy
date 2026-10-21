@@ -2,11 +2,9 @@ package fakellm
 
 import "strings"
 
-// anthropicTailSuffixes are synthetic counterexample suffixes: the stream ends
-// with a non-final delta, an empty delta before message_stop, an error and
-// empty delta before message_stop, or an invalid final followed by a valid
-// final. They are not official Claude sequences.
-var anthropicTailSuffixes = []string{"_tail_nonfinal", "_tail_empty_stop", "_tail_error_empty_stop", "_tail_invalid_final_retry"}
+// anthropicTailSuffixes are synthetic counterexamples appended after usage;
+// they are not official Claude sequences.
+var anthropicTailSuffixes = []string{"_tail_nonfinal", "_tail_empty_stop", "_tail_error_empty_stop", "_tail_invalid_final_retry", "_tail_invalid_iteration_retry", "_tail_omitted_iterations_retry", "_tail_message_mismatch_retry", "_tail_error_retry_final", "_tail_retry_final", "_tail_cost_incomplete_retry"}
 
 func anthropicTail(mode string) (string, string) {
 	for _, suffix := range anthropicTailSuffixes {
@@ -204,6 +202,46 @@ func (s *Server) serveMessages(c *call) {
 		billed := Usage{Input: 7, Output: 4}
 		c.rec.Usage = &billed
 		st.done("ok", &billed)
+		return
+	case "invalid_iteration_retry", "omitted_iterations_retry", "message_mismatch_retry":
+		// Synthetic: unverifiable/omitted iterations or a message-only mismatch
+		// after an earlier valid final. Not an official Claude sequence.
+		retryUsage := map[string]any{"input_tokens": 70, "output_tokens": 20, "cache_read_input_tokens": 30, "cache_creation_input_tokens": 0}
+		switch tail {
+		case "invalid_iteration_retry":
+			retryUsage["iterations"] = []any{
+				map[string]any{"type": "message", "input_tokens": 70, "output_tokens": 20, "cache_read_input_tokens": 30, "cache_creation_input_tokens": 0},
+				map[string]any{"type": "advisor_message", "model": "fake-advisor", "input_tokens": -1, "output_tokens": 3, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+			}
+		case "message_mismatch_retry":
+			retryUsage["iterations"] = []any{
+				map[string]any{"type": "message", "input_tokens": 71, "output_tokens": 20, "cache_read_input_tokens": 30, "cache_creation_input_tokens": 0},
+			}
+		}
+		retry := map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": firstNonEmpty(c.sc.Finish, "end_turn")}, "usage": retryUsage}
+		st.event("message_delta", retry)
+		st.event("message_stop", map[string]any{"type": "message_stop"})
+		st.done("ok", &u)
+		return
+	case "error_retry_final", "retry_final", "cost_incomplete_retry":
+		// Synthetic: an error or a 50/9 replacement final after the committed
+		// snapshot; cost_incomplete_retry adds one server tool request.
+		if tail == "error_retry_final" {
+			st.event("error", map[string]any{"type": "error", "error": map[string]any{"type": "overloaded_error", "message": "synthetic error after usage"}})
+		}
+		replacement := map[string]any{"input_tokens": 50, "output_tokens": 9, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "iterations": []any{}}
+		if tail == "cost_incomplete_retry" {
+			replacement["server_tool_use"] = map[string]any{"web_search_requests": 1}
+		}
+		st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": firstNonEmpty(c.sc.Finish, "end_turn")}, "usage": replacement})
+		st.event("message_stop", map[string]any{"type": "message_stop"})
+		billed := Usage{Input: 50, Output: 9}
+		c.rec.Usage = &billed
+		status := "ok"
+		if tail == "error_retry_final" {
+			status = "stream_error"
+		}
+		st.done(status, &billed)
 		return
 	case "nonfinal":
 		// No message_stop: the stream ends after a delta that only repeats output.

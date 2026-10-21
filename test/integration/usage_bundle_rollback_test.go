@@ -53,18 +53,19 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 		strings.TrimSpace(string(bundleCommand(t, root, nil, "git", "rev-parse", "HEAD"))), bundleCompatibleSHA, bundleIncompatibleSHA)
 
 	for _, scenario := range []struct {
-		name       string
-		journal    bool
-		committed  bool
-		legacy     bool
-		freeRoot   bool
-		cost       float64
-		appendCost float64
+		name            string
+		journal         bool
+		committed       bool
+		legacy          bool
+		freeRoot        bool
+		cost            float64
+		appendCost      float64
+		legacyUsageRows int64
 	}{
 		{name: "database", committed: true, cost: 12, appendCost: 12},
 		{name: "journal_only", journal: true, cost: 12, appendCost: 12},
 		{name: "committed_uncompacted_journal", journal: true, committed: true, cost: 12, appendCost: 12},
-		{name: "nonbillable_root_mixed_legacy", journal: true, committed: true, legacy: true, freeRoot: true, cost: 12, appendCost: 10},
+		{name: "nonbillable_root_mixed_legacy", journal: true, committed: true, legacy: true, freeRoot: true, cost: 12, appendCost: 10, legacyUsageRows: 1},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -90,7 +91,7 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 					t.Fatalf("missing durable journal: %v", err)
 				}
 				if !scenario.committed {
-					assertBundleReport(t, inspectBundle(t, current, dir), nil, 0)
+					assertBundleReport(t, inspectBundle(t, current, dir), nil, 0, scenario.legacyUsageRows)
 				}
 				for attempt := 0; attempt < 2; attempt++ {
 					if attempt > 0 {
@@ -108,12 +109,12 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 						t.Fatalf("recovered clients=%v", recovered)
 					}
 					assertBundleJournalEmpty(t, dir)
-					assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost)
-					assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost)
+					assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost, scenario.legacyUsageRows)
+					assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost, scenario.legacyUsageRows)
 				}
 			} else {
-				assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost)
-				assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost)
+				assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost, scenario.legacyUsageRows)
+				assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost, scenario.legacyUsageRows)
 			}
 
 			// Overwrite the SAME hour/model cells using the fixed older source.
@@ -122,8 +123,10 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 			continued.Timestamp = continued.Timestamp.Add(time.Minute)
 			runBundleProbe(t, compatible, dir, "record", continued)
 			expected = append(expected, usage.ExpandEvent(continued)...)
-			assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost+scenario.appendCost)
-			assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost+scenario.appendCost)
+			// The fixed older source rewrites the old cell with record_count,
+			// so every expanded row is provable again at this step.
+			assertBundleReport(t, inspectBundle(t, compatible, dir), expected, scenario.cost+scenario.appendCost, 0)
+			assertBundleReport(t, inspectBundle(t, current, dir), expected, scenario.cost+scenario.appendCost, 0)
 			assertBundleJournalEmpty(t, dir)
 		})
 	}
@@ -132,7 +135,7 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 		dir := t.TempDir()
 		event := rollbackBundle(false)
 		runBundleProbe(t, current, dir, "record", event)
-		assertBundleReport(t, inspectBundle(t, current, dir), usage.ExpandEvent(event), 12)
+		assertBundleReport(t, inspectBundle(t, current, dir), usage.ExpandEvent(event), 12, 0)
 		old := inspectBundle(t, incompatible, dir)
 		stable, exact := old.Prices["stable"], old.Prices["exact"]
 		if stable.Error != "" || stable.Cost != 27 || stable.Requests != 1 || stable.InputTokens != 6_000_000 {
@@ -142,7 +145,7 @@ func TestUsageBundleRollbackContract(t *testing.T) {
 			t.Fatalf("expected typed ErrUsageHistoryIncomplete from record parity, got %+v", exact)
 		}
 		t.Logf("%s: stable cost=%g requests=%d tokens=%d; exact=%s", bundleIncompatibleSHA, stable.Cost, stable.Requests, stable.InputTokens, exact.Error)
-		assertBundleReport(t, inspectBundle(t, current, dir), usage.ExpandEvent(event), 12)
+		assertBundleReport(t, inspectBundle(t, current, dir), usage.ExpandEvent(event), 12, 0)
 	})
 }
 
@@ -161,7 +164,10 @@ func rollbackBundle(freeRoot bool) usage.Event {
 	}
 }
 
-func assertBundleReport(t *testing.T, got bundleProbeReport, want []usage.Event, cost float64) {
+// legacyUsageRows counts rows written by binaries that predate record_count.
+// Their cells carry tokens and request totals but no row count, so the usage
+// aggregate ledger alone cannot prove those rows.
+func assertBundleReport(t *testing.T, got bundleProbeReport, want []usage.Event, cost float64, legacyUsageRows int64) {
 	t.Helper()
 	want = append([]usage.Event{}, want...)
 	byID := func(a, b usage.Event) int { return strings.Compare(a.RecordID, b.RecordID) }
@@ -203,8 +209,12 @@ func assertBundleReport(t *testing.T, got bundleProbeReport, want []usage.Event,
 				rollupFree += cell.NonBillable.InputTokens
 			}
 		}
-		if records != int64(len(want)) || rollupRequests != requests || rollupTokens != tokens || rollupFree != freeTokens {
-			t.Fatalf("%s lost record_count/non_billable: records=%d requests=%d tokens=%d free=%d", name, records, rollupRequests, rollupTokens, rollupFree)
+		wantRecords := int64(len(want))
+		if name == nosql.BucketUsageAggHourly {
+			wantRecords -= legacyUsageRows
+		}
+		if records != wantRecords || rollupRequests != requests || rollupTokens != tokens || rollupFree != freeTokens {
+			t.Fatalf("%s lost record_count/non_billable: records=%d want=%d requests=%d tokens=%d free=%d", name, records, wantRecords, rollupRequests, rollupTokens, rollupFree)
 		}
 	}
 	t.Logf("cost=%g records=%d requests=%d observed_tokens=%d non_billable_tokens=%d (stable/exact/conditional)", cost, len(want), requests, tokens, freeTokens)
