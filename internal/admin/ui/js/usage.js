@@ -434,9 +434,9 @@ AdminApp.register("usage", function (app) {
       label +=
         " <span title='用量不完整：" +
         incomplete +
-        "；成本覆盖不完整：" +
+        " 条记录；成本覆盖不完整：" +
         partial +
-        "'>（部分）</span>";
+        " 条记录（按记录计数，一个请求可对应多条记录）'>（部分）</span>";
     return label;
   }
   function usageTotals() {
