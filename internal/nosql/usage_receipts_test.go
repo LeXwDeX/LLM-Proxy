@@ -463,7 +463,11 @@ func TestRawEvidenceWinsOverLegacyWatermark(t *testing.T) {
 	}
 }
 
-func TestReceiptWatermarkMigrationRetryable(t *testing.T) {
+// TestReceiptWatermarkCorruptCellMarksHourUntrusted: an undecodable cell no
+// longer blocks the migration (#35). Its hour becomes untrusted, the marker is
+// published once, and retained raw evidence still deduplicates a replay.
+// Failed attempts are retried with backoff (TestReceiptWatermarkFailureBacksOff).
+func TestReceiptWatermarkCorruptCellMarksHourUntrusted(t *testing.T) {
 	db := testDB(t)
 	store := NewUsageStore(db)
 	event := fixedIdentityBundle()
@@ -471,37 +475,30 @@ func TestReceiptWatermarkMigrationRetryable(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := aggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target)
-	var saved []byte
-	if err := db.View(func(tx *bolt.Tx) error {
-		saved = append([]byte(nil), tx.Bucket([]byte(BucketUsageAggHourly)).Get(key)...)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	resetReceiptTracking(t, db)
 	if err := db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte(BucketUsageAggHourly)).Put(key, []byte("not-json"))
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewUsageStore(db).EnsureUsageReceipts(); err == nil {
-		t.Fatal("corrupt aggregate cell did not block watermark migration")
+	fresh := NewUsageStore(db)
+	if err := fresh.EnsureUsageReceipts(); err != nil {
+		t.Fatalf("corrupt aggregate cell blocked watermark migration: %v", err)
 	}
 	if err := db.View(func(tx *bolt.Tx) error {
-		if tx.Bucket([]byte(BucketMeta)).Get([]byte(usageReceiptsWatermarkDoneKey)) != nil {
-			t.Fatal("failed migration published a completion marker")
+		if tx.Bucket([]byte(BucketMeta)).Get([]byte(usageReceiptsWatermarkDoneKey)) == nil {
+			t.Fatal("tolerated migration did not publish a completion marker")
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte(BucketUsageAggHourly)).Put(key, saved)
-	}); err != nil {
-		t.Fatal(err)
+	if got, want := receiptWatermark(t, db), event.Timestamp.Truncate(time.Hour).Add(time.Hour); !got.Equal(want) {
+		t.Fatalf("watermark=%v, want %v", got, want)
 	}
-	if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
-		t.Fatalf("repaired migration: %v", err)
+	added, err := fresh.RecordOnce(event)
+	if err != nil || added {
+		t.Fatalf("retained raw evidence lost to a corrupt cell: added=%v err=%v", added, err)
 	}
 	if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
 		t.Fatalf("repeated migration: %v", err)
@@ -958,35 +955,36 @@ func TestLegacyFourSegmentAggregateKeyIsConservative(t *testing.T) {
 	}
 }
 
-// TestReceiptWatermarkStillRejectsMalformedAggregate keeps explicit failures
-// for impossible key shapes; only separator-bearing dimensions become valid.
-func TestReceiptWatermarkStillRejectsMalformedAggregate(t *testing.T) {
+// TestReceiptWatermarkToleratesMalformedAggregateKeys: impossible key shapes
+// no longer block the migration (#35). A key whose prefix still names an hour
+// marks that hour untrusted; a key without any hour cannot bound an identity
+// and is only logged.
+func TestReceiptWatermarkToleratesMalformedAggregateKeys(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		key   string
-		value []byte
+		name      string
+		key       string
+		watermark time.Time
 	}{
-		{"too few segments", "2026-10-21T09|claude|alice", []byte(`{"record_count":1}`)},
-		{"invalid hour", "not-an-hour|claude|alice|executor|anthropic", []byte(`{"record_count":1}`)},
-		{"hour without separator", "2026-10-21T09x|claude|alice|executor", []byte(`{"record_count":1}`)},
+		{"too few segments", "2026-10-21T09|claude|alice", time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)},
+		{"invalid hour", "not-an-hour|claude|alice|executor|anthropic", time.Time{}},
+		{"hour without separator", "2026-10-21T09x|claude|alice|executor", time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			logs := captureDefaultLog(t)
 			db := testDB(t)
 			if err := db.Update(func(tx *bolt.Tx) error {
-				return tx.Bucket([]byte(BucketUsageAggHourly)).Put([]byte(tc.key), tc.value)
+				return tx.Bucket([]byte(BucketUsageAggHourly)).Put([]byte(tc.key), []byte(`{"record_count":1}`))
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if err := NewUsageStore(db).EnsureUsageReceipts(); err == nil {
-				t.Fatalf("malformed aggregate key %q was accepted", tc.key)
+			if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
+				t.Fatalf("malformed aggregate key %q blocked the migration: %v", tc.key, err)
 			}
-			if err := db.View(func(tx *bolt.Tx) error {
-				if tx.Bucket([]byte(BucketMeta)).Get([]byte(usageReceiptsWatermarkDoneKey)) != nil {
-					t.Fatal("rejected migration published a completion marker")
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
+			if got := receiptWatermark(t, db); !got.Equal(tc.watermark) {
+				t.Fatalf("watermark=%v, want %v", got, tc.watermark)
+			}
+			if out := logs.String(); !strings.Contains(out, "level=ERROR") || !strings.Contains(out, tc.key) {
+				t.Fatalf("malformed key not logged at ERROR:\n%s", out)
 			}
 		})
 	}

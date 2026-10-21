@@ -173,16 +173,24 @@ func run(args []string) int {
 	appLogger.Info("usage agg backfill done", "duration", time.Since(backfillStart).String())
 
 	// Establish the conservative legacy boundary before any receipt can be
-	// written. A failure does not block ordinary traffic; explicit recovery and
-	// retention pruning retry the migration and keep uncertain events queued.
+	// written. Undecodable or malformed legacy aggregate evidence does not
+	// fail this step: the hour it claims becomes untrusted and is logged.
+	// Any other failure (for example a missing bucket or an I/O error) blocks
+	// every explicit-identity write until a retry succeeds: journal replay,
+	// the asynchronous writer, calibration drains and retention pruning all
+	// fail, events stay durable in the recovery journal, and quota admission
+	// for clients with queued events fails closed. Later writes retry the
+	// migration with a cached exponential backoff instead of rescanning.
 	if err := usageStore.EnsureUsageReceipts(); err != nil {
-		appLogger.Warn("usage receipt migration incomplete; uncertain legacy retries will stay queued", "error", err)
+		appLogger.Error("usage receipt migration failed; explicit usage writes stay queued in the recovery journal until a retry succeeds", "error", err)
 	}
 
 	if recoveredClients, err := usageJournal.Replay(); err != nil {
-		// Individual records that keep failing must not take the whole proxy
-		// down: they stay queued in the journal and every retry tick reports
-		// the failure until the underlying cause is resolved.
+		// Individual records that keep failing transiently must not take the
+		// whole proxy down: they stay queued in the journal and every retry
+		// tick reports the failure until the underlying cause is resolved.
+		// Rows the ledger permanently rejects are moved to the journal's
+		// ".rejected" sidecar (logged at ERROR) instead of staying queued.
 		appLogger.Error("usage journal recovery left events pending; continuing startup",
 			"error", err)
 	} else if len(recoveredClients) > 0 {

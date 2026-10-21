@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,8 +32,17 @@ type UsageStore struct {
 	db *bolt.DB
 	// receiptMu serializes the one-time legacy coverage scan. receiptsReady is
 	// guarded by receiptMu and stays false when a scan fails so it can retry.
-	receiptMu     sync.Mutex
-	receiptsReady bool
+	// A failure is cached in receiptErr until receiptRetryAt, with the delay
+	// doubling per failure (receiptBackoff), so writes do not rescan.
+	receiptMu      sync.Mutex
+	receiptsReady  bool
+	receiptErr     error
+	receiptRetryAt time.Time
+	receiptBackoff time.Duration
+	// receiptScans counts migration attempts that read the database.
+	receiptScans atomic.Int64
+	// now overrides the clock for receipt retry backoff in tests.
+	now func() time.Time
 }
 
 // NewUsageStore creates a new bbolt-backed usage store.
@@ -51,7 +61,7 @@ func (s *UsageStore) Record(event usage.Event) error {
 func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
 	explicit := strings.TrimSpace(event.RecordID) != ""
 	if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
-		return false, err
+		return false, withUsageKind(ErrUsageBundleInvalid, err)
 	}
 	rows, keys, err := normalizeUsageBundle(event)
 	if err != nil {
@@ -98,7 +108,7 @@ func (s *UsageStore) RecordBatch(events []usage.Event) error {
 	for _, event := range events {
 		explicit := strings.TrimSpace(event.RecordID) != ""
 		if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
-			return err
+			return withUsageKind(ErrUsageBundleInvalid, err)
 		}
 		rows, keys, err := normalizeUsageBundle(event)
 		if err != nil {
@@ -124,7 +134,13 @@ func (s *UsageStore) RecordBatch(events []usage.Event) error {
 
 // normalizeUsageBundle keeps root metadata intact and expands every additional
 // row before opening a write transaction. A rejected component rejects its root.
+// Every failure is payload-deterministic and tagged ErrUsageBundleInvalid.
 func normalizeUsageBundle(event usage.Event) ([]usage.Event, []string, error) {
+	rows, keys, err := expandUsageBundle(event)
+	return rows, keys, withUsageKind(ErrUsageBundleInvalid, err)
+}
+
+func expandUsageBundle(event usage.Event) ([]usage.Event, []string, error) {
 	event = usage.CloneEvent(event)
 	key, err := normalizeUsageEvent(&event)
 	if err != nil {
@@ -160,7 +176,7 @@ func normalizeUsageBundle(event usage.Event) ([]usage.Event, []string, error) {
 // journal retries, not ordinary requests.
 func (s *UsageStore) RecordExists(event usage.Event) (bool, error) {
 	if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
-		return false, err
+		return false, withUsageKind(ErrUsageBundleInvalid, err)
 	}
 	rows, keys, err := normalizeUsageBundle(event)
 	if err != nil {
@@ -196,7 +212,7 @@ func (s *UsageStore) RecordExists(event usage.Event) (bool, error) {
 			return nil
 		}
 		if committed > 0 {
-			return fmt.Errorf("usage bundle is partially committed and cannot be proven complete")
+			return withUsageKind(ErrUsageBundleInvalid, fmt.Errorf("usage bundle is partially committed and cannot be proven complete"))
 		}
 		meta := tx.Bucket([]byte(BucketMeta))
 		if meta == nil {
@@ -286,18 +302,31 @@ func (s *UsageStore) List(filter usage.Filter) ([]usage.Event, error) {
 // Count returns total and success request counts within the given time range.
 // It reads both physical aggregate key formats and only needs hour and totals,
 // so structurally valid legacy keys stay counted even when their dimensions are
-// ambiguous. Any malformed key or cell fails the whole read.
+// ambiguous. Like v1.0.1, this display-only total skips malformed keys and
+// undecodable cells; it logs one WARN per read naming the first skipped key,
+// never a cell value. Billing and quota readers stay fail-closed.
 func (s *UsageStore) Count(from, to time.Time) (total, success int64, err error) {
+	var skipped int
+	var firstKey string
 	err = s.db.View(func(tx *bolt.Tx) error {
-		total, success = 0, 0
-		return aggCellIter(tx, from, to, func(entry aggCellEntry) error {
+		total, success, skipped, firstKey = 0, 0, 0, ""
+		return aggCellIterSkipping(tx, from, to, func(entry aggCellEntry) error {
 			total += entry.cell.Requests
 			success += entry.cell.Success
 			return nil
+		}, func(key []byte, _ error) {
+			if skipped == 0 {
+				firstKey = string(key)
+			}
+			skipped++
 		})
 	})
 	if err != nil {
 		return 0, 0, err
+	}
+	if skipped > 0 {
+		slog.Warn("usage count skipped malformed hourly aggregate cells; totals exclude them",
+			"bucket", BucketUsageAggHourly, "skipped", skipped, "first_key", firstKey)
 	}
 	return total, success, nil
 }

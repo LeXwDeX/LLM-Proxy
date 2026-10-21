@@ -204,7 +204,10 @@ func TestDimensionReadersRejectAmbiguousLegacyKey(t *testing.T) {
 	}
 }
 
-func TestMalformedAggregateCellsFailClosed(t *testing.T) {
+// TestMalformedAggregateCellsDimensionReadersFailClosed keeps dimension
+// readers (quota fallback) fail-closed while the display-only Count skips the
+// cell with a warning, matching v1.0.1 read tolerance (#35).
+func TestMalformedAggregateCellsDimensionReadersFailClosed(t *testing.T) {
 	hour := time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC)
 	hourKey := hour.Format(hourLayout)
 	for _, tc := range []struct {
@@ -228,29 +231,25 @@ func TestMalformedAggregateCellsFailClosed(t *testing.T) {
 				t.Fatal("dimension reader accepted a malformed cell")
 			}
 			total, success, err := store.Count(hour, hour)
-			if err == nil || total != 0 || success != 0 {
-				t.Fatalf("count malformed cell=(%d,%d,%v), want (0,0,error)", total, success, err)
+			if err != nil || total != 0 || success != 0 {
+				t.Fatalf("count malformed cell=(%d,%d,%v), want (0,0,nil) with the cell skipped", total, success, err)
 			}
 		})
 	}
 }
 
-// TestReceiptWatermarkRejectsMalformedHour covers keys whose physical ordering
+// TestReceiptWatermarkMarksNonCanonicalHour covers keys whose physical ordering
 // places them outside any range scan. The one-time watermark scan sees the
-// whole bucket, so it must fail instead of publishing a completion marker.
-func TestReceiptWatermarkRejectsMalformedHour(t *testing.T) {
+// whole bucket; it cannot count such a cell, so the hour the key claims becomes
+// untrusted instead of blocking every explicit write (#35).
+func TestReceiptWatermarkMarksNonCanonicalHour(t *testing.T) {
 	db := testDB(t)
 	putAgg(t, db, "2026-10-21T9|openai|alice|gpt-4|upstream", AggCell{RecordCount: 1})
-	if err := NewUsageStore(db).EnsureUsageReceipts(); err == nil {
-		t.Fatal("non-canonical hour was accepted")
+	if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
+		t.Fatalf("non-canonical hour blocked the migration: %v", err)
 	}
-	if err := db.View(func(tx *bolt.Tx) error {
-		if tx.Bucket([]byte(BucketMeta)).Get([]byte(usageReceiptsWatermarkDoneKey)) != nil {
-			t.Fatal("rejected migration published a completion marker")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	if got, want := receiptWatermark(t, db), time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Fatalf("watermark=%v, want %v", got, want)
 	}
 }
 
