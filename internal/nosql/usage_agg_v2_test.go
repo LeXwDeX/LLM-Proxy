@@ -245,7 +245,9 @@ func TestMalformedAggregateCellsDimensionReadersFailClosed(t *testing.T) {
 func TestReceiptWatermarkMarksNonCanonicalHour(t *testing.T) {
 	db := testDB(t)
 	putAgg(t, db, "2026-10-21T9|openai|alice|gpt-4|upstream", AggCell{RecordCount: 1})
-	if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
+	// No raw survives, so the hour may have been cleaned; the scan runs later
+	// that day, below the scan-hour cap.
+	if err := clockedStore(db).EnsureUsageReceipts(); err != nil {
 		t.Fatalf("non-canonical hour blocked the migration: %v", err)
 	}
 	if got, want := receiptWatermark(t, db), time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC); !got.Equal(want) {

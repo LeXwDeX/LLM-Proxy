@@ -977,7 +977,9 @@ func TestReceiptWatermarkToleratesMalformedAggregateKeys(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if err := NewUsageStore(db).EnsureUsageReceipts(); err != nil {
+			// Empty raw bucket: every hour may have been cleaned. The scan runs
+			// after the bad hour, so the scan-hour cap does not apply.
+			if err := clockedStore(db).EnsureUsageReceipts(); err != nil {
 				t.Fatalf("malformed aggregate key %q blocked the migration: %v", tc.key, err)
 			}
 			if got := receiptWatermark(t, db); !got.Equal(tc.watermark) {

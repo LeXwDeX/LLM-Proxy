@@ -174,7 +174,9 @@ func run(args []string) int {
 
 	// Establish the conservative legacy boundary before any receipt can be
 	// written. Undecodable or malformed legacy aggregate evidence does not
-	// fail this step: the hour it claims becomes untrusted and is logged.
+	// fail this step: it is logged, and its hour becomes untrusted only when
+	// retention may have cleaned that hour. The watermark never passes the
+	// hour in which this scan runs.
 	// Any other failure (for example a missing bucket or an I/O error) blocks
 	// every explicit-identity write until a retry succeeds: journal replay,
 	// the asynchronous writer, calibration drains and retention pruning all
