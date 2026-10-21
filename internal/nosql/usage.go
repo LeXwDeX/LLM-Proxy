@@ -41,9 +41,19 @@ type UsageStore struct {
 	receiptBackoff time.Duration
 	// receiptScans counts migration attempts that read the database.
 	receiptScans atomic.Int64
-	// now overrides the clock for receipt retry backoff in tests.
+	// now overrides the clock for receipt retry backoff and Count warning
+	// rate limiting in tests.
 	now func() time.Time
+
+	// countWarnMu guards Count's skipped-cell WARN rate limit: at most one
+	// WARN per countWarnInterval, carrying the number of suppressed ones.
+	countWarnMu         sync.Mutex
+	countWarnAt         time.Time
+	countWarnSuppressed int
 }
+
+// countWarnInterval bounds how often Count logs skipped malformed cells.
+const countWarnInterval = time.Minute
 
 // NewUsageStore creates a new bbolt-backed usage store.
 func NewUsageStore(db *bolt.DB) *UsageStore {
@@ -303,8 +313,10 @@ func (s *UsageStore) List(filter usage.Filter) ([]usage.Event, error) {
 // It reads both physical aggregate key formats and only needs hour and totals,
 // so structurally valid legacy keys stay counted even when their dimensions are
 // ambiguous. Like v1.0.1, this display-only total skips malformed keys and
-// undecodable cells; it logs one WARN per read naming the first skipped key,
-// never a cell value. Billing and quota readers stay fail-closed.
+// undecodable cells. It logs at most one WARN per minute per store with the
+// skipped count, the first skipped key (never a cell value) and how many
+// warnings were suppressed since the last one. Billing and quota readers stay
+// fail-closed.
 func (s *UsageStore) Count(from, to time.Time) (total, success int64, err error) {
 	var skipped int
 	var firstKey string
@@ -325,10 +337,29 @@ func (s *UsageStore) Count(from, to time.Time) (total, success int64, err error)
 		return 0, 0, err
 	}
 	if skipped > 0 {
-		slog.Warn("usage count skipped malformed hourly aggregate cells; totals exclude them",
-			"bucket", BucketUsageAggHourly, "skipped", skipped, "first_key", firstKey)
+		s.warnCountSkipped(skipped, firstKey)
 	}
 	return total, success, nil
+}
+
+func (s *UsageStore) warnCountSkipped(skipped int, firstKey string) {
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	at := now()
+	s.countWarnMu.Lock()
+	if !s.countWarnAt.IsZero() && at.Sub(s.countWarnAt) < countWarnInterval {
+		s.countWarnSuppressed++
+		s.countWarnMu.Unlock()
+		return
+	}
+	suppressed := s.countWarnSuppressed
+	s.countWarnAt, s.countWarnSuppressed = at, 0
+	s.countWarnMu.Unlock()
+	slog.Warn("usage count skipped malformed hourly aggregate cells; totals exclude them",
+		"bucket", BucketUsageAggHourly, "skipped", skipped, "first_key", firstKey,
+		"suppressed_warnings", suppressed)
 }
 
 // Aggregate aggregates usage in requested time buckets, served from the hourly agg bucket.

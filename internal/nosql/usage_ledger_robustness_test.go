@@ -264,3 +264,34 @@ func rawUsageRowCount(t *testing.T, db *bolt.DB) int {
 	}
 	return count
 }
+
+// TestCountSkipWarningIsRateLimited keeps the overview from logging one WARN
+// per request while a malformed cell persists.
+func TestCountSkipWarningIsRateLimited(t *testing.T) {
+	logs := captureDefaultLog(t)
+	db := testDB(t)
+	clock := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	store := NewUsageStore(db)
+	store.now = func() time.Time { return clock }
+	hour := clock.Truncate(time.Hour)
+	putAggRaw(t, db, hour.Format(hourLayout)+"|claude|c|m|t", []byte("{not json"))
+	warnings := func() int { return strings.Count(logs.String(), "usage count skipped malformed") }
+	for i := 0; i < 3; i++ {
+		if _, _, err := store.Count(hour, hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := warnings(); got != 1 {
+		t.Fatalf("warnings within one minute=%d, want 1", got)
+	}
+	clock = clock.Add(61 * time.Second)
+	if _, _, err := store.Count(hour, hour); err != nil {
+		t.Fatal(err)
+	}
+	if got := warnings(); got != 2 {
+		t.Fatalf("warnings after the interval=%d, want 2", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "suppressed_warnings=2") || strings.Contains(out, "not json") {
+		t.Fatalf("second warning lacks the suppressed count or leaks the body:\n%s", out)
+	}
+}
