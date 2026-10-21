@@ -1431,6 +1431,23 @@ func (s *Service) recordParsedUsage(r *http.Request, target *Target, statusCode 
 		state.keyPool.recordTokens(keyIndex, totalTokens)
 	}
 
+	for _, echo := range tokens.unadmittedEchoes {
+		if s.logger == nil {
+			break
+		}
+		targetName := ""
+		if target != nil {
+			targetName = target.Name
+		}
+		// Attribution keeps the echoed spelling and never infers an identity.
+		s.logger.Warn("回显附属模型不在准入集合内 / echoed supplementary model not in admission set",
+			"request_id", appmiddleware.RequestIDFromContext(r.Context()),
+			"target", targetName,
+			"iteration_type", echo.iterationType,
+			"model", echo.model,
+		)
+	}
+
 	if tokens.billingModel != "" {
 		upstreamModel = tokens.billingModel
 	}

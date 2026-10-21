@@ -20,6 +20,7 @@ func newTargetUsageParser(r *http.Request, target *Target, model string, body []
 	if target != nil {
 		p.endpoint = target.Endpoint
 		p.usageAdapter = target.UsageAdapter
+		p.modelPrefix = target.ModelPrefix
 	}
 	if outbound != nil {
 		// The outbound headers already contain the client headers plus

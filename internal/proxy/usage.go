@@ -51,10 +51,14 @@ type usageTokens struct {
 	// invalidIterations: an unverifiable attribution plan cannot replace a
 	// committed final; first-final handling stays conservative.
 	invalidIterations bool
+	// unadmittedEchoes: explicit echoed component/fallback models outside the
+	// request's admission set; logged once when the bundle is recorded.
+	unadmittedEchoes []claudeEchoMismatch
 }
 
 type usageParser struct {
 	endpointType, model    string
+	modelPrefix            string // target ModelPrefix; stripped from echoed Claude models only
 	protocol               config.ProtocolType
 	endpoint               *url.URL
 	usageAdapter           string
