@@ -12,6 +12,17 @@ func (s *Server) serveMessages(c *call) {
 	text := replyText(s.opts.Name, c.raw, c.sc.Text)
 	id := s.newID("msg")
 	model := firstNonEmpty(c.model, s.opts.Model)
+	mode := c.sc.Iterations
+	lateError := strings.HasSuffix(mode, "_then_error")
+	intermediateError, stopConfirmedError := mode == "advisor_intermediate_then_error", mode == "advisor_stop_then_error"
+	mode = strings.TrimSuffix(mode, "_then_error")
+	if intermediateError || stopConfirmedError {
+		mode = "advisor"
+	}
+	zeroRefusal := strings.Contains(mode, "refusal_") && mode != "refusal_nonzero" && mode != "refusal_nonrefusal"
+	fallback := strings.HasPrefix(mode, "fallback_")
+	midOutput := mode == "fallback_output" || mode == "fallback_missing_input" || mode == "fallback_chain" || mode == "fallback_chain_unknown"
+	boundary := map[string]any{"type": "fallback", "from": map[string]any{"model": model}, "to": map[string]any{"model": "fake-fallback"}}
 	_, thinkingOn := c.req["thinking"].(map[string]any)
 	thinking := c.sc.Reasoning || thinkingOn
 
@@ -26,11 +37,17 @@ func (s *Server) serveMessages(c *call) {
 		if !c.sc.NoUsage {
 			resp["usage"] = anthropicUsage(u)
 			pricingPreset(c.sc.PricingPreset, resp["usage"].(map[string]any), true)
-			anthropicIterations(c.sc.Iterations, resp["usage"].(map[string]any))
+			anthropicIterations(mode, resp["usage"].(map[string]any))
 		}
-		anthropicIterationStop(c.sc.Iterations, resp)
-		if strings.HasPrefix(c.sc.Iterations, "fallback_") {
+		anthropicIterationStop(mode, resp)
+		if zeroRefusal {
+			resp["content"] = []any{}
+		}
+		if fallback {
 			resp["model"] = "fake-fallback"
+			if !zeroRefusal && mode != "fallback_sticky" {
+				resp["content"] = append([]any{boundary}, content...)
+			}
 		}
 		c.rec.Usage = &u
 		c.ok(200, resp)
@@ -40,11 +57,23 @@ func (s *Server) serveMessages(c *call) {
 	st := c.startSSE()
 	startUsage := anthropicUsage(u)
 	pricingPreset(c.sc.PricingPreset, startUsage, true)
-	if c.sc.Iterations == "cache_missing" {
+	if mode == "cache_missing" {
 		delete(startUsage, "cache_read_input_tokens")
 	}
 	startUsage["output_tokens"] = 1
 	startUsage["output_tokens_details"] = map[string]any{"thinking_tokens": 0}
+	if zeroRefusal {
+		startUsage["output_tokens"] = 0
+	}
+	if mode == "refusal_missing_output" {
+		delete(startUsage, "output_tokens")
+	}
+	// Official streaming contract, checked 2026-10-21: before-output/sticky
+	// fallback names the serving model at message_start; mid-output does not.
+	// https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
+	if fallback && !midOutput {
+		model = "fake-fallback"
+	}
 	msg := map[string]any{"id": id, "type": "message", "role": "assistant", "model": model, "content": []any{},
 		"stop_reason": nil, "stop_sequence": nil}
 	if !c.sc.NoUsage {
@@ -52,43 +81,82 @@ func (s *Server) serveMessages(c *call) {
 	}
 	st.event("message_start", map[string]any{"type": "message_start", "message": msg})
 	idx := 0
-	if thinking {
-		st.event("content_block_start", map[string]any{"type": "content_block_start", "index": idx,
-			"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""}})
-		st.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": idx,
-			"delta": map[string]any{"type": "thinking_delta", "thinking": "fake reasoning"}})
-		st.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": idx,
-			"delta": map[string]any{"type": "signature_delta", "signature": "fake-signature"}})
+	if fallback && !zeroRefusal && mode != "fallback_sticky" {
+		if midOutput {
+			st.event("content_block_start", map[string]any{"type": "content_block_start", "index": idx, "content_block": map[string]any{"type": "text", "text": ""}})
+			st.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": idx, "delta": map[string]any{"type": "text_delta", "text": "partial"}})
+			st.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": idx})
+			idx++
+		}
+		st.event("content_block_start", map[string]any{"type": "content_block_start", "index": idx, "content_block": boundary})
 		st.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": idx})
 		idx++
 	}
-	st.event("content_block_start", map[string]any{"type": "content_block_start", "index": idx,
-		"content_block": map[string]any{"type": "text", "text": ""}})
-	st.event("ping", map[string]any{"type": "ping"})
-	for i, piece := range splitText(text, c.sc.Chunks) {
-		if c.sc.StreamError > 0 && i >= c.sc.StreamError {
-			e := streamFailure(c.sc, c.flavor, 529)
-			inner := map[string]any{"type": e.errType, "message": e.message}
-			if e.code != "" && c.flavor == FlavorGLM {
-				inner["code"] = e.code
-			}
-			st.event("error", map[string]any{"type": "error", "error": inner})
-			st.done("stream_error", nil)
-			return
+	if !zeroRefusal {
+		if thinking {
+			st.event("content_block_start", map[string]any{"type": "content_block_start", "index": idx,
+				"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""}})
+			st.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": idx,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": "fake reasoning"}})
+			st.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": idx,
+				"delta": map[string]any{"type": "signature_delta", "signature": "fake-signature"}})
+			st.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": idx})
+			idx++
 		}
-		st.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": idx,
-			"delta": map[string]any{"type": "text_delta", "text": piece}})
+		st.event("content_block_start", map[string]any{"type": "content_block_start", "index": idx,
+			"content_block": map[string]any{"type": "text", "text": ""}})
+		st.event("ping", map[string]any{"type": "ping"})
+		for i, piece := range splitText(text, c.sc.Chunks) {
+			if c.sc.StreamError > 0 && i >= c.sc.StreamError {
+				e := streamFailure(c.sc, c.flavor, 529)
+				inner := map[string]any{"type": e.errType, "message": e.message}
+				if e.code != "" && c.flavor == FlavorGLM {
+					inner["code"] = e.code
+				}
+				st.event("error", map[string]any{"type": "error", "error": inner})
+				st.done("stream_error", nil)
+				return
+			}
+			st.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": idx,
+				"delta": map[string]any{"type": "text_delta", "text": piece}})
+		}
+		st.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": idx})
 	}
-	st.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": idx})
 	delta := map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": firstNonEmpty(c.sc.Finish, "end_turn"), "stop_sequence": nil}}
 	if !c.sc.NoUsage {
-		// Current API repeats the cumulative input/cache counts here.
+		// Default fixture repeats input/cache; the gap mode intentionally omits them.
 		delta["usage"] = anthropicUsage(u)
 		pricingPreset(c.sc.PricingPreset, delta["usage"].(map[string]any), true)
-		anthropicIterations(c.sc.Iterations, delta["usage"].(map[string]any))
+		anthropicIterations(mode, delta["usage"].(map[string]any))
+		finalUsage := delta["usage"].(map[string]any)
+		if mode == "advisor_early_only" {
+			st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": finalUsage})
+			delete(finalUsage, "iterations")
+		}
+		if mode == "fallback_missing_input" {
+			for _, key := range []string{"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation", "output_tokens_details", "service_tier"} {
+				delete(finalUsage, key)
+			}
+		}
 	}
-	anthropicIterationStop(c.sc.Iterations, delta["delta"].(map[string]any))
+	anthropicIterationStop(mode, delta["delta"].(map[string]any))
+	if intermediateError || stopConfirmedError {
+		delta["delta"] = map[string]any{}
+	}
 	st.event("message_delta", delta)
+	// Synthetic settlement counterexamples: an error can follow intermediate
+	// usage, a terminal delta, or a delta confirmed by message_stop.
+	if lateError {
+		if stopConfirmedError {
+			st.event("message_stop", map[string]any{"type": "message_stop"})
+		}
+		st.event("error", map[string]any{"type": "error", "error": map[string]any{"type": "overloaded_error", "message": "synthetic error after usage"}})
+		if intermediateError {
+			st.event("message_stop", map[string]any{"type": "message_stop"})
+		}
+		st.done("stream_error", &u)
+		return
+	}
 	st.event("message_stop", map[string]any{"type": "message_stop"})
 	if c.sc.NoUsage {
 		st.done("ok", nil)

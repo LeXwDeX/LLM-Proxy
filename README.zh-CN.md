@@ -36,11 +36,23 @@ LLMs Proxy 是一个 Go HTTP 服务，为客户端提供统一的模型 API 入�
 
 `ReadCostUnits` 将小时内价格稳定的 target/model 保持为小时单元；价格模板覆盖、分钟时段或时区偏移在 UTC 小时内切价，或存在请求条件价时，使用事件的 target、model、timestamp 和计价上下文选择 `pricing.Resolver` 价率，费用公式仍为 `usage.CostRates.CostFor`。目标模板、全局模板、目录价格和 provider 隔离规则不变。存储层使用调用方传入的 resolver；管理报表与额度各自只折算一次模型组系数。
 
-单客户端额度校准只读取日/周/月窗口并集一次（ISO 周可早于月初），再将每个已计价单元分配到三个窗口。分钟模板使用客户端索引读取，不解码其他客户端事件；每个小时的最后一个读事务同时复核小时修订状态与永久聚合的请求数。索引未完成、有未解决隔离或索引不一致时，记录诊断并丢弃全部局部结果，回退到原有全量原始事件扫描路径。全量路径仍跳过无法解码的事件，并通过双向 raw/rollup 请求计数核对使受影响客户端明确失败。需要精确计价的原始事件已被保留期清理时返回错误，不能猜测小时价或成功返回偏低金额；价格稳定的历史仍可使用永久聚合。
+单客户端额度校准只读取日/周/月窗口并集一次（ISO 周可早于月初），再将每个已计价单元分配到三个窗口。分钟模板使用客户端索引读取，不解码其他客户端事件；每个小时的最后一个读事务同时复核小时修订状态与永久聚合的记录数（`record_count`，旧聚合格回退到 `Requests`）。索引未完成、有未解决隔离或索引不一致时，记录诊断并丢弃全部局部结果，回退到原有全量原始事件扫描路径。全量路径仍跳过无法解码的事件，并通过双向 raw/rollup 记录数核对使受影响客户端明确失败；附属记录参与核对，但不增加请求数。需要精确计价的原始事件已被保留期清理时返回错误，不能猜测小时价或成功返回偏低金额；价格稳定的历史仍可使用永久聚合。
 
-多客户端报表在一个读事务中扫描原始历史一次，将同一批费用结果复用于总计、时间桶、客户端、模型、模型组及 target/model 明细。Summary 的精确 last_hour 与其他窗口共用这一扫描；全为稳定价格时仅扫描 last_hour 原始事件。报表保留既有小时窗口归属和各入口的请求计数口径（全部请求或成功请求），只将选价时刻改为实际事件时间。冷客户端的准入与 Status 校准按客户端合并并发；首次失败同样进入 10 秒退避，期间不重复 Drain/Evaluate，并保留原计数、拒绝准入，直到可靠校准成功。
+多客户端报表在一个读事务中扫描原始历史一次，将同一批费用结果复用于总计、时间桶、客户端、模型、模型组及 target/model 明细。Summary 的精确 last_hour 与其他窗口共用这一扫描；全为稳定价格时仅扫描 last_hour 原始事件。报表保留既有小时窗口归属和各入口的请求计数口径（全部请求或成功请求），只将选价时刻改为实际事件时间。
+
+准入、冷客户端的 `Status` 和 `RecordUsage` 完成路径上的失败校准重试，共用按客户端的 single-flight（一次校准，并发调用等待同一结果）与 10 秒失败退避。退避期间不重复 Drain/Evaluate，保留原计数、拒绝准入，直到可靠校准成功。到期触发的校准仍同步执行，并发调用仍须等待，不保证请求完成路径无延迟。bundle 核价时，nil resolver 仅表示不新增 `missing_iteration_price`，不证明核价完整，也不关闭其他价格与分区检查。
 
 索引、小时修订状态、隔离记录与迁移标记都在同一个 bbolt 文件中，随数据库的一致性备份保存。恢复已有标记和游标的备份后，迁移跳过已完成构建或继续未完成批次；旧备份没有索引时从原始记录构建。用量恢复日志是独立文件，仍须纳入同一备份集；恢复后通过 `Record` 的幂等路径重放。不得用旧备份覆盖新实例已产生的数据。
+
+### 未发布 bundle 账本兼容与回退限制
+
+未发布的 bundle 账本保存 root 与关联附属记录、各自的计价证据、非计费 token 子集及聚合记录数。**含 bundle 数据的数据库或恢复日志禁止原地回退到 v1.0.1（`0e7ebfd`）**：旧版读取不保留该合同，可能多收费或返回 `ErrUsageHistoryIncomplete`。[Issue #13 方案 B](https://github.com/LeXwDeX/LLM-Proxy/issues/13#issuecomment-6306613243) 记录了这一限制。`b36b5445853c33ee0b804de46d42f6d8a1b152fa` 仅是固定的数据合同测试目标，不是已发布或生产安全的回退制品，其其他已知旧 bug 仍须处置。上线前须准备并验证不可变的兼容回退制品，记录其 digest。
+
+1. 停止新写入，排空在途请求和排队写入。
+2. 保留数据库、恢复 journal、其 `.corrupt` 文件、配置及迁移快照的一致集。
+3. 在隔离副本上使用兼容版本执行 `Replay`，核对记录数、请求数、token、费用及待处理/隔离日志。HTTP 健康检查正常不代表 replay 成功。
+
+不得手工清理日志、用旧库覆盖新账，或拼接旧数据库与当前 journal。[跨版本集成测试](test/integration/usage_bundle_rollback_test.go) 验证固定版本间的稳定价、精确价、条件价、重放幂等及继续写入，不代表生产部署验收。
 
 ## 环境要求
 
@@ -113,7 +125,7 @@ OpenAI 兼容请求的 JSON 或 SSE 数据帧中，顶层 `error` 为含有效 `
 
 目标的 `usage_adapter` 显式选项为 `standard`、`qwen`、`glm`、`deepseek`、`kimi`、`openrouter`、`minimax`，不按 host 或模型名推断。OpenRouter 与 MiniMax 只增加错误 Patch，用量仍按实际协议使用原厂解析器。OpenRouter 通过结构化预算来源区分临时限流、额度和余额，普通 403 文本不触发；MiniMax 仅在非流式 Chat Completions HTTP 200 JSON 中读取顶层 `base_resp` 数字业务码，已知认证/额度/限流码直接换 key，未知非零码透传并记 usage failed。MiniMax 全 key 耗尽时允许 failover，否则返回映射错误而非原始 200 体。2056 在代理侧按 `quota_exceeded` 处理：未配置有效未来重置时间时记为 `quota_exceeded_api`，需人工唤醒，或配置有效重置时间按既有 keypool 规则恢复（与 Kimi 一致）；不会自行推算 M Plan 窗口。流式、非 2xx、Anthropic Messages 和 Responses 均走原厂规则，不以 `base_resp` 触发 Patch。依据 [MiniMax Chat OpenAPI](https://platform.minimaxi.com/docs/api-reference/text-chat-openai) 与 [官方错误码页](https://platform.minimaxi.com/docs/api-reference/errorcode)，核对日期 2026-10-13；文档核对不等于真实 API 验收。完整判据与不做项见 [代理层约束](internal/proxy/AGENTS.md)。
 
-计费只依据上游官方返回的 token 用量字段，不估算、不补算，也不重放请求。客户端中途断开或取消时，代理照常立即取消上游，不重试、不重放；若此时尚未取得该协议的官方最终用量字段，且上游请求可能已发出，则记一条 0 token、状态为不完整的用量事件，诊断为 `client_disconnected_no_usage`（管理端口径说明中显示为“连接断开，未获取到计费字段”），已观察到的部分 token 也不计入；同时写一条 Warn 日志并累计计数 `usage_client_gone_no_usage`。可证明尚未向上游发送任何字节的取消不写用量事件。该规则与协议和传输方式（HTTP、SSE、WebSocket）无关；因此统计会少于厂商官方账单中这部分中断请求的用量，属于预期。上游原因（出错、断流、超时、解码失败、缺少终态或官方最终用量）造成的中断同样记 0 token，诊断为 `upstream_interrupted_no_usage`，计数 `usage_upstream_interrupted_no_usage`；两类计数均可在 `/admin/metrics` 与总览中查看。一个客户端请求至多对应一条用量事件，期间会重试或切换目标的失败尝试只写日志与计数。
+计费只依据上游官方返回的 token 用量字段，不估算、不补算，也不重放请求。客户端中途断开或取消时，代理照常立即取消上游，不重试、不重放；若此时尚未取得该协议的官方最终用量字段，且上游请求可能已发出，则记一条 0 token、状态为不完整的用量事件，诊断为 `client_disconnected_no_usage`（管理端口径说明中显示为“连接断开，未获取到计费字段”），已观察到的部分 token 也不计入；同时写一条 Warn 日志并累计计数 `usage_client_gone_no_usage`。可证明尚未向上游发送任何字节的取消不写用量事件。该规则与协议和传输方式（HTTP、SSE、WebSocket）无关；因此统计会少于厂商官方账单中这部分中断请求的用量，属于预期。上游原因（出错、断流、超时、解码失败、缺少终态或官方最终用量）造成的中断同样记 0 token，诊断为 `upstream_interrupted_no_usage`，计数 `usage_upstream_interrupted_no_usage`；两类计数均可在 `/admin/metrics` 与总览中查看。一个客户端请求至多对应一个用量 bundle，由持久化层原子展开为 root 和关联附属记录，仅 root 计入请求数；期间会重试或切换目标的失败尝试只写日志与计数。
 
 统计不保存身份、请求正文或密钥，也不参与计费、额度、重试或健康结算。写入失败会记录日志，并在总览通过本进程 `record_failures` 提示样本可能不完整；没有恢复日志，写入失败和进程崩溃期间不保证计数完整。读取失败显示不可用，不回退到旧数据。兼容字段 `success_rate`、`requests_72h`、`success_72h` 仍以用量事件为样本，并通过 `legacy_sample_basis: "usage_events"` 标明口径。
 

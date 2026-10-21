@@ -89,17 +89,15 @@ func (t *usageTokens) finalizeOpenAIImagePartitions(m map[string]any, op config.
 			t.conflict("image_text_partition_mismatch")
 		}
 	}
-	// Chat/Responses providers disagree on whether output text_tokens include
-	// reasoning. Images always requires text + image = output. Accept
-	// either partition: reasoning inside text (image = output - text), or
-	// reasoning disjoint from text as the Gemini OpenAI-compatible layer reports
-	// it (image + reasoning = output - text). Reasoning remains an output subset;
-	// totals are not changed and any other split is still a conflict.
+	// Reasoning inside text must fit within text. Only Chat also accepts disjoint
+	// reasoning, observed in issue #6's redacted Gemini-compatible Chat JSON.
+	// Responses has no such evidence; remove the unreleased dev extension (#16).
+	// Images keeps its text-based derivation above. Totals stay unchanged.
 	if _, present := od["text_tokens"]; present {
 		text := t.count(od, "text_tokens", 0)
 		remainder := t.OutputTokens - text
-		included := t.ImageOutputTokens == remainder
-		disjoint := (op == config.ProtocolOpenAIChat || op == config.ProtocolOpenAIResponses) &&
+		included := t.ReasoningTokens <= text && t.ImageOutputTokens == remainder
+		disjoint := op == config.ProtocolOpenAIChat &&
 			t.ReasoningTokens > 0 && t.ImageOutputTokens+t.ReasoningTokens == remainder
 		if text > t.OutputTokens || !included && !disjoint {
 			t.conflict("image_output_text_partition_mismatch")

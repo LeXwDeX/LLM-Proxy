@@ -189,14 +189,19 @@ func TestClaudeIterationStreamSnapshotsAndSettlement(t *testing.T) {
 	for _, tc := range []struct {
 		name, wire string
 		children   int
+		diagnostic string
 	}{
-		{"early_only", early + `data: {"type":"message_stop"}` + "\n\n", 0},
-		{"early_then_absent", early + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{` + top + `}}` + "\n\ndata: {\"type\":\"message_stop\"}\n\n", 0},
-		{"two_final_snapshots", early + final + final + `data: {"type":"message_stop"}` + "\n\n", 1},
-		{"final_empty_replaces", early + final + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{` + top + `,"iterations":[]}}` + "\n\ndata: {\"type\":\"message_stop\"}\n\n", 0},
+		{"early_only", early + `data: {"type":"message_stop"}` + "\n\n", 0, "missing_final_usage"},
+		// An early array is evidence of work, not permission to bill a stale snapshot.
+		{"early_then_absent", early + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{` + top + `}}` + "\n\ndata: {\"type\":\"message_stop\"}\n\n", 0, "missing_final_iterations"},
+		{"two_final_snapshots", early + final + final + `data: {"type":"message_stop"}` + "\n\n", 1, ""},
+		{"final_empty_replaces", early + final + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{` + top + `,"iterations":[]}}` + "\n\ndata: {\"type\":\"message_stop\"}\n\n", 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, event := claudeBillingEvent(t, p, tc.wire, "text/event-stream")
+			tokens, event := claudeBillingEvent(t, p, tc.wire, "text/event-stream")
+			if tokens.diagnostic != tc.diagnostic || tokens.costIncomplete != (tc.diagnostic != "") {
+				t.Fatalf("stream evidence lost: %+v", tokens)
+			}
 			if len(event.Components) != tc.children {
 				t.Fatalf("stale or duplicate components: %+v", event)
 			}
@@ -208,7 +213,8 @@ func TestClaudeIterationStreamSnapshotsAndSettlement(t *testing.T) {
 	}{
 		{"before_final", early, false},
 		{"after_final", early + final, true},
-		{"error_invalidates", early + final + `data: {"type":"error","error":{"type":"overloaded_error"}}` + "\n\n", false},
+		// An error invalidates a pending delta, not an already confirmed bill.
+		{"error_after_final_preserves", early + final + `data: {"type":"error","error":{"type":"overloaded_error"}}` + "\n\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			observer := newUsageStream("text/event-stream", "", p)
@@ -219,8 +225,11 @@ func TestClaudeIterationStreamSnapshotsAndSettlement(t *testing.T) {
 			tokens, model := s.settleNoOfficialUsage(req, nil, noOfficialUsage{cause: noUsageCauseClientGone, usage: observer, tokens: observer.tokens, quiet: true})
 			event := claudeRecordTokens(t, p, tokens, model)
 			if tc.hasFinal {
-				if len(event.Components) != 1 || event.InputTokens != 7 {
+				if len(event.Components) != 1 || event.InputTokens != 7 || event.OutputTokens != 2 || event.PricingContext == nil {
 					t.Fatalf("official final lost: %+v", event)
+				}
+				if tc.name == "error_after_final_preserves" && (event.ResponseStatus != "failed" || !hasGoneDiagnostic(event.UsageDiagnostic, diagnosticInterruptedAfterFinalUsage)) {
+					t.Fatalf("failure must be recorded without erasing usage: %+v", event)
 				}
 			} else if len(event.Components) != 0 || event.InputTokens != 0 || event.OutputTokens != 0 || event.PricingContext != nil {
 				t.Fatalf("unofficial components survived clearing: %+v", event)

@@ -65,6 +65,9 @@ type Usage struct {
 	CacheWr1h  int
 	Reasoning  int
 	Images     int
+
+	OutputText  *int
+	OutputImage *int
 }
 
 func (u Usage) Total() int { return u.Input + u.Output }
@@ -103,6 +106,7 @@ func computeUsage(promptText string, maxTokens int, spec *UsageSpec) Usage {
 		set(&u.CacheWr1h, spec.CacheWr1h)
 		set(&u.Reasoning, spec.Reasoning)
 		set(&u.Images, spec.Images)
+		u.OutputText, u.OutputImage = spec.OutputText, spec.OutputImage
 	}
 	return u
 }
@@ -218,14 +222,14 @@ func openAIChatUsage(u Usage, flavor string, stream bool) map[string]any {
 		m["cached_tokens"] = u.CachedRead
 		prompt["cache_write_tokens"] = u.CacheWrite + u.CacheWr1h
 	case FlavorGemini:
-		// Gemini OpenAI compatibility (https://ai.google.dev/gemini-api/docs/openai)
-		// reports reasoning and text as disjoint output parts. Shape follows a
-		// redacted real response observed 2026-10-20 (contract assumption, not an
-		// official example).
+		// Chat JSON shape from the redacted observation on 2026-10-20 in
+		// https://github.com/LeXwDeX/LLM-Proxy/issues/6, not an official example.
+		// Applying it to SSE is a synthetic extension, not a live observation.
 		m["prompt_tokens_details"] = map[string]any{"cached_tokens": u.CachedRead,
 			"cache_write_tokens": u.CacheWrite + u.CacheWr1h, "text_tokens": u.Input}
-		m["completion_tokens_details"] = map[string]any{"reasoning_tokens": u.Reasoning,
+		completion = map[string]any{"reasoning_tokens": u.Reasoning,
 			"text_tokens": max(0, u.Output-u.Reasoning)}
+		m["completion_tokens_details"] = completion
 	case FlavorGLM:
 		if stream {
 			// GLM documents cache details for non-stream replies only.
@@ -236,18 +240,31 @@ func openAIChatUsage(u Usage, flavor string, stream bool) map[string]any {
 			prompt["cache_write_tokens"] = w
 		}
 	}
+	if u.OutputText != nil {
+		completion["text_tokens"] = *u.OutputText
+	}
+	if u.OutputImage != nil {
+		completion["image_tokens"] = *u.OutputImage
+	}
 	return m
 }
 
 // responsesUsage renders Responses API usage.
 func responsesUsage(u Usage, flavor string) map[string]any {
 	in := map[string]any{"cached_tokens": u.CachedRead}
+	out := map[string]any{"reasoning_tokens": u.Reasoning}
+	if u.OutputText != nil {
+		out["text_tokens"] = *u.OutputText
+	}
+	if u.OutputImage != nil {
+		out["image_tokens"] = *u.OutputImage
+	}
 	m := map[string]any{
 		"input_tokens":          u.Input,
 		"output_tokens":         u.Output,
 		"total_tokens":          u.Total(),
 		"input_tokens_details":  in,
-		"output_tokens_details": map[string]any{"reasoning_tokens": u.Reasoning},
+		"output_tokens_details": out,
 	}
 	w := u.CacheWrite + u.CacheWr1h
 	switch {
@@ -293,8 +310,8 @@ func anthropicUsage(u Usage) map[string]any {
 // https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback
 // Fixed extra counters (7/3, 11/2, 13/4) and fake model names are deterministic
 // fixture assumptions, not examples copied from the API. Earlier zero-output
-// attempts deliberately have no invented refusal category. Only final deltas
-// carry iterations; unknown/invalid/mismatch modes are explicit counterexamples.
+// attempts deliberately have no invented refusal category. Stream-gap and
+// unknown/invalid/mismatch modes are synthetic counterexamples, not live evidence.
 func anthropicIterations(mode string, usage map[string]any) {
 	if mode == "" {
 		return
@@ -305,9 +322,15 @@ func anthropicIterations(mode string, usage map[string]any) {
 		}
 		usage["cache_creation"] = map[string]any{"ephemeral_5m_input_tokens": int(0), "ephemeral_1h_input_tokens": int(0)}
 	}
-	if strings.HasPrefix(mode, "fallback_refusal_") || mode == "compaction_on_demand" {
+	if (strings.Contains(mode, "refusal_") && mode != "refusal_nonzero" && mode != "refusal_nonrefusal") || mode == "compaction_on_demand" {
 		usage["output_tokens"] = int(0)
 		usage["output_tokens_details"] = map[string]any{"thinking_tokens": int(0)}
+	}
+	if strings.HasPrefix(mode, "refusal_") {
+		if mode == "refusal_missing_output" {
+			delete(usage, "output_tokens")
+		}
+		return
 	}
 	executor := map[string]any{"type": "message"}
 	for _, key := range []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"} {
@@ -318,17 +341,17 @@ func anthropicIterations(mode string, usage map[string]any) {
 	}
 	items := []any{executor}
 	switch mode {
-	case "advisor":
+	case "advisor", "advisor_refusal_free", "advisor_early_only":
 		advisor := extra("advisor_message", 7, 3)
 		advisor["model"] = "fake-advisor"
 		items = append(items, advisor)
-	case "compaction":
+	case "compaction", "compaction_refusal_free":
 		items = []any{extra("compaction", 11, 2), executor}
 	case "compaction_on_demand":
 		items = []any{extra("compaction", 11, 2)}
-	case "fallback_output", "fallback_zero_unknown", "fallback_sticky", "fallback_chain", "fallback_chain_unknown", "fallback_refusal_free", "fallback_refusal_paid", "fallback_refusal_null", "fallback_refusal_missing_category":
+	case "fallback_output", "fallback_zero_unknown", "fallback_sticky", "fallback_chain", "fallback_chain_unknown", "fallback_refusal_free", "fallback_refusal_paid", "fallback_refusal_null", "fallback_refusal_missing_category", "fallback_refusal_unknown", "fallback_missing_input":
 		executor["type"], executor["model"] = "fallback_message", "fake-fallback"
-		if mode == "fallback_output" {
+		if mode == "fallback_output" || mode == "fallback_missing_input" {
 			items = []any{extra("message", 13, 4), executor}
 		}
 		if mode == "fallback_zero_unknown" {
@@ -369,18 +392,26 @@ func anthropicIterations(mode string, usage map[string]any) {
 }
 
 func anthropicIterationStop(mode string, envelope map[string]any) {
-	if !strings.HasPrefix(mode, "fallback_refusal_") {
+	if !strings.Contains(mode, "refusal_") || mode == "refusal_nonrefusal" {
 		return
 	}
 	envelope["stop_reason"] = "refusal"
 	details := map[string]any{}
 	switch mode {
-	case "fallback_refusal_free":
+	case "fallback_refusal_free", "refusal_free", "message_refusal_free", "advisor_refusal_free", "compaction_refusal_free", "refusal_nonzero", "refusal_missing_output":
 		details["category"] = "cyber"
-	case "fallback_refusal_paid":
+	case "refusal_general_harms":
+		details["category"] = "general_harms"
+	case "fallback_refusal_paid", "refusal_paid":
 		details["category"] = "bio"
-	case "fallback_refusal_null":
+	case "refusal_frontier":
+		details["category"] = "frontier_llm"
+	case "refusal_reasoning":
+		details["category"] = "reasoning_extraction"
+	case "fallback_refusal_null", "refusal_null":
 		details["category"] = nil
+	case "refusal_unknown", "fallback_refusal_unknown":
+		details["category"] = "future_policy"
 	}
 	envelope["stop_details"] = details
 }

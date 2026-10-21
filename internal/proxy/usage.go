@@ -157,7 +157,9 @@ func (p usageParser) parsePayload(payload map[string]any) (usageTokens, string, 
 	}
 	if t.billingModel != "" {
 		model = t.billingModel
-		p.finalizeClaudeFallbackBilling(&t, payload)
+	}
+	if p.operation(m) == config.ProtocolAnthropicMessages {
+		p.finalizeClaudeRefusalBilling(&t, payload)
 	}
 	observer := usageStream{parser: p}
 	observer.observeLifecycle(payload, "")

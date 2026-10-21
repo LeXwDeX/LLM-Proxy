@@ -106,7 +106,7 @@ type Manager struct {
 	groupExceeded     map[string]map[string]ExceededInfo // clientName → group → 第一超限维度
 	counters          map[string]*clientCounters         // clientName → per-group counters
 	calibrationErrors map[string]string                  // incomplete history/read failures block admission until calibration succeeds
-	// calibrationRetryAt rate-limits recalibration from the admission path so a
+	// calibrationRetryAt rate-limits recalibration from request paths so a
 	// transient failure clears on a later request rather than the hourly run.
 	calibrationRetryAt  map[string]time.Time
 	calibrationInFlight map[string]chan struct{}
@@ -498,15 +498,15 @@ func (m *Manager) Evaluate(clientName string) {
 	m.evaluate(clientName, false)
 }
 
-func (m *Manager) evaluate(clientName string, admission bool) {
+func (m *Manager) evaluate(clientName string, retry bool) {
 	if m.clientStore == nil || m.usageStore == nil {
 		return
 	}
 	gate := m.accountingGate(clientName)
 	gate.Lock()
 	defer gate.Unlock()
-	if admission {
-		// An explicit/preload calibration may have completed while admission
+	if retry {
+		// An explicit/preload calibration may have completed while this retry
 		// waited for the accounting gate. Do not drain/evaluate it again.
 		m.mu.RLock()
 		failed := m.calibrationErrors[clientName] != ""
@@ -642,10 +642,10 @@ func (m *Manager) calibrationFailed(clientName string, err error) {
 	m.calibrationRetryAt[clientName] = time.Now().Add(calibrationRetryBackoff)
 }
 
-// calibrationRetryBackoff spaces admission-path recalibration attempts per client.
+// calibrationRetryBackoff spaces request-path recalibration attempts per client.
 const calibrationRetryBackoff = 10 * time.Second
 
-// retryCalibrationIfDue recalibrates a blocked client from the admission path
+// retryCalibrationIfDue recalibrates a blocked client on admission or completion
 // at most once per back-off, so one request pays for the retry, not a burst.
 func (m *Manager) retryCalibrationIfDue(clientName string) {
 	m.mu.Lock()
