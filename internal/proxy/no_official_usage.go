@@ -232,8 +232,12 @@ func (s *Service) settleNoOfficialUsage(r *http.Request, target *Target, in noOf
 		// Interrupted after the official final usage: record the official
 		// snapshot. The interruption does not downgrade it (status and cost
 		// completeness are the snapshot's own: complete for well-formed
-		// official usage); only a marker is added. No zero-usage log/counter.
+		// official usage); only lifecycle state and a marker are added.
 		official := in.usage.finalTokens
+		official.responseStatus, official.finishReason = in.tokens.responseStatus, in.tokens.finishReason
+		if hasTokenDiagnostic(in.usage.tokens, diagnosticInterruptedAfterFinalUsage) {
+			appendTokenDiagnostic(&official, diagnosticInterruptedAfterFinalUsage)
+		}
 		if in.cause == noUsageCauseClientGone {
 			appendTokenDiagnostic(&official, diagnosticClientDisconnectedAfterFinalUsage)
 		} else {

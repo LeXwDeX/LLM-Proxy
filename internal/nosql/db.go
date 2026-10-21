@@ -30,7 +30,7 @@ var allBuckets = []string{
 	BucketModelGroups, BucketClientQuotaGroups, BucketQuotaUsageAggHourly,
 	BucketJobLevels,
 	BucketUsageEventsByClient, BucketUsageClientHours,
-	BucketUsageEventsQuarantine,
+	BucketUsageEventsQuarantine, BucketUsageReceipts,
 }
 
 // dbMaxBatchDelay bounds how long a lone db.Batch caller waits for company
@@ -48,6 +48,7 @@ func OpenDB(path string) (*bolt.DB, error) {
 	db.MaxBatchDelay = dbMaxBatchDelay
 	err = db.Update(func(tx *bolt.Tx) error {
 		indexSchemaMissing := tx.Bucket([]byte(BucketUsageEventsByClient)) == nil || tx.Bucket([]byte(BucketUsageClientHours)) == nil
+		receiptsMissing := tx.Bucket([]byte(BucketUsageReceipts)) == nil
 		for _, name := range allBuckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %q: %w", name, err)
@@ -61,6 +62,14 @@ func OpenDB(path string) (*bolt.DB, error) {
 				return err
 			}
 			if err := meta.Delete([]byte(usageClientIndexCursor)); err != nil {
+				return err
+			}
+		}
+		if receiptsMissing {
+			// A recreated, empty receipt bucket cannot prove that old identities
+			// were never committed. Recompute the conservative legacy watermark.
+			meta := tx.Bucket([]byte(BucketMeta))
+			if err := meta.Delete([]byte(usageReceiptsWatermarkDoneKey)); err != nil {
 				return err
 			}
 		}

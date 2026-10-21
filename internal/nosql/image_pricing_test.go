@@ -55,7 +55,7 @@ func TestImagePermanentRollupAndLegacyValues(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"requests":1,"input_tokens":1000000,"output_tokens":1000000,"cached_tokens":1000000}`), &old); err != nil {
 		t.Fatal(err)
 	}
-	if got := aggCellCost(old, "upstream", stamp, "image", rates); got != 7 {
+	if got, _ := aggCellCost(old, "upstream", stamp, "image", rates); got != 7 {
 		t.Fatalf("legacy cell cost=%v", got)
 	}
 }

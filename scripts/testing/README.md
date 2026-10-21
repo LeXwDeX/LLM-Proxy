@@ -40,6 +40,18 @@ node scripts/testing/usage_table_browser_test.cjs
 - `admin_ui_browser_test.cjs`：用 Playwright/Chromium 访问本地 mock server 上的真实管理页面，复用 `admin_ui_test.cjs` 的 Schema fixture；不使用凭据，也不调用上游模型。可用 `LLMS_UI_SCREENSHOT_DIR` 指定截图目录。
 - `usage_table_browser_test.cjs`：仅加载真实内嵌 HTML/CSS 与消费统计模块的本地 fixture，不启动服务。可用 `LLMS_UI_BROWSER` 选择 `chromium`（默认）或 `webkit`。
 
+## 用量收据、重试身份与最终快照（本机单测）
+
+以下用例在 `go test ./internal/...` 中运行，不调用真实模型：
+
+- `internal/nosql/usage_receipts_test.go`：`TestPrunedBundleRetryDoesNotResurrectOrDoubleCount`、`TestLegacyPrunedDatabaseRejectsUnverifiedIdentity`、`TestJournalReplayAfterPruneDoesNotDoubleCount`、`TestReceiptWatermarkMarksMissingAggregateCell`、`TestReceiptBucketRecreationRequiresNewWatermark`、`TestPruneFailsClosedWithoutReceiptBucket`。
+- `internal/nosql/usage_identity_test.go`：`TestRecordOnceRejectsExplicitIdentityWithoutTimestamp`、`TestRecordOnceRetryIgnoresOnlyDerivedPricingRuleMetadata`、`TestUsageJournalPendingRetryIgnoresDerivedPricingMetadata`。
+- `internal/proxy/usage_final_snapshot_test.go`：`TestClaudeConfirmedFinalSnapshotSurvivesUntrustedTail`、`TestClaudeInvalidLaterFinalDoesNotOverwriteConfirmed`；`internal/fakellm/anthropic_final_tail_test.go`：`TestAnthropicFinalSnapshotTailModes`。
+- `internal/quota/accounting_identity_test.go`：`TestRecordUsageRejectsExplicitIdentityWithoutTimestampWithoutSideEffects`、`TestRecordUsageRetryIgnoresPricingRuleVersion`。
+- `internal/nosql/usage_price_coverage_test.go`：`TestStableAggregateReportsMissingSupplementaryIterationPrice`、`TestStableAggregateIterationPriceScope`、`TestStableAggregatePriceRecoveryDoesNotPersistDerivedIncomplete`、`TestMixedLegacyAndNewCellIsNotAssumedCovered`、`TestStablePriceCoverageSurvivesClearedRawHistory`，以及 Summary、ReadCostUnits、模型组消费者的缺价计数回归。
+
+以上用例覆盖工作区当前合同，不代表部署或真实上游验收。
+
 ## 虚假上游端到端（make e2e）
 
 ```sh
@@ -47,6 +59,10 @@ make e2e   # go test -tags=e2e -count=1 -v ./test/e2e/
 ```
 
 套件编译真实代理二进制，在进程内启动确定性虚假上游 `internal/fakellm`，经管理 API 创建 target、池、客户端与职级后以客户端身份发请求，核对上游实际收到的内容（路径、认证、模型名大小写）、客户端响应和 usage 事件的计费回读。覆盖原厂与 Patch 厂商矩阵（含 `standard` 反例）、Responses WebSocket、key 池限流轮换与耗尽、失败切换与取消不重试，以及 JSON/SSE 响应压缩。`TestKnownGaps` 以 SKIP 列出已知兼容缺口及观测值，`-v` 输出即当前清单。
+
+当前新增的最终快照合同用例为 `TestClaudeConfirmedFinalSnapshotE2E`（[`test/e2e/claude_final_snapshot_test.go`](../../test/e2e/claude_final_snapshot_test.go)），子用例 `advisor_tail_nonfinal`、`advisor_tail_empty_stop`、`advisor_tail_error_empty_stop`、`advisor_refusal_free_tail_nonfinal`、`replace_empty_iterations`、`fallback_output_tail_nonfinal`。它核对 root/附属记录、模型、token、诊断、失败状态和聚合费用；尾部帧是合成反例，不是官方 Claude 序列。
+
+同文件的 `TestClaudeInvalidFinalTailRecoveryE2E` 验证无效终态不能污染后续合法终态；[`TestChatFinalSnapshotTailE2E`](../../test/e2e/chat_final_snapshot_test.go) 验证无 usage 的 Chat 尾帧不能改写已确认档位和费用。对应合成指令为 `iterations=advisor_tail_invalid_final_retry` 和 `chat_tail=reprice_nonfinal`，不是原厂正常输出合同。
 
 fakellm 的回复与 token 用量由请求字节确定性推导，行为可通过请求内 `[[fake k=v ...]]` 指令、`X-Fake-Scenario` 头或 `POST /_control` 控制；preset 只代表按官方文档建模的合同，不能替代真实厂商验收。独立进程入口为 `cmd/fakellm`（`go run ./cmd/fakellm -h` 查看参数），镜像为 `Dockerfile.fakellm`。
 
