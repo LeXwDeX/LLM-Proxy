@@ -39,7 +39,8 @@ func (s *Server) serveMessages(c *call) {
 	zeroRefusal := strings.Contains(mode, "refusal_") && mode != "refusal_nonzero" && mode != "refusal_nonrefusal"
 	fallback := strings.HasPrefix(mode, "fallback_")
 	midOutput := mode == "fallback_output" || mode == "fallback_missing_input" || mode == "fallback_chain" || mode == "fallback_chain_unknown"
-	boundary := map[string]any{"type": "fallback", "from": map[string]any{"model": model}, "to": map[string]any{"model": "fake-fallback"}}
+	requestModel, echoPrefix := model, c.sc.IterationModelPrefix
+	boundary := map[string]any{"type": "fallback", "from": map[string]any{"model": echoedModel(echoPrefix, model)}, "to": map[string]any{"model": echoedModel(echoPrefix, "fake-fallback")}}
 	_, thinkingOn := c.req["thinking"].(map[string]any)
 	thinking := c.sc.Reasoning || thinkingOn
 
@@ -55,6 +56,7 @@ func (s *Server) serveMessages(c *call) {
 			resp["usage"] = anthropicUsage(u)
 			pricingPreset(c.sc.PricingPreset, resp["usage"].(map[string]any), true)
 			anthropicIterations(mode, resp["usage"].(map[string]any))
+			echoIterationModels(resp["usage"].(map[string]any), echoPrefix, requestModel)
 		}
 		anthropicIterationStop(mode, resp)
 		if zeroRefusal {
@@ -66,6 +68,7 @@ func (s *Server) serveMessages(c *call) {
 				resp["content"] = append([]any{boundary}, content...)
 			}
 		}
+		resp["model"] = echoedModel(echoPrefix, resp["model"].(string))
 		c.rec.Usage = &u
 		c.ok(200, resp)
 		return
@@ -91,7 +94,7 @@ func (s *Server) serveMessages(c *call) {
 	if fallback && !midOutput {
 		model = "fake-fallback"
 	}
-	msg := map[string]any{"id": id, "type": "message", "role": "assistant", "model": model, "content": []any{},
+	msg := map[string]any{"id": id, "type": "message", "role": "assistant", "model": echoedModel(echoPrefix, model), "content": []any{},
 		"stop_reason": nil, "stop_sequence": nil}
 	if !c.sc.NoUsage {
 		msg["usage"] = startUsage
@@ -149,6 +152,7 @@ func (s *Server) serveMessages(c *call) {
 		} else {
 			pricingPreset(c.sc.PricingPreset, delta["usage"].(map[string]any), true)
 			anthropicIterations(mode, delta["usage"].(map[string]any))
+			echoIterationModels(delta["usage"].(map[string]any), echoPrefix, requestModel)
 			finalUsage := delta["usage"].(map[string]any)
 			if mode == "advisor_early_only" {
 				st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": finalUsage})

@@ -391,6 +391,36 @@ func anthropicIterations(mode string, usage map[string]any) {
 	usage["iterations"] = items
 }
 
+// echoedModel namespaces one echoed model for the iteration_model_prefix
+// control: a synthetic, non-official contract assumption, not a provider shape.
+func echoedModel(prefix, name string) string {
+	if prefix == "" || strings.HasPrefix(name, prefix) {
+		return name
+	}
+	return prefix + name
+}
+
+// echoIterationModels gives every iterations item an explicit echoed model
+// under the iteration_model_prefix assumption. Items without their own model
+// (executor messages, compaction) echo the received request model.
+func echoIterationModels(usage map[string]any, prefix, requestModel string) {
+	if prefix == "" {
+		return
+	}
+	items, _ := usage["iterations"].([]any)
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := item["model"].(string)
+		if name == "" {
+			name = requestModel
+		}
+		item["model"] = echoedModel(prefix, name)
+	}
+}
+
 func anthropicIterationStop(mode string, envelope map[string]any) {
 	if !strings.Contains(mode, "refusal_") || mode == "refusal_nonrefusal" {
 		return
