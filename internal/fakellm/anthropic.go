@@ -2,6 +2,21 @@ package fakellm
 
 import "strings"
 
+// anthropicTailSuffixes are synthetic counterexample suffixes: the stream ends
+// with a non-final delta, an empty delta before message_stop, an error and
+// empty delta before message_stop, or an invalid final followed by a valid
+// final. They are not official Claude sequences.
+var anthropicTailSuffixes = []string{"_tail_nonfinal", "_tail_empty_stop", "_tail_error_empty_stop", "_tail_invalid_final_retry"}
+
+func anthropicTail(mode string) (string, string) {
+	for _, suffix := range anthropicTailSuffixes {
+		if strings.HasSuffix(mode, suffix) {
+			return strings.TrimSuffix(mode, suffix), strings.TrimPrefix(suffix, "_tail_")
+		}
+	}
+	return mode, ""
+}
+
 // serveMessages mimics the Anthropic Messages API (also served by GLM,
 // DeepSeek and Qwen under their Anthropic-compatible prefixes).
 func (s *Server) serveMessages(c *call) {
@@ -12,7 +27,11 @@ func (s *Server) serveMessages(c *call) {
 	text := replyText(s.opts.Name, c.raw, c.sc.Text)
 	id := s.newID("msg")
 	model := firstNonEmpty(c.model, s.opts.Model)
-	mode := c.sc.Iterations
+	mode, tail := anthropicTail(c.sc.Iterations)
+	replaceEmpty := mode == "replace_empty_iterations"
+	if replaceEmpty {
+		mode = "advisor"
+	}
 	lateError := strings.HasSuffix(mode, "_then_error")
 	intermediateError, stopConfirmedError := mode == "advisor_intermediate_then_error", mode == "advisor_stop_then_error"
 	mode = strings.TrimSuffix(mode, "_then_error")
@@ -126,16 +145,21 @@ func (s *Server) serveMessages(c *call) {
 	if !c.sc.NoUsage {
 		// Default fixture repeats input/cache; the gap mode intentionally omits them.
 		delta["usage"] = anthropicUsage(u)
-		pricingPreset(c.sc.PricingPreset, delta["usage"].(map[string]any), true)
-		anthropicIterations(mode, delta["usage"].(map[string]any))
-		finalUsage := delta["usage"].(map[string]any)
-		if mode == "advisor_early_only" {
-			st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": finalUsage})
-			delete(finalUsage, "iterations")
-		}
-		if mode == "fallback_missing_input" {
-			for _, key := range []string{"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation", "output_tokens_details", "service_tier"} {
-				delete(finalUsage, key)
+		if tail == "invalid_final_retry" {
+			// Synthetic counterexample: a valid final with no cache evidence.
+			delta["usage"] = map[string]any{"input_tokens": 7, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+		} else {
+			pricingPreset(c.sc.PricingPreset, delta["usage"].(map[string]any), true)
+			anthropicIterations(mode, delta["usage"].(map[string]any))
+			finalUsage := delta["usage"].(map[string]any)
+			if mode == "advisor_early_only" {
+				st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": finalUsage})
+				delete(finalUsage, "iterations")
+			}
+			if mode == "fallback_missing_input" {
+				for _, key := range []string{"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_creation", "output_tokens_details", "service_tier"} {
+					delete(finalUsage, key)
+				}
 			}
 		}
 	}
@@ -154,6 +178,48 @@ func (s *Server) serveMessages(c *call) {
 		if intermediateError {
 			st.event("message_stop", map[string]any{"type": "message_stop"})
 		}
+		st.done("stream_error", &u)
+		return
+	}
+	finalUsage, _ := delta["usage"].(map[string]any)
+	if replaceEmpty {
+		second := map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": firstNonEmpty(c.sc.Finish, "end_turn")}}
+		replacement := make(map[string]any, len(finalUsage))
+		for key, value := range finalUsage {
+			replacement[key] = value
+		}
+		replacement["iterations"] = []any{}
+		second["usage"] = replacement
+		st.event("message_delta", second)
+	}
+	switch tail {
+	case "invalid_final_retry":
+		// Synthetic counterexamples, not official Claude sequences: an invalid
+		// final must not leave cache/model evidence for the next valid final.
+		st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"},
+			"usage": map[string]any{"input_tokens": 11, "output_tokens": nil, "cache_read_input_tokens": 1000}})
+		st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn"},
+			"usage": map[string]any{"input_tokens": 7, "output_tokens": 4, "iterations": []any{}}})
+		st.event("message_stop", map[string]any{"type": "message_stop"})
+		billed := Usage{Input: 7, Output: 4}
+		c.rec.Usage = &billed
+		st.done("ok", &billed)
+		return
+	case "nonfinal":
+		// No message_stop: the stream ends after a delta that only repeats output.
+		out := 0
+		if n, ok := finalUsage["output_tokens"].(int); ok {
+			out = n
+		}
+		st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": map[string]any{"output_tokens": out}})
+		st.done("ok", &u)
+		return
+	case "empty_stop":
+		st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": map[string]any{}})
+	case "error_empty_stop":
+		st.event("error", map[string]any{"type": "error", "error": map[string]any{"type": "overloaded_error", "message": "synthetic error after usage"}})
+		st.event("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": map[string]any{}})
+		st.event("message_stop", map[string]any{"type": "message_stop"})
 		st.done("stream_error", &u)
 		return
 	}

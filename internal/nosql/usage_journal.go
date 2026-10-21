@@ -138,6 +138,9 @@ func (j *UsageJournal) Record(event usage.Event) error {
 		return errors.New("usage journal: recorder is not initialized")
 	}
 	event = usage.CloneEvent(event)
+	if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
+		return err
+	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	} else {
@@ -173,6 +176,9 @@ func (j *UsageJournal) RecordOnce(event usage.Event) (bool, error) {
 		err := j.Record(event)
 		return err == nil, err
 	}
+	if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
+		return false, err
+	}
 	rows, _, err := normalizeUsageBundle(event)
 	if err != nil {
 		return false, err
@@ -202,7 +208,7 @@ func (j *UsageJournal) RecordOnce(event usage.Event) (bool, error) {
 	if len(corrupt) > 0 {
 		return false, errors.New("usage journal: cannot verify retry identity in corrupt journal")
 	}
-	data, err := json.Marshal(event)
+	digest, err := usage.RetryEquivalentDigest(event)
 	if err != nil {
 		return false, err
 	}
@@ -214,11 +220,11 @@ func (j *UsageJournal) RecordOnce(event usage.Event) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		priorData, err := json.Marshal(priorRows[0])
+		priorDigest, err := usage.RetryEquivalentDigest(priorRows[0])
 		if err != nil {
 			return false, err
 		}
-		if !bytes.Equal(data, priorData) {
+		if digest != priorDigest {
 			return false, fmt.Errorf("usage record ID %q already exists with different event data", event.RecordID)
 		}
 		return false, nil

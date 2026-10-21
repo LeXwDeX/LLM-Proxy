@@ -13,16 +13,18 @@ import (
 // The observation pipe applies backpressure but never changes forwarded bytes.
 // Content is discarded by projection; only usage and lifecycle metadata survive.
 type usageStream struct {
-	writer               *io.PipeWriter
-	done                 chan struct{}
-	tokens               usageTokens
-	model                string
-	found                bool
-	err                  error
-	parser               usageParser
-	terminal             bool
-	streaming            bool
-	jsonResponse         bool
+	writer       *io.PipeWriter
+	done         chan struct{}
+	tokens       usageTokens
+	model        string
+	found        bool
+	err          error
+	parser       usageParser
+	terminal     bool
+	streaming    bool
+	jsonResponse bool
+	// finalUsage is sticky: once a protocol terminal event supplied official
+	// usage, a later non-final event cannot retract it.
 	finalUsage           bool
 	responseStatus       string
 	finishReason         string
@@ -32,9 +34,10 @@ type usageStream struct {
 	claudeFinalEnvelope  map[string]any
 	claudeLastDelta      map[string]any
 	claudeIterationsSeen bool
-	// finalSeen and finalTokens hold the protocol's official final usage as
-	// observed so far (see officialFinalUsage). Written by the observer
-	// goroutine; read only after Close.
+	// finalSeen and finalTokens hold the committed official final usage.
+	// Non-final frames never revoke or recompute them; Close reconciles the
+	// working copy to this snapshot. Written by the observer goroutine; read
+	// only after Close.
 	finalSeen   bool
 	finalTokens usageTokens
 	finalModel  string
@@ -85,14 +88,51 @@ func newUsageStream(contentType, encoding string, parser usageParser) *usageStre
 			if err == nil {
 				u.tokens, u.model, u.found = u.parser.parsePayload(payload)
 				u.observeLifecycle(payload, "")
-				u.captureFinalUsage()
+				u.captureFinalUsage(u.found)
 			}
 		}
 	}()
 	return u
 }
 func (u *usageStream) Write(p []byte) (int, error) { _, _ = u.writer.Write(p); return len(p), nil }
-func (u *usageStream) Close()                      { _ = u.writer.Close(); <-u.done }
+func (u *usageStream) Close() {
+	_ = u.writer.Close()
+	<-u.done
+	u.reconcileFinalUsage()
+}
+
+// reconcileFinalUsage keeps the committed snapshot authoritative for the
+// request's consumers. A later final that was rejected (conflicting, invalid,
+// or incomplete) and any lifecycle-only tail may have changed the live
+// working copy; neither may rewrite the committed tokens, model, components
+// or pricing context. Only the terminal lifecycle state and after-final
+// markers are current.
+func (u *usageStream) reconcileFinalUsage() {
+	// A decoder/read error keeps its existing incomplete usage status and
+	// diagnostic; it is not a reason to promote the working copy to the
+	// committed snapshot.
+	if !u.finalSeen || u.err != nil {
+		return
+	}
+	committed := u.finalTokens
+	committed.responseStatus, committed.finishReason = u.tokens.responseStatus, u.tokens.finishReason
+	for _, marker := range []string{diagnosticClientDisconnectedAfterFinalUsage, diagnosticInterruptedAfterFinalUsage} {
+		if hasTokenDiagnostic(u.tokens, marker) {
+			appendTokenDiagnostic(&committed, marker)
+		}
+	}
+	u.tokens = committed
+	u.model = u.finalModel
+}
+
+func hasTokenDiagnostic(t usageTokens, want string) bool {
+	for _, existing := range strings.Split(t.diagnostic, ";") {
+		if existing == want {
+			return true
+		}
+	}
+	return false
+}
 
 // Vendor aborts follow the explicit choice. Keep all reported usage and the
 // original reason, even when that reason does not mark this target as failed.
@@ -238,6 +278,16 @@ func mergeUsageSnapshot(dst, src map[string]any) {
 	}
 }
 
+// Copy every map level the merger can mutate; arrays are read-only evidence.
+func cloneUsageSnapshot(snapshot map[string]any) map[string]any {
+	if snapshot == nil {
+		return nil
+	}
+	clone := make(map[string]any, len(snapshot))
+	mergeUsageSnapshot(clone, snapshot)
+	return clone
+}
+
 // readSSE observes events in order. A clean EOF (no decoder or read error) may
 // omit the blank line after the last event: complete data ([DONE] or a fully
 // parsed JSON payload) is then treated as dispatched. Incomplete last data and
@@ -262,7 +312,13 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 			_, _ = io.Copy(io.Discard, data)
 			u.terminal = true
 			complete = true
-			u.captureFinalUsage()
+			// DONE settles Chat/Gemini streams; Responses and Anthropic need
+			// their own terminal event (officialFinalUsage checks it). A
+			// committed snapshot is not re-committed: the working copy may
+			// carry a lifecycle-only tail that must not reach the ledger.
+			if !u.finalSeen {
+				u.captureFinalUsage(u.officialFinalUsage())
+			}
 		} else {
 			payload, err := readUsagePayload(data)
 			_, _ = io.Copy(io.Discard, data)
@@ -281,10 +337,6 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 					payload = u.claudeLastDelta
 					usageEvent = "message_stop"
 				}
-				m, model := usageEnvelope(payload)
-				if model != "" {
-					u.model = model
-				}
 				if u.parser.protocol == "" {
 					if _, ok := payload["usageMetadata"]; ok {
 						u.parser.protocol = config.ProtocolGemini
@@ -293,77 +345,109 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 						u.parser.protocol = config.ProtocolAnthropicMessages
 					}
 				}
-				u.observePricingEnvelope(payload)
-				u.observeFinalUsage(payload, usageEvent, m)
-				if u.parser.operation(m) == config.ProtocolAnthropicMessages &&
-					(readString(payload["type"]) == "message_delta" || (readString(payload["type"]) == "" && event.event == "message_delta")) {
-					payload["type"] = "message_delta"
-					u.claudeLastDelta = payload
-				}
-				claudeDiagnostic := ""
-				if m != nil {
-					if u.snapshot == nil {
-						u.snapshot = map[string]any{}
+				m, model := usageEnvelope(payload)
+				previousFinalUsage := u.finalUsage
+				frameFinal := u.frameFinalUsage(payload, usageEvent, m)
+				// Once official final usage is committed, an event that does not
+				// itself confirm a new final may change only lifecycle state. It
+				// must not recompute tokens, components, model or pricing context.
+				lifecycleOnly := u.finalSeen && !frameFinal
+				if !lifecycleOnly {
+					// Rejected replacement finals must leave no accounting residue.
+					// The first final instead retains its protocol's conflict evidence.
+					candidate := u.finalSeen && frameFinal
+					var candidateBase struct {
+						snapshot, lastDelta, finalEnvelope, pricing map[string]any
+						tokens                                      usageTokens
+						model                                       string
+						found, iterations                           bool
 					}
-					if u.parser.operation(m) == config.ProtocolAnthropicMessages {
-						typ := readString(payload["type"])
-						if typ == "" {
-							typ = event.event
+					if candidate {
+						candidateBase.snapshot, candidateBase.lastDelta, candidateBase.finalEnvelope = u.snapshot, u.claudeLastDelta, u.claudeFinalEnvelope
+						candidateBase.pricing = cloneUsageSnapshot(u.pricingEnvelope)
+						candidateBase.tokens, candidateBase.model, candidateBase.found, candidateBase.iterations = u.tokens, u.model, u.found, u.claudeIterationsSeen
+						u.snapshot = cloneUsageSnapshot(u.snapshot)
+					}
+					if model != "" {
+						u.model = model
+					}
+					u.observePricingEnvelope(payload)
+					if u.parser.operation(m) == config.ProtocolAnthropicMessages &&
+						(readString(payload["type"]) == "message_delta" || (readString(payload["type"]) == "" && event.event == "message_delta")) {
+						payload["type"] = "message_delta"
+						u.claudeLastDelta = payload
+					}
+					claudeDiagnostic := ""
+					if m != nil {
+						if u.snapshot == nil {
+							u.snapshot = map[string]any{}
 						}
-						// Remember early evidence, but never bill an intermediate array.
-						iterations, array := m["iterations"].([]any)
-						if len(iterations) > 0 {
-							u.claudeIterationsSeen = true
-						}
-						if typ != "message_delta" || !u.finalUsage {
-							// Keep the last delta intact until message_stop can confirm it.
-							counters := make(map[string]any, len(m))
-							for key, value := range m {
-								if key != "iterations" {
-									counters[key] = value
-								}
+						if u.parser.operation(m) == config.ProtocolAnthropicMessages {
+							typ := readString(payload["type"])
+							if typ == "" {
+								typ = event.event
 							}
-							m = counters
-						} else {
-							delete(u.snapshot, "iterations")
-							if u.claudeIterationsSeen && !array {
-								claudeDiagnostic = "missing_final_iterations"
+							// Remember early evidence, but never bill an intermediate array.
+							iterations, array := m["iterations"].([]any)
+							if len(iterations) > 0 {
+								u.claudeIterationsSeen = true
 							}
-							for _, raw := range iterations {
-								item, _ := raw.(map[string]any)
-								if item["type"] == "fallback_message" {
-									// Different returned attempt: none of the original
-									// executor's optional usage evidence belongs to it.
-									u.snapshot = map[string]any{}
-									if _, present := m["input_tokens"]; !present {
-										claudeDiagnostic = "missing_fallback_input_usage"
+							if typ != "message_delta" || !u.finalUsage {
+								// Keep the last delta intact until message_stop can confirm it.
+								counters := make(map[string]any, len(m))
+								for key, value := range m {
+									if key != "iterations" {
+										counters[key] = value
 									}
-									break
 								}
+								m = counters
+							} else {
+								delete(u.snapshot, "iterations")
+								if u.claudeIterationsSeen && !array {
+									claudeDiagnostic = "missing_final_iterations"
+								}
+								for _, raw := range iterations {
+									item, _ := raw.(map[string]any)
+									if item["type"] == "fallback_message" {
+										// Different returned attempt: none of the original
+										// executor's optional usage evidence belongs to it.
+										u.snapshot = map[string]any{}
+										if _, present := m["input_tokens"]; !present {
+											claudeDiagnostic = "missing_fallback_input_usage"
+										}
+										break
+									}
+								}
+								u.claudeFinalEnvelope = payload
 							}
-							u.claudeFinalEnvelope = payload
 						}
+						mergeUsageSnapshot(u.snapshot, m)
+						parsed := map[string]any{"usage": u.snapshot, "model": u.model}
+						if u.claudeFinalEnvelope != nil {
+							parsed["delta"] = u.claudeFinalEnvelope["delta"]
+						}
+						var parsedModel string
+						u.tokens, parsedModel, u.found = u.parser.parsePayload(parsed)
+						if claudeDiagnostic != "" {
+							u.tokens.costIncomplete = true
+							appendTokenDiagnostic(&u.tokens, claudeDiagnostic)
+						}
+						if u.tokens.billingModel != "" {
+							u.model = parsedModel
+						}
+						u.observeChoicesFinalUsage()
 					}
-					mergeUsageSnapshot(u.snapshot, m)
-					parsed := map[string]any{"usage": u.snapshot, "model": u.model}
-					if u.claudeFinalEnvelope != nil {
-						parsed["delta"] = u.claudeFinalEnvelope["delta"]
+					if candidate && u.tokens.status != usageStatusComplete {
+						u.snapshot, u.claudeLastDelta, u.claudeFinalEnvelope, u.pricingEnvelope = candidateBase.snapshot, candidateBase.lastDelta, candidateBase.finalEnvelope, candidateBase.pricing
+						u.tokens, u.model, u.found, u.claudeIterationsSeen = candidateBase.tokens, candidateBase.model, candidateBase.found, candidateBase.iterations
+						u.finalUsage = previousFinalUsage
+						frameFinal = false
 					}
-					var parsedModel string
-					u.tokens, parsedModel, u.found = u.parser.parsePayload(parsed)
-					if claudeDiagnostic != "" {
-						u.tokens.costIncomplete = true
-						appendTokenDiagnostic(&u.tokens, claudeDiagnostic)
+					if u.snapshot != nil && u.tokens.billingModel == "" {
+						u.updatePricingContext()
 					}
-					if u.tokens.billingModel != "" {
-						u.model = parsedModel
-					}
-					u.observeChoicesFinalUsage()
 				}
-				if u.snapshot != nil && u.tokens.billingModel == "" {
-					u.updatePricingContext()
-				}
-				u.captureFinalUsage()
+				u.captureFinalUsage(frameFinal)
 			}
 		}
 		if event.eof {
@@ -404,19 +488,28 @@ func choiceIndex(entry map[string]any) int64 {
 	return 0
 }
 
+// allChoicesFinished reports whether every choice/candidate seen so far has a
+// finish reason. A stream with no choices yet is not final.
+func (u *usageStream) allChoicesFinished() bool {
+	if len(u.choiceFinished) == 0 {
+		return false
+	}
+	for _, finished := range u.choiceFinished {
+		if !finished {
+			return false
+		}
+	}
+	return true
+}
+
 // observeChoicesFinalUsage runs for a chunk that carries usage, after its
 // lifecycle: the usage is final when every choice (candidate) seen so far
 // has a finish reason. A chunk with no choices of its own (the trailing
 // OpenAI usage chunk) qualifies once the earlier choices finished; a usage
 // chunk before any choice, or with one choice of several unfinished, does not.
 func (u *usageStream) observeChoicesFinalUsage() {
-	if u.choicesFinalUsage || len(u.choiceFinished) == 0 {
+	if u.choicesFinalUsage || !u.allChoicesFinished() {
 		return
-	}
-	for _, finished := range u.choiceFinished {
-		if !finished {
-			return
-		}
 	}
 	u.choicesFinalUsage = true
 }
@@ -450,24 +543,55 @@ func (u *usageStream) officialFinalUsage() bool {
 	return u.terminal || u.choicesFinalUsage
 }
 
-// captureFinalUsage snapshots the tokens at the event that completes (or
-// keeps) official final usage, before end-of-stream adjustments. Response
-// failure is independent of confirmed usage and updates only its lifecycle.
-func (u *usageStream) captureFinalUsage() {
-	official := u.officialFinalUsage()
-	u.finalConflict = official && u.tokens.status == usageStatusConflict
-	u.finalSeen = official && !u.finalConflict
-	if u.finalSeen {
-		u.finalTokens = u.tokens
-		u.finalTokens.responseStatus, u.finalTokens.finishReason = u.responseStatus, u.finishReason
-		u.finalModel = u.model
+// captureFinalUsage commits the current event's tokens only when that event
+// carries official final usage. A non-final event never revokes, recomputes or
+// overwrites an already committed snapshot. A newer valid final replaces it
+// wholesale; a conflicting or incomplete newer final is not evidence and
+// cannot replace valid committed evidence.
+func (u *usageStream) captureFinalUsage(final bool) {
+	if !final {
+		return
 	}
+	if u.tokens.status == usageStatusConflict {
+		if !u.finalSeen {
+			u.finalConflict = true
+		}
+		return
+	}
+	if u.finalSeen && u.tokens.status != usageStatusComplete {
+		return
+	}
+	u.finalConflict = false
+	u.finalSeen = true
+	u.finalTokens = u.tokens
+	u.finalTokens.responseStatus, u.finalTokens.finishReason = u.responseStatus, u.finishReason
+	u.finalModel = u.model
 }
 
-// Transport/generation termination is not evidence of a final usage snapshot.
-// Responses publishes it on the terminal response; Claude publishes cumulative
-// output on the terminal message_delta. An error cannot revoke confirmed usage.
-func (u *usageStream) observeFinalUsage(payload map[string]any, event string, m map[string]any) {
+// frameFinalUsage reports whether this frame itself supplies official final
+// usage. Historical state (an earlier committed usage chunk or [DONE]) is not
+// evidence on a later frame: only a frame carrying the terminal event or the
+// final usage may replace the committed snapshot.
+func (u *usageStream) frameFinalUsage(payload map[string]any, event string, m map[string]any) bool {
+	switch u.parser.operation(m) {
+	case config.ProtocolOpenAIResponses, config.ProtocolAnthropicMessages:
+		return u.observeFinalUsage(payload, event, m)
+	}
+	if m == nil || len(m) == 0 {
+		return false
+	}
+	if u.allChoicesFinished() {
+		return true
+	}
+	// A terminal Gemini without candidates (blocked prompt, error envelope)
+	// can still carry official usage.
+	return u.terminal && len(u.choiceFinished) == 0
+}
+
+// observeFinalUsage reports whether this event itself supplies official final
+// usage. finalUsage is sticky: an event without final evidence cannot retract
+// the protocol's confirmed final usage.
+func (u *usageStream) observeFinalUsage(payload map[string]any, event string, m map[string]any) bool {
 	typ := readString(payload["type"])
 	if typ == "" {
 		typ = event
@@ -478,13 +602,17 @@ func (u *usageStream) observeFinalUsage(payload map[string]any, event string, m 
 		case "response.completed", "response.incomplete", "response.failed":
 			_, input := m["input_tokens"]
 			_, output := m["output_tokens"]
-			u.finalUsage = input && output
+			final := input && output
+			u.finalUsage = u.finalUsage || final
+			return final
 		}
 	case config.ProtocolAnthropicMessages:
 		switch typ {
 		case "message_delta":
 			_, output := m["output_tokens"]
-			u.finalUsage = output && (readString(usageDetails(payload, "delta")["stop_reason"]) != "" || event == "message_stop")
+			final := output && (readString(usageDetails(payload, "delta")["stop_reason"]) != "" || event == "message_stop")
+			u.finalUsage = u.finalUsage || final
+			return final
 		case "error":
 			if u.finalSeen {
 				appendTokenDiagnostic(&u.tokens, diagnosticInterruptedAfterFinalUsage)
@@ -493,6 +621,7 @@ func (u *usageStream) observeFinalUsage(payload map[string]any, event string, m 
 			u.claudeLastDelta = nil
 		}
 	}
+	return false
 }
 
 // sseEventReader exposes only joined data lines from one SSE event. It handles

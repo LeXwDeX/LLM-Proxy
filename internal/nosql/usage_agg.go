@@ -42,24 +42,32 @@ const quotaUsageAggBuiltMetaKey = "quota_usage_agg_built_at_v1"
 
 // AggCell is the persisted value of one hourly aggregation cell.
 type AggCell struct {
-	RecordCount             int64              `json:"record_count,omitempty"`
-	NonBillable             *NonBillableTokens `json:"non_billable,omitempty"`
-	IncompleteUsageCount    int64              `json:"incomplete_usage_count,omitempty"`
-	IncompleteCostCount     int64              `json:"incomplete_cost_count,omitempty"`
-	Requests                int64              `json:"requests"`
-	Success                 int64              `json:"success"`
-	InputTokens             int64              `json:"input_tokens"`
-	OutputTokens            int64              `json:"output_tokens"`
-	CachedTokens            int64              `json:"cached_tokens"`
-	CacheCreationTokens     int64              `json:"cache_creation_tokens"`
-	ExplicitCacheReadTokens int64              `json:"explicit_cache_read_tokens,omitempty"`
-	ReasoningTokens         int64              `json:"reasoning_tokens,omitempty"`
-	CacheCreation5mTokens   int64              `json:"cache_creation_5m_tokens,omitempty"`
-	CacheCreation1hTokens   int64              `json:"cache_creation_1h_tokens,omitempty"`
-	ToolUsePromptTokens     int64              `json:"tool_use_prompt_tokens,omitempty"`
-	ImageInputTokens        int64              `json:"image_input_tokens,omitempty"`
-	CachedImageInputTokens  int64              `json:"cached_image_input_tokens,omitempty"`
-	ImageOutputTokens       int64              `json:"image_output_tokens,omitempty"`
+	RecordCount int64 `json:"record_count,omitempty"`
+	// PriceCoverageRecordCount counts rows written with coverage metadata.
+	// A zero or partial count marks legacy or mixed cells whose coverage is
+	// unknown, so a later missing price is reported conservatively.
+	PriceCoverageRecordCount int64 `json:"price_coverage_record_count,omitempty"`
+	// IterationPriceCompleteCount counts billable supplementary/fallback rows
+	// that had a price when written. A later missing price makes exactly these
+	// rows incomplete; it never includes rows already marked incomplete.
+	IterationPriceCompleteCount int64              `json:"iteration_price_complete_count,omitempty"`
+	NonBillable                 *NonBillableTokens `json:"non_billable,omitempty"`
+	IncompleteUsageCount        int64              `json:"incomplete_usage_count,omitempty"`
+	IncompleteCostCount         int64              `json:"incomplete_cost_count,omitempty"`
+	Requests                    int64              `json:"requests"`
+	Success                     int64              `json:"success"`
+	InputTokens                 int64              `json:"input_tokens"`
+	OutputTokens                int64              `json:"output_tokens"`
+	CachedTokens                int64              `json:"cached_tokens"`
+	CacheCreationTokens         int64              `json:"cache_creation_tokens"`
+	ExplicitCacheReadTokens     int64              `json:"explicit_cache_read_tokens,omitempty"`
+	ReasoningTokens             int64              `json:"reasoning_tokens,omitempty"`
+	CacheCreation5mTokens       int64              `json:"cache_creation_5m_tokens,omitempty"`
+	CacheCreation1hTokens       int64              `json:"cache_creation_1h_tokens,omitempty"`
+	ToolUsePromptTokens         int64              `json:"tool_use_prompt_tokens,omitempty"`
+	ImageInputTokens            int64              `json:"image_input_tokens,omitempty"`
+	CachedImageInputTokens      int64              `json:"cached_image_input_tokens,omitempty"`
+	ImageOutputTokens           int64              `json:"image_output_tokens,omitempty"`
 }
 
 // NonBillableTokens preserves observed usage excluded from the bill. A missing
@@ -82,6 +90,16 @@ func (cell AggCell) recordCount() int64 {
 		return cell.RecordCount
 	}
 	return cell.Requests
+}
+
+// addPriceCoverage records which rows carry enough evidence to distinguish a
+// later missing iteration price from a row that was already incomplete or
+// outside the iteration-price check.
+func (cell *AggCell) addPriceCoverage(evt usage.Event) {
+	cell.PriceCoverageRecordCount++
+	if !evt.NonBillable && (evt.Supplementary || evt.IterationType == "fallback_message") && !evt.CostIncomplete {
+		cell.IterationPriceCompleteCount++
+	}
 }
 
 func (cell *AggCell) addNonBillable(evt usage.Event) {
@@ -179,6 +197,7 @@ func bumpAgg(tx *bolt.Tx, evt usage.Event) error {
 		}
 	}
 	cell.RecordCount = cell.recordCount() + 1
+	cell.addPriceCoverage(evt)
 	cell.Requests += usage.RequestWeight(evt)
 	cell.addNonBillable(evt)
 	if isSuccessStatus(evt.StatusCode) {
@@ -293,6 +312,7 @@ func bumpQuotaAgg(tx *bolt.Tx, evt usage.Event) error {
 		}
 	}
 	cell.RecordCount = cell.recordCount() + 1
+	cell.addPriceCoverage(evt)
 	cell.Requests += usage.RequestWeight(evt)
 	cell.addNonBillable(evt)
 	if isSuccessStatus(evt.StatusCode) {

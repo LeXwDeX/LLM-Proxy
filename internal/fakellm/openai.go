@@ -146,6 +146,14 @@ func (s *Server) serveChat(c *call) {
 		final["usage"] = openAIChatUsage(u, c.flavor, true)
 		st.event("", final)
 	}
+	if c.sc.ChatTail == "reprice_nonfinal" {
+		// Synthetic counterexample, not an OpenAI shape: a non-usage chunk after
+		// the official usage and before [DONE], with another model and tier.
+		st.event("", map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": "mutated-tail",
+			"system_fingerprint": "fp_fake",
+			"choices":            []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": nil, "logprobs": nil}},
+			"service_tier":       "priority"})
+	}
 	st.rawEvent("", "[DONE]")
 	if wantUsage {
 		st.done("ok", &u)

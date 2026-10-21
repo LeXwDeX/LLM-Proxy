@@ -24,6 +24,9 @@ func (m *Manager) accountingGate(clientName string) *sync.RWMutex {
 func (m *Manager) RecordUsage(recorder usage.Recorder, event usage.Event) error {
 	event = usage.CloneEvent(event)
 	event.ClientName = strings.TrimSpace(event.ClientName)
+	if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
+		return err
+	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
