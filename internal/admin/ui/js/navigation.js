@@ -10,6 +10,7 @@ AdminApp.register("navigation", function (app) {
   );
   var stopOverviewAutoRefresh = app.bind("overview", "stopOverviewAutoRefresh");
   var loadTargets = app.bind("targets", "loadTargets");
+  var loadPools = app.bind("pools", "loadPools");
   var loadClients = app.bind("clients", "loadClients");
   var loadPricingTemplates = app.bind("pricing", "loadPricingTemplates");
   var loadUsage = app.bind("usage", "loadUsage");
@@ -133,7 +134,9 @@ AdminApp.register("navigation", function (app) {
         loadOverview();
         break;
       case "targets":
-        loadTargets();
+        // The page keeps its last sub-tab; reload whichever panel is visible.
+        if (!document.getElementById("targetsPoolsPanel").hidden) loadPools();
+        else loadTargets();
         break;
       case "clients":
         loadClients();
