@@ -49,6 +49,10 @@ const js = (v) => JSON.stringify(v);
 async function goto(page, name) {
   await page.eval(`__sim.click('.sidebar-nav-item[data-page=${js(name)}]')`);
   await page.waitFor(`document.getElementById(${js("page-" + name)}).classList.contains("active")`, { what: `page ${name} active` });
+  if (name === "targets") {
+    await page.eval(`__sim.click("#targetsMainTab")`);
+    await page.waitFor(`!document.getElementById("targetsMainPanel").hidden`, { what: "targets tab active" });
+  }
 }
 
 // expectToast waits for a toast containing text (success unless kind given).
@@ -63,6 +67,19 @@ async function expectToast(page, text, kind = "success") {
 async function confirmModal(page) {
   await page.waitFor(`__sim.open("confirmModal")`, { what: "confirm modal" });
   await page.eval(`__sim.click("#confirmOkBtn")`);
+}
+
+// refreshOverview clicks the visible refresh control only when enabled and
+// waits for the activity load it starts to finish. It does not sleep for a
+// fixed interval.
+async function refreshOverview(page) {
+  await page.waitFor(`!document.getElementById("refreshOverviewBtn").disabled`,
+    { what: "overview refresh enabled", timeoutMs: 10000 });
+  await page.eval(`__sim.click("#refreshOverviewBtn")`);
+  await page.waitFor(`document.getElementById("refreshOverviewBtn").disabled`,
+    { what: "overview refresh running", timeoutMs: 2000 }).catch(() => {});
+  await page.waitFor(`!document.getElementById("refreshOverviewBtn").disabled`,
+    { what: "overview refresh finished", timeoutMs: 20000 });
 }
 
 async function fakeControl(base, body) {
@@ -102,15 +119,15 @@ const list = [
     name: "create-pool", critical: true,
     async run({ page }) {
       await goto(page, "targets");
-      await page.eval(`__sim.click("#openPoolsModalBtn")`);
-      await page.waitFor(`__sim.open("poolsModal")`);
+      await page.eval(`__sim.click("#targetsPoolsTab")`);
+      await page.waitFor(`!document.getElementById("targetsPoolsPanel").hidden`, { what: "pools tab active" });
       await page.eval(`__sim.click("#newPoolBtn")`);
       await page.waitFor(`__sim.open("poolModal")`);
       await page.eval(`__sim.fill("#poolName", ${js(S.pool)}) && __sim.fill("#poolDescription", "UI simulation pool")`);
       await page.eval(`__sim.click("#savePoolBtn")`);
       await expectToast(page, "部署池已创建");
       await page.waitFor(`[...document.querySelectorAll("#poolsTableBody td.pool-name")].some(td => td.textContent.includes(${js(S.pool)}))`, { what: "pool row" });
-      await page.eval(`closeModal("poolsModal"), true`);
+      await page.eval(`__sim.click("#targetsMainTab")`);
     },
   },
   {
@@ -251,8 +268,39 @@ const list = [
     name: "overview-counts-requests",
     async run({ page }) {
       await goto(page, "overview");
-      await page.eval(`__sim.click("#refreshOverviewBtn")`);
-      await page.waitFor(`Number(__sim.text("#ovTotalReqs").replace(/[^0-9]/g, "")) >= 7`, { what: "#ovTotalReqs >= 7", timeoutMs: 15000 });
+      const readOverview = () => page.eval(`fetch("/admin/api/overview").then(r => r.json())`);
+      // request_stats_72h excludes the current unfinished minute by design, so
+      // the UI must equal the closed-minute snapshot, not a wall-clock request
+      // count. Usage events are recorded immediately; they prove the traffic
+      // independently of that snapshot.
+      const deadline = Date.now() + 30000;
+      let overview, stats, usageToday, uiText, uiTotal;
+      await refreshOverview(page);
+      for (;;) {
+        overview = await readOverview();
+        stats = overview && overview.request_stats_72h;
+        usageToday = overview && overview.usage_summary && overview.usage_summary.today;
+        uiText = (await page.eval(`__sim.text("#ovTotalReqs")`)).trim();
+        uiTotal = Number(uiText.replace(/[^0-9]/g, ""));
+        const statsReady = stats && stats.available === true &&
+          Number.isSafeInteger(stats.total) && stats.total >= 0;
+        const usageReady = usageToday && Number.isSafeInteger(usageToday.requests) &&
+          usageToday.requests >= 7;
+        const uiReady = statsReady && /^[0-9][0-9,]*$/.test(uiText) &&
+          uiTotal === stats.total;
+        if (statsReady && usageReady && uiReady) break;
+        if (Date.now() >= deadline) break;
+        await refreshOverview(page);
+      }
+      assert.ok(stats, "overview response contains request_stats_72h");
+      assert.equal(stats.available, true, "request statistics are available");
+      assert.ok(Number.isSafeInteger(stats.total) && stats.total >= 0,
+        `closed-minute total must be a non-negative integer: ${JSON.stringify(stats)}`);
+      assert.ok(usageToday && Number.isSafeInteger(usageToday.requests) && usageToday.requests >= 7,
+        `sent traffic missing from usage_summary today: ${JSON.stringify(usageToday)}`);
+      assert.ok(/^[0-9][0-9,]*$/.test(uiText), `overview total is not numeric: "${uiText}"`);
+      assert.equal(uiTotal, stats.total,
+        `overview must show closed-minute total ${stats.total}; UI shows "${uiText}"`);
     },
   },
   {
@@ -350,6 +398,34 @@ const list = [
     },
   },
   {
+    name: "target-health-filter-and-detail-drawer",
+    async run({ page }) {
+      await goto(page, "targets");
+      await page.eval(`__sim.click('#targetStatusFilters [data-target-filter="attention"]')`);
+      await page.waitFor(`document.querySelector('#targetStatusFilters [data-target-filter="attention"]').getAttribute("aria-pressed") === "true"`,
+        { what: "attention filter pressed" });
+      const visibleHealth = await page.eval(`[...document.querySelectorAll("#targetsTableBody tr[data-target-health]")].map(tr => tr.dataset.targetHealth)`);
+      assert.ok(visibleHealth.length > 0, "attention filter keeps abnormal targets");
+      assert.ok(visibleHealth.every(value => value === "attention"), "attention filter hides healthy and paused targets");
+      assert.ok(await page.eval(`!!document.querySelector('#targetsTableBody td.target-text[title=${js(S.tgtGLM)}]')`),
+        "exhausted-key target is shown under the attention filter");
+      await page.eval(`__sim.click('#targetStatusFilters [data-target-filter="all"]')`);
+      await page.eval(`__sim.click('[data-detail-tgt=${js(S.tgtGLM)}]')`);
+      await page.waitFor(`__sim.open("targetDetailDrawer")`, { what: "target detail drawer" });
+      const detailTabs = await page.eval(`[...document.querySelectorAll("#targetDetailTabs [data-target-detail-tab]")].map(button => button.dataset.targetDetailTab)`);
+      assert.deepEqual(detailTabs, ["overview", "keys", "models", "advanced"]);
+      await page.eval(`__sim.click('#targetDetailTabs [data-target-detail-tab="keys"]')`);
+      const detailKeys = await page.eval(`__sim.text("#targetDetailKeys")`);
+      assert.ok(detailKeys.includes("sk-"), "key detail lists masked keys");
+      assert.ok(!detailKeys.includes(S.keysGLM[0]), "key detail never shows a plaintext key");
+      await page.eval(`__sim.click('#targetDetailTabs [data-target-detail-tab="models"]')`);
+      await page.waitFor(`document.querySelectorAll("#targetDetailModels .target-model-badge").length > 0`, { what: "detail model badges" });
+      await page.eval(`__sim.click('#targetDetailTabs [data-target-detail-tab="advanced"]')`);
+      assert.match(await page.eval(`__sim.text("#targetDetailAdvanced")`), /用量适配/);
+      await page.eval(`closeModal("targetDetailDrawer"), true`);
+    },
+  },
+  {
     name: "key-block-and-unblock-in-edit-modal",
     async run({ page }) {
       await page.eval(`__sim.click('[data-edit-tgt=${js(S.tgtOpenAI)}]')`);
@@ -373,7 +449,14 @@ const list = [
       }
       await page.waitFor(`document.querySelector("#model-mappings-container .test-model-btn")`, { what: "test button" });
       await page.eval(`__sim.click("#model-mappings-container .test-model-btn")`);
-      await expectToast(page, "测试成功");
+      try {
+        // The product reports the actual HTTP probe result, not a generic
+        // "test succeeded" message.
+        await expectToast(page, "HTTP 检测通过");
+      } catch (err) {
+        const afterFailure = (await fakeRequests(stack.fakes[0])).length;
+        throw new Error(`${err.message}; fake requests ${before} -> ${afterFailure}`);
+      }
       const after = (await fakeRequests(stack.fakes[0])).length;
       assert.ok(after > before, "fake-a received no test-model request");
       await page.eval(`closeModal("targetModal"), true`);
@@ -394,6 +477,140 @@ const list = [
       const resumed = await clientCall(stack.base, S.clientKey, "/v1/responses", { model: S.aliasOpenAI,
         input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] });
       assert.equal(resumed.status, 200, `after resume: ${resumed.text.slice(0, 200)}`);
+    },
+  },
+  {
+    name: "pool-pause-pauses-members-and-resume-restores",
+    critical: true,
+    async run({ page }) {
+      await goto(page, "targets");
+      await page.eval(`__sim.click("#targetsPoolsTab")`);
+      await page.waitFor(`!document.getElementById("targetsPoolsPanel").hidden`, { what: "pools tab active" });
+      const readPool = () => page.eval(`(() => {
+        const tr = document.querySelector('[data-pause-pool=${js(S.pool)}]')?.closest("tr")
+          || document.querySelector('[data-resume-pool=${js(S.pool)}]')?.closest("tr");
+        if (!tr) return null;
+        return {
+          paused: !!tr.querySelector('[data-resume-pool=${js(S.pool)}]'),
+          status: tr.querySelector(".pool-status")?.textContent.trim() || "",
+          members: [...tr.querySelectorAll(".pool-member-name")].map(el => el.textContent.trim()),
+        };
+      })()`);
+      const storedTargetPaused = () => page.eval(`fetch("/admin/data/targets").then(r => r.json())
+        .then(d => d.targets.find(t => t.name === ${js(S.tgtOpenAI)})?.paused)`);
+      // loadPools renders pool rows before its member targets and runtime finish
+      // loading. Wait for the actual member chip instead of reading a partial row.
+      const waitPoolMembers = () => page.waitFor(`(() => {
+        const tr = document.querySelector('[data-pause-pool=${js(S.pool)}]')?.closest("tr")
+          || document.querySelector('[data-resume-pool=${js(S.pool)}]')?.closest("tr");
+        if (!tr) return false;
+        const names = [...tr.querySelectorAll(".pool-member-name")].map(el => el.textContent.trim());
+        return names.length === 1 && names[0] === ${js(S.tgtOpenAI)};
+      })()`, { what: "loaded pool member chips", timeoutMs: 10000 });
+      await waitPoolMembers();
+      const before = await readPool();
+      assert.ok(before, "member pool row is rendered");
+      assert.equal(before.paused, false, "pool starts running");
+      assert.match(before.status, /运行中/);
+      assert.deepEqual(before.members, [S.tgtOpenAI], "pool membership before pause");
+      assert.equal(await storedTargetPaused(), false, "target starts unpaused in storage");
+
+      await page.eval(`__sim.click('[data-pause-pool=${js(S.pool)}]')`);
+      await confirmModal(page);
+      await expectToast(page, "已暂停池");
+      await page.waitFor(`document.querySelector('[data-resume-pool=${js(S.pool)}]')`, { what: "pause button flips to resume" });
+      await waitPoolMembers();
+      const paused = await readPool();
+      assert.equal(paused.paused, true, "pool row reports paused");
+      assert.match(paused.status, /已暂停/);
+      assert.deepEqual(paused.members, before.members, "pause keeps pool membership");
+
+      // The target page must show the pool member as effectively paused
+      // without turning it into an individually saved target pause.
+      await page.eval(`__sim.click("#targetsMainTab")`);
+      await page.waitFor(`!document.getElementById("targetsMainPanel").hidden`, { what: "targets tab active" });
+      await page.eval(`__sim.click("#refreshTargetsBtn")`);
+      await page.waitFor(`(() => {
+        const toggle = document.querySelector('[data-pause-tgt=${js(S.tgtOpenAI)}][aria-checked="true"]');
+        const tr = toggle && toggle.closest("tr");
+        return !!tr && tr.dataset.targetHealth === "paused";
+      })()`, { what: "pool-paused member in target list", timeoutMs: 10000 });
+      const memberWhilePaused = await page.eval(`(() => {
+        const toggle = document.querySelector('[data-pause-tgt=${js(S.tgtOpenAI)}]');
+        const tr = toggle && toggle.closest("tr");
+        const badge = tr?.querySelector(".target-health-badge");
+        return toggle && tr ? {
+          checked: toggle.getAttribute("aria-checked"),
+          ownResumeControl: !!tr.querySelector('[data-resume-tgt=${js(S.tgtOpenAI)}]'),
+          switchText: toggle.textContent.trim(),
+          switchLabel: toggle.getAttribute("aria-label") || "",
+          health: tr.dataset.targetHealth,
+          badge: badge?.textContent.trim() || "",
+          badgeTitle: badge?.getAttribute("title") || "",
+        } : null;
+      })()`);
+      assert.ok(memberWhilePaused, "pool member row and own switch are rendered");
+      assert.equal(memberWhilePaused.health, "paused", "pool member is shown as paused");
+      assert.match(memberWhilePaused.badge, /已暂停/);
+      assert.match(memberWhilePaused.badgeTitle, /部署池/,
+        "effective pause exposes the pool as its reason");
+      assert.equal(memberWhilePaused.checked, "true",
+        "pool pause must not flip the member's own pause switch");
+      assert.equal(memberWhilePaused.ownResumeControl, false,
+        "pool pause must not turn the target switch into a pool resume control");
+      assert.match(memberWhilePaused.switchText, /目标启用/);
+      assert.match(memberWhilePaused.switchLabel, /未暂停/);
+      assert.equal(await storedTargetPaused(), false,
+        "pool pause must not save a target-level pause");
+      const pausedCount = await page.eval(`Number(__sim.text('#targetStatusFilters [data-target-filter="paused"] .target-status-count'))`);
+      assert.ok(pausedCount >= 1, `paused filter count ${pausedCount}`);
+
+      await page.eval(`__sim.click("#targetsPoolsTab")`);
+      await page.waitFor(`!document.getElementById("targetsPoolsPanel").hidden`, { what: "pools tab active again" });
+      await page.eval(`__sim.click('[data-resume-pool=${js(S.pool)}]')`);
+      await expectToast(page, "已恢复池");
+      await page.waitFor(`document.querySelector('[data-pause-pool=${js(S.pool)}]')`, { what: "resume button flips to pause" });
+      await waitPoolMembers();
+      const resumed = await readPool();
+      assert.equal(resumed.paused, false, "pool row reports running");
+      assert.match(resumed.status, /运行中/);
+      assert.deepEqual(resumed.members, before.members, "resume keeps pool membership");
+
+      await page.eval(`__sim.click("#targetsMainTab")`);
+      await page.waitFor(`!document.getElementById("targetsMainPanel").hidden`, { what: "targets tab active after resume" });
+      await page.eval(`__sim.click("#refreshTargetsBtn")`);
+      await page.waitFor(`(() => {
+        const toggle = document.querySelector('[data-pause-tgt=${js(S.tgtOpenAI)}][aria-checked="true"]');
+        const tr = toggle && toggle.closest("tr");
+        return !!tr && tr.dataset.targetHealth !== "paused";
+      })()`, { what: "member restored to running", timeoutMs: 10000 });
+      assert.equal(await storedTargetPaused(), false,
+        "pool pause/resume must not persist an individual target pause");
+    },
+  },
+  {
+    name: "delete-empty-pool-only",
+    async run({ page }) {
+      await goto(page, "targets");
+      await page.eval(`__sim.click("#targetsPoolsTab")`);
+      await page.waitFor(`!document.getElementById("targetsPoolsPanel").hidden`, { what: "pools tab active" });
+      await page.eval(`__sim.click("#newPoolBtn")`);
+      await page.waitFor(`__sim.open("poolModal")`, { what: "pool modal" });
+      await page.eval(`__sim.fill("#poolName", "sim-ui-empty-pool") && __sim.fill("#poolDescription", "temporary empty pool")`);
+      await page.eval(`__sim.click("#savePoolBtn")`);
+      await expectToast(page, "部署池已创建");
+      await page.waitFor(`document.querySelector('[data-del-pool="sim-ui-empty-pool"]')`, { what: "empty pool row" });
+      assert.equal(await page.eval(`fetch("/admin/data/targets").then(r => r.json())
+        .then(d => d.targets.some(t => String(t.pool || "").toLowerCase() === "sim-ui-empty-pool"))`),
+        false, "temporary pool is empty before delete");
+      await page.eval(`__sim.click('[data-del-pool="sim-ui-empty-pool"]')`);
+      await confirmModal(page);
+      await expectToast(page, "已删除池");
+      await page.waitFor(`!document.querySelector('[data-del-pool="sim-ui-empty-pool"]')`, { what: "empty pool row gone" });
+      const pools = await page.eval(`fetch("/admin/data/pools").then(r => r.json()).then(d => d.pools.map(p => p.name))`);
+      assert.ok(!pools.includes("sim-ui-empty-pool"), "temporary pool was deleted");
+      assert.ok(pools.includes(S.pool), "member pool was not deleted");
+      await page.eval(`__sim.click("#targetsMainTab")`);
     },
   },
   {
@@ -423,7 +640,9 @@ const list = [
       await page.waitFor(`document.querySelector('[data-del-client=${js(S.client)}]')`, { what: "delete client button" });
       await page.eval(`__sim.click('[data-del-client=${js(S.client)}]')`);
       await confirmModal(page);
-      await expectToast(page, "删除");
+      await expectToast(page, "已删除客户端");
+      await page.waitFor(`!document.querySelector('[data-del-client=${js(S.client)}]')`,
+        { what: "deleted client row gone", timeoutMs: 10000 });
       const r = await clientCall(stack.base, S.clientKey, "/v1/chat/completions", { model: S.aliasGLM, messages: [] });
       assert.equal(r.status, 401, `deleted client key still accepted: ${r.status}`);
     },

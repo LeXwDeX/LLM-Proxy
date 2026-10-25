@@ -234,6 +234,111 @@ async function main() {
       viewport: { width: 1440, height: 1050 },
     });
     page.on("pageerror", (error) => errors.push(error.message));
+    const screenshotDir =
+      process.env.LLMS_UI_SCREENSHOT_DIR || os.tmpdir();
+    const screenshot = async (name) => {
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      // Keep captures honest: pointer hover can leave the model tooltip open,
+      // and badge scrolling leaves the table scrolled past the status column.
+      await page.mouse.move(8, 300);
+      // A clicked badge keeps keyboard focus, so mouseout alone leaves the
+      // tooltip open. Clear focus, then require the tooltip to be hidden.
+      await page.evaluate(() => document.activeElement?.blur());
+      await page.waitForFunction(
+        () => document.getElementById("targetModelHint")?.hidden === true,
+      );
+      await page.evaluate(() => {
+        document
+          .querySelectorAll("#targetsMainPanel .table-wrap, #targetsPoolsPanel .table-wrap")
+          .forEach((wrap) => {
+            wrap.scrollLeft = 0;
+          });
+      });
+      const captureState = await page.evaluate(() => {
+        const hint = document.getElementById("targetModelHint");
+        const main = document.getElementById("targetsMainPanel");
+        const wraps = [
+          ...document.querySelectorAll(
+            "#targetsMainPanel .table-wrap, #targetsPoolsPanel .table-wrap",
+          ),
+        ];
+        let statusVisible = null;
+        if (main && !main.hidden) {
+          const wrap = wraps[0];
+          const cell = document.querySelector(
+            "#targetsTableBody .target-status-cell",
+          );
+          const wrapRect = wrap?.getBoundingClientRect();
+          const cellRect = cell?.getBoundingClientRect();
+          if (wrapRect && cellRect && cellRect.width > 0) {
+            statusVisible =
+              cellRect.left >= wrapRect.left - 1 &&
+              cellRect.right <= wrapRect.right + 1;
+          }
+        }
+        return {
+          tooltipHidden: !!hint && hint.hidden,
+          scrollLeft: wraps.map((wrap) => wrap.scrollLeft),
+          statusVisible,
+        };
+      });
+      assert.equal(
+        captureState.tooltipHidden,
+        true,
+        "screenshot requires the model tooltip to be hidden",
+      );
+      assert.ok(
+        captureState.scrollLeft.every((left) => left === 0),
+        `screenshot requires tables scrolled to the start: ${JSON.stringify(captureState.scrollLeft)}`,
+      );
+      if (captureState.statusVisible !== null) {
+        assert.equal(
+          captureState.statusVisible,
+          true,
+          "screenshot keeps the status column inside the table viewport",
+        );
+      }
+      await page.screenshot({
+        path: path.join(screenshotDir, name),
+        animations: "disabled",
+      });
+    };
+    const setTheme = async (theme) => {
+      await page.evaluate((dark) => {
+        const root = document.documentElement;
+        if (root.classList.contains("dark") !== dark) {
+          document.getElementById("themeToggle").click();
+        }
+      }, theme === "dark");
+      await page.waitForFunction(
+        (dark) => document.documentElement.classList.contains("dark") === dark,
+        theme === "dark",
+      );
+    };
+    const openFixtureDetail = async () => {
+      await page.locator('[data-detail-tgt="fixture-target"]').click();
+      await page.locator("#targetDetailDrawer.open").waitFor();
+    };
+    const closeFixtureDetail = async () => {
+      await page
+        .locator('#targetDetailDrawer [data-close="targetDetailDrawer"]')
+        .first()
+        .click();
+      await page.locator("#targetDetailDrawer.open").waitFor({ state: "hidden" });
+    };
+    const tableLayout = (selector) =>
+      page.evaluate((selector) => {
+        const wrap = document.querySelector(selector);
+        const style = getComputedStyle(wrap);
+        return {
+          overflowX: style.overflowX,
+          scrollWidth: wrap.scrollWidth,
+          clientWidth: wrap.clientWidth,
+          tableWidth: wrap.querySelector("table").getBoundingClientRect().width,
+          pageScrollWidth: document.documentElement.scrollWidth,
+          pageClientWidth: document.documentElement.clientWidth,
+        };
+      }, selector);
     await page.goto(base);
     await page.waitForFunction(() => window.AdminApp?.state.ready === true);
     await page.waitForFunction(() => document.getElementById("activityTotalTokens").textContent === "42");
@@ -259,7 +364,93 @@ async function main() {
     }
     await page.locator('[data-page="targets"]').click();
     await page.waitForLoadState("networkidle");
-    await page.locator("#targetsTableBody [data-edit-tgt]").first().waitFor();
+    await page.locator('[data-edit-tgt="fixture-target"]').waitFor();
+    assert.equal(
+      await page.locator("#targetStatusFilters [data-target-filter]").count(),
+      4,
+      "health filters cover all, attention, healthy and paused",
+    );
+    // Real keyboard focus, roving tabindex and panel state, not just markup.
+    await page.locator("#targetsMainTab").focus();
+    await page.keyboard.press("ArrowRight");
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.id),
+      "targetsPoolsTab",
+      "main tab ArrowRight moves focus to the pools tab",
+    );
+    assert.equal(await page.locator("#targetsPoolsTab").getAttribute("aria-selected"), "true");
+    assert.equal(await page.locator("#targetsMainTab").getAttribute("aria-selected"), "false");
+    assert.equal(await page.locator("#targetsPoolsTab").getAttribute("tabindex"), "0");
+    assert.equal(await page.locator("#targetsMainTab").getAttribute("tabindex"), "-1");
+    assert.equal(await page.locator("#targetsPoolsPanel").evaluate((el) => el.hidden), false);
+    assert.equal(await page.locator("#targetsMainPanel").evaluate((el) => el.hidden), true);
+    await page.keyboard.press("ArrowLeft");
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.id),
+      "targetsMainTab",
+      "main tab ArrowLeft returns focus to the targets tab",
+    );
+    assert.equal(await page.locator("#targetsMainTab").getAttribute("aria-selected"), "true");
+    assert.equal(await page.locator("#targetsPoolsTab").getAttribute("aria-selected"), "false");
+    assert.equal(await page.locator("#targetsMainTab").getAttribute("tabindex"), "0");
+    assert.equal(await page.locator("#targetsPoolsTab").getAttribute("tabindex"), "-1");
+    assert.equal(await page.locator("#targetsMainPanel").evaluate((el) => el.hidden), false);
+    assert.equal(await page.locator("#targetsPoolsPanel").evaluate((el) => el.hidden), true);
+    const targetsLayout = await page.evaluate(() => {
+      const cell = document.querySelector("#targetsTableBody .target-status-cell");
+      const toggle = cell?.querySelector(".target-toggle");
+      const badge = cell?.querySelector(".target-health-badge");
+      return {
+        inlineStatus: !!toggle && !!badge &&
+          Math.abs(toggle.getBoundingClientRect().top - badge.getBoundingClientRect().top) < 4,
+        pageScrollWidth: document.documentElement.scrollWidth,
+        pageClientWidth: document.documentElement.clientWidth,
+      };
+    });
+    assert.equal(
+      targetsLayout.inlineStatus,
+      true,
+      "pause switch and health badge stay on one line",
+    );
+    // The status column must also fit the longest health copy. A synthesized
+    // label checks capacity without changing the fixture's actual health data.
+    const statusCapacity = await page.evaluate(() => {
+      const col = document.querySelector("#targetsMainPanel col.col-status");
+      const cell = document.querySelector("#targetsTableBody .target-status-cell");
+      const toggle = cell?.querySelector(".target-toggle");
+      const badge = cell?.querySelector(".target-health-badge");
+      if (!col || !toggle || !badge) return null;
+      const original = badge.textContent;
+      badge.textContent = "运行态不可用";
+      const toggleRect = toggle.getBoundingClientRect();
+      const badgeRect = badge.getBoundingClientRect();
+      const result = {
+        columnWidth: col.getBoundingClientRect().width,
+        noWrap: Math.abs(toggleRect.top - badgeRect.top) < 4,
+        noClip: cell.scrollWidth <= cell.clientWidth + 1,
+      };
+      badge.textContent = original;
+      return result;
+    });
+    assert.ok(statusCapacity, "status cell is measurable");
+    assert.equal(
+      statusCapacity.noWrap && statusCapacity.noClip,
+      true,
+      `longest health badge must fit on one line: ${JSON.stringify(statusCapacity)}`,
+    );
+    assert.ok(
+      targetsLayout.pageScrollWidth <= targetsLayout.pageClientWidth + 1,
+      `targets page overflows: ${targetsLayout.pageScrollWidth}/${targetsLayout.pageClientWidth}`,
+    );
+    const desktopTargets = await tableLayout("#targetsMainPanel .table-wrap");
+    assert.ok(
+      ["auto", "scroll"].includes(desktopTargets.overflowX),
+      `desktop targets table has its own scroll wrapper (${desktopTargets.overflowX})`,
+    );
+    assert.ok(
+      desktopTargets.pageScrollWidth <= desktopTargets.pageClientWidth + 1,
+      `desktop targets page overflows: ${desktopTargets.pageScrollWidth}/${desktopTargets.pageClientWidth}`,
+    );
     // Pointer coordinates must cross the tooltip region and still hit the lower badge.
     await page.evaluate(() => {
       document.querySelector(".target-model-list").style.flexDirection =
@@ -299,6 +490,183 @@ async function main() {
         .evaluate((element) => element.hidden),
       false,
     );
+    await screenshot("targets-list-desktop-light.png");
+    await setTheme("dark");
+    await screenshot("targets-list-desktop-dark.png");
+    await openFixtureDetail();
+    await screenshot("targets-detail-desktop-dark.png");
+    await closeFixtureDetail();
+    await setTheme("light");
+    await openFixtureDetail();
+    await screenshot("targets-detail-desktop-light.png");
+    const drawerLayout = await page.evaluate(() => {
+      const drawer = document.querySelector("#targetDetailDrawer .quota-drawer");
+      const rect = drawer.getBoundingClientRect();
+      return {
+        width: rect.width,
+        right: rect.right,
+        viewport: innerWidth,
+      };
+    });
+    assert.ok(
+      drawerLayout.width > 0 && drawerLayout.right <= drawerLayout.viewport + 1,
+      `detail drawer is clipped: ${JSON.stringify(drawerLayout)}`,
+    );
+    assert.equal(
+      await page.locator("#targetDetailTitle").textContent(),
+      "fixture-target",
+    );
+    assert.deepEqual(
+      await page
+        .locator("#targetDetailTabs [data-target-detail-tab]")
+        .evaluateAll((tabs) => tabs.map((tab) => tab.dataset.targetDetailTab)),
+      ["overview", "keys", "models", "advanced"],
+    );
+    // The drawer uses the same roving-tab keyboard contract as the main tabs.
+    await page.locator("#targetDetailOverviewTab").focus();
+    await page.keyboard.press("ArrowRight");
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.dataset.targetDetailTab),
+      "keys",
+      "drawer ArrowRight moves focus to the keys tab",
+    );
+    assert.equal(await page.locator("#targetDetailKeysTab").getAttribute("aria-selected"), "true");
+    assert.equal(await page.locator("#targetDetailOverviewTab").getAttribute("aria-selected"), "false");
+    assert.equal(await page.locator("#targetDetailKeysTab").getAttribute("tabindex"), "0");
+    assert.equal(await page.locator("#targetDetailOverviewTab").getAttribute("tabindex"), "-1");
+    assert.equal(await page.locator("#targetDetailKeys").evaluate((el) => el.hidden), false);
+    assert.equal(await page.locator("#targetDetailOverview").evaluate((el) => el.hidden), true);
+    await page.keyboard.press("ArrowLeft");
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.dataset.targetDetailTab),
+      "overview",
+      "drawer ArrowLeft returns focus to the overview tab",
+    );
+    assert.equal(await page.locator("#targetDetailOverviewTab").getAttribute("aria-selected"), "true");
+    assert.equal(await page.locator("#targetDetailKeysTab").getAttribute("aria-selected"), "false");
+    assert.equal(await page.locator("#targetDetailOverviewTab").getAttribute("tabindex"), "0");
+    assert.equal(await page.locator("#targetDetailKeysTab").getAttribute("tabindex"), "-1");
+    assert.equal(await page.locator("#targetDetailOverview").evaluate((el) => el.hidden), false);
+    assert.equal(await page.locator("#targetDetailKeys").evaluate((el) => el.hidden), true);
+    await page
+      .locator('#targetDetailTabs [data-target-detail-tab="keys"]')
+      .click();
+    assert.doesNotMatch(
+      await page.locator("#targetDetailKeys").textContent(),
+      /sk-fixture|fixture-only-key/,
+      "detail does not expose a plaintext key",
+    );
+    await page
+      .locator('#targetDetailTabs [data-target-detail-tab="models"]')
+      .click();
+    assert.ok(
+      (await page.locator("#targetDetailModels .target-model-badge").count()) >=
+        2,
+      "detail lists every model mapping",
+    );
+    await page
+      .locator('#targetDetailTabs [data-target-detail-tab="advanced"]')
+      .click();
+    assert.match(
+      await page.locator("#targetDetailAdvanced").textContent(),
+      /用量适配/,
+    );
+    await closeFixtureDetail();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(() => window.innerWidth === 390);
+    const mobileTargets = await tableLayout("#targetsMainPanel .table-wrap");
+    assert.ok(
+      mobileTargets.pageScrollWidth <= mobileTargets.pageClientWidth + 1,
+      `390px targets page overflows: ${mobileTargets.pageScrollWidth}/${mobileTargets.pageClientWidth}`,
+    );
+    assert.ok(
+      ["auto", "scroll"].includes(mobileTargets.overflowX),
+      `targets table has its own scroll wrapper (${mobileTargets.overflowX})`,
+    );
+    assert.ok(
+      mobileTargets.scrollWidth > mobileTargets.clientWidth,
+      "target table scrolls inside its wrapper, not the page",
+    );
+    await page.evaluate(() => {
+      document.querySelector("#targetsMainPanel .table-wrap").scrollLeft = 0;
+    });
+    await screenshot("targets-list-mobile-light.png");
+    await page.locator("#targetsPoolsTab").click();
+    await page.locator("#targetsPoolsPanel").waitFor();
+    const mobilePools = await tableLayout("#targetsPoolsPanel .table-wrap");
+    assert.ok(
+      mobilePools.pageScrollWidth <= mobilePools.pageClientWidth + 1,
+      `390px pools page overflows: ${mobilePools.pageScrollWidth}/${mobilePools.pageClientWidth}`,
+    );
+    assert.ok(
+      ["auto", "scroll"].includes(mobilePools.overflowX),
+      `pool table has its own scroll wrapper (${mobilePools.overflowX})`,
+    );
+    assert.ok(
+      mobilePools.scrollWidth > mobilePools.clientWidth,
+      "pool table scrolls inside its wrapper, not the page",
+    );
+    await page.locator("#targetsMainTab").click();
+    await page.locator("#targetsMainPanel").waitFor();
+    await openFixtureDetail();
+    await screenshot("targets-detail-mobile-light.png");
+    const mobileDrawer = await page.evaluate(() => {
+      const rect = document
+        .querySelector("#targetDetailDrawer .quota-drawer")
+        .getBoundingClientRect();
+      return {
+        width: rect.width,
+        right: rect.right,
+        viewport: window.innerWidth,
+        pageScrollWidth: document.documentElement.scrollWidth,
+        pageClientWidth: document.documentElement.clientWidth,
+      };
+    });
+    assert.ok(
+      mobileDrawer.width > 0 && mobileDrawer.right <= mobileDrawer.viewport + 1,
+      `390px detail drawer is clipped: ${JSON.stringify(mobileDrawer)}`,
+    );
+    assert.ok(
+      mobileDrawer.pageScrollWidth <= mobileDrawer.pageClientWidth + 1,
+      `390px drawer overflows the page: ${JSON.stringify(mobileDrawer)}`,
+    );
+    assert.deepEqual(
+      await page
+        .locator("#targetDetailTabs [data-target-detail-tab]")
+        .evaluateAll((tabs) => tabs.map((tab) => tab.dataset.targetDetailTab)),
+      ["overview", "keys", "models", "advanced"],
+    );
+    for (const tab of ["overview", "keys", "models", "advanced"]) {
+      await page
+        .locator(`#targetDetailTabs [data-target-detail-tab="${tab}"]`)
+        .click();
+      assert.equal(
+        await page
+          .locator(`#targetDetailTabs [data-target-detail-tab="${tab}"]`)
+          .getAttribute("aria-selected"),
+        "true",
+        `mobile detail tab ${tab}`,
+      );
+    }
+    assert.match(
+      await page.locator("#targetDetailAdvanced").textContent(),
+      /用量适配/,
+      "mobile advanced tab uses the usage-adapter label",
+    );
+    assert.doesNotMatch(
+      await page.locator("#targetDetailDrawer").textContent(),
+      /sk-fixture|fixture-only-key/,
+      "mobile detail never shows a plaintext key",
+    );
+    await closeFixtureDetail();
+    await setTheme("dark");
+    await screenshot("targets-list-mobile-dark.png");
+    await openFixtureDetail();
+    await screenshot("targets-detail-mobile-dark.png");
+    await closeFixtureDetail();
+    await setTheme("light");
+    await page.setViewportSize({ width: 1440, height: 1050 });
+    await page.waitForFunction(() => window.innerWidth === 1440);
     await page.locator("#newTargetBtn").click();
     await page.locator("#targetModal.open").waitFor();
     assert.equal(await page.locator("#tgtType").inputValue(), "provider-new");
@@ -337,7 +705,7 @@ async function main() {
       .locator('#targetModal [data-close="targetModal"]')
       .first()
       .click();
-    await page.locator("#targetsTableBody [data-edit-tgt]").first().click();
+    await page.locator('[data-edit-tgt="fixture-target"]').click();
     await page.locator("#targetModal.open").waitFor();
     assert.equal(await page.locator("#tgtName").inputValue(), "fixture-target");
     assert.equal(await page.locator("#tgtUsageAdapter").inputValue(), "standard", "editing preserves choice");
@@ -353,8 +721,17 @@ async function main() {
     assert.equal(mutations.length, 1);
     assert.equal(mutations[0].payload.model_prefix, "Vendor-New/");
     mutations.length = 0;
-    await page.locator("#openPoolsModalBtn").click();
-    await page.locator("#poolsModal.open").waitFor();
+    await page.locator("#targetsPoolsTab").click();
+    await page.locator("#targetsPoolsPanel").waitFor();
+    const desktopPools = await tableLayout("#targetsPoolsPanel .table-wrap");
+    assert.ok(
+      ["auto", "scroll"].includes(desktopPools.overflowX),
+      `desktop pool table has its own scroll wrapper (${desktopPools.overflowX})`,
+    );
+    assert.ok(
+      desktopPools.pageScrollWidth <= desktopPools.pageClientWidth + 1,
+      `desktop pools page overflows: ${desktopPools.pageScrollWidth}/${desktopPools.pageClientWidth}`,
+    );
     await page.locator("#newPoolBtn").click();
     await page.locator("#poolModal.open").waitFor();
     await page.locator('#poolModal [data-close="poolModal"]').first().click();
@@ -367,7 +744,7 @@ async function main() {
     assert.equal(mutations[0].endpoint, "/admin/data/pools/fixture-pool");
     assert.equal(mutations[0].payload.display_name, "FIXTURE-Pool");
     mutations.length = 0;
-    await page.locator('#poolsModal [data-close="poolsModal"]').first().click();
+    await page.locator("#targetsMainTab").click();
     await page.locator('[data-page="clients"]').click();
     await page.locator("#newClientBtn").click();
     await page.locator("#clientModal.open").waitFor();
@@ -468,7 +845,6 @@ async function main() {
     assert.match(await page.locator("#ptScopeNotice").textContent(), /2 个 Target.*2 个模型/);
     for (const [id, value] of [["ptInput","2"],["ptOutput","4"],["ptCacheWrite","0"],["ptCacheRead","1"]]) await page.locator("#"+id).fill(value);
     await page.locator("#ptStart").fill("2026-11-01T00:00");
-    const screenshotDir = process.env.LLMS_UI_SCREENSHOT_DIR || os.tmpdir();
     fs.mkdirSync(screenshotDir,{recursive:true});
     await page.locator('#modelCostModal .modal-body').evaluate(el=>{el.scrollTop=0;});
     await page.screenshot({path:path.join(screenshotDir,"pricing-selection-desktop.png"),animations:"disabled"});
@@ -669,7 +1045,41 @@ async function main() {
       true,
     );
     await readonly.locator('[data-page="targets"]').click();
+    await readonly
+      .locator('#targetsTableBody [data-detail-tgt="fixture-target"]')
+      .waitFor();
     assert.equal(await readonly.locator("#newTargetBtn").isVisible(), false);
+    await readonly.locator('[data-detail-tgt="fixture-target"]').click();
+    await readonly.locator("#targetDetailDrawer.open").waitFor();
+    assert.equal(
+      await readonly.locator("#targetDetailEditBtn").isVisible(),
+      false,
+      "readonly can inspect but cannot edit the target",
+    );
+    for (const tab of ["overview", "keys", "models", "advanced"]) {
+      await readonly
+        .locator(`#targetDetailTabs [data-target-detail-tab="${tab}"]`)
+        .click();
+      assert.equal(
+        await readonly
+          .locator(`#targetDetailTabs [data-target-detail-tab="${tab}"]`)
+          .getAttribute("aria-selected"),
+        "true",
+        `readonly detail tab ${tab}`,
+      );
+    }
+    assert.doesNotMatch(
+      await readonly.locator("#targetDetailDrawer").textContent(),
+      /fixture-only-key|sk-fixture/,
+      "readonly detail never exposes a plaintext key",
+    );
+    await readonly
+      .locator('#targetDetailDrawer [data-close="targetDetailDrawer"]')
+      .first()
+      .click();
+    await readonly
+      .locator("#targetDetailDrawer.open")
+      .waitFor({ state: "hidden" });
     await readonly.evaluate(() =>
       window.AdminApp.modules.targets.openTargetModal(null),
     );

@@ -196,7 +196,12 @@ function schemaFixture() {
         job_coefficient_field: "coefficient_monthly",
       },
     ],
-    target_phases: [option("ready", "Schema正常")],
+    target_phases: [
+      option("ready", "Schema正常"),
+      option("muted", "冷却"),
+      option("half-open", "恢复"),
+      option("offline", "暂停"),
+    ],
     defaults: {
       endpoint_type: "provider-new",
       usage_adapter: "",
@@ -216,10 +221,14 @@ function createHarness({
   failure = "",
   role = "admin",
   schema = schemaFixture(),
+  metrics = { targets_runtime: [] },
+  metricsFailure = false,
+  routes = {},
 } = {}) {
   const elements = [],
     ids = new Map(),
-    requests = [];
+    requests = [],
+    routeFailures = new Set();
   for (const match of html.matchAll(/<([a-z][\w-]*)\b([^>]*)>/gi)) {
     const attrs = Object.fromEntries(
       [...match[2].matchAll(/([\w-]+)="([^"]*)"/g)].map((attr) => [
@@ -307,6 +316,33 @@ function createHarness({
           text: async () => JSON.stringify(schema),
         };
       }
+      if (url === "/admin/metrics") {
+        if (metricsFailure)
+          return {
+            ok: false,
+            status: 503,
+            text: async () => JSON.stringify({ error: "metrics offline" }),
+          };
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify(metrics),
+        };
+      }
+      if (routeFailures.has(url)) {
+        return {
+          ok: false,
+          status: 503,
+          text: async () => JSON.stringify({ error: "route failed" }),
+        };
+      }
+      if (Object.prototype.hasOwnProperty.call(routes, url)) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify(routes[url]),
+        };
+      }
       const data =
         url === "/admin/api/me" ? { username: "fixture-user", role } :
         url === "/admin/api/activity" ? {
@@ -328,6 +364,18 @@ function createHarness({
     setFailure: (value) => {
       failure = value;
     },
+    setMetrics: (value) => {
+      metrics = value;
+    },
+    setMetricsFailure: (value) => {
+      metricsFailure = value;
+    },
+    setRoute: (url, value) => {
+      routes[url] = value;
+    },
+    setRouteFailure: (url, value) => {
+      value ? routeFailures.add(url) : routeFailures.delete(url);
+    },
     run: async () => {
       for (const script of scripts)
         vm.runInContext(script.source, context, { filename: script.name });
@@ -344,6 +392,36 @@ async function main() {
   assert.ok(harness.requests.some(item => item.url === "/admin/api/activity"), "homepage loads live activity");
   assert.ok(!harness.requests.some(item => item.url.startsWith("/admin/data/audit")), "homepage does not query audit logs");
   assert.ok(!html.includes("overviewAuditBody"), "homepage removes the obsolete audit table");
+  assert.ok(!html.includes('id="poolsModal"'), "pools live in an inline page tab, not a modal");
+  assert.ok(!html.includes('id="openPoolsModalBtn"'), "the obsolete pool modal trigger is removed");
+  for (const id of [
+    "targetsMainTab",
+    "targetsPoolsTab",
+    "targetsMainPanel",
+    "targetsPoolsPanel",
+    "targetStatusFilters",
+    "targetDetailDrawer",
+    "targetDetailTitle",
+    "targetDetailSubtitle",
+    "targetDetailTabs",
+    "targetDetailOverview",
+    "targetDetailKeys",
+    "targetDetailModels",
+    "targetDetailAdvanced",
+    "targetDetailEditBtn",
+  ]) {
+    assert.ok(harness.ids.get(id), `${id} is rendered`);
+  }
+  assert.equal(
+    harness.ids.get("targetsPoolsPanel").getAttribute("role"),
+    "tabpanel",
+    "pools pane is a real tab panel",
+  );
+  assert.deepEqual(
+    [...html.matchAll(/data-target-detail-tab="([^"]+)"/g)].map((match) => match[1]),
+    ["overview", "keys", "models", "advanced"],
+    "target detail offers the four read-only tabs",
+  );
   for (const [id, keywords] of [
     ["usageBillingBasis", ["官方", "不估算", "连接断开，未获取到计费字段", "少于厂商官方账单", "目录默认价"]],
     ["overviewBillingBasis", ["官方", "不估算", "连接断开，未获取到计费字段", "少于厂商官方账单", "目录默认价"]],
@@ -570,6 +648,713 @@ async function main() {
     ]),
     /<img/,
   );
+
+  // Targets page: health summary, abnormal-first filtering and the read-only
+  // detail drawer are driven by /admin/data/targets plus /admin/metrics only.
+  app.state.schema.target_phases[0].label = "正常";
+  const targetsModule = app.modules.targets;
+  app.state.targets = [
+    { name: "healthy-target", has_api_key: true, key_statuses: [] },
+    {
+      name: "attention-target",
+      has_api_key: true,
+      key_statuses: [
+        { index: 0, key_mask: "sk-****bad", status: "已屏蔽", blocked: true },
+      ],
+    },
+    { name: "phase-target", has_api_key: true, key_statuses: [] },
+    { name: "paused-target", paused: true },
+  ];
+  app.state.runtime = {
+    "healthy-target": { phase: "ready", in_flight: 1, max_concurrency: 2 },
+    "attention-target": { phase: "ready", in_flight: 0 },
+    "phase-target": { phase: "muted", in_flight: 0 },
+    "paused-target": { phase: "offline", paused: true },
+  };
+  const healthCounts = targetsModule.targetHealthCounts();
+  assert.equal(healthCounts.all, 4);
+  assert.equal(healthCounts.attention, 2);
+  assert.equal(healthCounts.healthy, 1);
+  assert.equal(healthCounts.paused, 1);
+  targetsModule.renderTargets();
+  assert.deepEqual(
+    [
+      ...harness.ids
+        .get("targetStatusFilters")
+        .innerHTML.matchAll(/data-target-filter="([^"]+)"/g),
+    ].map((match) => match[1]),
+    ["all", "attention", "healthy", "paused"],
+    "target health exposes exactly four filters",
+  );
+  const sortedBody = harness.ids.get("targetsTableBody").innerHTML;
+  assert.ok(
+    sortedBody.indexOf("attention-target") < sortedBody.indexOf("healthy-target"),
+    "targets needing attention sort before healthy targets",
+  );
+  const pausedTargetRow = sortedBody
+    .split("</tr>")
+    .find((row) => row.includes("paused-target"));
+  assert.ok(pausedTargetRow, "saved paused target row is rendered");
+  assert.match(pausedTargetRow, /aria-checked='false'/);
+  assert.match(pausedTargetRow, /data-resume-tgt='paused-target'/);
+  assert.doesNotMatch(pausedTargetRow, /data-pause-tgt='paused-target'/);
+  assert.match(pausedTargetRow, /目标已暂停/);
+  assert.match(
+    pausedTargetRow,
+    /aria-label='[^']*自身暂停状态[^']*已暂停/,
+    "target switch labels its own saved pause state",
+  );
+  assert.match(
+    harness.ids.get("targetStatusFilters").innerHTML,
+    /data-target-filter="attention"[^>]*aria-pressed="false"[\s\S]*?target-status-count[^>]*>2</,
+    "status filter exposes the abnormal count",
+  );
+  targetsModule.setTargetFilter("attention");
+  assert.match(
+    harness.ids.get("targetsTableBody").innerHTML,
+    /attention-target/,
+  );
+  assert.match(
+    harness.ids.get("targetsTableBody").innerHTML,
+    /phase-target/,
+  );
+  assert.doesNotMatch(
+    harness.ids.get("targetsTableBody").innerHTML,
+    /healthy-target|paused-target/,
+  );
+  assert.match(
+    harness.ids.get("targetStatusFilters").innerHTML,
+    /data-target-filter="attention"[^>]*aria-pressed="true"/,
+    "active filter is exposed to assistive technology",
+  );
+  targetsModule.setTargetFilter("all");
+  assert.match(
+    harness.ids.get("targetsTableBody").innerHTML,
+    /healthy-target/,
+  );
+  assert.match(
+    harness.ids.get("targetStatusFilters").innerHTML,
+    /data-target-filter="all"[^>]*aria-pressed="true"/,
+  );
+
+  const detailTarget = {
+    name: "detail-target",
+    endpoint_type: "provider-new",
+    endpoint: "https://upstream.example/v1",
+    usage_adapter: "standard",
+    key_reset_time: "23",
+    has_api_key: true,
+    api_key: "sk-secret-plaintext",
+    api_keys: ["sk-second-plaintext"],
+    key_statuses: [
+      { index: 0, key_mask: "sk-****mask", status: "已屏蔽", blocked: true },
+    ],
+    model_mappings: [
+      { upstream: "Upstream-A", fallback: "alias-a" },
+      { upstream: "Upstream-B", paused: true },
+    ],
+    custom_headers: { "X-Safe-Header": "secret-header-value" },
+    custom_body: { temperature: 0.2 },
+  };
+  app.state.targets = [detailTarget];
+  app.state.runtime = {
+    "detail-target": {
+      phase: "ready",
+      in_flight: 1,
+      max_concurrency: 4,
+      utilization: 0.25,
+      affinity_hits: 2,
+      breaker_trips: 0,
+      window_15m: { in_flight_peak: 3, affinity_hits: 2, breaker_trips: 0 },
+    },
+  };
+  targetsModule.renderTargets();
+  await targetsModule.openTargetDetail("detail-target");
+  assert.equal(
+    harness.ids.get("targetDetailDrawer").classList.contains("open"),
+    true,
+    "target detail opens through openModal",
+  );
+  assert.match(
+    harness.ids.get("targetDetailKeys").innerHTML,
+    /sk-\*\*\*\*mask/,
+    "key status shows the masked key only",
+  );
+  assert.doesNotMatch(
+    harness.ids.get("targetDetailKeys").innerHTML,
+    /sk-secret-plaintext|sk-second-plaintext/,
+    "detail never renders a plaintext key",
+  );
+  assert.match(
+    harness.ids.get("targetDetailModels").innerHTML,
+    /target-model-badge/,
+  );
+  assert.match(
+    harness.ids.get("targetDetailAdvanced").innerHTML,
+    /X-Safe-Header/,
+  );
+  assert.match(
+    harness.ids.get("targetDetailAdvanced").innerHTML,
+    /用量适配/,
+    "usage_adapter is described as usage adaptation, not billing",
+  );
+  assert.doesNotMatch(
+    harness.ids.get("targetDetailAdvanced").innerHTML,
+    /计费类型/,
+    "usage_adapter is not labelled as a billing type",
+  );
+  assert.doesNotMatch(
+    harness.ids.get("targetDetailAdvanced").innerHTML,
+    /secret-header-value/,
+    "advanced settings list custom header names without their values",
+  );
+  assert.match(
+    harness.ids.get("targetDetailEditBtn").getAttribute("class"),
+    /readonly-hide/,
+  );
+  targetsModule.switchTargetDetailTab("keys");
+  assert.equal(harness.ids.get("targetDetailKeys").hidden, false);
+  assert.equal(harness.ids.get("targetDetailOverview").hidden, true);
+  assert.equal(
+    harness.ids.get("targetDetailKeys").getAttribute("role"),
+    "tabpanel",
+  );
+  assert.equal(
+    harness.ids.get("targetDetailKeysTab").getAttribute("aria-selected"),
+    "true",
+  );
+  assert.equal(
+    harness.ids.get("targetDetailOverviewTab").getAttribute("aria-selected"),
+    "false",
+  );
+  targetsModule.closeTargetDetail();
+  assert.equal(
+    harness.ids.get("targetDetailDrawer").classList.contains("open"),
+    false,
+  );
+
+  app.state.targets = [
+    {
+      name: "masked-only",
+      has_api_key: true,
+      api_key: "sk-secret-only",
+      key_statuses: [],
+    },
+  ];
+  targetsModule.renderTargets();
+  targetsModule.openTargetDetail("masked-only");
+  assert.doesNotMatch(
+    harness.ids.get("targetDetailKeys").innerHTML,
+    /sk-secret-only/,
+    "missing key runtime status never falls back to the stored key",
+  );
+  targetsModule.closeTargetDetail();
+
+  await targetsModule.switchTargetPageTab("pools");
+  assert.equal(harness.ids.get("targetsPoolsPanel").hidden, false);
+  assert.equal(harness.ids.get("targetsMainPanel").hidden, true);
+  assert.equal(
+    harness.ids.get("targetsPoolsTab").getAttribute("aria-selected"),
+    "true",
+  );
+  await targetsModule.switchTargetPageTab("targets");
+  assert.equal(harness.ids.get("targetsMainPanel").hidden, false);
+  assert.equal(harness.ids.get("targetsPoolsPanel").hidden, true);
+  assert.equal(
+    harness.ids.get("targetsMainTab").getAttribute("aria-selected"),
+    "true",
+  );
+
+  // A paused deployment pool pauses members at runtime only. The saved target
+  // keeps paused=false, health and filters explain the pool, and returning from
+  // the Pools tab reloads targets plus scheduling runtime.
+  const poolHarness = createHarness({
+    metrics: {
+      targets_runtime: [
+        { name: "pool-paused", phase: "ready", paused: false, in_flight: 0 },
+        { name: "pool-active", phase: "ready", in_flight: 0 },
+      ],
+    },
+    routes: {
+      "/admin/data/targets": {
+        targets: [
+          { name: "pool-paused", pool: "pool-a", paused: false, key_statuses: [] },
+          { name: "pool-active", pool: "pool-b", paused: false, key_statuses: [] },
+        ],
+      },
+      "/admin/data/pools": {
+        pools: [
+          { name: "pool-a", paused: false },
+          { name: "pool-b", paused: false },
+        ],
+      },
+    },
+  });
+  const poolApp = await poolHarness.run();
+  await poolApp.modules.targets.loadTargets();
+  assert.equal(
+    poolApp.modules.targets.targetHealth(poolApp.state.targets[0]).key,
+    "healthy",
+  );
+  poolHarness.setMetrics({
+    targets_runtime: [
+      { name: "pool-paused", phase: "offline", paused: true, in_flight: 0 },
+      { name: "pool-active", phase: "ready", in_flight: 0 },
+    ],
+  });
+  poolHarness.setRoute("/admin/data/pools", {
+    pools: [
+      { name: "pool-a", paused: true },
+      { name: "pool-b", paused: false },
+    ],
+  });
+  await poolApp.modules.targets.switchTargetPageTab("pools");
+  const beforeReturn = poolHarness.requests.length;
+  await poolApp.modules.targets.switchTargetPageTab("targets");
+  const returnRequests = poolHarness.requests.slice(beforeReturn);
+  assert.ok(
+    returnRequests.some((request) => request.url === "/admin/data/targets"),
+    "returning from Pools reloads targets",
+  );
+  assert.ok(
+    returnRequests.some((request) => request.url === "/admin/metrics"),
+    "returning from Pools reloads scheduling runtime",
+  );
+  const pausedHealth = poolApp.modules.targets.targetHealth(
+    poolApp.state.targets[0],
+  );
+  assert.equal(pausedHealth.key, "paused");
+  assert.match(pausedHealth.reason, /部署池/);
+  assert.match(pausedHealth.reason, /暂停/);
+  assert.equal(
+    poolApp.state.targets[0].paused,
+    false,
+    "pool pause never rewrites the saved target setting",
+  );
+  const poolCounts = poolApp.modules.targets.targetHealthCounts();
+  assert.equal(poolCounts.all, 2);
+  assert.equal(poolCounts.attention, 0);
+  assert.equal(poolCounts.healthy, 1);
+  assert.equal(poolCounts.paused, 1);
+  poolApp.modules.targets.setTargetFilter("paused");
+  const poolPausedBody = poolHarness.ids.get("targetsTableBody").innerHTML;
+  assert.match(poolPausedBody, /pool-paused/);
+  assert.doesNotMatch(poolPausedBody, /pool-active/);
+  const poolPausedRow = poolPausedBody
+    .split("</tr>")
+    .find((row) => row.includes("pool-paused"));
+  assert.match(
+    poolPausedRow,
+    /data-pause-tgt='pool-paused'/,
+    "a pool-paused member keeps its own enabled target switch",
+  );
+  assert.doesNotMatch(poolPausedRow, /data-resume-tgt='pool-paused'/);
+  assert.match(poolPausedRow, /aria-checked='true'/);
+  assert.match(poolPausedRow, /目标启用/);
+  assert.match(
+    poolPausedRow,
+    /aria-label='[^']*自身暂停状态[^']*未暂停/,
+    "pool pause does not change the target switch label",
+  );
+  assert.match(
+    poolPausedRow,
+    /target-health-badge[^>]*title='[^']*部署池[^']*暂停[^']*'/,
+    "effective pause keeps its pool reason in the health badge",
+  );
+  poolApp.state.targets[0].paused = true;
+  poolApp.modules.targets.renderTargets();
+  const bothPausedRow = poolHarness.ids
+    .get("targetsTableBody")
+    .innerHTML.split("</tr>")
+    .find((row) => row.includes("pool-paused"));
+  assert.match(
+    bothPausedRow,
+    /data-resume-tgt='pool-paused'/,
+    "a saved target pause still offers target resume while the pool is paused",
+  );
+  assert.match(bothPausedRow, /aria-checked='false'/);
+  poolApp.state.targets[0].paused = false;
+  poolApp.modules.targets.renderTargets();
+  poolApp.modules.targets.setTargetFilter("healthy");
+  assert.match(poolHarness.ids.get("targetsTableBody").innerHTML, /pool-active/);
+  assert.doesNotMatch(
+    poolHarness.ids.get("targetsTableBody").innerHTML,
+    /pool-paused/,
+  );
+  poolApp.modules.targets.setTargetFilter("all");
+  poolHarness.setMetrics({
+    targets_runtime: [
+      { name: "pool-paused", phase: "ready", paused: false, in_flight: 0 },
+      { name: "pool-active", phase: "ready", in_flight: 0 },
+    ],
+  });
+  poolHarness.setRoute("/admin/data/pools", {
+    pools: [
+      { name: "pool-a", paused: false },
+      { name: "pool-b", paused: false },
+    ],
+  });
+  await poolApp.modules.targets.switchTargetPageTab("pools");
+  await poolApp.modules.targets.switchTargetPageTab("targets");
+  const resumedCounts = poolApp.modules.targets.targetHealthCounts();
+  assert.equal(resumedCounts.attention, 0);
+  assert.equal(resumedCounts.healthy, 2);
+  assert.equal(resumedCounts.paused, 0);
+
+  // A fresh runtime snapshot outranks a cached pool roster. Target refresh must
+  // reload pools every time, and a failed pool refresh must keep the last known
+  // roster instead of overriding authoritative runtime state.
+  const runtimePriorityHarness = createHarness({
+    metrics: {
+      targets_runtime: [{ name: "runtime-priority", phase: "ready", in_flight: 0 }],
+    },
+    routes: {
+      "/admin/data/targets": {
+        targets: [
+          { name: "runtime-priority", pool: "pool-a", paused: false, key_statuses: [] },
+        ],
+      },
+      "/admin/data/pools": { pools: [{ name: "pool-a", paused: true }] },
+    },
+  });
+  const runtimePriorityApp = await runtimePriorityHarness.run();
+  await runtimePriorityApp.modules.targets.loadTargets();
+  assert.equal(runtimePriorityApp.state.pools[0].paused, true);
+  assert.equal(
+    runtimePriorityApp.modules.targets.targetHealth(
+      runtimePriorityApp.state.targets[0],
+    ).key,
+    "healthy",
+    "fresh ready runtime outranks a cached paused pool",
+  );
+  runtimePriorityHarness.setRoute("/admin/data/pools", {
+    pools: [{ name: "pool-a", paused: false }],
+  });
+  await runtimePriorityApp.modules.targets.loadTargets();
+  assert.equal(
+    runtimePriorityApp.state.pools[0].paused,
+    false,
+    "target refresh always reloads the pool roster",
+  );
+  runtimePriorityHarness.setRoute("/admin/data/pools", {
+    pools: [{ name: "pool-a", paused: true }],
+  });
+  await runtimePriorityApp.modules.targets.loadTargets();
+  runtimePriorityHarness.setRouteFailure("/admin/data/pools", true);
+  runtimePriorityHarness.setMetrics({
+    targets_runtime: [{ name: "runtime-priority", phase: "ready", in_flight: 0 }],
+  });
+  await runtimePriorityApp.modules.targets.loadTargets();
+  assert.equal(
+    runtimePriorityApp.state.pools[0].paused,
+    true,
+    "failed pool refresh keeps the last known roster",
+  );
+  assert.equal(
+    runtimePriorityApp.modules.targets.targetHealth(
+      runtimePriorityApp.state.targets[0],
+    ).key,
+    "healthy",
+    "failed pool fetch cannot override fresh ready runtime",
+  );
+  runtimePriorityHarness.setRouteFailure("/admin/data/pools", false);
+  runtimePriorityHarness.setRoute("/admin/data/pools", {
+    pools: [{ name: "pool-a", paused: false }],
+  });
+  await runtimePriorityApp.modules.targets.loadTargets();
+  runtimePriorityHarness.setMetrics({
+    targets_runtime: [
+      { name: "runtime-priority", phase: "offline", paused: true, in_flight: 0 },
+    ],
+  });
+  await runtimePriorityApp.modules.targets.loadTargets();
+  assert.equal(
+    runtimePriorityApp.modules.targets.targetHealth(
+      runtimePriorityApp.state.targets[0],
+    ).key,
+    "paused",
+    "fresh offline runtime pauses a target while the cached pool is active",
+  );
+  runtimePriorityHarness.setRoute("/admin/data/targets", {
+    targets: [
+      { name: "runtime-priority", pool: "pool-a", paused: true, key_statuses: [] },
+    ],
+  });
+  runtimePriorityHarness.setRouteFailure("/admin/data/pools", true);
+  await runtimePriorityApp.modules.targets.loadTargets();
+  assert.equal(
+    runtimePriorityApp.state.targets[0].paused,
+    true,
+    "a failed pool refresh never erases the stored target pause",
+  );
+  const ownPauseHealth = runtimePriorityApp.modules.targets.targetHealth(
+    runtimePriorityApp.state.targets[0],
+  );
+  assert.equal(ownPauseHealth.key, "paused");
+  assert.match(ownPauseHealth.reason, /目标已暂停/);
+
+  // Runtime fetch failures clear stale metrics. Missing, unknown or malformed
+  // phases stay attention with explicit unavailable text, never healthy.
+  const runtimeHarness = createHarness({
+    metrics: {
+      targets_runtime: [{ name: "runtime-stale", phase: "ready", in_flight: 1 }],
+    },
+  });
+  const runtimeApp = await runtimeHarness.run();
+  await runtimeApp.modules.targets.fetchSchedulingRuntime();
+  assert.equal(runtimeApp.state.runtime["runtime-stale"].phase, "ready");
+  runtimeHarness.setMetricsFailure(true);
+  await runtimeApp.modules.targets.fetchSchedulingRuntime();
+  assert.equal(
+    runtimeApp.state.runtime,
+    null,
+    "failed metrics clears stale scheduling runtime",
+  );
+  runtimeHarness.setRoute("/admin/data/targets", {
+    targets: [{ name: "runtime-stale", has_api_key: true, key_statuses: [] }],
+  });
+  await runtimeApp.modules.targets.loadTargets();
+  const unavailableHealth = runtimeApp.modules.targets.targetHealth(
+    runtimeApp.state.targets[0],
+  );
+  assert.equal(unavailableHealth.key, "attention");
+  assert.match(unavailableHealth.reason, /运行态不可用/);
+  runtimeApp.modules.targets.renderTargets();
+  const unavailableBody = runtimeHarness.ids.get("targetsTableBody").innerHTML;
+  assert.match(unavailableBody, /运行态不可用/);
+  assert.match(unavailableBody, /data-target-health='attention'/);
+  assert.doesNotMatch(unavailableBody, /data-target-health='healthy'/);
+  runtimeHarness.setMetricsFailure(false);
+  runtimeHarness.setMetrics({
+    targets_runtime: [{ name: "runtime-stale", phase: "ready", in_flight: 1 }],
+  });
+  await runtimeApp.modules.targets.fetchSchedulingRuntime();
+  assert.equal(
+    runtimeApp.modules.targets.targetHealth(runtimeApp.state.targets[0]).key,
+    "healthy",
+    "metrics recovery restores a healthy classification",
+  );
+  runtimeHarness.setMetrics({
+    targets_runtime: [{ name: "runtime-stale", phase: "unexpected", in_flight: 0 }],
+  });
+  await runtimeApp.modules.targets.fetchSchedulingRuntime();
+  const unknownPhase = runtimeApp.modules.targets.targetHealth(
+    runtimeApp.state.targets[0],
+  );
+  assert.equal(unknownPhase.key, "attention");
+  assert.match(unknownPhase.reason, /运行态不可用/);
+  runtimeApp.modules.targets.renderTargets();
+  runtimeApp.modules.targets.openTargetDetail("runtime-stale");
+  assert.match(
+    runtimeHarness.ids.get("targetDetailOverview").innerHTML,
+    /运行态不可用/,
+  );
+  runtimeApp.modules.targets.closeTargetDetail();
+  runtimeHarness.setMetrics({
+    targets_runtime: [{ name: "runtime-stale", in_flight: 0 }],
+  });
+  await runtimeApp.modules.targets.fetchSchedulingRuntime();
+  const missingPhase = runtimeApp.modules.targets.targetHealth(
+    runtimeApp.state.targets[0],
+  );
+  assert.equal(missingPhase.key, "attention");
+  assert.match(missingPhase.reason, /运行态不可用/);
+
+  // keypool.status keeps exhausted=true after an expired cooldown. A
+  // recoverable key reports 可用(待激活) and is not an issue; only the
+  // non-recoverable 失效(待请求验证) state raises attention.
+  const keyHarness = createHarness({
+    metrics: {
+      targets_runtime: [
+        { name: "cooldown-recoverable", phase: "ready", in_flight: 0 },
+        { name: "cooldown-invalid", phase: "ready", in_flight: 0 },
+      ],
+    },
+  });
+  const keyApp = await keyHarness.run();
+  keyApp.state.targets = [
+    {
+      name: "cooldown-recoverable",
+      has_api_key: true,
+      key_statuses: [
+        {
+          index: 0,
+          key_mask: "sk-***good",
+          status: "可用(待激活)",
+          exhausted: true,
+          exhaust_reason: "rate_limited",
+          cooldown_end: "2020-01-01T00:00:00Z",
+        },
+      ],
+    },
+    {
+      name: "cooldown-invalid",
+      has_api_key: true,
+      key_statuses: [
+        {
+          index: 0,
+          key_mask: "sk-***bad",
+          status: "失效(待请求验证)",
+          exhausted: true,
+          exhaust_reason: "invalid_token",
+          cooldown_end: "2020-01-01T00:00:00Z",
+        },
+      ],
+    },
+  ];
+  keyApp.state.runtime = {
+    "cooldown-recoverable": { phase: "ready", in_flight: 0 },
+    "cooldown-invalid": { phase: "ready", in_flight: 0 },
+  };
+  assert.equal(
+    keyApp.modules.targets.targetHealth(keyApp.state.targets[0]).key,
+    "healthy",
+    "a cooldown-expired recoverable key is not an issue",
+  );
+  assert.equal(
+    keyApp.modules.targets.targetHealth(keyApp.state.targets[1]).key,
+    "attention",
+  );
+  const keyCounts = keyApp.modules.targets.targetHealthCounts();
+  assert.equal(keyCounts.all, 2);
+  assert.equal(keyCounts.attention, 1);
+  assert.equal(keyCounts.healthy, 1);
+  assert.equal(keyCounts.paused, 0);
+  keyApp.modules.targets.renderTargets();
+  const keyBody = keyHarness.ids.get("targetsTableBody").innerHTML;
+  const recoverableRow = keyBody
+    .split("</tr>")
+    .find((row) => row.includes("cooldown-recoverable"));
+  const invalidRow = keyBody
+    .split("</tr>")
+    .find((row) => row.includes("cooldown-invalid"));
+  assert.ok(recoverableRow);
+  assert.ok(invalidRow);
+  assert.doesNotMatch(
+    recoverableRow,
+    /限流|不可用|唤醒/,
+    "recoverable cooldown shows no key issue or wakeup action",
+  );
+  assert.match(invalidRow, /唤醒/);
+  keyApp.modules.targets.openTargetDetail("cooldown-recoverable");
+  const recoverableOverview =
+    keyHarness.ids.get("targetDetailOverview").innerHTML;
+  const recoverableKeys = keyHarness.ids.get("targetDetailKeys").innerHTML;
+  assert.match(recoverableOverview, /可用\(待激活\)/);
+  assert.doesNotMatch(recoverableOverview, /不可用/);
+  assert.match(recoverableKeys, /可用\(待激活\)/);
+  assert.doesNotMatch(recoverableKeys, /不可用/);
+  keyApp.modules.targets.openTargetDetail("cooldown-invalid");
+  assert.match(
+    keyHarness.ids.get("targetDetailOverview").innerHTML,
+    /不可用 1/,
+  );
+  assert.match(
+    keyHarness.ids.get("targetDetailKeys").innerHTML,
+    /失效\(待请求验证\)/,
+  );
+  keyApp.modules.targets.closeTargetDetail();
+
+  // Go's zero time must read as "no cooldown", not a real 0001 deadline.
+  keyApp.state.targets.push({
+    name: "cooldown-zero",
+    has_api_key: true,
+    key_statuses: [
+      {
+        index: 0,
+        key_mask: "sk-***normal",
+        status: "可用",
+        cooldown_end: "0001-01-01T00:00:00Z",
+      },
+      {
+        index: 1,
+        key_mask: "sk-***no-deadline",
+        status: "失效(待请求验证)",
+        blocked: false,
+        exhausted: true,
+        cooldown_end: "0001-01-01T00:00:00Z",
+      },
+      {
+        index: 2,
+        key_mask: "sk-***deadline",
+        status: "限流",
+        blocked: false,
+        exhausted: true,
+        cooldown_end: "2030-01-01T00:00:00Z",
+      },
+    ],
+  });
+  keyApp.state.runtime["cooldown-zero"] = { phase: "ready", in_flight: 0 };
+  keyApp.modules.targets.renderTargets();
+  keyApp.modules.targets.openTargetDetail("cooldown-zero");
+  const zeroCooldownKeys = keyHarness.ids.get("targetDetailKeys").innerHTML;
+  assert.doesNotMatch(
+    zeroCooldownKeys,
+    /冷却结束 0001-01-01T00:00:00Z/,
+    "Go zero time is not a real cooldown deadline",
+  );
+  assert.match(
+    zeroCooldownKeys,
+    /冷却结束 2030-01-01T00:00:00Z/,
+    "a real cooldown deadline is preserved",
+  );
+  keyApp.modules.targets.closeTargetDetail();
+
+  // Zero keys explain passthrough; single or multiple keys only expose masks,
+  // and no per-key health is invented without runtime status.
+  app.state.targets = [
+    {
+      name: "passthrough-only",
+      allow_bearer_passthrough: true,
+      has_api_key: false,
+      key_statuses: [],
+    },
+  ];
+  app.state.runtime = {
+    "passthrough-only": { phase: "ready", in_flight: 0 },
+  };
+  targetsModule.renderTargets();
+  targetsModule.openTargetDetail("passthrough-only");
+  assert.match(
+    harness.ids.get("targetDetailOverview").innerHTML,
+    /未配置独立密钥/,
+  );
+  assert.match(
+    harness.ids.get("targetDetailOverview").innerHTML,
+    /Bearer 透传/,
+  );
+  assert.doesNotMatch(
+    harness.ids.get("targetDetailKeys").innerHTML,
+    /target-detail-key/,
+    "zero keys never invent per-key health",
+  );
+  targetsModule.closeTargetDetail();
+  app.state.targets = [
+    {
+      name: "single-mask",
+      has_api_key: true,
+      api_key: "sk-secret-single",
+      key_statuses: [],
+    },
+  ];
+  app.state.runtime = { "single-mask": { phase: "ready", in_flight: 0 } };
+  targetsModule.renderTargets();
+  targetsModule.openTargetDetail("single-mask");
+  assert.doesNotMatch(
+    harness.ids.get("targetDetailKeys").innerHTML,
+    /sk-secret-single/,
+  );
+  assert.match(
+    harness.ids.get("targetDetailKeys").innerHTML,
+    /运行状态明细尚未上报/,
+  );
+  assert.doesNotMatch(
+    harness.ids.get("targetDetailKeys").innerHTML,
+    /target-detail-key/,
+    "single key without runtime status has no fabricated per-key state",
+  );
+  targetsModule.closeTargetDetail();
+
   const extendedSchema = schemaFixture();
   extendedSchema.quota_dimensions.push({
     value: "yearly",
@@ -646,6 +1431,11 @@ async function main() {
   );
   failedApp.modules.core.openModal("targetModal");
   assert.equal(failed.ids.get("targetModal").classList.contains("open"), false);
+  failedApp.modules.core.openModal("targetDetailDrawer");
+  assert.equal(
+    failed.ids.get("targetDetailDrawer").classList.contains("open"),
+    false,
+  );
   failed.setFailure("");
   await failedApp.boot();
   assert.equal(failedApp.state.ready, true, "retry initializes features once");
@@ -662,6 +1452,24 @@ async function main() {
   assert.equal(
     readonly.ids.get("targetModal").classList.contains("open"),
     false,
+  );
+  readonlyApp.state.targets = [
+    { name: "readonly-detail", key_statuses: [] },
+  ];
+  readonlyApp.modules.targets.renderTargets();
+  assert.equal(
+    readonlyApp.modules.targets.openTargetDetail("readonly-detail"),
+    true,
+    "readonly users can inspect the target detail",
+  );
+  assert.equal(
+    readonly.ids.get("targetDetailDrawer").classList.contains("open"),
+    true,
+  );
+  assert.match(
+    readonly.ids.get("targetDetailEditBtn").getAttribute("class"),
+    /readonly-hide/,
+    "edit action stays hidden in readonly mode",
   );
   const invalid = schemaFixture();
   delete invalid.usage_adapters;
