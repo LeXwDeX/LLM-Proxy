@@ -170,35 +170,68 @@ var adminLoginHTML = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>后台登录</title>
   <style>
-    :root { color-scheme: light; --bg:#f5f7fb; --card:#fff; --text:#1f2a37; --line:#d9e2ef; --primary:#2563eb; --danger:#dc2626; }
+    /* Theme tokens mirror the approved admin .app palette; this page follows the OS theme. */
+    :root {
+      color-scheme: light;
+      --bg:#F4F5F7;--surface:#FFFFFF;--line:#E3E6EB;--line-2:#EEF0F3;--ink:#14171C;--ink-2:#444C59;--ink-3:#5C6573;--accent:#2B59D9;--accent-ink:#FFFFFF;--accent-soft:#E9EEFC;--accent-hover:#1E47BE;--bad:#B42318;--bad-soft:#FCE8E6;--brand:#2B59D9;--brand-ink:#FFFFFF;
+      --shadow:0 1px 3px rgba(15,23,42,.06),0 12px 32px rgba(15,23,42,.06);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg:#0D0F12;--surface:#15181D;--line:#272C34;--line-2:#20252C;--ink:#E7EAEE;--ink-2:#B9C0CA;--ink-3:#959EAB;--accent:#7D9CFF;--accent-ink:#0D0F12;--accent-soft:#1C2645;--accent-hover:#9DB5FF;--bad:#F2796D;--bad-soft:#3A1916;
+        --shadow:0 1px 3px rgba(0,0,0,.4),0 16px 40px rgba(0,0,0,.35);
+      }
+    }
     * { box-sizing: border-box; }
     html { height: 100%; }
-    body { margin:0; min-height:100vh; min-height:100dvh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--text); font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,"PingFang SC","Microsoft YaHei",sans-serif; }
-    .card { width:min(420px, calc(100vw - 24px)); background:var(--card); border:1px solid var(--line); border-radius:16px; padding:28px; box-shadow:0 18px 40px rgba(15,23,42,.08); }
-    h1 { margin:0 0 8px; font-size:24px; }
-    p { margin:0 0 20px; color:#64748b; }
-    label { display:block; margin-bottom:14px; font-size:13px; color:#475569; }
-    input { width:100%; margin-top:6px; padding:12px 14px; border:1px solid #cbd5e1; border-radius:10px; font-size:14px; }
-    button { width:100%; margin-top:8px; border:0; border-radius:10px; padding:12px 14px; font-size:15px; color:#fff; background:var(--primary); cursor:pointer; }
-    .error { background:#fef2f2; color:var(--danger); border:1px solid #fecaca; padding:10px 12px; border-radius:10px; margin-bottom:14px; font-size:13px; }
-    .hint { margin-top:14px; color:#94a3b8; font-size:12px; }
+    body { margin:0; min-height:100vh; min-height:100dvh; display:grid; place-items:center; padding:24px 16px; background:var(--bg); color:var(--ink); font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif; font-size:14px; line-height:1.5; }
+    .login-card { width:100%; max-width:360px; margin:0; padding:24px; background:var(--surface); border:1px solid var(--line); border-radius:10px; box-shadow:var(--shadow); }
+    .brand { display:flex; align-items:center; gap:10px; margin-bottom:20px; }
+    .brand-mark { width:30px; height:30px; border-radius:8px; background:var(--brand); color:var(--brand-ink); display:grid; place-items:center; flex:0 0 auto; }
+    .brand-name { font-size:15px; font-weight:700; letter-spacing:-.01em; }
+    h1 { margin:0 0 20px; font-size:18px; font-weight:700; line-height:1.3; text-wrap:balance; }
+    .login-error { margin:0 0 16px; padding:8px 10px; border-radius:8px; background:var(--bad-soft); color:var(--bad); font-size:13px; line-height:1.5; }
+    .field { margin-bottom:14px; }
+    label { display:block; margin-bottom:6px; color:var(--ink-2); font-size:12px; font-weight:500; }
+    input { width:100%; height:34px; padding:0 10px; background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:8px; font:inherit; font-size:14px; caret-color:var(--accent); }
+    input:hover { border-color:var(--ink-3); }
+    input:focus { border-color:var(--accent); }
+    input:focus-visible, button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    button[type=submit] { width:100%; height:36px; margin-top:4px; border:0; border-radius:8px; background:var(--accent); color:var(--accent-ink); font:inherit; font-size:14px; font-weight:600; cursor:pointer; transition:background .15s ease; }
+    button[type=submit]:hover { background:var(--accent-hover); }
+    button[type=submit]:active { transform:translateY(1px); }
+    .login-meta { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px 12px; margin-top:20px; padding-top:14px; border-top:1px solid var(--line-2); color:var(--ink-3); font-size:12px; }
+    .login-version { font-variant-numeric:tabular-nums; }
+    ::selection { background:var(--accent-soft); color:var(--ink); }
   </style>
 </head>
 <body>
-  <form class="card" method="post" action="/login">
-    <h1>后台管理登录</h1>
-    <p>请输入独立后台账号密码。</p>
-    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
-    <input type="hidden" name="next" value="{{.Next}}">
-    <label>用户名
-      <input name="username" autocomplete="username" required>
-    </label>
-    <label>密码
-      <input name="password" type="password" autocomplete="current-password" required>
-    </label>
-    <button type="submit">登录</button>
-    <div class="hint">登录成功后将进入 /admin 管理台。</div>
-    <div class="hint" style="text-align:center;">版本 {{.Version}}</div>
-  </form>
+  <main>
+    <form class="login-card" method="post" action="/login">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
+        </div>
+        <span class="brand-name">LLMs Proxy</span>
+      </div>
+      <h1>后台管理登录</h1>
+      {{if .Error}}<div class="login-error" role="alert">{{.Error}}</div>{{end}}
+      <input type="hidden" name="next" value="{{.Next}}">
+      <div class="field">
+        <label for="username">用户名</label>
+        <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </div>
+      <button type="submit">登录</button>
+      <div class="login-meta">
+        <span>忘记密码？请联系管理员重置。</span>
+        <span class="login-version">版本 {{.Version}}</span>
+      </div>
+    </form>
+  </main>
 </body>
 </html>`

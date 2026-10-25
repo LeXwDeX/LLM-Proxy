@@ -126,13 +126,130 @@ async function fakeRequests(base) {
 
 const list = [
   {
+    name: "login-page-light",
+    async run({ page, stack }) {
+      await page.navigate(stack.base + "/login");
+      await page.waitFor(`!!document.querySelector("form.login-card")`, { what: "login card" });
+      const state = await page.eval(`(() => {
+        const user = document.querySelector('input[name=username]');
+        const pass = document.querySelector('input[name=password]');
+        return {
+          text: document.body.innerText,
+          username: user ? user.value : null,
+          password: pass ? pass.value : null,
+          passwordType: pass ? pass.type : null,
+          cards: document.querySelectorAll("form.login-card").length,
+          scripts: document.querySelectorAll("script, link").length,
+          width: document.documentElement.scrollWidth,
+          client: document.documentElement.clientWidth,
+        };
+      })()`);
+      assert.ok(state.text.includes("后台管理登录"), "login heading is visible");
+      assert.ok(state.text.includes("LLMs Proxy"), "admin identity is visible");
+      assert.ok(!state.text.includes("请输入独立后台账号密码"), "helper marketing copy is removed");
+      assert.ok(!state.text.includes("登录成功后将进入"), "redirect helper copy is removed");
+      assert.equal(state.username, "", "username is not prefilled");
+      assert.equal(state.password, "", "password is not prefilled");
+      assert.equal(state.passwordType, "password", "password input stays masked");
+      assert.equal(state.cards, 1, "login page has one centered card");
+      assert.equal(state.scripts, 0, "login page loads no external scripts or styles");
+      assert.ok(state.width <= state.client + 1, `login page overflows: ${state.width}/${state.client}`);
+    },
+  },
+  {
+    name: "login-page-error-light",
+    async run({ page, stack }) {
+      await page.navigate(stack.base + "/login");
+      await page.waitFor(`!!document.querySelector("form.login-card")`, { what: "login card" });
+      await page.eval(`(() => {
+        const form = document.querySelector("form.login-card");
+        const user = document.querySelector('input[name=username]');
+        const pass = document.querySelector('input[name=password]');
+        user.focus();
+        user.value = "admin";
+        user.dispatchEvent(new Event("input", { bubbles: true }));
+        pass.focus();
+        pass.value = "wrong-password-not-secret";
+        pass.dispatchEvent(new Event("input", { bubbles: true }));
+        form.requestSubmit();
+        return true;
+      })()`);
+      await page.waitFor(`!!document.querySelector('.login-error[role="alert"]')`, { what: "login error alert", timeoutMs: 10000 });
+      const state = await page.eval(`(() => ({
+        error: document.querySelector('.login-error[role="alert"]').textContent,
+        username: document.querySelector('input[name=username]').value,
+        password: document.querySelector('input[name=password]').value,
+      }))()`);
+      assert.match(state.error, /用户名或密码错误/);
+      assert.equal(state.username, "", "failed login does not echo the username");
+      assert.equal(state.password, "", "failed login does not echo the password");
+    },
+  },
+  {
+    // Screenshots are captured after run() returns, so viewport/media overrides
+    // stay active until the next flow restores them.
+    name: "login-page-mobile-390",
+    async run({ page, stack }) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+      try {
+        await page.navigate(stack.base + "/login");
+        await page.waitFor(`!!document.querySelector("form.login-card")`, { what: "mobile login card" });
+        const width = await page.eval(`({scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth})`);
+        assert.ok(width.scroll <= width.client + 1, `mobile login overflows: ${width.scroll}/${width.client}`);
+      } catch (err) {
+        await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+        throw err;
+      }
+    },
+  },
+  {
+    name: "login-page-short-390x560",
+    async run({ page, stack }) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 560, deviceScaleFactor: 1, mobile: true });
+      try {
+        await page.navigate(stack.base + "/login");
+        await page.waitFor(`!!document.querySelector("form.login-card")`, { what: "short login card" });
+        const width = await page.eval(`({scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth})`);
+        assert.ok(width.scroll <= width.client + 1, `short login overflows: ${width.scroll}/${width.client}`);
+        const fits = await page.eval(`(() => {
+          const card = document.querySelector("form.login-card").getBoundingClientRect();
+          return card.top >= 0 && card.bottom <= document.documentElement.scrollHeight + 1;
+        })()`);
+        assert.ok(fits, "short login card is reachable without clipping");
+      } catch (err) {
+        await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+        throw err;
+      }
+    },
+  },
+  {
+    name: "login-page-dark",
+    async run({ page, stack }) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+      await page.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
+      try {
+        await page.navigate(stack.base + "/login");
+        await page.waitFor(`matchMedia("(prefers-color-scheme: dark)").matches`, { what: "dark color scheme" });
+        await page.waitFor(`getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() === "#0D0F12"`,
+          { what: "dark login tokens" });
+        await page.waitFor(`getComputedStyle(document.body).backgroundColor === "rgb(13, 15, 18)"`,
+          { what: "dark login surface" });
+      } catch (err) {
+        await page.send("Emulation.setEmulatedMedia", { media: "", features: [] });
+        throw err;
+      }
+    },
+  },
+  {
     name: "login", critical: true,
     async run({ page, stack, ADMIN_PASSWORD }) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+      await page.send("Emulation.setEmulatedMedia", { media: "", features: [] });
       await install(page);
       await page.navigate(stack.base + "/login");
       await page.eval(`__sim.fill('input[name=username]', 'admin') && __sim.fill('input[name=password]', ${js(ADMIN_PASSWORD)})`);
       const loaded = page.waitEvent("Page.loadEventFired");
-      await page.eval(`__sim.click('form.card button[type=submit]')`);
+      await page.eval(`__sim.click('button[type=submit]')`);
       await loaded;
       await page.waitFor(`location.pathname.startsWith("/admin") && window.AdminApp && AdminApp.state.ready === true`,
         { what: "admin SPA ready", timeoutMs: 15000 });
