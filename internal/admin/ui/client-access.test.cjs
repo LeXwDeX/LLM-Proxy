@@ -33,7 +33,8 @@ assert.match(combined, /class=['"][^'"]*client-target-pool/);
 assert.ok(combined.indexOf('client-target-direct') < combined.indexOf('client-target-pool'), 'direct targets render above pools');
 assert.match(combined, /qwen-max/);
 assert.match(combined, /glm-flash/);
-assert.match(combined, /🧩 pool A/);
+assert.match(combined, /class='client-target-pool-tag'><svg[\s\S]*?<\/svg> pool A/);
+assert.doesNotMatch(combined, /🧩/, 'pool tag uses an inline SVG icon, not an emoji');
 
 const directOnly = render([{name: 'client', allowed_targets: ['qwen-max']}]);
 assert.match(directOnly, /class=['"][^'"]*client-target-direct/);
@@ -49,6 +50,6 @@ assert.match(unrestricted, /全部目标/);
 
 const escaped = render([{name: '<client>', allowed_targets: ['<qwen>'], allowed_pools: ['<pool>']}]);
 assert.match(escaped, /&lt;qwen&gt;/);
-assert.match(escaped, /🧩 &lt;pool&gt;/);
+assert.match(escaped, /class='client-target-pool-tag'><svg[\s\S]*?<\/svg> &lt;pool&gt;/);
 assert.match(escaped, /&lt;client&gt;/);
 console.log('client-access rendering checks passed');

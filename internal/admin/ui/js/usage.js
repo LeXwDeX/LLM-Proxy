@@ -506,6 +506,8 @@ AdminApp.register("usage", function (app) {
       esc(kind) +
       "' data-usage-expand-key='" +
       esc(encodeURIComponent(key)) +
+      "' aria-label='展开/收起明细' aria-expanded='" +
+      (expanded ? "true" : "false") +
       "' title='展开/收起明细'>" +
       (expanded ? "▼" : "▶") +
       "</button>"

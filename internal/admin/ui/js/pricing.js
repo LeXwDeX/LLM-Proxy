@@ -707,7 +707,7 @@ AdminApp.register("pricing", function (app) {
         (expanded ? " open" : "") +
         "' data-expand-pricing='" +
         esc(attr) +
-        "' aria-controls='" +
+        "' aria-label='展开/收起明细' aria-controls='" +
         esc(detailId) +
         "' aria-expanded='" +
         (expanded ? "true" : "false") +

@@ -98,7 +98,7 @@ AdminApp.register("catalog", function (app) {
     // 渠道徽章：颜色与标签均从 endpoint_type 元数据派生（单一信息源）。
     function epBadge(ep) {
       return (
-        "<span style='display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;" +
+        "<span class='ep-badge' style='" +
         epBadgeStyle(ep) +
         "'>" +
         esc(epDisplayName(ep) || ep) +
@@ -116,14 +116,35 @@ AdminApp.register("catalog", function (app) {
     function capBadges(caps) {
       if (!caps || !caps.length)
         return "<span style='color:var(--text-muted)'>—</span>";
+      function icon(paths) {
+        return (
+          "<svg width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>" +
+          paths +
+          "</svg>"
+        );
+      }
       var capIcons = {
-        vision: "👁️",
-        function_calling: "🔧",
-        structured_output: "📄",
-        reasoning: "🧠",
-        image_generation: "🎨",
-        audio_input: "🎤",
-        audio_output: "🔊",
+        vision: icon(
+          "<path d='M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z'></path><circle cx='12' cy='12' r='3'></circle>",
+        ),
+        function_calling: icon(
+          "<path d='M14 4a4 4 0 0 0-4 6.3L4 16.3V20h3.7l6-6A4 4 0 1 0 14 4z'></path>",
+        ),
+        structured_output: icon(
+          "<path d='M6 3h9l3 3v15H6z'></path><path d='M14 3v4h4M9 11h6M9 15h6'></path>",
+        ),
+        reasoning: icon(
+          "<path d='M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.3 1.3 2.2h4.6c.2-.9.6-1.6 1.3-2.2A6 6 0 0 0 12 3z'></path>",
+        ),
+        image_generation: icon(
+          "<rect x='3' y='4' width='18' height='16' rx='2'></rect><circle cx='8.5' cy='9' r='1.5'></circle><path d='m21 15-5-5L5 20'></path>",
+        ),
+        audio_input: icon(
+          "<rect x='9' y='3' width='6' height='11' rx='3'></rect><path d='M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8'></path>",
+        ),
+        audio_output: icon(
+          "<path d='M11 5 6 9H3v6h3l5 4z'></path><path d='M15.5 8.5a5 5 0 0 1 0 7M18 6a8 8 0 0 1 0 12'></path>",
+        ),
       };
       return caps
         .map(function (c) {
@@ -133,7 +154,7 @@ AdminApp.register("catalog", function (app) {
             "<span title='" +
             label +
             "' style='display:inline-block;padding:1px 6px;border-radius:3px;font-size:11px;" +
-            "background:var(--primary-light);color:var(--primary);margin:1px;'>" +
+            "background:var(--accent-soft);color:var(--accent);margin:1px;'>" +
             icon +
             " " +
             label +
@@ -152,7 +173,7 @@ AdminApp.register("catalog", function (app) {
               "<td>" +
               epBadge(m.endpoint_type) +
               "</td>" +
-              "<td style='font-family:monospace;font-size:12px;'>" +
+              "<td style='font-family:ui-monospace, SF Mono, Menlo, Consolas, monospace;font-size:12px;'>" +
               esc(m.model) +
               "</td>" +
               "<td style='color:var(--text-secondary)'>" +

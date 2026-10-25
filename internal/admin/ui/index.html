@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="app">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,38 +7,58 @@
   <style>
     :root {
       --sidebar-width: 240px;
-      --sidebar-bg: #1e293b;
-      --sidebar-hover: #334155;
-      --sidebar-active: #3b82f6;
-      --sidebar-text: #94a3b8;
-      --sidebar-text-active: #ffffff;
       --topbar-height: 56px;
-      --topbar-bg: #ffffff;
-      --topbar-border: #e2e8f0;
-      --primary: #3b82f6;
-      --primary-hover: #2563eb;
-      --primary-light: #dbeafe;
-      --danger: #ef4444;
-      --danger-hover: #dc2626;
-      --success: #22c55e;
-      --warning: #f59e0b;
-      --bg: #f1f5f9;
-      --card: #ffffff;
-      --card-border: #e2e8f0;
-      --text: #1e293b;
-      --text-secondary: #64748b;
-      --text-muted: #94a3b8;
-      --line: #e2e8f0;
-      --radius: 8px;
+      --radius: 10px;
       --shadow: 0 1px 3px rgba(0,0,0,0.08);
       --shadow-md: 0 4px 12px rgba(0,0,0,0.1);
       --transition: 0.2s ease;
     }
+    /* Theme tokens mirror the approved prototype .app / .app.dark values exactly. */
+    .app {
+      --bg:#F4F5F7;--surface:#FFFFFF;--surface-2:#F8F9FB;--line:#E3E6EB;--line-2:#EEF0F3;--ink:#14171C;--ink-2:#444C59;--ink-3:#5C6573;--accent:#2B59D9;--accent-ink:#FFFFFF;--accent-soft:#E9EEFC;--out:#A65314;--out-soft:#FBEEE2;--ok:#1C7A4A;--ok-soft:#E2F2E9;--warn:#8A5700;--warn-soft:#FAF0DA;--bad:#B42318;--bad-soft:#FCE8E6;--muted-soft:#EEF0F3;--side:#11141A;--side-2:#1D222B;--side-ink:#D3D8DF;--side-ink-2:#8E97A4;
+      --primary:var(--accent);
+      --primary-hover:#1E47BE;
+      --primary-light:var(--accent-soft);
+      --danger:var(--bad);
+      --danger-hover:#8F1C13;
+      --focus-ring:var(--accent);
+      --focus-ring-side:#8FA9FF;
+      --success:var(--ok);
+      --warning:var(--warn);
+      --card:var(--surface);
+      --card-border:var(--line);
+      --text:var(--ink);
+      --text-secondary:var(--ink-2);
+      --text-muted:var(--ink-3);
+      --sidebar-bg:var(--side);
+      --sidebar-hover:var(--side-2);
+      --sidebar-active:var(--accent);
+      --sidebar-text:var(--side-ink);
+      --sidebar-text-active:#FFFFFF;
+      --topbar-bg:var(--surface);
+      --topbar-border:var(--line);
+      color-scheme:light;
+      font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color:var(--ink);
+      background:var(--bg);
+      font-size:14px;
+      line-height:1.5;
+    }
+    .app.dark {
+      --bg:#0D0F12;--surface:#15181D;--surface-2:#1A1E24;--line:#272C34;--line-2:#20252C;--ink:#E7EAEE;--ink-2:#B9C0CA;--ink-3:#959EAB;--accent:#7D9CFF;--accent-ink:#0D0F12;--accent-soft:#1C2645;--out:#F0A15C;--out-soft:#3A2715;--ok:#5CC48C;--ok-soft:#14301F;--warn:#E6B450;--warn-soft:#33270F;--bad:#F2796D;--bad-soft:#3A1916;      --muted-soft:#22272E;--side:#090B0E;--side-2:#181C23;
+      --primary-hover:#9DB5FF;
+      --danger-hover:#FF9C93;
+      --shadow:0 1px 3px rgba(0,0,0,0.4);
+      --shadow-md:0 4px 12px rgba(0,0,0,0.45);
+      color-scheme:dark;
+    }
+    .mono { font-family:ui-monospace, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-variant-numeric:tabular-nums; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { background: var(--bg); }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-family: inherit;
       font-size: 14px;
-      color: var(--text);
+      color: var(--ink);
       background: var(--bg);
       line-height: 1.5;
       overflow: hidden;
@@ -52,7 +72,7 @@
     .sidebar {
       width: var(--sidebar-width);
       min-width: var(--sidebar-width);
-      background: var(--sidebar-bg);
+      background: var(--side);
       display: flex;
       flex-direction: column;
       transition: transform var(--transition), width var(--transition);
@@ -60,90 +80,102 @@
       overflow: hidden;
     }
     .sidebar-brand {
-      padding: 20px 16px;
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-    }
-    .sidebar-brand h1 {
-      font-size: 16px;
-      font-weight: 700;
-      color: #fff;
+      padding: 20px 12px 12px;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
     }
-    .sidebar-brand h1 span.icon { font-size: 20px; }
+    .sidebar-brand-mark {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      background: #2B59D9;
+      color: #FFFFFF;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+    }
+    .sidebar-brand-copy { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+    .sidebar-brand h1 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #FFFFFF;
+      display: block;
+      white-space: nowrap;
+    }
     .sidebar-brand p {
-      font-size: 11px;
-      color: var(--sidebar-text);
-      margin-top: 4px;
+      font-size: 12px;
+      color: var(--side-ink-2);
+      margin-top: 2px;
     }
 
-    .sidebar-nav { flex: 1; padding: 12px 0; overflow-y: auto; }
+    .sidebar-nav { flex: 1; padding: 8px 12px 16px; overflow-y: auto; }
+    .nav-group { display: flex; flex-direction: column; gap: 2px; margin-bottom: 18px; }
+    .nav-group:last-child { margin-bottom: 0; }
     .nav-section-title {
-      padding: 14px 20px 6px;
+      padding: 0 10px 4px;
       font-size: 11px;
-      font-weight: 600;
-      color: var(--sidebar-text);
-      opacity: 0.55;
-      letter-spacing: 0.08em;
+      font-weight: 500;
+      color: var(--side-ink-2);
+      letter-spacing: 0.06em;
       user-select: none;
       white-space: nowrap;
     }
-    .nav-section-title:first-child { padding-top: 4px; }
     .sidebar-nav-item {
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 10px 20px;
-      color: var(--sidebar-text);
+      height: 36px;
+      padding: 0 10px;
+      border-radius: 7px;
+      color: var(--side-ink);
       cursor: pointer;
       font-size: 14px;
-      transition: all var(--transition);
-      border-left: 3px solid transparent;
+      line-height: 1.2;
+      transition: background var(--transition), color var(--transition);
       user-select: none;
     }
-    .sidebar-nav-item:hover {
-      background: var(--sidebar-hover);
-      color: #cbd5e1;
-    }
-    .sidebar-nav-item.active {
-      background: rgba(59,130,246,0.12);
-      color: var(--sidebar-text-active);
-      border-left-color: var(--sidebar-active);
-    }
-    .sidebar-nav-item .nav-icon { font-size: 18px; width: 24px; text-align: center; flex-shrink: 0; }
-    .sidebar-nav-item .nav-label { white-space: nowrap; }
+    .sidebar-nav-item:hover { background: var(--side-2); color: #FFFFFF; }
+    .sidebar-nav-item.active { background: var(--side-2); color: #FFFFFF; font-weight: 600; }
+    .sidebar-nav-item:focus-visible { outline: 2px solid var(--focus-ring-side); outline-offset: -2px; }
+    .sidebar-nav-item .nav-icon { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; color: currentColor; }
+    .sidebar-nav-item .nav-icon svg { width: 18px; height: 18px; }
+    .sidebar-nav-item.active .nav-icon { color: var(--focus-ring-side); }
+    .sidebar-nav-item .nav-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sidebar-nav-item .debug-badge { margin-left: auto; }
 
     .sidebar-footer {
-      padding: 12px 16px;
-      border-top: 1px solid rgba(255,255,255,0.08);
+      margin-top: auto;
+      padding: 12px 12px 0;
+      border-top: 1px solid var(--side-2);
     }
     .sidebar-version {
-      margin-top: 10px;
-      text-align: center;
-      color: #64748b;
-      font-size: 11px;
-      letter-spacing: 0.3px;
+      margin-top: 8px;
+      padding: 0 10px;
+      color: var(--side-ink-2);
+      font-size: 12px;
       user-select: text;
     }
     .sidebar-footer .logout-btn {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
       width: 100%;
-      padding: 8px 12px;
-      background: rgba(239,68,68,0.1);
-      border: 1px solid rgba(239,68,68,0.2);
-      border-radius: 6px;
-      color: #fca5a5;
+      height: 32px;
+      padding: 0 10px;
+      background: none;
+      border: 0;
+      border-radius: 7px;
+      color: var(--side-ink);
       cursor: pointer;
-      font-size: 13px;
-      transition: all var(--transition);
+      font: inherit;
+      font-size: 14px;
+      text-align: left;
+      transition: background var(--transition), color var(--transition);
     }
-    .sidebar-footer .logout-btn:hover {
-      background: rgba(239,68,68,0.2);
-      color: #fecaca;
-    }
+    .sidebar-footer .logout-btn:hover { background: var(--side-2); color: #FFFFFF; }
+    .sidebar-footer .logout-btn svg { width: 18px; height: 18px; flex: 0 0 auto; }
 
     /* ===== Main Content ===== */
     .main-wrapper {
@@ -157,40 +189,50 @@
     /* ===== Topbar ===== */
     .topbar {
       height: var(--topbar-height);
-      background: var(--topbar-bg);
-      border-bottom: 1px solid var(--topbar-border);
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 0 24px;
       flex-shrink: 0;
-      box-shadow: var(--shadow);
       z-index: 50;
     }
-    .topbar-left { display: flex; align-items: center; gap: 12px; }
-    .topbar-title { font-size: 16px; font-weight: 600; color: var(--text); }
-    .topbar-right { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-secondary); }
+    .topbar-left { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1 1 auto; }
+    .topbar-title { font-size: 18px; font-weight: 700; letter-spacing: 0.01em; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .topbar-right { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--ink-2); flex: 0 0 auto; }
     .topbar-right .user-badge {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       padding: 4px 10px;
-      background: var(--primary-light);
+      background: var(--accent-soft);
       border-radius: 20px;
       font-size: 12px;
-      color: var(--primary);
+      color: var(--accent);
       font-weight: 500;
     }
+    .user-badge svg { width: 15px; height: 15px; }
     .menu-toggle {
       display: none;
-      background: none;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      background: var(--surface);
       border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 6px 10px;
+      border-radius: 8px;
+      padding: 0;
       cursor: pointer;
-      font-size: 18px;
-      color: var(--text);
+      color: var(--ink);
     }
+    .menu-toggle svg { width: 18px; height: 18px; }
+    .theme-toggle { width: 34px; height: 34px; padding: 0; }
+    .theme-toggle svg { width: 16px; height: 16px; }
+    .theme-icon-sun { display: none; }
+    .theme-icon-moon { display: block; }
+    .app.dark .theme-icon-sun { display: block; }
+    .app.dark .theme-icon-moon { display: none; }
 
     /* ===== Content Area ===== */
     .content { flex: 1; overflow-y: auto; padding: 24px; }
@@ -265,9 +307,9 @@
     .panel-body.no-pad { padding: 0; }
 
     /* ===== Tables ===== */
-    table { width: 100%; border-collapse: collapse; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
     thead th {
-      background: #f8fafc;
+      background: var(--surface-2);
       font-size: 12px;
       font-weight: 600;
       color: var(--text-secondary);
@@ -286,18 +328,18 @@
     thead th.sorted-desc::after { content: "▼"; color: var(--primary); }
     tbody td {
       padding: 10px 16px;
-      border-bottom: 1px solid #f1f5f9;
+      border-bottom: 1px solid var(--line-2);
       font-size: 13px;
       vertical-align: middle;
     }
     tbody tr:last-child td { border-bottom: none; }
-    tbody tr:hover { background: #f8fafc; }
+    tbody tr:hover { background: var(--surface-2); }
     .empty-row td { text-align: center; color: var(--text-muted); padding: 32px 16px; }
     .key-mask {
-      font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       font-size: 12px;
       color: var(--text-secondary);
-      background: #f1f5f9;
+      background: var(--muted-soft);
       padding: 2px 6px;
       border-radius: 4px;
     }
@@ -309,8 +351,8 @@
       gap: 6px;
       padding: 7px 14px;
       border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #fff;
+      border-radius: 8px;
+      background: var(--surface);
       color: var(--text);
       font-size: 13px;
       cursor: pointer;
@@ -318,20 +360,26 @@
       white-space: nowrap;
       font-family: inherit;
     }
-    .btn:hover { border-color: #cbd5e1; background: #f8fafc; }
+    .btn:hover { border-color: var(--line); background: var(--surface-2); }
     .btn-primary {
       background: var(--primary);
-      color: #fff;
+      color: var(--accent-ink);
       border-color: var(--primary);
     }
     .btn-primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
     .btn-danger {
       background: var(--danger);
-      color: #fff;
+      color: var(--accent-ink);
       border-color: var(--danger);
     }
     .btn-danger:hover { background: var(--danger-hover); border-color: var(--danger-hover); }
     .btn-sm { padding: 4px 10px; font-size: 12px; height: 34px; }
+    .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+    .btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+    .modal-close:focus-visible,
+    .menu-toggle:focus-visible,
+    .theme-toggle:focus-visible,
+    .quota-expand-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
     .btn-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
     /* ===== Forms ===== */
@@ -350,15 +398,15 @@
       height: 34px;
       padding: 0 12px;
       border: 1px solid var(--line);
-      border-radius: 6px;
+      border-radius: 8px;
       font-size: 14px;
       font-family: inherit;
       color: var(--text);
-      background: #fff;
+      background: var(--surface);
       transition: border-color var(--transition);
       width: 100%;
     }
-    .form-control:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
+    .form-control:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--accent-soft); }
     select.form-control { appearance: auto; }
     button:disabled,
     button:disabled:hover,
@@ -367,15 +415,15 @@
     textarea:disabled,
     input.form-control[readonly],
     textarea.form-control[readonly] {
-      background: #eef2f7;
-      border-color: #cbd5e1;
-      color: #64748b;
+      background: var(--muted-soft);
+      border-color: var(--line);
+      color: var(--ink-3);
       opacity: 1;
       cursor: not-allowed;
     }
     .form-control:disabled:focus,
     input.form-control[readonly]:focus,
-    textarea.form-control[readonly]:focus { border-color: #cbd5e1; box-shadow: none; }
+    textarea.form-control[readonly]:focus { border-color: var(--line); box-shadow: none; }
 
     .form-row {
       display: flex;
@@ -422,12 +470,17 @@
     }
     .modal-header h3 { font-size: 16px; font-weight: 600; }
     .modal-close {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
       background: none;
       border: none;
       font-size: 20px;
       cursor: pointer;
       color: var(--text-muted);
-      padding: 4px;
+      padding: 0;
       line-height: 1;
     }
     .modal-close:hover { color: var(--text); }
@@ -461,10 +514,10 @@
     .pool-description-text { width: max-content; max-width: clamp(160px, 20vw, 320px); overflow-wrap: anywhere; }
     .pool-members { min-width: 200px; }
     .pool-member-list { display: flex; flex-wrap: wrap; gap: 4px; }
-    .pool-member-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+    .pool-member-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 12px; }
     .pool-member-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .pool-member-name { min-width: 0; overflow-wrap: anywhere; }
-    .pool-member-load { color: #64748b; font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+    .pool-member-load { color: var(--ink-3); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
 
     /* ===== Toast ===== */
     .toast-container {
@@ -480,12 +533,12 @@
       padding: 12px 20px;
       border-radius: 8px;
       font-size: 13px;
-      color: #fff;
+      color: var(--accent-ink);
       box-shadow: var(--shadow-md);
       animation: toastIn 0.3s ease;
       max-width: 380px;
     }
-    .toast.success { background: #16a34a; }
+    .toast.success { background: var(--ok); }
     .toast.error { background: var(--danger); }
     .toast.info { background: var(--primary); }
     @keyframes toastIn {
@@ -512,12 +565,12 @@
     .chart-bar {
       width: 22px;
       min-height: 2px;
-      background: linear-gradient(180deg, #60a5fa, var(--primary));
+      background: linear-gradient(180deg, var(--accent-soft), var(--primary));
       border-radius: 4px 4px 0 0;
       transition: height 0.3s ease;
       cursor: default;
     }
-    .chart-bar:hover { background: linear-gradient(180deg, #93c5fd, #2563eb); }
+    .chart-bar:hover { background: linear-gradient(180deg, var(--accent), var(--accent)); }
     .chart-label {
       font-size: 10px;
       color: var(--text-muted);
@@ -545,7 +598,7 @@
       top: 100%;
       left: 0;
       margin-top: 6px;
-      background: #fff;
+      background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 8px 10px;
@@ -564,7 +617,7 @@
       padding: 5px 12px;
       border: 1px solid var(--line);
       border-radius: 20px;
-      background: #fff;
+      background: var(--surface);
       color: var(--text-secondary);
       font-size: 12px;
       cursor: pointer;
@@ -574,7 +627,7 @@
     .time-range-btn:hover { border-color: var(--primary); color: var(--primary); }
     .time-range-btn.active {
       background: var(--primary);
-      color: #fff;
+      color: var(--accent-ink);
       border-color: var(--primary);
     }
 
@@ -607,6 +660,12 @@
       background: rgba(0,0,0,0.3);
       z-index: 99;
     }
+    @media (max-width: 600px) {
+      .topbar { padding: 0 12px; }
+      .topbar-right { gap: 6px; }
+      .topbar-right .user-badge { padding: 4px 8px; }
+      #userBadgeName, #changePasswordBtn .btn-label { display: none; }
+    }
     @media (max-width: 768px) {
       .sidebar {
         position: fixed;
@@ -628,8 +687,8 @@
     /* ===== Scrollbar ===== */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--ink-3); }
 
     /* ===== Quota Progress Bar ===== */
     .quota-bar-wrap {
@@ -640,7 +699,7 @@
     .quota-bar {
       flex: 1;
       height: 8px;
-      background: #e2e8f0;
+      background: var(--line);
       border-radius: 4px;
       overflow: hidden;
       min-width: 60px;
@@ -654,7 +713,7 @@
     .quota-bar-inner.q-ok { background: var(--success); }
     .quota-bar-inner.q-warn { background: var(--warning); }
     .quota-bar-inner.q-over { background: var(--danger); }
-    .quota-bar-inner.q-none { background: #cbd5e1; }
+    .quota-bar-inner.q-none { background: var(--line); }
     .quota-pct { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
     .quota-cell { min-width: 110px; }
 
@@ -687,7 +746,7 @@
     /* ===== Quota Summary Table ===== */
     .quota-summary-toolbar { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; padding:12px 16px; }
     .quota-person-cell { min-width: 150px; }
-    .quota-expand-btn { background:none; border:none; cursor:pointer; color:var(--text-muted); font-size:14px; padding:2px 6px; }
+    .quota-expand-btn { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; background:none; border:none; border-radius:6px; cursor:pointer; color:var(--text-muted); font-size:14px; padding:0; }
     .quota-expand-btn:hover { color: var(--primary); }
     .quota-expand-btn.open { color: var(--primary); }
     /* Usage tables share a two-line token slot without fixing or clipping row height. */
@@ -702,8 +761,8 @@
     .usage-token-detail { display: block; min-height: 16px; line-height: 16px; font-size: 11px; font-weight: 400; color: var(--text-secondary); }
     .usage-token-detail:empty { display: none; }
     .usage-tree-row > td:first-child { white-space: nowrap; }
-    .usage-tree-row.usage-group-row > td { background: #f8fafc; font-weight: 600; }
-    .usage-tree-row.usage-target-row > td { background: #fbfdff; }
+    .usage-tree-row.usage-group-row > td { background: var(--surface-2); font-weight: 600; }
+    .usage-tree-row.usage-target-row > td { background: var(--surface); }
     .usage-tree-row.usage-model-row > td:first-child { color: var(--text-secondary); }
     .usage-tree-indent-target { padding-left: 24px !important; }
     .usage-tree-indent-model { padding-left: 48px !important; }
@@ -715,18 +774,21 @@
     .usage-model-group-menu { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; max-height: 260px; overflow-y: auto; padding: 4px 0; background: var(--card); border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 6px 18px rgba(15,23,42,.14); }
     .usage-model-group-menu[hidden] { display: none; }
     .usage-model-group-option { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; font-size: 12px; color: var(--text); white-space: nowrap; }
-    .usage-model-group-option:hover { background: #f1f5f9; }
+    .usage-model-group-option:hover { background: var(--muted-soft); }
     .usage-model-group-option input { margin: 0; flex: 0 0 auto; }
-    .quota-detail-row > td { background:#f8fafc; padding:14px 16px; }
+    .quota-detail-row > td { background:var(--surface-2); padding:14px 16px; }
     .quota-detail-group { margin-top:10px; }
     .quota-detail-group h4 { font-size:12px; color:var(--text-secondary); margin-bottom:6px; font-weight:600; }
-    .quota-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; }
-    .quota-badge.ok { background:#dcfce7; color:#16a34a; }
-    .quota-badge.warn { background:#fef3c7; color:#b45309; }
-    .quota-badge.over { background:#fee2e2; color:#dc2626; }
-    .quota-badge.none { background:#f1f5f9; color:#64748b; }
-    .quota-badge.del { background:#e5e7eb; color:#4b5563; }
-    .quota-target-deleted { color:#dc2626; font-size:11px; margin-left:4px; }
+    .quota-badge { display:inline-block; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600; }
+    .quota-badge.ok { background:var(--ok-soft); color:var(--ok); }
+    .quota-badge.warn { background:var(--warn-soft); color:var(--warn); }
+    .quota-badge.over { background:var(--bad-soft); color:var(--bad); }
+    .quota-badge.none { background:var(--muted-soft); color:var(--ink-3); }
+    .quota-badge.del { background:var(--muted-soft); color:var(--ink-3); }
+    /* Endpoint badges carry Schema metadata colors in light mode; dark mode uses theme tokens. */
+    .ep-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:var(--ep-bg, var(--muted-soft)); color:var(--ep-fg, var(--ink-3)); }
+    .app.dark .ep-badge { background:var(--accent-soft); color:var(--accent); }
+    .quota-target-deleted { color:var(--bad); font-size:11px; margin-left:4px; }
 
     /* ===== Quota Edit Drawer ===== */
     .quota-drawer-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.4); display:none; z-index:200; }
@@ -747,7 +809,7 @@
     .quota-drawer-overlay.open .quota-drawer { transform: translateX(0); }
     .quota-drawer-body { padding: 20px; overflow-y:auto; flex:1; }
     .quota-drawer-body .form-group { margin-bottom: 14px; }
-    .quota-drawer-note { font-size:12px; color:var(--text-muted); background:#f8fafc; border-radius:6px; padding:8px 10px; margin-bottom:12px; }
+    .quota-drawer-note { font-size:12px; color:var(--text-muted); background:var(--surface-2); border-radius:6px; padding:8px 10px; margin-bottom:12px; }
     .quota-edit-selected-title { display:block; margin:16px 0 8px; font-size:12px; font-weight:600; }
     .quota-edit-group-header { display:flex; align-items:end; gap:16px; }
     .quota-edit-group-header label { display:block; margin-bottom:3px; font-size:12px; color:var(--text-secondary); }
@@ -761,11 +823,11 @@
     .device-code-display {
       font-size: 28px;
       font-weight: 700;
-      font-family: "SF Mono", "Consolas", monospace;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       letter-spacing: 4px;
       text-align: center;
       padding: 12px 16px;
-      background: #f8fafc;
+      background: var(--surface-2);
       border: 2px dashed var(--primary);
       border-radius: var(--radius);
       cursor: pointer;
@@ -785,24 +847,24 @@
     .model-cat-badge {
       display: inline-block;
       padding: 2px 8px;
-      border-radius: 10px;
+      border-radius: 6px;
       font-size: 11px;
       font-weight: 600;
     }
-    .model-cat-badge.cat-free     { background: #dcfce7; color: #16a34a; }
-    .model-cat-badge.cat-low      { background: #dbeafe; color: #2563eb; }
-    .model-cat-badge.cat-standard { background: #f1f5f9; color: #64748b; }
-    .model-cat-badge.cat-high     { background: #fee2e2; color: #dc2626; }
+    .model-cat-badge.cat-free     { background: var(--ok-soft); color: var(--ok); }
+    .model-cat-badge.cat-low      { background: var(--accent-soft); color: var(--accent); }
+    .model-cat-badge.cat-standard { background: var(--muted-soft); color: var(--ink-3); }
+    .model-cat-badge.cat-high     { background: var(--bad-soft); color: var(--bad); }
 
     /* ===== Debug Badge ===== */
     .debug-badge {
       display: inline-block;
       padding: 2px 6px;
-      border-radius: 4px;
+      border-radius: 6px;
       font-size: 10px;
       font-weight: 700;
-      background: #f59e0b;
-      color: #fff;
+      background: var(--warn-soft);
+      color: var(--warn);
       margin-left: 6px;
       vertical-align: middle;
     }
@@ -861,7 +923,7 @@
       display: flex;
       gap: 16px;
       padding: 12px 16px;
-      background: #f8fafc;
+      background: var(--surface-2);
       border-bottom: 1px solid var(--line);
       font-size: 13px;
       color: var(--text-secondary);
@@ -902,16 +964,17 @@
       color: var(--text-muted);
     }
     .trace-detail-item .value {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       font-size: 13px;
       color: var(--text);
       word-break: break-all;
     }
     .trace-body-preview {
-      background: #1e293b;
-      color: #e2e8f0;
+      background: var(--side);
+      color: var(--side-ink);
       padding: 12px;
       border-radius: 6px;
-      font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       font-size: 12px;
       line-height: 1.5;
       max-height: 300px;
@@ -935,7 +998,7 @@
       font-size: 14px;
       font-family: inherit;
       color: var(--text);
-      background: #fff;
+      background: var(--surface);
       transition: border-color var(--transition);
     }
     .model-mapping-row .upstream-input { flex: 2; }
@@ -944,15 +1007,15 @@
     .model-mapping-row .fallback-input:focus {
       outline: none;
       border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
+      box-shadow: 0 0 0 3px var(--accent-soft);
     }
     .model-mapping-row .btn-remove-row {
       flex: 0 0 auto;
       padding: 0.25rem 0.5rem;
       background: var(--danger);
-      color: white;
+      color: var(--accent-ink);
       border: none;
-      border-radius: 4px;
+      border-radius: 8px;
       cursor: pointer;
       font-size: 16px;
       line-height: 1;
@@ -967,7 +1030,7 @@
       left: 0;
       right: 0;
       z-index: 80;
-      background: #fff;
+      background: var(--surface);
       border: 1px solid var(--line);
       border-radius: 6px;
       max-height: 220px;
@@ -994,9 +1057,9 @@
       flex: 0 0 auto;
       padding: 4px 12px;
       background: var(--primary);
-      color: white;
+      color: var(--accent-ink);
       border: none;
-      border-radius: 4px;
+      border-radius: 8px;
       cursor: pointer;
       font-size: 13px;
       line-height: 1.4;
@@ -1007,13 +1070,13 @@
       margin-top: 0.5rem;
       padding: 0.5rem 1rem;
       background: var(--success);
-      color: white;
+      color: var(--accent-ink);
       border: none;
-      border-radius: 4px;
+      border-radius: 8px;
       cursor: pointer;
       font-size: 13px;
     }
-     .btn-add-row:hover { background: #16a34a; }
+     .btn-add-row:hover { background: var(--ok); }
 
      /* ===== Readonly Mode ===== */
      body.readonly-mode .readonly-hide { display: none !important; }
@@ -1021,11 +1084,11 @@
      .readonly-badge {
        display: inline-block;
        padding: 2px 8px;
-       border-radius: 4px;
+       border-radius: 6px;
        font-size: 11px;
        font-weight: 600;
-       background: #fef3c7;
-       color: #b45309;
+       background: var(--warn-soft);
+       color: var(--warn);
        margin-left: 8px;
        vertical-align: middle;
      }
@@ -1037,14 +1100,14 @@
      .quota-sync-panel { display:none; position:absolute; top:100%; left:0; right:0; min-width:320px; z-index:60; background:var(--card); border:1px solid var(--line); border-radius:6px; box-shadow:var(--shadow); max-height:min(380px, 60vh); overflow:auto; padding:6px; }
      .quota-sync-panel.open { display:block; }
      .quota-sync-option { display:flex; align-items:center; gap:7px; font-size:13px; padding:4px 6px; border-radius:4px; cursor:pointer; }
-     .quota-sync-option:hover { background:#f8fafc; }
+     .quota-sync-option:hover { background:var(--surface-2); }
      .quota-sync-option input { cursor:pointer; }
      .quota-sync-sub { color:var(--text-muted); font-size:12px; }
      .quota-detail { min-width:320px; font-size:12px; color:var(--text-secondary); }
      .quota-detail-scroll { overflow-x:auto; border:1px solid var(--line); border-radius:6px; background:var(--card); }
      .quota-detail-table { width:100%; border-collapse:collapse; white-space:nowrap; }
      .quota-detail-table th, .quota-detail-table td { padding:6px 10px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); text-align:right; }
-     .quota-detail-table th { background:#f8fafc; color:var(--text-secondary); font-size:11px; font-weight:600; }
+     .quota-detail-table th { background:var(--surface-2); color:var(--text-secondary); font-size:11px; font-weight:600; }
      .quota-detail-table thead th { text-align:center; }
      .quota-detail-table tbody th { text-align:left; min-width:100px; }
      .quota-detail-table tr > :last-child { border-right:none; }
@@ -1054,8 +1117,8 @@
      .quota-group-table { min-width:1080px; }
      .quota-group-table td { min-width:86px; }
      .quota-group-table td:nth-child(3n+2) { min-width:130px; }
-     .quota-detail-total > * { background:#f1f5f9; color:var(--text); font-weight:600; }
-       .quota-detail-total td { font-family:"SF Mono","Consolas",monospace; text-align:right; }
+     .quota-detail-total > * { background:var(--muted-soft); color:var(--text); font-weight:600; }
+       .quota-detail-total td { font-family:ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; text-align:right; }
 
        /* ===== Pricing Templates ===== */
        .pricing-table-wrap { overflow-x:auto; }
@@ -1069,10 +1132,10 @@
        .pricing-target-meta,
        .pricing-model-meta,
        .pricing-mode-note { display:block; margin-top:2px; color:var(--text-muted); font-size:11px; }
-       .pricing-count { display:inline-flex; min-width:28px; justify-content:center; padding:2px 8px; border-radius:999px; background:#eff6ff; color:#2563eb; font-weight:600; }
+       .pricing-count { display:inline-flex; min-width:28px; justify-content:center; padding:2px 8px; border-radius:999px; background:var(--accent-soft); color:var(--accent); font-weight:600; }
        .pricing-mode-summary { display:flex; align-items:center; gap:6px; }
        .pricing-mode-summary .pricing-mode-note { display:inline; margin-top:0; }
-       .pricing-detail-row > td { padding:0 !important; background:#f8fafc; }
+       .pricing-detail-row > td { padding:0 !important; background:var(--surface-2); }
        .pricing-detail { padding:14px 16px 16px; }
        .pricing-detail-list { display:grid; gap:10px; }
        .pricing-template-card { padding:14px; border:1px solid var(--line); border-radius:8px; background:var(--card); box-shadow:0 1px 2px rgba(15,23,42,.04); }
@@ -1082,15 +1145,15 @@
        .pricing-template-actions { flex:0 0 auto; }
        .pricing-section-label { margin:12px 0 7px; color:var(--text-secondary); font-size:11px; font-weight:600; }
        .pricing-rate-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
-       .pricing-rate-item { min-width:0; padding:8px 10px; border:1px solid #e5e7eb; border-radius:6px; background:#f8fafc; }
+       .pricing-rate-item { min-width:0; padding:8px 10px; border:1px solid var(--line-2); border-radius:6px; background:var(--surface-2); }
        .pricing-rate-label { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-muted); font-size:11px; }
-       .pricing-rate-value { display:block; margin-top:2px; color:var(--text); font-family:"SF Mono","Consolas",monospace; font-size:13px; font-weight:600; }
+       .pricing-rate-value { display:block; margin-top:2px; color:var(--text); font-family:ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; font-size:13px; font-weight:600; }
        .pricing-period-list { display:grid; gap:8px; }
-       .pricing-period-item { padding:10px; border:1px solid #e5e7eb; border-radius:6px; background:#fff; }
+       .pricing-period-item { padding:10px; border:1px solid var(--line-2); border-radius:6px; background:var(--surface); }
        .pricing-period-top { display:flex; justify-content:space-between; gap:12px; margin-bottom:8px; font-size:12px; }
        .pricing-period-days { color:var(--text); font-weight:600; }
-       .pricing-period-time { color:var(--text-secondary); font-family:"SF Mono","Consolas",monospace; white-space:nowrap; }
-       .pricing-empty-periods { padding:10px; border:1px dashed #cbd5e1; border-radius:6px; color:var(--text-muted); font-size:12px; }
+       .pricing-period-time { color:var(--text-secondary); font-family:ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; white-space:nowrap; }
+       .pricing-empty-periods { padding:10px; border:1px dashed var(--line); border-radius:6px; color:var(--text-muted); font-size:12px; }
        .pricing-modal { width:94%; max-width:760px; }
        .pricing-form-section { padding:14px 0; border-bottom:1px solid var(--line); }
        .pricing-form-section:first-child { padding-top:0; }
@@ -1098,8 +1161,8 @@
        .pricing-form-section-title { margin-bottom:10px; color:var(--text); font-size:13px; font-weight:600; }
        .pricing-form-section-hint,
        .pricing-help { color:var(--text-muted); font-size:11px; }
-       #ptSelectionHelp, #ptScopeNotice { display:block; margin-top:6px; font-size:12px; color:#475569; }
-       #ptScopeNotice.pricing-scope-error { color:#b91c1c; }
+       #ptSelectionHelp, #ptScopeNotice { display:block; margin-top:6px; font-size:12px; color:var(--ink-2); }
+       #ptScopeNotice.pricing-scope-error { color:var(--bad); }
        #ptTarget, #ptModel { display:none; }
        .pricing-choice-heading { display:flex; justify-content:space-between; gap:12px; align-items:baseline; margin-bottom:8px; }
        .pricing-choice-heading label { margin:0; font-size:13px; font-weight:600; }
@@ -1111,9 +1174,9 @@
        .pricing-choice-option { display:flex; gap:10px; align-items:flex-start; padding:10px 12px; margin:0; border-bottom:1px solid var(--line); cursor:pointer; font-size:12px; line-height:1.5; }
        .pricing-choice-option:last-child { border-bottom:none; }
        .pricing-choice-option[hidden] { display:none; }
-       .pricing-choice-option:has(input:checked) { background:#eff6ff; }
-       .pricing-choice-option:hover { background:#f1f5f9; }
-       .pricing-choice-option:has(input:focus-visible) { outline:2px solid var(--primary); outline-offset:-2px; }
+       .pricing-choice-option:has(input:checked) { background:var(--accent-soft); }
+       .pricing-choice-option:hover { background:var(--muted-soft); }
+       .pricing-choice-option:has(input:focus-visible) { outline:2px solid var(--focus-ring); outline-offset:-2px; }
        .pricing-choice-option:has(input:disabled) { cursor:default; color:var(--text-secondary); }
        .pricing-choice-option input { flex:0 0 auto; margin:3px 0 0; accent-color:var(--primary); }
        .pricing-choice-option span { min-width:0; overflow-wrap:anywhere; }
@@ -1133,7 +1196,7 @@
        .pricing-period-editor { display:grid; gap:10px; margin-top:10px; }
        .pricing-weekday-list { display:flex; flex-wrap:wrap; gap:4px 8px; margin-bottom:10px; }
        .pricing-period-editor .quota-group-card { margin-top:0; }
-       .quota-group-card { border:1px solid var(--line); border-radius:8px; padding:12px; margin-top:10px; background:#f8fafc; }
+       .quota-group-card { border:1px solid var(--line); border-radius:8px; padding:12px; margin-top:10px; background:var(--surface-2); }
       .quota-binding-row { display:grid; grid-template-columns:minmax(140px,1fr) minmax(180px,1.4fr) auto; gap:8px; margin-top:8px; align-items:center; }
       @media (max-width:768px) {
         .quota-binding-row { grid-template-columns:1fr; }
@@ -1176,16 +1239,16 @@
     .target-type-badge { display:inline-block; white-space:nowrap; }
     /* Informational tooltips never intercept input intended for the content below. */
     [role="tooltip"] { pointer-events:none; }
-    .target-model-hint { position:fixed; z-index:2000; max-width:min(420px, calc(100vw - 16px)); box-sizing:border-box; padding:8px 12px; border-radius:6px; background:#1e293b; color:#fff; box-shadow:0 4px 12px #0003; font-size:13px; line-height:20px; overflow-wrap:anywhere; max-height:calc(100vh - 16px); overflow:auto; }
-    .target-model-badge:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
-    .target-model-badge { display:block; border:0; font-family:inherit; text-align:left; cursor:pointer; min-width:0; max-width:100%; box-sizing:border-box; padding:2px 8px; border-radius:4px; background:var(--primary-light); color:var(--primary); font-size:12px; line-height:18px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .target-model-hint { position:fixed; z-index:2000; max-width:min(420px, calc(100vw - 16px)); box-sizing:border-box; padding:8px 12px; border-radius:6px; background:var(--side); color:var(--side-ink); box-shadow:0 4px 12px #0003; font-size:13px; line-height:20px; overflow-wrap:anywhere; max-height:calc(100vh - 16px); overflow:auto; }
+    .target-model-badge:focus-visible { outline:2px solid var(--focus-ring); outline-offset:2px; }
+    .target-model-badge { display:block; border:0; font-family:inherit; text-align:left; cursor:pointer; min-width:0; max-width:100%; box-sizing:border-box; padding:2px 8px; border-radius:6px; background:var(--primary-light); color:var(--primary); font-size:12px; line-height:18px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .targets-table .btn-group { flex-wrap:nowrap; }
     .targets-table td:nth-child(3) > span { white-space:nowrap; }
-    .target-toggle-track { position:relative; width:30px; height:18px; border-radius:9px; background:#94a3b8; }
-    .target-toggle-track::after { content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:white; }
-    .target-toggle[aria-checked="true"] .target-toggle-track { background:#16a34a; }
+    .target-toggle-track { position:relative; width:30px; height:18px; border-radius:9px; background:var(--ink-3); }
+    .target-toggle-track::after { content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:var(--surface); }
+    .target-toggle[aria-checked="true"] .target-toggle-track { background:var(--ok); }
     .target-toggle[aria-checked="true"] .target-toggle-track::after { left:14px; }
-    .target-toggle:focus-visible { outline:2px solid var(--primary); outline-offset:3px; border-radius:4px; }
+    .target-toggle:focus-visible { outline:2px solid var(--focus-ring); outline-offset:3px; border-radius:4px; }
     .target-toggle:disabled { cursor:not-allowed; opacity:0.7; }
     .client-target-list { display: flex; flex-direction: column; gap: 3px; min-width: 180px; }
     .client-target-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
@@ -1193,20 +1256,20 @@
       display: inline-block;
       max-width: 100%;
       overflow-wrap: anywhere;
-      background: #dbeafe;
-      color: #1d4ed8;
+      background: var(--accent-soft);
+      color: var(--accent);
       padding: 1px 6px;
-      border-radius: 4px;
+      border-radius: 6px;
       font-size: 11px;
     }
     .client-target-pool-tag {
       display: inline-block;
       max-width: 100%;
       overflow-wrap: anywhere;
-      background: #ede9fe;
-      color: #6d28d9;
+      background: var(--out-soft);
+      color: var(--out);
       padding: 1px 6px;
-      border-radius: 4px;
+      border-radius: 6px;
       font-size: 11px;
     }
     .pricing-modal .pricing-context-section > summary,
@@ -1219,17 +1282,18 @@
     .pricing-modal .pricing-context-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:10px; }
     .pricing-modal .pricing-context-rates { margin:8px 0; }
     .pricing-modal .pricing-context-section > summary:focus-visible,
-    .pricing-modal .pricing-context-rates > summary:focus-visible { outline:2px solid var(--primary); outline-offset:3px; }
+    .pricing-modal .pricing-context-rates > summary:focus-visible { outline:2px solid var(--focus-ring); outline-offset:3px; }
     .pricing-condition-summary { list-style:none; margin:8px 0; padding:0; }
     .pricing-condition-summary > li { padding:10px 0; }
 
     /* Homepage: live activity. Scoped to preserve every other management page. */
-    #page-overview { --activity-secondary:#526174; --activity-input:#2563eb; --activity-output:#087f74; --activity-concurrency:#355d9d; min-width:0; }
+    #page-overview { --activity-secondary:var(--ink-2); --activity-input:var(--accent); --activity-output:var(--out); --activity-concurrency:#355d9d; min-width:0; }
+    .app.dark #page-overview { --activity-concurrency:#8FA9FF; }
     #page-overview svg { fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; }
     #page-overview button, #page-overview input { font:inherit; }
     #page-overview button { cursor:pointer; }
     #page-overview [hidden] { display:none !important; }
-    #page-overview :focus-visible { outline:2px solid var(--primary-hover); outline-offset:3px; }
+    #page-overview :focus-visible { outline:2px solid var(--focus-ring); outline-offset:3px; }
     #page-overview ::selection { background:var(--primary-light); color:var(--text); }
     #page-overview .activity-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
     #page-overview h2 { font-size:24px; line-height:1.3; letter-spacing:-.02em; font-weight:650; }
@@ -1245,17 +1309,17 @@
     #page-overview .activity-metric strong { font-size:30px; line-height:1.2; font-weight:650; letter-spacing:-.025em; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
     #page-overview .activity-metric-unit { margin-left:7px; color:var(--activity-secondary); font-size:12px; white-space:nowrap; }
     #page-overview .activity-token-split { display:block; color:var(--activity-secondary); font-size:12px; margin-top:6px; font-variant-numeric:tabular-nums; }
-    #page-overview .activity-split-divider { display:inline-block; margin:0 10px; color:#64748b; }
-    #page-overview .activity-info { border:0; background:transparent; color:var(--activity-secondary); display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; border-radius:4px; vertical-align:middle; padding:4px; flex-shrink:0; }
+    #page-overview .activity-split-divider { display:inline-block; margin:0 10px; color:var(--ink-3); }
+    #page-overview .activity-info { border:0; background:transparent; color:var(--activity-secondary); display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; border-radius:4px; vertical-align:middle; padding:4px; flex-shrink:0; }
     #page-overview .activity-info:hover, #page-overview .activity-info:focus-visible { color:var(--primary-hover); background:var(--primary-light); }
     #page-overview .activity-info svg { width:16px; height:16px; }
     #page-overview .activity-status { min-height:32px; padding:6px 0 8px; font-size:12px; color:var(--activity-secondary); }
-    #page-overview .activity-status[data-state=error], #page-overview .activity-history-error { color:#b42318; }
-    #page-overview .activity-status[data-state=partial], #page-overview .activity-history-status { color:#85540b; }
+    #page-overview .activity-status[data-state=error], #page-overview .activity-history-error { color:var(--bad); }
+    #page-overview .activity-status[data-state=partial], #page-overview .activity-history-status { color:var(--warn); }
     #page-overview .activity-charts { min-width:0; }
     #page-overview .activity-scope { display:flex; align-items:center; gap:10px; flex-wrap:wrap; min-height:30px; margin-bottom:12px; font-size:12px; color:var(--activity-secondary); }
     #page-overview .activity-scope strong { font-size:14px; color:var(--text); max-width:100%; overflow-wrap:anywhere; }
-    #page-overview #activityScopeStatus { color:#85540b; }
+    #page-overview #activityScopeStatus { color:var(--warn); }
     #page-overview .activity-chart-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:18px; }
     #page-overview .activity-chart { min-width:0; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 16px 12px; }
     #page-overview figcaption { display:flex; align-items:center; justify-content:space-between; gap:8px; }
@@ -1272,40 +1336,40 @@
     #page-overview .activity-input { color:var(--activity-input); stroke:var(--activity-input); }
     #page-overview .activity-output { color:var(--activity-output); stroke:var(--activity-output); }
     #page-overview .activity-line.activity-output { stroke-dasharray:5 3; }
-    #page-overview .activity-cursor { stroke:#64748b; stroke-dasharray:3 3; stroke-width:1; }
+    #page-overview .activity-cursor { stroke:var(--ink-3); stroke-dasharray:3 3; stroke-width:1; }
     #page-overview .activity-point { fill:var(--card); stroke-width:2.2; }
     #page-overview .activity-chart-readout { min-height:34px; font-size:12px; font-variant-numeric:tabular-nums; color:var(--activity-secondary); margin-top:5px; }
     #page-overview .activity-clients { margin-top:24px; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
     #page-overview .activity-table-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px 20px 12px; }
     #page-overview .activity-table-heading h3 { display:flex; align-items:center; gap:4px; }
     #page-overview #activityClientCount { display:block; margin-top:2px; font-size:12px; color:var(--activity-secondary); }
-    #page-overview .activity-search { display:flex; align-items:center; gap:6px; border:1px solid #b9c5d3; border-radius:6px; padding:6px 9px; color:var(--activity-secondary); width:220px; }
+    #page-overview .activity-search { display:flex; align-items:center; gap:6px; border:1px solid var(--line); border-radius:6px; padding:6px 9px; color:var(--activity-secondary); width:220px; }
     #page-overview .activity-search svg { width:16px; height:16px; }
-    #page-overview .activity-search:focus-within { outline:2px solid var(--primary-hover); outline-offset:2px; }
+    #page-overview .activity-search:focus-within { outline:2px solid var(--focus-ring); outline-offset:2px; }
     #page-overview .activity-search input { width:100%; min-width:0; padding:0; border:0; background:transparent; color:var(--text); outline:none; caret-color:var(--primary-hover); }
     #page-overview .activity-search input::placeholder { color:var(--activity-secondary); }
-    #page-overview .activity-table-wrap { overflow:auto; scrollbar-color:#b9c5d3 var(--bg); scrollbar-width:thin; }
+    #page-overview .activity-table-wrap { overflow:auto; scrollbar-color:var(--line) var(--bg); scrollbar-width:thin; }
     #page-overview .activity-client-table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
     #page-overview .activity-client-table th:first-child { width:28%; }
     #page-overview .activity-client-table th, #page-overview .activity-client-table td { padding:10px 16px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
-    #page-overview .activity-client-table th { background:#f8fafc; font-size:12px; font-weight:500; }
+    #page-overview .activity-client-table th { background:var(--surface-2); font-size:12px; font-weight:500; }
     #page-overview .activity-client-table th:first-child, #page-overview .activity-client-table td:first-child { text-align:left; }
     #page-overview .activity-client-table td:first-child { white-space:normal; }
     #page-overview [data-activity-sort] { display:inline-flex; align-items:center; gap:5px; color:var(--activity-secondary); border:0; background:transparent; padding:2px 0; white-space:nowrap; }
-    #page-overview [data-activity-sort] svg { width:14px; height:14px; color:#64748b; }
+    #page-overview [data-activity-sort] svg { width:14px; height:14px; color:var(--ink-3); }
     #page-overview [data-activity-sort]:hover, #page-overview [data-activity-sort][data-direction=asc], #page-overview [data-activity-sort][data-direction=desc] { color:var(--primary-hover); }
     #page-overview .activity-client-table tbody tr { cursor:pointer; }
-    #page-overview .activity-client-table tbody tr:hover { background:#f8fafc; }
-    #page-overview .activity-client-table tbody tr[data-selected=true] { background:#eff6ff; }
+    #page-overview .activity-client-table tbody tr:hover { background:var(--surface-2); }
+    #page-overview .activity-client-table tbody tr[data-selected=true] { background:var(--accent-soft); }
     #page-overview .activity-client-table tbody tr[data-selected=true] .activity-client-button { color:var(--primary-hover); }
     #page-overview .activity-client-button { border:0; background:transparent; color:var(--text); padding:3px 0; font-weight:600; text-align:left; overflow-wrap:anywhere; }
     #page-overview .activity-client-button:hover { text-decoration:underline; text-underline-offset:3px; }
-    #page-overview .activity-unconfigured { display:inline-block; margin-left:7px; padding:1px 5px; font-size:11px; font-weight:400; color:var(--activity-secondary); background:#edf1f5; border-radius:3px; }
+    #page-overview .activity-unconfigured { display:inline-block; margin-left:7px; padding:1px 5px; font-size:11px; font-weight:400; color:var(--activity-secondary); background:var(--muted-soft); border-radius:3px; }
     #page-overview .activity-client-table tr:last-child td { border-bottom:0; }
     #page-overview .activity-client-table td[colspan] { text-align:center; padding:25px 12px; color:var(--activity-secondary); cursor:default; }
-    #page-overview .activity-history { margin-top:24px; border-top:1px solid #cbd5e1; }
+    #page-overview .activity-history { margin-top:24px; border-top:1px solid var(--line); }
     #page-overview .activity-history summary { display:flex; align-items:center; gap:14px; cursor:pointer; padding:16px 0; list-style:none; font-size:13px; font-weight:600; }
-    #page-overview .activity-history summary .activity-history-state { color:#b42318; font-weight:500; width:auto; }
+    #page-overview .activity-history summary .activity-history-state { color:var(--bad); font-weight:500; width:auto; }
     #page-overview .activity-history summary::-webkit-details-marker { display:none; }
     #page-overview .activity-history summary span { font-size:12px; color:var(--activity-secondary); font-weight:400; }
     #page-overview .activity-history summary svg { margin-left:auto; width:18px; height:18px; }
@@ -1320,7 +1384,7 @@
     #page-overview .activity-history-table th, #page-overview .activity-history-table td { padding:9px 16px; text-align:right; border-bottom:1px solid var(--line); }
     #page-overview .activity-history-table th:first-child { text-align:left; }
     #page-overview .activity-history-table th { font-weight:500; color:var(--activity-secondary); }
-    #page-overview .activity-tooltip { position:fixed; z-index:300; max-width:min(380px,calc(100vw - 24px)); padding:12px 14px; border-radius:8px; background:var(--sidebar-bg); color:#f8fafc; box-shadow:0 6px 18px rgba(15,23,42,.2); font-size:12px; line-height:1.65; pointer-events:none; overflow-wrap:anywhere; }
+    #page-overview .activity-tooltip { position:fixed; z-index:300; max-width:min(380px,calc(100vw - 24px)); padding:12px 14px; border-radius:8px; background:var(--side); color:var(--side-ink); box-shadow:0 6px 18px rgba(15,23,42,.2); font-size:12px; line-height:1.65; pointer-events:none; overflow-wrap:anywhere; }
     @media(max-width:1050px) {
       #page-overview .activity-metric { padding:0 14px; }
       #page-overview .activity-metric-unit { display:block; margin:5px 0 0; }
@@ -1350,8 +1414,8 @@
       #page-overview .activity-client-table { min-width:580px; }
       #page-overview .activity-client-table th:first-child { width:145px; }
       #page-overview .activity-client-table th:first-child, #page-overview .activity-client-table td:first-child { position:sticky; left:0; z-index:1; background:var(--card); box-shadow:1px 0 0 var(--line); }
-      #page-overview .activity-client-table th:first-child { background:#f8fafc; }
-      #page-overview .activity-client-table tbody tr[data-selected=true] td:first-child { background:#eff6ff; }
+      #page-overview .activity-client-table th:first-child { background:var(--surface-2); }
+      #page-overview .activity-client-table tbody tr[data-selected=true] td:first-child { background:var(--accent-soft); }
       #page-overview .activity-history summary { gap:8px; flex-wrap:wrap; }
       #page-overview .activity-history summary span { width:calc(100% - 30px); order:2; }
       #page-overview .activity-history-metrics { gap:16px 24px; }
@@ -1360,7 +1424,7 @@
   </style>
 </head>
 <body>
-  <div id="adminBootStatus" role="alert" style="padding:12px;background:#fef3c7;color:#92400e;">管理元数据：<span id="adminBootMessage">加载中…</span><button class="btn btn-sm" id="adminBootRetry" type="button" hidden>重试</button></div>
+  <div id="adminBootStatus" role="alert" style="padding:12px;background:var(--warn-soft);color:var(--warn);">管理元数据：<span id="adminBootMessage">加载中…</span><button class="btn btn-sm" id="adminBootRetry" type="button" hidden>重试</button></div>
   <div class="layout">
     <!-- Sidebar Overlay (mobile) -->
     <div class="sidebar-overlay" id="sidebarOverlay"></div>
@@ -1368,66 +1432,80 @@
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">
-        <h1><span class="icon">⚡</span> LLMs Proxy</h1>
-        <p style="margin-left: 36px;">运维管理台</p>
+        <div class="sidebar-brand-mark" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
+        </div>
+        <div class="sidebar-brand-copy">
+          <h1>LLMs Proxy</h1>
+          <p>运维管理台</p>
+        </div>
       </div>
-      <nav class="sidebar-nav">
-        <div class="nav-section-title">首页</div>
-        <div class="sidebar-nav-item active" data-page="overview">
-          <span class="nav-icon">📊</span>
-          <span class="nav-label">总览</span>
+      <nav class="sidebar-nav" aria-label="主导航">
+        <div class="nav-group">
+          <div class="nav-section-title">首页</div>
+          <div class="sidebar-nav-item active" data-page="overview" role="link" tabindex="0" aria-current="page">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"></rect><rect x="14" y="3" width="7" height="5" rx="1.5"></rect><rect x="14" y="12" width="7" height="9" rx="1.5"></rect><rect x="3" y="16" width="7" height="5" rx="1.5"></rect></svg></span>
+            <span class="nav-label">总览</span>
+          </div>
         </div>
-        <div class="nav-section-title">访问权限</div>
-        <div class="sidebar-nav-item" data-page="targets">
-          <span class="nav-icon">🎯</span>
-          <span class="nav-label">目标管理</span>
+        <div class="nav-group">
+          <div class="nav-section-title">上游与接入</div>
+          <div class="sidebar-nav-item" data-page="targets" role="link" tabindex="0">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"></rect><rect x="3" y="13" width="18" height="7" rx="2"></rect><path d="M7 7.5h.01M7 16.5h.01"></path></svg></span>
+            <span class="nav-label">目标与部署池</span>
+          </div>
+          <div class="sidebar-nav-item" data-page="clients" role="link" tabindex="0">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"></circle><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"></path><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18.5 14.8c1.6.8 2.6 2.5 3 5.2"></path></svg></span>
+            <span class="nav-label">客户端</span>
+          </div>
         </div>
-        <div class="sidebar-nav-item" data-page="clients">
-          <span class="nav-icon">👥</span>
-          <span class="nav-label">客户端管理</span>
+        <div class="nav-group">
+          <div class="nav-section-title">计费与额度</div>
+          <div class="sidebar-nav-item" data-page="model-costs" role="link" tabindex="0">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12V4.5A1.5 1.5 0 0 1 4.5 3H12l9 9-9 9-9-9z"></path><circle cx="7.5" cy="7.5" r="1.5"></circle></svg></span>
+            <span class="nav-label">模型计费</span>
+          </div>
+          <div class="sidebar-nav-item" data-page="quota" role="link" tabindex="0">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18a8 8 0 1 1 16 0"></path><path d="M12 18l4-6"></path></svg></span>
+            <span class="nav-label">额度管理</span>
+          </div>
+          <div class="sidebar-nav-item" data-page="model-catalog" role="link" tabindex="0">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2z"></path><path d="M5 18a2 2 0 0 1 2-2h12"></path></svg></span>
+            <span class="nav-label">模型目录</span>
+          </div>
         </div>
-        <div class="nav-section-title">计费方案</div>
-        <div class="sidebar-nav-item" data-page="model-costs">
-          <span class="nav-icon">💰</span>
-          <span class="nav-label">模型计费</span>
+        <div class="nav-group">
+          <div class="nav-section-title">观测</div>
+          <div class="sidebar-nav-item" data-page="usage" role="link" tabindex="0">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"></path></svg></span>
+            <span class="nav-label">消费统计</span>
+          </div>
+          <div class="sidebar-nav-item" data-page="audit" role="link" tabindex="0">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"></path></svg></span>
+            <span class="nav-label">审计日志</span>
+          </div>
+          <div class="sidebar-nav-item" data-page="trace" id="nav-trace" style="display:none;" role="link" tabindex="0">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.3-4.3"></path></svg></span>
+            <span class="nav-label">请求记录</span>
+            <span class="debug-badge">DEBUG</span>
+          </div>
         </div>
-        <div class="sidebar-nav-item" data-page="quota">
-          <span class="nav-icon">⏱</span>
-          <span class="nav-label">额度管理</span>
-        </div>
-        <!-- 模型目录：入口隐藏，页面与功能保留（直达 hash/代码调用仍可用） -->
-        <div class="sidebar-nav-item" data-page="model-catalog">
-          <span class="nav-icon">📦</span>
-          <span class="nav-label">模型目录</span>
-        </div>
-        <div class="nav-section-title">消费观测</div>
-        <div class="sidebar-nav-item" data-page="usage">
-          <span class="nav-icon">📈</span>
-          <span class="nav-label">消费统计</span>
-        </div>
-        <div class="sidebar-nav-item" data-page="audit">
-          <span class="nav-icon">📋</span>
-          <span class="nav-label">审计日志</span>
-        </div>
-        <div class="nav-section-title" id="nav-section-system" style="display:none;">系统</div>
-        <div class="sidebar-nav-item" data-page="users" id="nav-users" style="display:none;">
-          <span class="nav-icon">🛡️</span>
-          <span class="nav-label">用户管理</span>
-        </div>
-        <div class="sidebar-nav-item" data-page="trace" id="nav-trace" style="display:none;">
-          <span class="nav-icon">🔍</span>
-          <span class="nav-label">请求记录</span>
-          <span class="debug-badge">DEBUG</span>
+        <div class="nav-group">
+          <div class="nav-section-title" id="nav-section-system" style="display:none;">系统</div>
+          <div class="sidebar-nav-item" data-page="users" id="nav-users" style="display:none;" role="link" tabindex="0">
+            <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"></path></svg></span>
+            <span class="nav-label">后台用户</span>
+          </div>
         </div>
       </nav>
       <div class="sidebar-footer">
         <form method="POST" action="/logout" id="logoutForm">
           <button type="submit" class="logout-btn">
-            <span>🚪</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"></path></svg>
             <span>退出登录</span>
           </button>
         </form>
-        <div class="sidebar-version">版本 __APP_VERSION__</div>
+        <div class="sidebar-version mono">版本 __APP_VERSION__</div>
       </div>
     </aside>
 
@@ -1436,18 +1514,27 @@
       <!-- Topbar -->
       <header class="topbar">
         <div class="topbar-left">
-          <button class="menu-toggle" id="menuToggle">☰</button>
+          <button class="menu-toggle" id="menuToggle" type="button" aria-label="打开主导航" aria-controls="sidebar" aria-expanded="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
+          </button>
           <span class="topbar-title" id="topbarTitle">总览</span>
         </div>
         <div class="topbar-right">
-          <span class="user-badge" id="userBadge">👤 管理员</span>
+          <button class="btn btn-sm theme-toggle" id="themeToggle" type="button" aria-label="切换到暗色模式" aria-pressed="false" title="切换到暗色模式">
+            <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+            <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"></path></svg>
+          </button>
+          <span class="user-badge" id="userBadge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4 21a8 8 0 0 1 16 0"></path></svg><span id="userBadgeName">管理员</span></span>
           <span class="readonly-badge" id="readonlyBadge" style="display:none;">只读</span>
-          <button class="btn btn-sm" id="changePasswordBtn" title="修改密码" style="font-size:12px;padding:4px 10px;">🔑 改密</button>
+          <button class="btn btn-sm" id="changePasswordBtn" title="修改密码" aria-label="修改密码" style="font-size:12px;padding:4px 10px;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"></circle><path d="M11 12l8-8M16 4l3 3M14 6l3 3"></path></svg>
+            <span class="btn-label">修改密码</span>
+          </button>
         </div>
       </header>
 
       <!-- Content -->
-      <div class="content">
+      <main class="content" id="mainContent">
 
         <!-- ========== Page: 总览 ========== -->
         <div class="page active" id="page-overview" aria-busy="false">
@@ -1504,9 +1591,9 @@
             <div class="panel-header">
               <h3>目标 (Endpoint) 管理</h3>
               <div class="btn-group">
-                <button class="btn" id="refreshTargetsBtn">🔄 刷新</button>
-                <button class="btn readonly-hide" id="openPoolsModalBtn">🧩 部署池管理</button>
-                <button class="btn btn-primary readonly-hide" id="newTargetBtn">➕ 新增目标</button>
+                <button class="btn" id="refreshTargetsBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+                <button class="btn readonly-hide" id="openPoolsModalBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"></rect><rect x="3" y="13" width="18" height="7" rx="2"></rect><path d="M7 7.5h.01M7 16.5h.01"></path></svg>部署池管理</button>
+                <button class="btn btn-primary readonly-hide" id="newTargetBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增目标</button>
               </div>
             </div>
             <div class="panel-body no-pad table-wrap">
@@ -1543,8 +1630,8 @@
             <div class="panel-header">
               <h3>客户端管理</h3>
               <div class="btn-group">
-                <button class="btn" id="refreshClientsBtn">🔄 刷新</button>
-                <button class="btn btn-primary readonly-hide" id="newClientBtn">➕ 新增客户端</button>
+                <button class="btn" id="refreshClientsBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+                <button class="btn btn-primary readonly-hide" id="newClientBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增客户端</button>
               </div>
             </div>
             <div class="panel-body billing-basis-note" id="clientsBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;"><strong>计费口径：</strong>费用 = 上游官方 token 用量 × 适用的价格（目标模板、全局模板或目录默认价，均无则按 0 计），系统不估算 token。</div>
@@ -1638,11 +1725,11 @@
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start;">
               <div class="panel">
                 <div class="panel-header"><h3>职级可用额度倍率</h3><button class="btn btn-primary readonly-hide" id="newJobLevelBtn">新增职级</button></div>
-                <div class="panel-body no-pad"><table><thead id="jobLevelTableHead"></thead><tbody id="jobLevelsBody"><tr class="empty-row"><td colspan="5">加载中...</td></tr></tbody></table></div>
+                <div class="panel-body no-pad table-wrap"><table><thead id="jobLevelTableHead"></thead><tbody id="jobLevelsBody"><tr class="empty-row"><td colspan="5">加载中...</td></tr></tbody></table></div>
               </div>
               <div class="panel">
                 <div class="panel-header"><h3>项目组</h3><button class="btn btn-primary readonly-hide" id="newProjectGroupBtn">新增项目组</button></div>
-                <div class="panel-body no-pad"><table><thead><tr><th>项目组</th><th>操作</th></tr></thead><tbody id="projectGroupsBody"><tr class="empty-row"><td colspan="2">加载中...</td></tr></tbody></table></div>
+                <div class="panel-body no-pad table-wrap"><table><thead><tr><th>项目组</th><th>操作</th></tr></thead><tbody id="projectGroupsBody"><tr class="empty-row"><td colspan="2">加载中...</td></tr></tbody></table></div>
               </div>
             </div>
           </div>
@@ -1655,8 +1742,8 @@
               <h3>模型计费</h3>
               <div class="btn-group">
                 <select class="form-control" id="mcTargetFilter" style="width:auto;font-size:13px;padding:4px 8px;"><option value="">全部目标</option></select>
-                <button class="btn" id="refreshModelCostsBtn">🔄 刷新</button>
-                <button class="btn btn-primary readonly-hide" id="newModelCostBtn">➕ 新增模板</button>
+                <button class="btn" id="refreshModelCostsBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+                <button class="btn btn-primary readonly-hide" id="newModelCostBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增模板</button>
               </div>
             </div>
             <div class="panel-body billing-basis-note" id="pricingBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;"><strong>计费口径：</strong>费用 = 上游官方 token 用量 × 适用的价格（目标模板、全局模板或目录默认价，均无则按 0 计），系统不估算 token。</div>
@@ -1819,9 +1906,9 @@
           <div class="panel">
             <div class="panel-header">
               <h3>审计日志</h3>
-              <button class="btn" id="refreshAuditBtn">🔄 刷新</button>
+              <button class="btn" id="refreshAuditBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
             </div>
-            <div class="panel-body no-pad">
+            <div class="panel-body no-pad table-wrap">
               <table>
                 <thead>
                   <tr>
@@ -1861,12 +1948,13 @@
                   <option value="5xx">5xx 服务端错误</option>
                 </select>
                 <input type="number" class="form-control" id="traceLimit" value="50" min="1" max="5000" style="width:80px;" title="显示条数">
-                <button class="btn" id="searchTraceBtn">🔍 查询</button>
-                <button class="btn" id="refreshTraceBtn">🔄 刷新</button>
+                <button class="btn" id="searchTraceBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.3-4.3"></path></svg>查询</button>
+                <button class="btn" id="refreshTraceBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
               </div>
             </div>
             <div class="panel-body no-pad">
               <div class="trace-stats" id="traceStats"></div>
+              <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
@@ -1885,6 +1973,7 @@
                   <tr class="empty-row"><td colspan="9">加载中...</td></tr>
                 </tbody>
               </table>
+              </div>
               <div style="text-align:center;padding:10px;">
                 <button class="btn" id="traceLoadMore" style="display:none;">加载更早的记录</button>
               </div>
@@ -1902,7 +1991,7 @@
             <div class="modal" style="max-width:900px;">
               <div class="modal-header">
                 <h3>请求详情</h3>
-                <button class="modal-close" onclick="closeTraceDetail()">&times;</button>
+                <button type="button" class="modal-close" onclick="closeTraceDetail()" aria-label="关闭">&times;</button>
               </div>
               <div class="modal-body" id="traceDetailBody">
                 <div class="loading-overlay"><span class="loading-spinner"></span> 加载中...</div>
@@ -1923,10 +2012,10 @@
                 </select>
                 <!-- 关键词搜索 -->
                 <input type="text" class="form-control" id="catalogSearch" placeholder="搜索模型名..." style="width:200px;">
-                <button class="btn" id="refreshCatalogBtn">🔄 刷新</button>
+                <button class="btn" id="refreshCatalogBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
               </div>
             </div>
-            <div class="panel-body no-pad">
+            <div class="panel-body no-pad table-wrap">
               <table id="catalogTable">
                 <thead>
                   <tr>
@@ -1964,11 +2053,11 @@
             <div class="panel-header">
               <h3>用户管理</h3>
               <div class="btn-group">
-                <button class="btn" id="refreshUsersBtn">🔄 刷新</button>
-                <button class="btn btn-primary" id="newUserBtn">➕ 新增用户</button>
+                <button class="btn" id="refreshUsersBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+                <button class="btn btn-primary" id="newUserBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增用户</button>
               </div>
             </div>
-            <div class="panel-body no-pad">
+            <div class="panel-body no-pad table-wrap">
               <table>
                 <thead>
                   <tr>
@@ -1987,7 +2076,7 @@
           </div>
         </div>
 
-      </div>
+      </main>
     </div>
   </div>
 
@@ -1996,7 +2085,7 @@
     <div class="modal" style="max-width:690px;">
       <div class="modal-header">
         <h3 id="clientModalTitle">新增客户端</h3>
-        <button class="modal-close" data-close="clientModal">&times;</button>
+        <button type="button" class="modal-close" data-close="clientModal" aria-label="关闭">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
@@ -2038,7 +2127,7 @@
     <div class="modal pricing-modal">
       <div class="modal-header">
         <h3 id="modelCostModalTitle">新增模型计费</h3>
-        <button class="modal-close" data-close="modelCostModal">&times;</button>
+        <button type="button" class="modal-close" data-close="modelCostModal" aria-label="关闭">&times;</button>
       </div>
       <div class="modal-body">
         <div class="pricing-form-section">
@@ -2146,7 +2235,7 @@
 
   <div class="modal-overlay" id="modelGroupModal">
     <div class="modal">
-      <div class="modal-header"><h3 id="modelGroupModalTitle">新建模型组</h3><button class="modal-close" data-close="modelGroupModal">&times;</button></div>
+      <div class="modal-header"><h3 id="modelGroupModalTitle">新建模型组</h3><button type="button" class="modal-close" data-close="modelGroupModal" aria-label="关闭">&times;</button></div>
       <div class="modal-body">
         <div class="form-group"><label>模型组唯一标识</label><input class="form-control readonly-disable" id="modelGroupName" required></div>
         <div class="form-group"><label>扣费折算系数（模型原价 × 此系数；0 = 不计消耗、额度不限）</label><input class="form-control readonly-disable" id="modelGroupCoefficient" type="number" min="0" step="0.01" value="1" required></div>
@@ -2159,7 +2248,7 @@
 
   <div class="modal-overlay" id="dictModal">
     <div class="modal">
-      <div class="modal-header"><h3 id="dictModalTitle">新增选项</h3><button class="modal-close" data-close="dictModal">&times;</button></div>
+      <div class="modal-header"><h3 id="dictModalTitle">新增选项</h3><button type="button" class="modal-close" data-close="dictModal" aria-label="关闭">&times;</button></div>
       <div class="modal-body">
         <div class="form-group"><label id="dictModalLabel">名称</label><input class="form-control" id="dictEntryName" required></div>
       </div>
@@ -2172,7 +2261,7 @@
     <div class="quota-drawer">
       <div class="modal-header">
         <h3 id="quotaEditDrawerTitle">编辑额度</h3>
-        <button class="modal-close" data-close="quotaEditDrawer">&times;</button>
+        <button type="button" class="modal-close" data-close="quotaEditDrawer" aria-label="关闭">&times;</button>
       </div>
       <div class="quota-drawer-body">
         <p id="quotaEditDrawerInfo" style="font-size:12px;color:var(--text-muted);margin-bottom:12px;"></p>
@@ -2200,7 +2289,7 @@
   <!-- ===== Job Level Modal（结构化职级：三系数） ===== -->
   <div class="modal-overlay" id="jobLevelModal">
     <div class="modal" style="max-width:480px;">
-      <div class="modal-header"><h3 id="jobLevelModalTitle">新增职级</h3><button class="modal-close" data-close="jobLevelModal">&times;</button></div>
+      <div class="modal-header"><h3 id="jobLevelModalTitle">新增职级</h3><button type="button" class="modal-close" data-close="jobLevelModal" aria-label="关闭">&times;</button></div>
       <div class="modal-body">
         <div class="form-group"><label>职级名称</label><input class="form-control" id="jobLevelName" placeholder="例如：L5" required></div>
         <div id="jobLevelDimensions" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;"></div>
@@ -2215,7 +2304,7 @@
     <div class="modal" style="max-width: 720px;">
       <div class="modal-header">
         <h3>确认操作</h3>
-        <button class="modal-close" data-close="confirmModal">&times;</button>
+        <button type="button" class="modal-close" data-close="confirmModal" aria-label="关闭">&times;</button>
       </div>
       <div class="modal-body">
         <p id="confirmMessage">确认执行此操作？</p>
@@ -2233,28 +2322,28 @@
     <div class="modal" style="max-width: 720px;">
       <div class="modal-header">
         <h3 id="targetModalTitle">新增目标</h3>
-        <button class="modal-close" data-close="targetModal">&times;</button>
+        <button type="button" class="modal-close" data-close="targetModal" aria-label="关闭">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label>名称 <span style="color:#ef4444">*</span></label>
+          <label>名称 <span style="color:var(--bad)">*</span></label>
           <input class="form-control" id="tgtName" placeholder="例如: OpenAI Official">
         </div>
         <div class="form-group">
-          <label>类型 <span style="color:#ef4444">*</span></label>
+          <label>类型 <span style="color:var(--bad)">*</span></label>
           <select class="form-control endpoint-type-select" id="tgtType">
           </select><small id="tgtCapabilities" style="color:var(--text-muted);display:block;margin-top:4px;"></small>
         </div>
         <div class="form-group">
-          <label>Endpoint URL <span style="color:#ef4444">*</span></label>
+          <label>Endpoint URL <span style="color:var(--bad)">*</span></label>
           <input class="form-control" id="tgtEndpoint" placeholder="https://api.openai.com">
           <small id="tgtEndpointHint" style="color:var(--text-muted);font-size:12px;display:block;margin-top:4px;"></small>
         </div>
         <div class="form-group" id="tgtApiKeysGroup">
-          <label>API Keys <span style="color:#ef4444">*</span></label>
+          <label>API Keys <span style="color:var(--bad)">*</span></label>
           <div id="keyCardList" style="display:none;margin-bottom:8px;"></div>
           <div style="display:flex;gap:8px;">
-            <input class="form-control" id="tgtNewKeyInput" placeholder="sk-..." style="font-family:monospace;font-size:12px;flex:1;">
+            <input class="form-control" id="tgtNewKeyInput" placeholder="sk-..." style="font-family:ui-monospace, SF Mono, Menlo, Consolas, monospace;font-size:12px;flex:1;">
             <button class="btn btn-sm readonly-hide" id="addKeyBtn" type="button">+ 添加</button>
           </div>
           <small style="color:var(--text-muted)">按顺序消费（集中流量最大化单 Key 缓存命中），耗尽自动切换到下一个</small>
@@ -2364,13 +2453,13 @@
     <div class="modal">
       <div class="modal-header">
         <h3>部署池管理</h3>
-        <button class="modal-close" data-close="poolsModal">&times;</button>
+        <button type="button" class="modal-close" data-close="poolsModal" aria-label="关闭">&times;</button>
       </div>
       <div class="modal-body">
         <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px;">部署池是路由构件：目标归属某池后，客户端授权该池即授权其全部成员节点；暂停/删除池影响转发候选。</p>
         <div class="btn-group" style="margin-bottom:12px;">
-          <button class="btn btn-sm" id="refreshPoolsBtn">🔄 刷新</button>
-          <button class="btn btn-sm btn-primary readonly-hide" id="newPoolBtn">➕ 新增池</button>
+          <button class="btn btn-sm" id="refreshPoolsBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+          <button class="btn btn-sm btn-primary readonly-hide" id="newPoolBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增池</button>
         </div>
         <div class="table-wrap">
           <table class="pools-table">
@@ -2397,11 +2486,11 @@
     <div class="modal">
       <div class="modal-header">
         <h3 id="poolModalTitle">新增部署池</h3>
-        <button class="modal-close" data-close="poolModal">&times;</button>
+        <button type="button" class="modal-close" data-close="poolModal" aria-label="关闭">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label for="poolName">池名称 <span style="color:#ef4444">*</span></label>
+          <label for="poolName">池名称 <span style="color:var(--bad)">*</span></label>
           <input class="form-control" id="poolName" placeholder="例如: prod-pool">
           <small style="color:var(--text-muted)">保留填写的大小写。创建后可调整显示大小写，内部标识和已有成员引用保持不变。</small>
         </div>
@@ -2427,7 +2516,7 @@
     <div class="modal" style="max-width: 720px;">
       <div class="modal-header">
         <h3>修改密码</h3>
-        <button class="modal-close" data-close="changePasswordModal">&times;</button>
+        <button type="button" class="modal-close" data-close="changePasswordModal" aria-label="关闭">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
@@ -2455,7 +2544,7 @@
     <div class="modal" style="max-width: 480px;">
       <div class="modal-header">
         <h3 id="userModalTitle">新增用户</h3>
-        <button class="modal-close" data-close="userModal">&times;</button>
+        <button type="button" class="modal-close" data-close="userModal" aria-label="关闭">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">

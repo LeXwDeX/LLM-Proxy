@@ -122,7 +122,7 @@ AdminApp.register("clients", function (app) {
               "<div class='client-target-line client-target-pool'>" +
                 c.allowed_pools
                   .map(function (pn) {
-                    return "<span class='client-target-pool-tag'>🧩 " + esc(poolDisplayName(pn)) + "</span>";
+                    return "<span class='client-target-pool-tag'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='3' y='4' width='18' height='7' rx='2'></rect><rect x='3' y='13' width='18' height='7' rx='2'></rect><path d='M7 7.5h.01M7 16.5h.01'></path></svg> " + esc(poolDisplayName(pn)) + "</span>";
                   })
                   .join("") +
                 "</div>",
@@ -345,7 +345,7 @@ AdminApp.register("clients", function (app) {
     tag.style.cssText =
       "display:inline-block;padding:4px 12px;border-radius:6px;font-size:12px;cursor:pointer;transition:all 0.15s ease;user-select:none;" +
       (selected
-        ? "background:var(--primary);color:#fff;border:1px solid var(--primary);"
+        ? "background:var(--primary);color:var(--accent-ink);border:1px solid var(--primary);"
         : "background:var(--bg);color:var(--text-secondary);border:1px solid var(--card-border);");
   }
   function getSelectedClientTargets() {

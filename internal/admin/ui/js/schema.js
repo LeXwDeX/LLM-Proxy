@@ -24,13 +24,23 @@ AdminApp.register("schema", function (app) {
     var m = epMeta(code);
     return m ? m.short_label : code || "";
   }
+  // Only pass literal colors from Schema through; anything else falls back to tokens.
+  function epColor(value, fallback) {
+    var color = String(value || "").trim();
+    return /^(#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|(?:rgb|rgba|hsl|hsla)\([0-9.,%\s\/]+\)|[a-zA-Z]+)$/.test(
+      color,
+    )
+      ? color
+      : fallback;
+  }
   function epBadgeStyle(code) {
     var m = epMeta(code);
-    if (m)
-      return (
-        "background:" + m.badge_background + ";color:" + m.badge_foreground
-      );
-    return "background:#f1f5f9;color:#64748b";
+    return (
+      "--ep-bg:" +
+      epColor(m && m.badge_background, "var(--muted-soft)") +
+      ";--ep-fg:" +
+      epColor(m && m.badge_foreground, "var(--ink-3)")
+    );
   }
 
   // A failed or partial schema must never turn form fields into empty options.

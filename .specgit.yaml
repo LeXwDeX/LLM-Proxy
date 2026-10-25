@@ -1,0 +1,26 @@
+version: 2
+remote: origin
+provider: github
+target: dev
+language: zh
+validation:
+  titles: false
+  labels: off
+  bodies: false
+init_policy:
+  required_checks: []
+tags: []
+templates:
+  issue:
+    source: builtin
+  pr:
+    source: builtin
+agent:
+  native_auto_merge: false
+  close_issues_after_merge: true
+observation:
+  poll_seconds: 15
+  max_wait_seconds: 1800
+  notify:
+  - attention
+  - completed

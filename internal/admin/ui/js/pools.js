@@ -42,12 +42,12 @@ AdminApp.register("pools", function (app) {
           ? state.runtime[String(t.name || "").toLowerCase()]
           : null;
         var dotColors = {
-          ready: "#16a34a",
-          muted: "#d97706",
-          "half-open": "#c2410c",
-          offline: "#94a3b8",
+          ready: "var(--ok)",
+          muted: "var(--warn)",
+          "half-open": "var(--out)",
+          offline: "var(--ink-3)",
         };
-        var dot = "#94a3b8";
+        var dot = "var(--ink-3)";
         var tip = esc(t.name);
         if (rt) {
           dot = dotColors[rt.phase] || dot;
@@ -128,8 +128,8 @@ AdminApp.register("pools", function (app) {
       .map(function (p) {
         var members = poolMemberChips(p.name);
         var pauseBadge = p.paused
-          ? "<span style='background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:4px;font-size:12px;'>已暂停（成员等效暂停）</span>"
-          : "<span style='background:#dcfce7;color:#16a34a;padding:2px 8px;border-radius:4px;font-size:12px;'>运行中</span>";
+          ? "<span class='quota-badge over'>已暂停（成员等效暂停）</span>"
+          : "<span class='quota-badge ok'>运行中</span>";
         var pauseButton = p.paused
           ? "<button class='btn btn-sm readonly-hide' data-resume-pool='" +
             esc(p.name) +

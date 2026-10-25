@@ -175,7 +175,7 @@ AdminApp.register("quota", function (app) {
     }
     if (status.job_level_missing) {
       html +=
-        "<div class='quota-detail-group'><h4>职级</h4><div style='padding:6px 0;color:#ef4444;font-size:12px;'>未绑定职级：未配置额度，请求将被 429 拒绝。请在「编辑额度」中绑定职级。</div></div>";
+        "<div class='quota-detail-group'><h4>职级</h4><div style='padding:6px 0;color:var(--bad);font-size:12px;'>未绑定职级：未配置额度，请求将被 429 拒绝。请在「编辑额度」中绑定职级。</div></div>";
     } else if (status.job_level) {
       var level = jobLevelByName(status.job_level);
       html +=
@@ -1027,6 +1027,7 @@ AdminApp.register("quota", function (app) {
               groups = s.groups || {},
               st = entry.status;
             var expanded = !!state.quotaExpanded[c.name];
+            var detailId = "quota-detail-" + encodeURIComponent(c.name);
             var usage30 = (state.clientUsage30d || {})[c.name] || {};
             var tok30 = quotaTotalTok(usage30),
               cost30 = Number(usage30.estimated_cost || 0);
@@ -1074,6 +1075,10 @@ AdminApp.register("quota", function (app) {
               (expanded ? " open" : "") +
               "' data-expand-quota='" +
               esc(c.name) +
+              "' aria-label='展开/收起明细' aria-expanded='" +
+              (expanded ? "true" : "false") +
+              "' aria-controls='" +
+              esc(detailId) +
               "' title='展开/收起明细'>" +
               (expanded ? "▼" : "▶") +
               "</button></td>" +
@@ -1108,7 +1113,9 @@ AdminApp.register("quota", function (app) {
               "</td></tr>";
             if (expanded)
               row +=
-                "<tr class='quota-detail-row' data-quota-detail='" +
+                "<tr class='quota-detail-row' id='" +
+                esc(detailId) +
+                "' data-quota-detail='" +
                 esc(c.name) +
                 "'><td colspan='" +
                 (quotaDimensions.length + 7) +

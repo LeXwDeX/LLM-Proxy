@@ -22,19 +22,53 @@ AdminApp.register("navigation", function (app) {
   state.currentPage = "overview";
   var pageTitles = {
     overview: "总览",
-    targets: "目标管理",
-    clients: "客户端管理",
+    targets: "目标与部署池",
+    clients: "客户端",
     "model-costs": "模型计费",
     usage: "消费统计",
     quota: "额度管理",
     audit: "审计日志",
-    users: "用户管理",
+    trace: "请求记录",
+    users: "后台用户",
     "model-catalog": "模型目录",
   };
+  var mobileNavQuery =
+    typeof window.matchMedia === "function"
+      ? window.matchMedia("(max-width: 768px)")
+      : null;
+  function isMobileNav() {
+    if (mobileNavQuery) return mobileNavQuery.matches;
+    return window.innerWidth <= 768;
+  }
+  function setSidebarOpen(open) {
+    var sidebar = document.getElementById("sidebar");
+    sidebar.classList.toggle("open", open);
+    document.getElementById("sidebarOverlay").classList.toggle("open", open);
+    var toggle = document.getElementById("menuToggle");
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      toggle.setAttribute("aria-label", open ? "关闭主导航" : "打开主导航");
+    }
+    /* A closed mobile drawer stays off-canvas; strip it from the tab order too. */
+    var isolated = isMobileNav() && !open;
+    var hadFocus =
+      isolated &&
+      typeof sidebar.contains === "function" &&
+      sidebar.contains(document.activeElement);
+    sidebar.inert = isolated;
+    sidebar.setAttribute("aria-hidden", isolated ? "true" : "false");
+    if (hadFocus && toggle) toggle.focus();
+    if (open && isMobileNav()) {
+      var firstNav = sidebar.querySelector(".sidebar-nav-item");
+      if (firstNav) firstNav.focus();
+    }
+  }
   function switchPage(page) {
     state.currentPage = page;
     document.querySelectorAll(".sidebar-nav-item").forEach(function (n) {
-      n.classList.toggle("active", n.dataset.page === page);
+      var active = n.dataset.page === page;
+      n.classList.toggle("active", active);
+      n.setAttribute("aria-current", active ? "page" : "false");
     });
     document.querySelectorAll(".page").forEach(function (p) {
       p.classList.toggle("active", p.id === "page-" + page);
@@ -42,8 +76,7 @@ AdminApp.register("navigation", function (app) {
     document.getElementById("topbarTitle").textContent =
       pageTitles[page] || page;
     /* Close sidebar on mobile */
-    document.getElementById("sidebar").classList.remove("open");
-    document.getElementById("sidebarOverlay").classList.remove("open");
+    setSidebarOpen(false);
     /* Manage overview auto-refresh */
     if (page === "overview") {
       startOverviewAutoRefresh();
@@ -54,22 +87,44 @@ AdminApp.register("navigation", function (app) {
     loadPageData(page);
   }
   document.querySelectorAll(".sidebar-nav-item").forEach(function (item) {
-    item.addEventListener("click", function () {
+    function activate() {
       switchPage(item.dataset.page);
+    }
+    item.addEventListener("click", activate);
+    item.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activate();
+      }
     });
   });
 
   /* Mobile menu */
   document.getElementById("menuToggle").addEventListener("click", function () {
-    document.getElementById("sidebar").classList.toggle("open");
-    document.getElementById("sidebarOverlay").classList.toggle("open");
+    setSidebarOpen(
+      !document.getElementById("sidebar").classList.contains("open"),
+    );
   });
   document
     .getElementById("sidebarOverlay")
     .addEventListener("click", function () {
-      document.getElementById("sidebar").classList.remove("open");
-      document.getElementById("sidebarOverlay").classList.remove("open");
+      setSidebarOpen(false);
     });
+  document.addEventListener("keydown", function (event) {
+    if (
+      event.key === "Escape" &&
+      isMobileNav() &&
+      document.getElementById("sidebar").classList.contains("open")
+    ) {
+      setSidebarOpen(false);
+    }
+  });
+  if (mobileNavQuery && typeof mobileNavQuery.addEventListener === "function") {
+    mobileNavQuery.addEventListener("change", function () {
+      setSidebarOpen(document.getElementById("sidebar").classList.contains("open"));
+    });
+  }
+  setSidebarOpen(false);
 
   /* ===== Page Data Loader ===== */
   function loadPageData(page) {
