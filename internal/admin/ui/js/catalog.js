@@ -98,7 +98,7 @@ AdminApp.register("catalog", function (app) {
     // 渠道徽章：颜色与标签均从 endpoint_type 元数据派生（单一信息源）。
     function epBadge(ep) {
       return (
-        "<span style='display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;" +
+        "<span class='ep-badge' style='" +
         epBadgeStyle(ep) +
         "'>" +
         esc(epDisplayName(ep) || ep) +

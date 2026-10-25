@@ -785,6 +785,9 @@
     .quota-badge.over { background:var(--bad-soft); color:var(--bad); }
     .quota-badge.none { background:var(--muted-soft); color:var(--ink-3); }
     .quota-badge.del { background:var(--muted-soft); color:var(--ink-3); }
+    /* Endpoint badges carry Schema metadata colors in light mode; dark mode uses theme tokens. */
+    .ep-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:var(--ep-bg, var(--muted-soft)); color:var(--ep-fg, var(--ink-3)); }
+    .app.dark .ep-badge { background:var(--accent-soft); color:var(--accent); }
     .quota-target-deleted { color:var(--bad); font-size:11px; margin-left:4px; }
 
     /* ===== Quota Edit Drawer ===== */

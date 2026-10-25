@@ -235,6 +235,82 @@ func TestUIBadgesUseThemeTokens(t *testing.T) {
 	}
 }
 
+func TestUIEndpointBadgesUseThemeTokensInDarkMode(t *testing.T) {
+	schema := adminUIJSSources()["ui/js/schema.js"]
+	styleFn := regexp.MustCompile(`(?s)function epBadgeStyle\(code\) \{.*?\n  \}`).FindString(schema)
+	if styleFn == "" {
+		t.Fatal("schema.js 缺少 epBadgeStyle")
+	}
+	for _, want := range []string{"--ep-bg:", "--ep-fg:", "badge_background", "badge_foreground", "var(--muted-soft)", "var(--ink-3)"} {
+		if !strings.Contains(styleFn, want) {
+			t.Errorf("epBadgeStyle 缺少 %q", want)
+		}
+	}
+	for _, banned := range []string{"background:", "color:"} {
+		if strings.Contains(styleFn, banned) {
+			t.Errorf("epBadgeStyle 不得输出内联 %s，主题由 CSS class 决定", banned)
+		}
+	}
+
+	catalog := adminUIJSSources()["ui/js/catalog.js"]
+	badgeFn := regexp.MustCompile(`(?s)function epBadge\(ep\) \{.*?\n    \}`).FindString(catalog)
+	if badgeFn == "" {
+		t.Fatal("catalog.js 缺少 epBadge")
+	}
+	if !strings.Contains(badgeFn, "class='ep-badge'") {
+		t.Error("epBadge 必须输出稳定的 ep-badge class")
+	}
+	for _, banned := range []string{"background:", "color:"} {
+		if strings.Contains(badgeFn, banned) {
+			t.Errorf("epBadge 不得输出内联 %s", banned)
+		}
+	}
+
+	light := uiCSSBlock(t, ".ep-badge")
+	if !strings.Contains(light, "var(--ep-bg") || !strings.Contains(light, "var(--ep-fg") {
+		t.Error(".ep-badge 必须使用 --ep-bg/--ep-fg 并保留 token 回退")
+	}
+	dark := uiCSSBlock(t, ".app.dark .ep-badge")
+	if !strings.Contains(dark, "background:var(--accent-soft)") || !strings.Contains(dark, "color:var(--accent)") {
+		t.Error(".app.dark .ep-badge 必须用 --accent-soft/--accent 覆盖元数据颜色")
+	}
+	if regexp.MustCompile(`#[0-9a-fA-F]{3,8}\b`).MatchString(dark) {
+		t.Error(".app.dark .ep-badge 不得硬编码颜色")
+	}
+}
+
+func TestUIExpansionButtonsExposeAriaState(t *testing.T) {
+	for _, name := range []string{"quota.js", "usage.js", "pricing.js"} {
+		src := adminUIJSSources()["ui/js/"+name]
+		idx := strings.Index(src, "quota-expand-btn")
+		if idx < 0 {
+			t.Fatalf("%s 缺少 quota-expand-btn 生成逻辑", name)
+		}
+		end := strings.Index(src[idx:], "</button>")
+		if end < 0 {
+			t.Fatalf("%s 展开按钮缺少结束标签", name)
+		}
+		button := src[idx : idx+end]
+		for _, want := range []string{"aria-label='展开/收起明细'", "aria-expanded='", `(expanded ? "true" : "false")`} {
+			if !strings.Contains(button, want) {
+				t.Errorf("%s 展开按钮缺少 %s", name, want)
+			}
+		}
+	}
+	for _, name := range []string{"quota.js", "pricing.js"} {
+		source := adminUIJSSources()["ui/js/"+name]
+		idx := strings.Index(source, "quota-expand-btn")
+		end := strings.Index(source[idx:], "</button>")
+		if !strings.Contains(source[idx:idx+end], "aria-controls='") {
+			t.Errorf("%s 展开按钮缺少 aria-controls", name)
+		}
+	}
+	quotaSrc := adminUIJSSources()["ui/js/quota.js"]
+	if !strings.Contains(quotaSrc, "quota-detail-row' id='") || !strings.Contains(quotaSrc, "esc(detailId)") {
+		t.Error("quota 明细行必须用与 aria-controls 相同的 detailId")
+	}
+}
+
 func TestUIThemePreferenceContract(t *testing.T) {
 	core := adminUIJSSources()["ui/js/core.js"]
 	for _, want := range []string{"localStorage", `classList.toggle("dark"`, "aria-pressed", "themeToggle"} {
