@@ -603,6 +603,45 @@ test("hidden overview aborts metrics and aggregate and reloads them on return", 
   assert.equal(pending.length, 2);
 });
 
+test("completed metrics and aggregate refetch after leaving and returning instead of hitting the cache", async () => {
+  const h = harness();
+  h.setOverview({
+    client_count: 1,
+    targets: [{Name: "healthy", Phase: "ready", TotalKeys: 2, ActiveKeys: 2, RateLimitedKeys: 0}],
+    usage_summary: {},
+    recent_audit: [],
+  });
+  h.setMetrics(completeMetrics({requests: {total: 7}}));
+  h.setAggregate({
+    totals: {requests: 1},
+    by_client: [{key: "c1", requests: 1, input_tokens: 2, output_tokens: 1, estimated_cost: 0.5}],
+    by_model: [{key: "m1", requests: 1, input_tokens: 2, output_tokens: 1, estimated_cost: 0.5}],
+  });
+  await h.module.loadOverview();
+  const metricsCalls = () => h.calls.filter(c => c.url.endsWith("/admin/metrics")).length;
+  const aggregateCalls = () => h.calls.filter(c => c.url.includes("usage/aggregate")).length;
+  const metricsBefore = metricsCalls();
+  const aggregateBefore = aggregateCalls();
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  assert.equal(h.get("topClientsStatus").dataset.state, "ready");
+
+  h.doc.hidden = true;
+  h.module.stopOverviewAutoRefresh();
+  h.doc.hidden = false;
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.equal(h.get("topClientsStatus").dataset.state, "error");
+
+  h.module.startOverviewAutoRefresh();
+  await h.module.loadOverview();
+  assert.ok(metricsCalls() > metricsBefore, "metrics request must be sent again");
+  assert.ok(aggregateCalls() > aggregateBefore, "aggregate request must be sent again");
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  assert.equal(h.get("chainStatus").textContent, "链路数据已加载");
+  assert.equal(h.get("topClientsStatus").dataset.state, "ready");
+  assert.equal(h.get("topModelsStatus").dataset.state, "ready");
+  h.module.stopOverviewAutoRefresh();
+});
+
 test("range input card labels base input tokens without cache or tool usage", () => {
   const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
   const card = html.match(/<article class="overview-card"><span([^>]*)>([^<]+)<\/span><strong id="ovRangeInputTokens">/);

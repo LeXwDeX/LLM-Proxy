@@ -206,12 +206,14 @@ AdminApp.register("overview", function (app) {
     timer = null;
     if (activityController) activityController.abort();
     if (historyController) { historyController.abort(); historyFetchedAt = 0; }
-    if (metricsController) { metricsController.abort(); metricsFetchedAt = 0; }
-    if (aggregateController) { aggregateController.abort(); aggregateFetchedAt = 0; }
+    if (metricsController) metricsController.abort();
+    if (aggregateController) aggregateController.abort();
     activityController = historyController = metricsController = aggregateController = null;
     activityFlight = historyFlight = metricsFlight = aggregateFlight = null;
     metricsSnapshot = null;
     aggregateSnapshot = null;
+    metricsFetchedAt = 0;
+    aggregateFetchedAt = 0;
     aggregateError = "";
     aggregateLoading = false;
     renderTop();
