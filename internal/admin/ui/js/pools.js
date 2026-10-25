@@ -94,24 +94,29 @@ AdminApp.register("pools", function (app) {
   }
   async function loadPools() {
     try {
-      var fetches = [api("/admin/data/pools"), fetchSchedulingRuntime()];
-      // 成员数按 targets 汇总，缺失时一并拉取。
-      if (!state.targets || !state.targets.length) {
-        fetches.push(
-          api("/admin/data/targets").catch(function () {
-            return { targets: [] };
-          }),
-        );
-      }
-      var results = await Promise.all(fetches);
+      // 成员 chips 按 targets 汇总；每次刷新都重新拉取，失败时整体报错，
+      // 不能把未知成员关系渲染成"无成员"。
+      var results = await Promise.all([
+        api("/admin/data/pools"),
+        fetchSchedulingRuntime(),
+        api("/admin/data/targets"),
+      ]);
       state.pools = Array.isArray(results[0].pools) ? results[0].pools : [];
-      if (results[2] && Array.isArray(results[2].targets)) {
+      if (Array.isArray(results[2].targets)) {
         state.targets = results[2].targets;
       }
       renderPools();
     } catch (e) {
+      // Stale rows must not read as the current roster.
+      renderPoolsLoadError(e.message);
       toast("加载部署池失败: " + e.message, "error");
     }
+  }
+  function renderPoolsLoadError(message) {
+    document.getElementById("poolsTableBody").innerHTML =
+      "<tr class='empty-row'><td colspan='5'>加载失败: " +
+      esc(message) +
+      "。请点击「刷新」重试。</td></tr>";
   }
   function renderPools() {
     var tb = document.getElementById("poolsTableBody");

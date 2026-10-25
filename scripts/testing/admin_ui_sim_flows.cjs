@@ -71,6 +71,52 @@ async function confirmModal(page) {
   await page.eval(`__sim.click("#confirmOkBtn")`);
 }
 
+// adminAPI runs an authenticated admin data call from the page, simulating
+// another operator changing state outside this browser's forms.
+async function adminAPI(page, path, { method = "GET", body } = {}) {
+  const init = { method, headers: { "X-Requested-With": "XMLHttpRequest" } };
+  if (body !== undefined) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  return page.eval(`fetch(${js(path)}, ${js(init)}).then(async (r) => {
+    if (!r.ok) throw new Error(${js(`${method} ${path}`)} + " HTTP " + r.status + ": " + (await r.text()));
+    return r.json();
+  })`);
+}
+
+async function waitPoolMembers(page, pool, want, timeoutMs = 10000) {
+  await page.waitFor(`(() => {
+    const row = document.querySelector('[data-edit-pool=${js(pool)}]')?.closest("tr");
+    if (!row) return false;
+    const names = [...row.querySelectorAll(".pool-member-name")].map((el) => el.textContent.trim());
+    const want = ${js(want)};
+    return names.length === want.length && names.every((name, i) => name === want[i]);
+  })()`, { what: `pool ${pool} members ${want.join(",") || "(none)"}`, timeoutMs });
+}
+
+// interceptTargetsFailure makes the member roster request fail so the page's
+// explicit error path is exercised instead of rendering unknown as empty.
+async function interceptTargetsFailure(page) {
+  const handler = (msg) => {
+    if (msg.method !== "Fetch.requestPaused") return;
+    page.send("Fetch.fulfillRequest", {
+      requestId: msg.params.requestId,
+      responseCode: 503,
+      responseHeaders: [{ name: "Content-Type", value: "application/json" }],
+      body: Buffer.from(JSON.stringify({ error: "simulated targets failure" })).toString("base64"),
+    }).catch(() => {});
+  };
+  page.listeners.push(handler);
+  await page.send("Fetch.enable", { patterns: [{ urlPattern: "*/admin/data/targets*" }] });
+  return {
+    async stop() {
+      page.listeners = page.listeners.filter((listener) => listener !== handler);
+      await page.send("Fetch.disable");
+    },
+  };
+}
+
 // refreshOverview clicks the visible refresh control only when enabled and
 // waits for the activity load it starts to finish. It does not sleep for a
 // fixed interval.
@@ -788,6 +834,80 @@ const list = [
       assert.ok(!pools.includes("sim-ui-empty-pool"), "temporary pool was deleted");
       assert.ok(pools.includes(S.pool), "member pool was not deleted");
       await page.eval(`__sim.click("#targetsMainTab")`);
+    },
+  },
+  {
+    // Another operator can change membership while this page is off-screen or
+    // idle. Re-entering and refreshing must both reload the roster, and a
+    // failed roster fetch must read as an error, never as "无成员".
+    name: "pool-refresh-tracks-external-membership",
+    async run({ page }) {
+      const tempPool = "sim-ui-refresh-pool";
+      const targetPath = "/admin/data/targets/" + encodeURIComponent(S.tgtOpenAI);
+      let intercept = null;
+      let failure = null;
+      try {
+        await goto(page, "targets");
+        await page.eval(`__sim.click("#targetsPoolsTab")`);
+        await page.waitFor(`!document.getElementById("targetsPoolsPanel").hidden`, { what: "pools tab active" });
+        await waitPoolMembers(page, S.pool, [S.tgtOpenAI]);
+
+        // Leave with the pools tab selected, then change state via the API.
+        await page.eval(`__sim.click('.sidebar-nav-item[data-page="overview"]')`);
+        await page.waitFor(`document.getElementById("page-overview").classList.contains("active")`,
+          { what: "overview page active" });
+        await adminAPI(page, "/admin/data/pools", { method: "POST", body: { name: tempPool } });
+        await adminAPI(page, targetPath, { method: "PUT", body: { pool: tempPool } });
+        await page.eval(`__sim.click('.sidebar-nav-item[data-page="targets"]')`);
+        await page.waitFor(`document.getElementById("page-targets").classList.contains("active") && !document.getElementById("targetsPoolsPanel").hidden`,
+          { what: "returned to visible pools tab" });
+        await waitPoolMembers(page, tempPool, [S.tgtOpenAI]);
+        assert.equal(
+          await page.eval(`document.querySelector('[data-edit-pool=${js(S.pool)}]')?.closest("tr").querySelector(".pool-members").textContent.trim()`),
+          "无成员",
+          "returning reloads the old pool as empty",
+        );
+
+        // A visible tab must refresh membership instead of reusing its cache.
+        await adminAPI(page, targetPath, { method: "PUT", body: { pool: S.pool } });
+        await page.eval(`__sim.click("#refreshPoolsBtn")`);
+        await waitPoolMembers(page, S.pool, [S.tgtOpenAI]);
+        await waitPoolMembers(page, tempPool, []);
+
+        // Unknown membership is a failure, not an empty pool.
+        intercept = await interceptTargetsFailure(page);
+        await page.eval(`__sim.click("#refreshPoolsBtn")`);
+        await page.waitFor(`__sim.text("#poolsTableBody").includes("加载失败: simulated targets failure")`,
+          { what: "explicit pool load failure", timeoutMs: 10000 });
+        const table = await page.eval(`__sim.text("#poolsTableBody")`);
+        assert.doesNotMatch(table, /无成员/, "failed member fetch is not rendered as empty");
+        assert.match(table, /请点击「刷新」重试/, "failure offers retry guidance");
+      } catch (err) {
+        failure = err;
+      }
+      try {
+        if (intercept) await intercept.stop();
+        await adminAPI(page, targetPath, { method: "PUT", body: { pool: S.pool } });
+        await adminAPI(page, "/admin/data/pools/" + encodeURIComponent(tempPool), { method: "DELETE" })
+          .catch((err) => {
+            if (!/HTTP 404/.test(err.message)) throw err;
+          });
+        if (!(await page.eval(`document.getElementById("page-targets").classList.contains("active")`))) {
+          await goto(page, "targets");
+        }
+        if (await page.eval(`document.getElementById("targetsPoolsPanel").hidden`)) {
+          await page.eval(`__sim.click("#targetsPoolsTab")`);
+          await page.waitFor(`!document.getElementById("targetsPoolsPanel").hidden`,
+            { what: "pools tab active for cleanup" });
+        }
+        await page.eval(`__sim.click("#refreshPoolsBtn")`);
+        await waitPoolMembers(page, S.pool, [S.tgtOpenAI]);
+        await page.waitFor(`!document.querySelector('[data-edit-pool=${js(tempPool)}]')`,
+          { what: "temporary pool removed", timeoutMs: 10000 });
+      } catch (err) {
+        if (!failure) failure = err;
+      }
+      if (failure) throw failure;
     },
   },
   {

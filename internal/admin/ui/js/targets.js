@@ -1773,8 +1773,22 @@ AdminApp.register("targets", function (app) {
             : "");
         sel.appendChild(opt);
       });
+    var known = (state.pools || []).some(function (p) {
+      return String(p.name || "") === val;
+    });
+    if (val && !known) {
+      // Roster absence is not proof of deletion: the roster can be stale after
+      // a failed refresh or a concurrent change. Keep the saved membership
+      // selectable; choosing "不属于任何池" still unbinds it explicitly.
+      var current = document.createElement("option");
+      current.value = val;
+      current.textContent = poolDisplayName(val);
+      sel.appendChild(current);
+      sel.value = val;
+      return;
+    }
     sel.value = val;
-    if (sel.value !== val) sel.value = ""; // 选中池不存在（已删除）时回退为未分组
+    if (sel.value !== val) sel.value = "";
   }
   document
     .getElementById("tgtType")
