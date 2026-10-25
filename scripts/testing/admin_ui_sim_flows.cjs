@@ -256,6 +256,92 @@ const list = [
     },
   },
   {
+    name: "overview-chain-range-and-ranking",
+    async run({ page }) {
+      await goto(page, "overview");
+      // The overview is cached for 60s by design; force one fresh read before
+      // asserting the targets created by earlier flows.
+      await page.waitFor(`!document.getElementById("refreshOverviewBtn").disabled`, { what: "overview refresh enabled", timeoutMs: 10000 });
+      await page.eval(`__sim.click("#refreshOverviewBtn")`);
+      await page.waitFor(`document.querySelectorAll("#targetHealthBody tr[data-target-name]").length >= 2`,
+        { what: "overview target health rows", timeoutMs: 15000 });
+      const chain = await page.eval(`(() => {
+        const keys = document.getElementById("chainKeys");
+        return {
+          total: Number(keys.dataset.total),
+          active: Number(keys.dataset.active),
+          rateLimited: Number(keys.dataset.rateLimited),
+          clients: document.getElementById("chainClients").textContent,
+          status: document.getElementById("chainStatus").textContent,
+        };
+      })()`);
+      assert.equal(chain.total, S.keysOpenAI.length + S.keysGLM.length);
+      assert.ok(chain.active >= 1 && chain.active <= chain.total, `active keys ${chain.active}/${chain.total}`);
+      assert.ok(chain.rateLimited >= 1, `rate-limited keys ${chain.rateLimited}`);
+      assert.match(chain.clients, /1 个配置客户端/);
+      assert.ok(chain.status.length > 0);
+      const limited = await page.eval(`(() => {
+        const row = [...document.querySelectorAll("#targetHealthBody tr[data-target-name]")]
+          .find(tr => tr.dataset.targetName === ${js(S.tgtGLM)});
+        return row ? {issue: row.dataset.targetKeyIssue, text: row.textContent} : null;
+      })()`);
+      assert.ok(limited, "GLM target row is rendered");
+      assert.equal(limited.issue, "true", "GLM row exposes its key issue");
+      assert.match(limited.text, /限流/);
+      await page.eval(`__sim.click('[data-overview-range="7d"]')`);
+      await page.waitFor(`document.querySelector('[data-overview-range="7d"]').getAttribute("aria-pressed") === "true" && document.querySelectorAll("#topClientsBody tr[data-top-client]").length > 0`,
+        { what: "7d range cards and top clients", timeoutMs: 15000 });
+      const range = await page.eval(`({
+        status: document.getElementById("ovRangeStatus").textContent,
+        cost: document.getElementById("ovRangeCost").textContent,
+        requests: document.getElementById("ovRangeRequests").textContent,
+        clients: [...document.querySelectorAll("#topClientsBody tr[data-top-client]")].map(tr => tr.dataset.topClient),
+        models: [...document.querySelectorAll("#topModelsBody tr[data-top-model]")].map(tr => tr.dataset.topModel),
+      })`);
+      assert.match(range.status, /官方基础价/);
+      assert.notEqual(range.requests, "不可用");
+      assert.notEqual(range.cost, "不可用");
+      assert.ok(range.clients.includes(S.client), `top clients ${range.clients.join(",")}`);
+      assert.ok(range.models.length > 0, "top models are derived from aggregate by_model");
+      assert.ok(range.models.every(model => model && model !== "不可用"), `top models ${range.models.join(",")}`);
+    },
+  },
+  {
+    name: "overview-attention-and-recent-changes",
+    async run({ page }) {
+      await goto(page, "overview");
+      await page.waitFor(`!document.getElementById("refreshOverviewBtn").disabled`, { what: "overview refresh enabled", timeoutMs: 10000 });
+      await page.eval(`__sim.click("#refreshOverviewBtn")`);
+      await page.waitFor(`document.querySelectorAll("#recentChangesBody tr[data-audit-id]").length > 0`,
+        { what: "recent audit rows", timeoutMs: 15000 });
+      assert.equal(await page.eval(`document.querySelectorAll("#recentChangesBody tr:first-child td").length`), 5,
+        "recent changes render only timestamp/actor/action/object/result");
+      await page.waitFor(`document.querySelectorAll("#overviewAttentionList li[data-attention-kind]").length > 0`,
+        { what: "attention items", timeoutMs: 10000 });
+      const attention = await page.eval(`document.getElementById("overviewAttentionList").textContent`);
+      assert.ok(attention.includes(S.tgtGLM), `attention list: ${attention}`);
+      const status = await page.eval(`document.getElementById("overviewAttentionStatus").textContent`);
+      assert.ok(status.length > 0, "attention status is present");
+    },
+  },
+  {
+    name: "overview-mobile-no-overflow",
+    async run({ page }) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+      try {
+        await goto(page, "overview");
+        await page.waitFor(`!document.getElementById("refreshOverviewBtn").disabled`, { what: "overview refresh enabled", timeoutMs: 10000 });
+        await page.eval(`__sim.click("#refreshOverviewBtn")`);
+        await page.waitFor(`document.querySelectorAll("#targetHealthBody tr[data-target-name]").length >= 2`,
+          { what: "mobile overview", timeoutMs: 15000 });
+        const width = await page.eval(`({scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth})`);
+        assert.ok(width.scroll <= width.client + 1, `mobile overview overflows: ${width.scroll}/${width.client}`);
+      } finally {
+        await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+      }
+    },
+  },
+  {
     name: "target-table-shows-glm-key-exhausted",
     async run({ page }) {
       await goto(page, "targets");
