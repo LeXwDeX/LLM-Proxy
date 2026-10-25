@@ -261,7 +261,7 @@ AdminApp.register("overview", function (app) {
     text("ovRangeInputTokens", input === null ? "不可用" : fmtNum(input));
     text("ovRangeOutputTokens", output === null ? "不可用" : fmtNum(output));
     text("ovRangeCost", cost === null ? "不可用" : fmtMoney(cost));
-    var notes = ["费用按官方基础价估算；$0.00 只表示已记录费用为零，不推断为未定价或免费。"];
+    var notes = ["费用按估算规则计算，已含模型组系数（模型组扣费系数），不是厂商官方账单；$0.00 只表示已记录费用为零，不推断为未定价或免费。"];
     notes.push(period.key === "today" ? "今日按 UTC 自然日。" : period.key === "1h" ? "范围是近 1 小时。" : "7/30 天按小时桶聚合，跨小时请求可能归入相邻桶。");
     if (data) {
       if (counter(data.incomplete_usage_count) && data.incomplete_usage_count > 0) notes.push(fmtNum(data.incomplete_usage_count) + " 条用量不完整。");
@@ -344,10 +344,10 @@ AdminApp.register("overview", function (app) {
     return '<tr data-' + attribute + '="' + esc(name) + '"><td>' + esc(name) + '</td><td>' + requests + '</td><td>' + total + '</td><td>' + cost + '</td></tr>';
   }
   function topStatus(kind, available, error) {
-    var caveat = "费用按官方基础价，按日边界聚合（group_by=day）；$0.00 不推断为未定价或免费。";
+    var caveat = "费用为估算金额，已含模型组系数（模型组扣费系数），按 UTC 自然日聚合（group_by=day）；$0.00 不推断为未定价或免费。";
     if (error) return "费用排行不可用：" + error + "。" + caveat;
     if (!available) return "费用排行不可用：聚合响应缺少" + kind + "维度。" + caveat;
-    return "费用按官方基础价；按日边界聚合（group_by=day），跨日记录可能归入相邻日桶。$0.00 不推断为未定价或免费。";
+    return "费用按估算规则计算，已含模型组系数（模型组扣费系数）；按 UTC 自然日聚合（group_by=day），跨日记录可能归入相邻日桶。$0.00 不推断为未定价或免费。";
   }
   function renderTopPanel(bodyID, statusID, list, kind, attribute) {
     var body = el(bodyID);

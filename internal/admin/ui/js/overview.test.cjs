@@ -318,7 +318,7 @@ test("range cards distinguish missing totals from real zero and reload only aggr
   assert.equal(h.get("ovRangeCost").textContent, "$1.23");
   assert.equal(ranges[0].attrs["aria-pressed"], "true");
   assert.equal(ranges[1].attrs["aria-pressed"], "false");
-  assert.match(h.get("ovRangeStatus").textContent, /官方基础价/);
+  assert.match(h.get("ovRangeStatus").textContent, /含模型组系数/);
   assert.match(h.get("ovRangeStatus").textContent, /1 条用量不完整/);
   assert.equal(h.get("ovRangeStatus").dataset.state, "partial");
   assert.equal(activityCalls(), initialActivity);
@@ -438,8 +438,8 @@ test("top five ranks cost then requests then name and never fabricates zero", as
   const models = [...h.get("topModelsBody").innerHTML.matchAll(/data-top-model="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(models, ["m-a", "m-b", "m-no-cost"]);
   assert.match(h.get("topModelsBody").innerHTML, /不可用/);
-  assert.match(h.get("topClientsStatus").textContent, /官方基础价/);
-  assert.match(h.get("topClientsStatus").textContent, /按日/);
+  assert.match(h.get("topClientsStatus").textContent, /含模型组系数/);
+  assert.match(h.get("topClientsStatus").textContent, /UTC 自然日/);
   assert.doesNotMatch(h.get("topClientsStatus").textContent, /按小时/);
 
   h.setAggregateHandler(() => Promise.reject(new Error("aggregate rejected")));
