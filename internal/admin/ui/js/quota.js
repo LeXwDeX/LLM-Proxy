@@ -6,6 +6,8 @@ AdminApp.register("quota", function (app) {
   var esc = app.bind("core", "esc");
   var fmtNum = app.bind("core", "fmtNum");
   var fmtMoney = app.bind("core", "fmtMoney");
+  var fmtTime = app.bind("core", "fmtTime");
+  var totalTok = app.bind("core", "totalTok");
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
   var openModal = app.bind("core", "openModal");
@@ -164,10 +166,17 @@ AdminApp.register("quota", function (app) {
       ? String(n)
       : n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
   }
+  function quotaResetText(value) {
+    if (!value) return "";
+    var d = new Date(value);
+    if (!isFinite(d.getTime()) || d.getUTCFullYear() <= 1) return "";
+    return fmtTime(value) + "（本地时间）";
+  }
   function quotaConvertedDetail(status) {
     var groups = status.groups || {};
     var names = Object.keys(groups).sort();
-    var html = "";
+    var html =
+      "<div class='quota-detail-note'>人员行的各周期进度是各独立限额组的合计，不是共享额度池；每个模型组的上限分别生效，任一组不限时合计显示不限。扣费系数只用于消耗折算，不乘入可用上限；但扣费系数为 0 时该组不限。下次重置时间按模型组和周期分别列出。</div>";
     if (status.calibration_error) {
       html += "<div class='quota-detail-group'><h4>计费校准不可用</h4><div>" +
         esc(status.calibration_error) +
@@ -217,8 +226,9 @@ AdminApp.register("quota", function (app) {
                   quotaNumber(rank[dim.key] == null ? 1 : rank[dim.key]) +
                   " × 个人倍率 " +
                   quotaNumber(pc) +
-                  "；折算消耗：原价 × 扣费系数 " +
+                  "；基数、职级倍率、个人倍率及扣费系数均 >0 时生成正上限，扣费系数为 0 时该组不限；折算消耗：原价 × 扣费系数 " +
                   quotaNumber(gc);
+                var reset = quotaResetText(q.resets_at);
                 return (
                   "<td>" +
                   quotaNumber(q.used || 0) +
@@ -226,7 +236,13 @@ AdminApp.register("quota", function (app) {
                   (q.limit > 0 ? quotaNumber(q.limit) : "不限") +
                   "<small style='display:block;color:var(--text-muted);font-weight:400;'>" +
                   formula +
-                  "</small></td>"
+                  "</small>" +
+                  (reset
+                    ? "<small class='quota-reset'>下次重置：" +
+                      esc(reset) +
+                      "</small>"
+                    : "") +
+                  "</td>"
                 );
               })
               .join("") +
@@ -244,12 +260,13 @@ AdminApp.register("quota", function (app) {
         "</tr></thead><tbody>" +
         groupRows +
         "</tbody></table></div></div>";
+    } else if (!status.calibration_error && !status.job_level_missing) {
+      html +=
+        "<span style='color:var(--text-muted)'>" +
+        (status.job_level ? "未加入模型组" : "暂无用量") +
+        "</span>";
     }
-    return (
-      "<div class='quota-detail'>" +
-      (html || "<span style='color:var(--text-muted)'>暂无用量</span>") +
-      "</div>"
-    );
+    return "<div class='quota-detail'>" + html + "</div>";
   }
   async function loadQuotaEditorData() {
     var requests = [];
@@ -280,7 +297,7 @@ AdminApp.register("quota", function (app) {
           return data;
         },
         function () {
-          return { by_client: [] };
+          return { by_client: [], unavailable: true };
         },
       );
       var results = await Promise.all([
@@ -302,6 +319,7 @@ AdminApp.register("quota", function (app) {
         ? results[3].project_groups
         : [];
       state.clientUsage30d = {};
+      state.clientUsage30dUnavailable = !!(results[5] && results[5].unavailable);
       ((results[5] && results[5].by_client) || []).forEach(function (item) {
         state.clientUsage30d[item.key] = item;
       });
@@ -903,21 +921,51 @@ AdminApp.register("quota", function (app) {
       return { key: "unlimited", label: "不限", badge: "none" };
     return { key: "none", label: "未配置", badge: "none" };
   }
-  function quotaBarCell(q, unavailable) {
-    if (unavailable)
+  function quotaBarCell(q, unavailable, dimLabel) {
+    var prefix = dimLabel ? dimLabel + " " : "";
+    if (unavailable) {
+      var unavailableText = prefix + unavailable;
+      if (unavailable === "-")
+        return (
+          "<div class='quota-cell'><span class='quota-pct'>-</span></div>"
+        );
       return (
-        "<span style='color:var(--text-muted);'>" + esc(unavailable) + "</span>"
+        "<div class='quota-cell' role='group' aria-label='" +
+        esc(unavailableText) +
+        "'><div class='quota-bar-wrap'><div class='quota-bar' aria-hidden='true'><div class='quota-bar-inner q-none' style='width:0%'></div></div></div><div class='quota-pct'>" +
+        esc(unavailable) +
+        "</div></div>"
       );
+    }
     q = q || {};
     var limit = Number(q.limit || 0),
       used = Number(q.used || 0);
-    if (limit <= 0) {
-      return "<div class='quota-cell'><div class='quota-bar-wrap'><div class='quota-bar'><div class='quota-bar-inner q-none' style='width:100%'></div></div></div><div class='quota-pct'>不限</div></div>";
+    if (!isFinite(limit) || limit <= 0) {
+      return (
+        "<div class='quota-cell' role='group' aria-label='" +
+        esc(prefix + "不限（无正数上限）") +
+        "'><div class='quota-bar-wrap'><div class='quota-bar' aria-hidden='true'><div class='quota-bar-inner q-none' style='width:100%'></div></div></div><div class='quota-pct'>不限</div></div>"
+      );
     }
+    if (!isFinite(used) || used < 0) used = 0;
     var pct = Math.min(100, Math.round((used / limit) * 100));
     var cls = pct >= 90 ? "q-over" : pct >= 70 ? "q-warn" : "q-ok";
+    var stateText =
+      prefix +
+      "已用 " +
+      fmtMoney(used) +
+      "，上限 " +
+      fmtMoney(limit) +
+      "，" +
+      pct +
+      "%" +
+      (used > limit ? "，超出上限" : "");
     return (
-      "<div class='quota-cell'><div class='quota-bar-wrap'><div class='quota-bar'><div class='quota-bar-inner " +
+      "<div class='quota-cell'><div class='quota-bar-wrap'><div class='quota-bar' role='progressbar' aria-valuemin='0' aria-valuemax='100' aria-valuenow='" +
+      pct +
+      "' aria-label='" +
+      esc(stateText) +
+      "'><div class='quota-bar-inner " +
       cls +
       "' style='width:" +
       pct +
@@ -936,11 +984,13 @@ AdminApp.register("quota", function (app) {
       return groups[name].exceeded;
     }).length;
     return (
+      "<span>" +
       names.length +
-      " 个" +
+      " 个模型组" +
       (exceeded
         ? " · <span class='quota-badge over'>" + exceeded + " 超限</span>"
-        : "")
+        : "") +
+      "</span>"
     );
   }
   function renderQuotaSummaryFilters() {
@@ -978,23 +1028,95 @@ AdminApp.register("quota", function (app) {
     });
   }
   function quotaTotalTok(r) {
-    return (
-      Number(r.input_tokens || 0) +
-      Number(r.output_tokens || 0) +
-      Number(r.cached_tokens || 0) +
-      Number(r.cache_creation_tokens || 0)
-    );
+    return totalTok(r);
   }
-  function renderQuotaSummary() {
+  var quotaTokenFields = [
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cache_creation_tokens",
+    "tool_use_prompt_tokens",
+  ];
+  function quotaFiniteNumber(value) {
+    return typeof value === "number" && isFinite(value) ? value : null;
+  }
+  function quotaUsageStats(name) {
+    if (state.clientUsage30dUnavailable)
+      return {
+        tokens: null,
+        cost: null,
+        unavailable: true,
+        usageIncomplete: 0,
+        costIncomplete: 0,
+      };
+    var r = (state.clientUsage30d || {})[name];
+    if (!r)
+      return {
+        tokens: 0,
+        cost: 0,
+        unavailable: false,
+        usageIncomplete: 0,
+        costIncomplete: 0,
+      };
+    var hasTokens = quotaTokenFields.some(function (field) {
+      return quotaFiniteNumber(r[field]) !== null;
+    });
+    return {
+      tokens: hasTokens ? quotaTotalTok(r) : null,
+      cost: quotaFiniteNumber(r.estimated_cost),
+      unavailable: false,
+      usageIncomplete: Number(r.incomplete_usage_count || 0),
+      costIncomplete: Number(r.incomplete_cost_count || 0),
+    };
+  }
+  function quotaTokenCell(stats) {
+    if (stats.tokens === null)
+      return (
+        "<span class='quota-usage-unavailable'>不可用</span>" +
+        (stats.usageIncomplete
+          ? "<small class='quota-usage-note'>用量不完整 " +
+            stats.usageIncomplete +
+            " 条记录</small>"
+          : "")
+      );
+    var html = fmtNum(stats.tokens);
+    if (stats.usageIncomplete)
+      html +=
+        "<small class='quota-usage-note'>用量不完整 " +
+        stats.usageIncomplete +
+        " 条记录</small>";
+    return html;
+  }
+  function quotaCostCell(stats) {
+    if (stats.cost === null) {
+      return (
+        "<span class='quota-usage-unavailable'>不可用</span><small class='quota-cost-note'>" +
+        (stats.unavailable
+          ? "30 天用量加载失败"
+          : "聚合接口未返回 estimated_cost") +
+        "</small>" +
+        (stats.costIncomplete
+          ? "<small class='quota-cost-note'>费用不完整 " +
+            stats.costIncomplete +
+            " 条记录</small>"
+          : "")
+      );
+    }
+    var html = fmtMoney(stats.cost);
+    if (stats.costIncomplete)
+      html +=
+        "<small class='quota-cost-note'>费用不完整 " +
+        stats.costIncomplete +
+        " 条记录</small>";
+    return html;
+  }
+  function quotaSummaryScopedRows() {
     var search = (document.getElementById("quotaSearch").value || "")
       .trim()
       .toLowerCase();
     var project = document.getElementById("quotaSummaryProjectFilter").value;
     var job = document.getElementById("quotaSummaryJobFilter").value;
-    var statusFilter = document.getElementById(
-      "quotaSummaryStatusFilter",
-    ).value;
-    var rows = (state.quotaSummary || [])
+    return (state.quotaSummary || [])
       .map(function (item) {
         return { item: item, status: quotaRowStatus(item) };
       })
@@ -1010,8 +1132,32 @@ AdminApp.register("quota", function (app) {
           return false;
         if (project && (c.project_group || "未分组") !== project) return false;
         if (job && c.job_level !== job) return false;
-        if (statusFilter && entry.status.key !== statusFilter) return false;
         return true;
+      });
+  }
+  function renderQuotaStatusCounts(rows) {
+    var select = document.getElementById("quotaSummaryStatusFilter");
+    var options = Array.prototype.slice.call(select.options || []);
+    if (!options.length) return;
+    var counts = {};
+    rows.forEach(function (entry) {
+      counts[entry.status.key] = (counts[entry.status.key] || 0) + 1;
+    });
+    options.forEach(function (option) {
+      var base = String(option.textContent || "").replace(/\s*\(\d+\)$/, "");
+      var count = option.value ? counts[option.value] || 0 : rows.length;
+      option.textContent = base + " (" + count + ")";
+    });
+  }
+  function renderQuotaSummary() {
+    var statusFilter = document.getElementById(
+      "quotaSummaryStatusFilter",
+    ).value;
+    var scoped = quotaSummaryScopedRows();
+    renderQuotaStatusCounts(scoped);
+    var rows = scoped
+      .filter(function (entry) {
+        return !statusFilter || entry.status.key === statusFilter;
       })
       .sort(function (a, b) {
         return String((a.item.client || {}).name || "").localeCompare(
@@ -1028,9 +1174,7 @@ AdminApp.register("quota", function (app) {
               st = entry.status;
             var expanded = !!state.quotaExpanded[c.name];
             var detailId = "quota-detail-" + encodeURIComponent(c.name);
-            var usage30 = (state.clientUsage30d || {})[c.name] || {};
-            var tok30 = quotaTotalTok(usage30),
-              cost30 = Number(usage30.estimated_cost || 0);
+            var usage30 = quotaUsageStats(c.name);
             var deletedBadge = c.deleted
               ? " <span class='quota-badge del'>已删除</span>"
               : "";
@@ -1089,16 +1233,20 @@ AdminApp.register("quota", function (app) {
                 .map(function (dim) {
                   return (
                     "<td>" +
-                    quotaBarCell((s.quotas || {})[dim.key], quotaUnavailable) +
+                    quotaBarCell(
+                      (s.quotas || {})[dim.key],
+                      quotaUnavailable,
+                      dim.label,
+                    ) +
                     "</td>"
                   );
                 })
                 .join("") +
-              "<td>" +
-              (tok30 ? fmtNum(tok30) : "-") +
+              "<td class='quota-number quota-token-cell'>" +
+              quotaTokenCell(usage30) +
               "</td>" +
-              "<td>" +
-              (cost30 ? fmtMoney(cost30) : "-") +
+              "<td class='quota-number quota-cost-cell'>" +
+              quotaCostCell(usage30) +
               "</td>" +
               "<td>" +
               quotaGroupSummary(groups) +
@@ -1707,7 +1855,9 @@ AdminApp.register("quota", function (app) {
           return "<th>" + esc(dim.label) + "已用 / 可用</th>";
         })
         .join("") +
-      "<th>近30天 Token</th><th>近30天折算费用</th><th>模型组</th><th>状态</th><th>操作</th></tr>";
+      "<th title='普通输入 + 输出 + 缓存读取 + 缓存写入 + 工具输入；缺失显示不可用'>近30天 Token</th>" +
+      "<th title='聚合接口 estimated_cost 已含模型组扣费系数，前端不再次折算；返回 0 显示 $0.00，缺失显示不可用'>估算费用（含模型组系数）</th>" +
+      "<th title='各模型组额度独立生效，不是共享额度池'>模型组</th><th>状态</th><th>操作</th></tr>";
     document.getElementById("jobLevelTableHead").innerHTML =
       "<tr><th>职级</th>" +
       quotaDimensions
@@ -1749,6 +1899,7 @@ AdminApp.register("quota", function (app) {
     collectModelGroupBindings: collectModelGroupBindings,
     openModelGroupModal: openModelGroupModal,
     quotaRowStatus: quotaRowStatus,
+    quotaResetText: quotaResetText,
     quotaBarCell: quotaBarCell,
     quotaGroupSummary: quotaGroupSummary,
     renderQuotaSummaryFilters: renderQuotaSummaryFilters,
