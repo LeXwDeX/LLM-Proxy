@@ -45,7 +45,10 @@ AdminApp.register("navigation", function (app) {
     sidebar.classList.toggle("open", open);
     document.getElementById("sidebarOverlay").classList.toggle("open", open);
     var toggle = document.getElementById("menuToggle");
-    if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      toggle.setAttribute("aria-label", open ? "关闭主导航" : "打开主导航");
+    }
     /* A closed mobile drawer stays off-canvas; strip it from the tab order too. */
     var isolated = isMobileNav() && !open;
     var hadFocus =
@@ -55,6 +58,10 @@ AdminApp.register("navigation", function (app) {
     sidebar.inert = isolated;
     sidebar.setAttribute("aria-hidden", isolated ? "true" : "false");
     if (hadFocus && toggle) toggle.focus();
+    if (open && isMobileNav()) {
+      var firstNav = sidebar.querySelector(".sidebar-nav-item");
+      if (firstNav) firstNav.focus();
+    }
   }
   function switchPage(page) {
     state.currentPage = page;
@@ -103,6 +110,15 @@ AdminApp.register("navigation", function (app) {
     .addEventListener("click", function () {
       setSidebarOpen(false);
     });
+  document.addEventListener("keydown", function (event) {
+    if (
+      event.key === "Escape" &&
+      isMobileNav() &&
+      document.getElementById("sidebar").classList.contains("open")
+    ) {
+      setSidebarOpen(false);
+    }
+  });
   if (mobileNavQuery && typeof mobileNavQuery.addEventListener === "function") {
     mobileNavQuery.addEventListener("change", function () {
       setSidebarOpen(document.getElementById("sidebar").classList.contains("open"));

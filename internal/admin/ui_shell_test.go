@@ -374,6 +374,65 @@ func TestUIMobileSidebarIsolatesFocusWhenClosed(t *testing.T) {
 	}
 }
 
+func TestUIMobileNavFocusAndMenuLabel(t *testing.T) {
+	nav := adminUIJSSources()["ui/js/navigation.js"]
+	setOpen := regexp.MustCompile(`(?s)function setSidebarOpen\(open\) \{.*?\n  \}`).FindString(nav)
+	if setOpen == "" {
+		t.Fatal("navigation.js 缺少 setSidebarOpen")
+	}
+	if !strings.Contains(setOpen, "open && isMobileNav()") {
+		t.Error("仅移动端打开抽屉时才移动焦点")
+	}
+	if !strings.Contains(setOpen, `sidebar.querySelector(".sidebar-nav-item")`) {
+		t.Error("打开移动端抽屉必须定位第一个导航项")
+	}
+	if !strings.Contains(setOpen, "firstNav.focus()") {
+		t.Error("打开移动端抽屉必须把焦点放到第一个导航项")
+	}
+	labelIdx := strings.Index(setOpen, `setAttribute("aria-label"`)
+	if labelIdx < 0 {
+		t.Fatal("菜单按钮缺少 aria-label 状态同步")
+	}
+	labelCall := setOpen[labelIdx:]
+	if end := strings.Index(labelCall, ");"); end >= 0 {
+		labelCall = labelCall[:end]
+	}
+	for _, want := range []string{"open ?", `"关闭主导航"`, `"打开主导航"`} {
+		if !strings.Contains(labelCall, want) {
+			t.Errorf("菜单按钮 aria-label 必须反映开合状态，缺少 %q", want)
+		}
+	}
+	escapeIdx := strings.Index(nav, `event.key === "Escape"`)
+	if escapeIdx < 0 {
+		t.Fatal("移动端抽屉必须支持 Escape 关闭")
+	}
+	escapeBlock := nav[escapeIdx:]
+	if end := strings.Index(escapeBlock, "\n  });"); end >= 0 {
+		escapeBlock = escapeBlock[:end]
+	}
+	for _, want := range []string{"isMobileNav()", "classList.contains(\"open\")", "setSidebarOpen(false)"} {
+		if !strings.Contains(escapeBlock, want) {
+			t.Errorf("Escape 关闭契约缺少 %q", want)
+		}
+	}
+}
+
+func TestUIMainContentLandmark(t *testing.T) {
+	main := regexp.MustCompile(`<main\b[^>]*\bid="mainContent"[^>]*>`).FindString(adminUIHTML)
+	if main == "" {
+		t.Fatal("管理内容必须使用带稳定 id 的 <main> landmark")
+	}
+	if !strings.Contains(main, `class="content"`) {
+		t.Error("#mainContent 必须保留 .content 布局类")
+	}
+	if got := strings.Count(adminUIHTML, "<main"); got != 1 {
+		t.Errorf("<main> 必须唯一，found %d", got)
+	}
+	if !strings.Contains(adminUIHTML, "</main>") {
+		t.Error("<main> 缺少闭合标签")
+	}
+}
+
 func TestUIFocusRingsAndHoverAliasesUseThemeTokens(t *testing.T) {
 	for name, selector := range map[string]string{"亮色": ".app", "暗色": ".app.dark"} {
 		block := uiCSSBlock(t, selector)
@@ -405,7 +464,7 @@ func TestUIFocusRingsAndHoverAliasesUseThemeTokens(t *testing.T) {
 }
 
 func TestUIIconControlsMeetMinimumTargetSize(t *testing.T) {
-	for _, selector := range []string{".menu-toggle", ".theme-toggle", ".modal-close", ".quota-expand-btn"} {
+	for _, selector := range []string{".menu-toggle", ".theme-toggle", ".modal-close", ".quota-expand-btn", "#page-overview .activity-info"} {
 		block := uiCSSBlock(t, selector)
 		for _, dimension := range []string{"width", "height"} {
 			if !regexp.MustCompile(dimension + `\s*:\s*34px`).MatchString(block) {
