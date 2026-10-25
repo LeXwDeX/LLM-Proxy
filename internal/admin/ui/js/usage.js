@@ -3,6 +3,16 @@
 // Imports resolve through AdminApp; implementation state stays inside this module.
 AdminApp.register("usage", function (app) {
   var state = app.state;
+  state.usageModelGroupExpanded = usageSafeMap(state.usageModelGroupExpanded);
+  state.usageModelTargetExpanded = usageSafeMap(state.usageModelTargetExpanded);
+  function usageSafeMap(source) {
+    var safe = Object.create(null);
+    if (source && typeof source === "object")
+      Object.keys(source).forEach(function (key) {
+        safe[key] = source[key];
+      });
+    return safe;
+  }
   var modelGroupLabel = app.bind("quota", "modelGroupLabel");
   var esc = app.bind("core", "esc");
   var fmtNum = app.bind("core", "fmtNum");
@@ -13,6 +23,18 @@ AdminApp.register("usage", function (app) {
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
   /* ===== Usage / Stats ===== */
+  var usageChartMetric = "tokens";
+  var usageChartBuckets = [];
+  var usageChartGroupBy = "day";
+  var usageLoadVersion = 0;
+  var usageDenominator = { total: null, usageIncomplete: false, costIncomplete: false };
+  var usageTokenFields = [
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cache_creation_tokens",
+    "tool_use_prompt_tokens",
+  ];
   function getTimeRange(range) {
     var now = new Date();
     var to = now;
@@ -42,6 +64,16 @@ AdminApp.register("usage", function (app) {
     return { from: from.toISOString(), to: to.toISOString() };
   }
 
+  function usageGroupBy(rangeName, range) {
+    if (rangeName === "7d" || rangeName === "30d") return "day";
+    if (rangeName === "custom") {
+      var from = Date.parse(range.from);
+      var to = Date.parse(range.to);
+      return to - from <= 48 * 3600 * 1000 ? "hour" : "day";
+    }
+    return "hour";
+  }
+
   var activeRange = "today";
   document.querySelectorAll(".time-range-btn").forEach(function (btn) {
     btn.addEventListener("click", function () {
@@ -52,15 +84,15 @@ AdminApp.register("usage", function (app) {
       activeRange = btn.dataset.range;
       if (activeRange === "custom") {
         document.getElementById("customRangeInputs").style.display = "flex";
-        var r = getTimeRange("7d");
-        document.getElementById("usageFrom").value = toLocalInput(
-          new Date(r.from),
-        );
-        document.getElementById("usageTo").value = toLocalInput(new Date(r.to));
+        var fromInput = document.getElementById("usageFrom");
+        var toInput = document.getElementById("usageTo");
+        if (!fromInput.value || !toInput.value) {
+          var r = getTimeRange("7d");
+          fromInput.value = toLocalInput(new Date(r.from));
+          toInput.value = toLocalInput(new Date(r.to));
+        }
       } else {
         document.getElementById("customRangeInputs").style.display = "none";
-        /* Reset client filter so dropdown refreshes for the new time range */
-        document.getElementById("usageClientFilter").value = "";
         loadUsage();
       }
     });
@@ -68,7 +100,6 @@ AdminApp.register("usage", function (app) {
   document
     .getElementById("applyCustomRange")
     .addEventListener("click", function () {
-      document.getElementById("usageClientFilter").value = "";
       loadUsage();
     });
 
@@ -255,29 +286,39 @@ AdminApp.register("usage", function (app) {
         toast(e.message, "error");
         return;
       }
+      if (Date.parse(range.from) > Date.parse(range.to)) {
+        toast("开始时间不能晚于结束时间", "error");
+        return;
+      }
     } else {
       range = getTimeRange(activeRange);
     }
     state.usageRange = range;
+    var clientFilter = document.getElementById("usageClientFilter").value;
+    var modelGroupFilter = usageModelGroupValues();
+    var version = ++usageLoadVersion;
     try {
       await ensureModelGroupsLoaded();
+      if (version !== usageLoadVersion) return;
       var qs = new URLSearchParams({ from: range.from, to: range.to });
-      var clientFilter = document.getElementById("usageClientFilter").value;
       if (clientFilter) qs.set("client_name", clientFilter);
-      var modelGroupFilter = usageModelGroupValues();
       appendUsageModelGroups(qs, modelGroupFilter);
-      var chartQs = new URLSearchParams({
-        from: new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
-        to: new Date().toISOString(),
-      });
-      if (clientFilter) chartQs.set("client_name", clientFilter);
-      appendUsageModelGroups(chartQs, modelGroupFilter);
-      var results = await Promise.all([
-        api("/admin/data/usage/aggregate?group_by=day&" + qs.toString()),
-        api("/admin/data/usage/aggregate?group_by=day&" + chartQs.toString()),
-      ]);
-      var mainAgg = results[0];
-      var byDay = results[1];
+      var groupBy = usageGroupBy(activeRange, range);
+      var mainAgg = await api(
+        "/admin/data/usage/aggregate?group_by=" +
+          groupBy +
+          "&" +
+          qs.toString(),
+      );
+      if (version !== usageLoadVersion) return;
+      mainAgg = mainAgg && typeof mainAgg === "object" ? mainAgg : {};
+      var responseGroupBy =
+        mainAgg.group_by === "hour" || mainAgg.group_by === "day"
+          ? mainAgg.group_by
+          : groupBy;
+      var totals = mainAgg.totals && typeof mainAgg.totals === "object"
+        ? mainAgg.totals
+        : {};
       refreshUsageModelGroupFilter();
 
       /* Update client filter dropdown with clients that have data in this range */
@@ -288,31 +329,34 @@ AdminApp.register("usage", function (app) {
         populateUsageClientFilter(activeNames);
       }
 
-      /* Summary cards from aggregate totals (respects client filter) */
-      var sp = mainAgg.totals || {};
-      document.getElementById("usReqs").textContent = fmtNum(sp.requests);
-      document.getElementById("usInput").textContent = fmtNum(sp.input_tokens);
-      document.getElementById("usOutput").textContent = fmtNum(
-        sp.output_tokens,
-      );
-      document.getElementById("usCached").textContent = fmtNum(
-        sp.cached_tokens,
-      );
-      document.getElementById("usCacheWrite").textContent = fmtNum(
-        sp.cache_creation_tokens,
-      );
-      document.getElementById("usCost").innerHTML = usageCostHtml(sp);
+      usageDenominator = usageCostDenominator(totals);
+      renderUsageSummary(totals);
 
       usageTableMap.usageByClientBody.rows = mainAgg.by_client || [];
-      var modelRows = mainAgg.by_model_group_model;
-      if (!modelRows || !modelRows.length) modelRows = mainAgg.by_model || [];
+      var modelRows = Array.isArray(mainAgg.by_model_group_model)
+        ? mainAgg.by_model_group_model
+        : [];
+      var modelRequestSource = "by_model_group_model";
+      if (!modelRows.length) {
+        modelRows = Array.isArray(mainAgg.by_model) ? mainAgg.by_model : [];
+        modelRequestSource = "by_model";
+      }
+      if (!modelRows.length) modelRequestSource = "none";
       usageTableMap.usageByModelBody.rows = modelRows;
+      setUsageModelRequestHeader(
+        modelRequestSource,
+        modelGroupFilter.length > 0,
+      );
       usageTables.forEach(renderAggregateTable);
       state.usageModelGroupRows = mainAgg.by_target_model || [];
-      renderUsageModelGroups(state.usageModelGroupRows);
-      renderDailyChart(byDay.buckets || []);
+      renderUsageModelGroups(state.usageModelGroupRows, usageDenominator);
+      usageChartBuckets = mainAgg.buckets || [];
+      usageChartGroupBy = responseGroupBy;
+      setUsageChartNote(responseGroupBy);
+      renderDailyChart(usageChartBuckets, responseGroupBy);
     } catch (e) {
-      toast("加载统计失败: " + e.message, "error");
+      if (version === usageLoadVersion)
+        toast("加载统计失败: " + e.message, "error");
     }
   }
 
@@ -386,57 +430,125 @@ AdminApp.register("usage", function (app) {
         return (
           "<tr>" +
           identity +
-          "<td>" +
-          fmtNum(r.requests) +
-          "</td>" +
-          "<td>" +
-          fmtNum(r.input_tokens) +
-          "</td>" +
-          "<td>" +
-          usageSubsetHtml(r.output_tokens, r.reasoning_tokens, "推理") +
-          "</td>" +
-          "<td>" +
-          usageSubsetHtml(
-            r.cached_tokens,
-            r.explicit_cache_read_tokens,
-            "显式",
-          ) +
-          "</td>" +
-          "<td>" +
-          fmtNum(r.cache_creation_tokens) +
-          "</td>" +
-          "<td>" +
-          fmtNum(totalTok(r)) +
-          "</td>" +
-          "<td>" +
-          usageCostHtml(r) +
-          "</td></tr>"
+          usageTotalCells(r, usageDenominator) +
+          "</tr>"
         );
       })
       .join("");
   }
 
+  function usageNumber(value) {
+    return typeof value === "number" && isFinite(value) ? value : null;
+  }
+  function usageCell(value) {
+    var numeric = usageNumber(value);
+    return numeric === null ? "不可用" : fmtNum(numeric);
+  }
+  function usageTokensAvailable(totals) {
+    return usageTokenFields.some(function (key) {
+      return usageNumber(totals[key]) !== null;
+    });
+  }
+  function usageTotalHtml(totals) {
+    return usageTokensAvailable(totals) ? fmtNum(totalTok(totals)) : "不可用";
+  }
+  function usageCostDenominator(totals) {
+    var usageIncomplete =
+      (usageNumber(totals && totals.incomplete_usage_count) || 0) > 0;
+    var costIncomplete =
+      (usageNumber(totals && totals.incomplete_cost_count) || 0) > 0;
+    return {
+      total: usageNumber(totals && totals.estimated_cost),
+      usageIncomplete: usageIncomplete,
+      costIncomplete: costIncomplete,
+      incomplete: usageIncomplete || costIncomplete,
+    };
+  }
+  function usageCostShare(cost, denominator) {
+    if (cost === null) return "—";
+    if (!denominator || denominator.total === null) return "占比不可用";
+    if (denominator.usageIncomplete && denominator.costIncomplete)
+      return "占比不可用（用量和费用不完整）";
+    if (denominator.usageIncomplete) return "占比不可用（用量不完整）";
+    if (denominator.costIncomplete) return "占比不可用（费用不完整）";
+    if (denominator.total <= 0) return "占比不可用（总费用为 0）";
+    return "占比 " + ((cost / denominator.total) * 100).toFixed(1) + "%";
+  }
+  function renderUsageSummary(totals) {
+    totals = totals || {};
+    document.getElementById("usReqs").textContent = usageCell(totals.requests);
+    document.getElementById("usInput").textContent = usageCell(totals.input_tokens);
+    document.getElementById("usOutput").textContent = usageCell(totals.output_tokens);
+    document.getElementById("usCached").textContent = usageCell(totals.cached_tokens);
+    document.getElementById("usCacheWrite").textContent = usageCell(
+      totals.cache_creation_tokens,
+    );
+    document.getElementById("usTotal").textContent = usageTotalHtml(totals);
+    document.getElementById("usCost").innerHTML = usageCostHtml(totals);
+  }
   function usageSubsetHtml(total, subset, label) {
     // Keep a consistent token slot; CSS hides absent details and centers the main value.
+    var totalValue = usageNumber(total);
+    var subsetValue = usageNumber(subset);
     return (
       "<span class='usage-token-value'><span>" +
-      fmtNum(total) +
+      (totalValue === null ? "不可用" : fmtNum(totalValue)) +
       "</span><small class='usage-token-detail'>" +
-      (Number(subset || 0) ? "其中" + esc(label) + " " + fmtNum(subset) : "") +
+      (subsetValue ? "其中" + esc(label) + " " + fmtNum(subsetValue) : "") +
       "</small></span>"
     );
   }
-  function usageCostHtml(r) {
-    var label = fmtMoney(r.estimated_cost);
-    var incomplete = Number(r.incomplete_usage_count || 0);
-    var partial = Number(r.incomplete_cost_count || 0);
-    if (incomplete || partial)
+  function usageModelRequestHeader(source, filtered) {
+    if (source === "by_model_group_model" || (source === "by_model" && filtered))
+      return {
+        label: "请求（成功）",
+        title: "成功请求权重（状态码 1–499），不是记录数",
+      };
+    if (source === "by_model")
+      return {
+        label: "请求权重",
+        title:
+          "请求权重；模型组明细为空时回退到按模型汇总，未选模型组，含全部请求",
+      };
+    return {
+      label: "请求权重",
+      title: "请求权重；当前无模型明细数据",
+    };
+  }
+  function setUsageModelRequestHeader(source, filtered) {
+    var th = document.getElementById("usageModelRequestHeader");
+    if (!th) return;
+    var header = usageModelRequestHeader(source, filtered);
+    th.textContent = header.label;
+    th.title = header.title;
+  }
+  function usageCostHtml(r, denominator) {
+    var cost = usageNumber(r.estimated_cost);
+    var label = cost === null ? "不可用" : fmtMoney(cost);
+    var incompleteUsage = Number(r.incomplete_usage_count || 0);
+    var incompleteCost = Number(r.incomplete_cost_count || 0);
+    var details = [];
+    if (incompleteUsage)
+      details.push("用量不完整 " + incompleteUsage + " 条记录");
+    if (incompleteCost)
+      details.push("费用不完整 " + incompleteCost + " 条记录");
+    if (details.length)
       label +=
-        " <span title='用量不完整：" +
-        incomplete +
-        " 条记录；成本覆盖不完整：" +
-        partial +
-        " 条记录（按记录计数，一个请求可对应多条记录）'>（部分）</span>";
+        " <span title='" +
+        esc(details.join("；") + "（按记录计数，一个请求可对应多条记录）") +
+        "'>（部分）</span>";
+    if (denominator)
+      label +=
+        "<small class='usage-cost-share'>" +
+        esc(
+          usageCostShare(cost, {
+            total: denominator.total,
+            usageIncomplete:
+              !!denominator.usageIncomplete || incompleteUsage > 0,
+            costIncomplete: !!denominator.costIncomplete || incompleteCost > 0,
+          }),
+        ) +
+        "</small>";
     return label;
   }
   function usageTotals() {
@@ -446,6 +558,7 @@ AdminApp.register("usage", function (app) {
       output_tokens: 0,
       cached_tokens: 0,
       cache_creation_tokens: 0,
+      tool_use_prompt_tokens: 0,
       estimated_cost: 0,
       incomplete_usage_count: 0,
       incomplete_cost_count: 0,
@@ -460,7 +573,7 @@ AdminApp.register("usage", function (app) {
       "output_tokens",
       "cached_tokens",
       "cache_creation_tokens",
-      "estimated_cost",
+      "tool_use_prompt_tokens",
       "incomplete_usage_count",
       "incomplete_cost_count",
       "reasoning_tokens",
@@ -468,14 +581,18 @@ AdminApp.register("usage", function (app) {
     ].forEach(function (key) {
       target[key] += Number(source[key] || 0);
     });
+    var cost = usageNumber(source.estimated_cost);
+    var previousCost = usageNumber(target.estimated_cost);
+    target.estimated_cost =
+      previousCost === null || cost === null ? null : previousCost + cost;
   }
-  function usageTotalCells(totals) {
+  function usageTotalCells(totals, denominator) {
     return (
       "<td>" +
-      fmtNum(totals.requests) +
+      usageCell(totals.requests) +
       "</td>" +
       "<td>" +
-      fmtNum(totals.input_tokens) +
+      usageCell(totals.input_tokens) +
       "</td>" +
       "<td>" +
       usageSubsetHtml(totals.output_tokens, totals.reasoning_tokens, "推理") +
@@ -488,13 +605,13 @@ AdminApp.register("usage", function (app) {
       ) +
       "</td>" +
       "<td>" +
-      fmtNum(totals.cache_creation_tokens) +
+      usageCell(totals.cache_creation_tokens) +
       "</td>" +
       "<td>" +
-      fmtNum(totalTok(totals)) +
+      usageTotalHtml(totals) +
       "</td>" +
       "<td>" +
-      usageCostHtml(totals) +
+      usageCostHtml(totals, denominator) +
       "</td>"
     );
   }
@@ -557,19 +674,24 @@ AdminApp.register("usage", function (app) {
       });
   }
 
-  function renderUsageModelGroups(rows) {
+  function renderUsageModelGroups(rows, denominator) {
     var tb = document.getElementById("usageByModelGroupBody");
+    rows = Array.isArray(rows) ? rows : [];
+    denominator = denominator || usageDenominator;
     if (!rows.length) {
       tb.innerHTML =
         "<tr class='empty-row'><td colspan='8'>当前时间段无数据</td></tr>";
       return;
     }
-    var groups = {};
+    var groups = Object.create(null);
     rows.forEach(function (row) {
       var groupName = String(row.model_group || "company_general");
       var targetName = String(row.target || "unknown_target");
       if (!groups[groupName])
-        groups[groupName] = { totals: usageTotals(), targets: {} };
+        groups[groupName] = {
+          totals: usageTotals(),
+          targets: Object.create(null),
+        };
       var group = groups[groupName];
       addUsageTotals(group.totals, row);
       if (!group.targets[targetName])
@@ -625,8 +747,8 @@ AdminApp.register("usage", function (app) {
             esc(modelGroupLabel(groupName)) +
             "</strong> <span class='usage-tree-muted'>· " +
             targetNames.length +
-            " Targets</span></td>" +
-            usageTotalCells(group.totals) +
+            " 个目标</span></td>" +
+            usageTotalCells(group.totals, denominator) +
             "</tr>",
         );
         if (!groupExpanded) return;
@@ -647,8 +769,8 @@ AdminApp.register("usage", function (app) {
               deletedBadge +
               " <span class='usage-tree-muted'>· " +
               target.models.length +
-              " 模型</span></td>" +
-              usageTotalCells(target.totals) +
+              " 个模型</span></td>" +
+              usageTotalCells(target.totals, denominator) +
               "</tr>",
           );
           if (!targetExpanded) return;
@@ -667,7 +789,7 @@ AdminApp.register("usage", function (app) {
                 "<tr class='usage-tree-row usage-model-row'><td class='usage-tree-indent-model'>↳ " +
                   esc(model.model || "unknown") +
                   "</td>" +
-                  usageTotalCells(model) +
+                  usageTotalCells(model, denominator) +
                   "</tr>",
               );
             });
@@ -676,60 +798,188 @@ AdminApp.register("usage", function (app) {
     tb.innerHTML = html.join("");
   }
 
-  function renderDailyChart(buckets) {
+  function setUsageChartNote(groupBy) {
+    var note = document.getElementById("usageChartNote");
+    if (!note) return;
+    note.textContent =
+      groupBy === "hour"
+        ? "跟随上方时间范围和筛选 · 按 UTC 小时聚合；开始与结束时间所在整点小时均整桶计入（含边界小时），因此边界桶可能包含范围外记录。今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。"
+        : "跟随上方时间范围和筛选 · 所选范围内的小时用量按 UTC 自然日分组；开始与结束边界所在整点小时整桶计入，不扩展到完整起止 UTC 日。今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。";
+  }
+  function usageChartLabel(start, groupBy) {
+    var text = String(start || "");
+    var match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})/.exec(text);
+    if (!match) return text || "—";
+    return groupBy === "hour"
+      ? match[2] + "-" + match[3] + " " + match[4] + ":00"
+      : match[2] + "-" + match[3];
+  }
+  function usageChartValue(bucket, metric) {
+    if (metric === "cost") return usageNumber(bucket.estimated_cost);
+    return usageTokensAvailable(bucket) ? totalTok(bucket) : null;
+  }
+  function setUsageChartMetric(metric) {
+    usageChartMetric = metric === "cost" ? "cost" : "tokens";
+    [
+      ["usageChartMetricTokens", "tokens"],
+      ["usageChartMetricCost", "cost"],
+    ].forEach(function (item) {
+      var button = document.getElementById(item[0]);
+      if (!button) return;
+      var active = item[1] === usageChartMetric;
+      button.setAttribute("aria-pressed", String(active));
+      button.classList.toggle("active", active);
+    });
+    renderDailyChart(usageChartBuckets, usageChartGroupBy);
+  }
+  function renderDailyChart(buckets, groupBy) {
     var chart = document.getElementById("dailyChart");
+    buckets = Array.isArray(buckets) ? buckets : [];
+    groupBy = groupBy || usageChartGroupBy || "day";
+    usageChartBuckets = buckets;
+    usageChartGroupBy = groupBy;
     if (!buckets.length) {
       chart.innerHTML =
         "<div style='color:var(--text-muted);padding:32px;text-align:center;width:100%;'>当前时间段内暂无统计数据</div>";
       return;
     }
+    var isCost = usageChartMetric === "cost";
     var rows = buckets
       .slice()
       .sort(function (a, b) {
         return String(a.bucket_start).localeCompare(String(b.bucket_start));
       })
       .map(function (b) {
-        var reqs = Number(b.requests || 0);
-        var total = totalTok(b);
         return {
-          date: String(b.bucket_start || "").slice(5, 10),
-          reqs: reqs,
-          total: total,
-          cost: Number(b.estimated_cost || 0),
+          label: usageChartLabel(b.bucket_start, groupBy),
+          requests: b.requests,
+          value: usageChartValue(b, usageChartMetric),
         };
       });
-    var maxTotal =
+    var maxValue =
       rows.reduce(function (m, r) {
-        return Math.max(m, r.total);
+        return r.value === null ? m : Math.max(m, r.value);
       }, 0) || 1;
     chart.innerHTML = rows
       .map(function (r) {
-        var h = Math.max(4, Math.round((r.total / maxTotal) * 180));
+        var missing = r.value === null;
+        var h = missing
+          ? 0
+          : Math.max(4, Math.round((r.value / maxValue) * 180));
+        var valueText = missing
+          ? "不可用"
+          : isCost
+            ? fmtMoney(r.value)
+            : fmtNum(r.value);
+        var metricTitle = isCost
+          ? "费用: " + valueText
+          : "总 Token: " + valueText;
         var title =
-          "总 Token: " +
-          fmtNum(r.total) +
-          "\n请求数: " +
-          fmtNum(r.reqs) +
-          "\n费用: " +
-          fmtMoney(r.cost);
+          "UTC " +
+          r.label +
+          "\n" +
+          metricTitle +
+          "\n请求权重: " +
+          usageCell(r.requests);
+        var aria =
+          "UTC " +
+          r.label +
+          "，" +
+          (isCost ? "费用 " : "总 Token ") +
+          valueText +
+          "，请求权重 " +
+          usageCell(r.requests);
         return (
-          "<div class='chart-bar-group' title='" +
+          "<div class='chart-bar-group' tabindex='0' role='img' title='" +
           esc(title) +
+          "' aria-label='" +
+          esc(aria) +
           "'>" +
           "<div class='chart-value'>" +
-          fmtNum(r.total) +
+          esc(valueText) +
           "</div>" +
-          "<div class='chart-bar' style='height:" +
+          "<div class='chart-bar" +
+          (missing ? " usage-chart-missing" : "") +
+          "' style='height:" +
           h +
           "px'></div>" +
           "<div class='chart-label'>" +
-          esc(r.date) +
+          esc(r.label) +
           "</div>" +
           "</div>"
         );
       })
       .join("");
   }
+
+  var usageTabItems = [
+    {
+      name: "group",
+      button: document.getElementById("usageTabGroup"),
+      panel: document.getElementById("usagePanelGroup"),
+    },
+    {
+      name: "client",
+      button: document.getElementById("usageTabClient"),
+      panel: document.getElementById("usagePanelClient"),
+    },
+    {
+      name: "model",
+      button: document.getElementById("usageTabModel"),
+      panel: document.getElementById("usagePanelModel"),
+    },
+  ];
+  var activeUsageTab = "group";
+  function selectUsageTab(name, focus) {
+    var selected = usageTabItems.find(function (item) {
+      return item.name === name;
+    });
+    if (!selected) return;
+    activeUsageTab = name;
+    usageTabItems.forEach(function (item) {
+      var active = item === selected;
+      item.button.setAttribute("aria-selected", String(active));
+      item.button.tabIndex = active ? 0 : -1;
+      item.button.classList.toggle("active", active);
+      item.panel.hidden = !active;
+    });
+    if (focus) selected.button.focus();
+  }
+  usageTabItems.forEach(function (item) {
+    item.button.addEventListener("click", function () {
+      selectUsageTab(item.name, false);
+    });
+  });
+  document
+    .getElementById("usageTabList")
+    .addEventListener("keydown", function (event) {
+      var horizontal = ["ArrowLeft", "ArrowRight", "Home", "End"];
+      if (horizontal.indexOf(event.key) < 0) return;
+      event.preventDefault();
+      var index = usageTabItems.findIndex(function (item) {
+        return item.name === activeUsageTab;
+      });
+      if (event.key === "Home") index = 0;
+      else if (event.key === "End") index = usageTabItems.length - 1;
+      else
+        index =
+          (index + (event.key === "ArrowRight" ? 1 : -1) +
+            usageTabItems.length) %
+          usageTabItems.length;
+      selectUsageTab(usageTabItems[index].name, true);
+    });
+  selectUsageTab("group", false);
+
+  document
+    .getElementById("usageChartMetricTokens")
+    .addEventListener("click", function () {
+      setUsageChartMetric("tokens");
+    });
+  document
+    .getElementById("usageChartMetricCost")
+    .addEventListener("click", function () {
+      setUsageChartMetric("cost");
+    });
 
   document
     .getElementById("usageByModelGroupBody")
@@ -745,7 +995,7 @@ AdminApp.register("usage", function (app) {
         state.usageModelTargetExpanded[key] =
           !state.usageModelTargetExpanded[key];
       }
-      renderUsageModelGroups(state.usageModelGroupRows || []);
+      renderUsageModelGroups(state.usageModelGroupRows || [], usageDenominator);
     });
 
   usageTables.forEach(function (t) {
@@ -801,6 +1051,15 @@ AdminApp.register("usage", function (app) {
   window.refreshUsageModelGroupFilter = refreshUsageModelGroupFilter;
   return {
     getTimeRange: getTimeRange,
+    usageGroupBy: usageGroupBy,
+    usageNumber: usageNumber,
+    usageCostDenominator: usageCostDenominator,
+    usageCostShare: usageCostShare,
+    usageModelRequestHeader: usageModelRequestHeader,
+    setUsageModelRequestHeader: setUsageModelRequestHeader,
+    renderUsageSummary: renderUsageSummary,
+    selectUsageTab: selectUsageTab,
+    setUsageChartMetric: setUsageChartMetric,
     populateUsageClientFilter: populateUsageClientFilter,
     populateUsageModelGroupFilter: populateUsageModelGroupFilter,
     appendUsageModelGroupOption: appendUsageModelGroupOption,

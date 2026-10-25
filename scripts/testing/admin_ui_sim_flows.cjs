@@ -346,7 +346,7 @@ const list = [
         clients: [...document.querySelectorAll("#topClientsBody tr[data-top-client]")].map(tr => tr.dataset.topClient),
         models: [...document.querySelectorAll("#topModelsBody tr[data-top-model]")].map(tr => tr.dataset.topModel),
       })`);
-      assert.match(range.status, /官方基础价/);
+      assert.match(range.status, /含模型组系数/);
       assert.notEqual(range.requests, "不可用");
       assert.notEqual(range.cost, "不可用");
       assert.ok(range.clients.includes(S.client), `top clients ${range.clients.join(",")}`);
