@@ -1,5 +1,6 @@
 "use strict";
-// Targets owns target CRUD, key cards, model mappings and provider capability controls.
+// Targets owns target CRUD, health summaries, the read-only detail drawer,
+// key cards, model mappings and provider capability controls.
 // Imports resolve through AdminApp; implementation state stays inside this module.
 AdminApp.register("targets", function (app) {
   var state = app.state;
@@ -16,20 +17,22 @@ AdminApp.register("targets", function (app) {
   var setSchemaSelectValue = app.bind("schema", "setSchemaSelectValue");
   var poolMemberCount = app.bind("pools", "poolMemberCount");
   var poolDisplayName = app.bind("pools", "poolDisplayName");
+  var loadPools = app.bind("pools", "loadPools");
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var loadCatalog = app.bind("catalog", "loadCatalog");
   var catalogFilterModels = app.bind("catalog", "catalogFilterModels");
   async function loadTargets() {
     try {
-      var fetches = [api("/admin/data/targets"), fetchSchedulingRuntime()];
-      // 池徽章与池下拉依赖池数据，缺失时一并拉取。
-      if (!state.pools || !state.pools.length) {
-        fetches.push(
-          api("/admin/data/pools").catch(function () {
-            return { pools: [] };
-          }),
-        );
-      }
+      // Pool pause lives on the roster, and another admin session may resume it
+      // between refreshes. Reload it every time; a failed fetch keeps the last
+      // known roster instead of turning cached pause into an authoritative fact.
+      var fetches = [
+        api("/admin/data/targets"),
+        fetchSchedulingRuntime(),
+        api("/admin/data/pools").catch(function () {
+          return null;
+        }),
+      ];
       var results = await Promise.all(fetches);
       state.targets = Array.isArray(results[0].targets)
         ? results[0].targets
@@ -43,7 +46,7 @@ AdminApp.register("targets", function (app) {
     }
   }
   // fetchSchedulingRuntime：拉取 /admin/metrics 的 targets_runtime 调度观测快照
-  // （S5），失败时保留旧数据（观测是尽力而为，不阻塞管理台主流程）。
+  // （S5）。失败时清空快照，避免把过期运行态当成当前健康状态。
   async function fetchSchedulingRuntime() {
     try {
       var m = await api("/admin/metrics");
@@ -55,9 +58,541 @@ AdminApp.register("targets", function (app) {
       }
       state.runtime = map;
     } catch (e) {
-      /* 指标缺失不影响列表功能 */
+      // Stale snapshots would misreport health; metrics stay best-effort.
+      state.runtime = null;
     }
     return null;
+  }
+  /* ===== Target health summaries and detail drawer ===== */
+  var targetFilter = "all";
+  var detailTargetName = "";
+  var detailTab = "overview";
+  var targetFilterSpecs = [
+    { key: "all", label: "全部" },
+    { key: "attention", label: "异常" },
+    { key: "healthy", label: "正常" },
+    { key: "paused", label: "已暂停" },
+  ];
+  var targetHealthRanks = { attention: 0, paused: 1, healthy: 2 };
+  // keypool.status keeps exhausted=true after an expired cooldown; only the
+  // 可用(待激活) display label means the key can be retried without an issue.
+  // 失效(待请求验证), blocked keys and active cooldowns still need attention.
+  function keyStatusNeedsAttention(status) {
+    return (
+      !!status &&
+      (!!status.blocked ||
+        (!!status.exhausted && status.status !== "可用(待激活)"))
+    );
+  }
+  function keyStatusRecoverablePending(status) {
+    return (
+      !!status &&
+      !!status.exhausted &&
+      !status.blocked &&
+      status.status === "可用(待激活)"
+    );
+  }
+  function targetKeyCounts(t) {
+    var statuses = t && Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    var extraKeys = t && Array.isArray(t.api_keys) ? t.api_keys.length : 0;
+    return {
+      total: (t && t.has_api_key ? 1 : 0) + extraKeys,
+      blocked: statuses.filter(function (s) {
+        return !!s.blocked;
+      }).length,
+      exhausted: statuses.filter(function (s) {
+        return keyStatusNeedsAttention(s) && !s.blocked;
+      }).length,
+      recoverable: statuses.filter(keyStatusRecoverablePending).length,
+    };
+  }
+  function targetRuntimeFor(t) {
+    return state.runtime
+      ? state.runtime[String((t && t.name) || "").toLowerCase()] || null
+      : null;
+  }
+  // Known phases come from the schema; a missing or malformed snapshot stays
+  // attention instead of being treated as healthy.
+  function targetPhaseKnown(phase) {
+    if (typeof phase !== "string" || !phase) return false;
+    var phases = (state.schema && state.schema.target_phases) || [];
+    return phases.some(function (option) {
+      return option.value === phase;
+    });
+  }
+  // Pool pause is applied to runtime targets (proxy.applyPoolPause); the saved
+  // target keeps its own paused flag. Read the roster only, never write it.
+  // This roster can lag behind /admin/metrics, so health uses it only when the
+  // runtime snapshot is missing or also reports a pause.
+  function targetPoolPaused(t) {
+    var poolName = String((t && t.pool) || "").toLowerCase();
+    if (!poolName) return false;
+    return (state.pools || []).some(function (p) {
+      return (
+        String((p && p.name) || "").toLowerCase() === poolName && !!p.paused
+      );
+    });
+  }
+  function targetHealth(t) {
+    var keys = targetKeyCounts(t);
+    var rt = targetRuntimeFor(t);
+    var phase = rt && rt.phase ? String(rt.phase) : "";
+    if (t && t.paused) {
+      return {
+        key: "paused",
+        label: "已暂停",
+        tone: "muted",
+        reason: "目标已暂停，不参与转发",
+      };
+    }
+    // A fresh runtime snapshot is authoritative. Only fall back to the roster
+    // when runtime is absent, or use its reason when runtime also shows pause.
+    if (!rt) {
+      if (targetPoolPaused(t)) {
+        return {
+          key: "paused",
+          label: "已暂停",
+          tone: "muted",
+          reason:
+            "所属部署池已暂停，目标作为池成员停止转发；目标自身暂停设置未修改",
+        };
+      }
+      return {
+        key: "attention",
+        label: "需要关注",
+        tone: "warn",
+        reason: "运行态不可用：/admin/metrics 未返回该目标",
+      };
+    }
+    if (rt.paused || phase === "offline") {
+      if (targetPoolPaused(t)) {
+        return {
+          key: "paused",
+          label: "已暂停",
+          tone: "muted",
+          reason:
+            "所属部署池已暂停，目标作为池成员停止转发；目标自身暂停设置未修改",
+        };
+      }
+      return {
+        key: "paused",
+        label: "已暂停",
+        tone: "muted",
+        reason: rt.paused
+          ? "运行态显示目标已暂停，不参与转发；目标自身暂停设置未修改"
+          : "运行态相位为暂停（offline），不参与转发；目标自身暂停设置未修改",
+      };
+    }
+    if (!targetPhaseKnown(phase)) {
+      return {
+        key: "attention",
+        label: "需要关注",
+        tone: "warn",
+        reason: "运行态不可用：调度相位缺失或无法识别",
+      };
+    }
+    if (keys.blocked || keys.exhausted) {
+      var issues = [];
+      if (keys.blocked) issues.push(keys.blocked + " 个 Key 已屏蔽");
+      if (keys.exhausted) issues.push(keys.exhausted + " 个 Key 额度或限流不可用");
+      return {
+        key: "attention",
+        label: "需要关注",
+        tone: "bad",
+        reason: issues.join("，"),
+      };
+    }
+    if (phase && phase !== "ready") {
+      return {
+        key: "attention",
+        label: "需要关注",
+        tone: "warn",
+        reason: "运行状态：" + (schemaLabel("target_phases", phase) || phase),
+      };
+    }
+    var models = t && Array.isArray(t.model_mappings) ? t.model_mappings : [];
+    if (models.length && models.every(function (m) { return !!m.paused; })) {
+      return {
+        key: "attention",
+        label: "需要关注",
+        tone: "warn",
+        reason: "全部模型已暂停",
+      };
+    }
+    return {
+      key: "healthy",
+      label: "正常",
+      tone: "ok",
+      reason: "目标已启用，调度运行正常",
+    };
+  }
+  function targetHealthCounts() {
+    var targets = Array.isArray(state.targets) ? state.targets : [];
+    var counts = { all: targets.length, attention: 0, healthy: 0, paused: 0 };
+    targets.forEach(function (t) {
+      var key = targetHealth(t).key;
+      if (counts[key] !== undefined) counts[key]++;
+    });
+    return counts;
+  }
+  function targetSort(a, b) {
+    var ar = targetHealthRanks[targetHealth(a).key];
+    var br = targetHealthRanks[targetHealth(b).key];
+    if (ar === undefined) ar = 3;
+    if (br === undefined) br = 3;
+    return ar - br || String(a.name || "").localeCompare(String(b.name || ""));
+  }
+  function filteredTargets() {
+    var targets = Array.isArray(state.targets) ? state.targets : [];
+    return targets
+      .slice()
+      .sort(targetSort)
+      .filter(function (t) {
+        return targetFilter === "all" || targetHealth(t).key === targetFilter;
+      });
+  }
+  function renderTargetStatusFilters() {
+    var counts = targetHealthCounts();
+    document.getElementById("targetStatusFilters").innerHTML = targetFilterSpecs
+      .map(function (spec) {
+        return (
+          '<button type="button" class="target-status-chip" data-target-filter="' +
+          spec.key +
+          '" aria-pressed="' +
+          (targetFilter === spec.key) +
+          '">' +
+          esc(spec.label) +
+          " <span class='target-status-count'>" +
+          counts[spec.key] +
+          "</span></button>"
+        );
+      })
+      .join("");
+  }
+  function setTargetFilter(filter) {
+    targetFilter =
+      targetFilterSpecs.some(function (spec) {
+        return spec.key === filter;
+      })
+        ? filter
+        : "all";
+    renderTargets();
+  }
+  function switchTargetPageTab(name) {
+    var pools = name === "pools";
+    document.getElementById("targetsMainPanel").hidden = pools;
+    document.getElementById("targetsPoolsPanel").hidden = !pools;
+    [
+      ["targetsMainTab", !pools],
+      ["targetsPoolsTab", pools],
+    ].forEach(function (entry) {
+      var tab = document.getElementById(entry[0]);
+      tab.classList.toggle("active", entry[1]);
+      tab.setAttribute("aria-selected", entry[1] ? "true" : "false");
+      tab.tabIndex = entry[1] ? 0 : -1;
+    });
+    return pools ? loadPools() : loadTargets();
+  }
+  function detailRow(label, value) {
+    return (
+      "<div class='target-detail-row'><dt>" +
+      esc(label) +
+      "</dt><dd>" +
+      value +
+      "</dd></div>"
+    );
+  }
+  function detailGrid(rows) {
+    return "<dl class='target-detail-grid'>" + rows.join("") + "</dl>";
+  }
+  function targetKeyDetailSummary(t) {
+    var counts = targetKeyCounts(t);
+    if (!counts.total) {
+      return t.allow_bearer_passthrough
+        ? "未配置独立密钥；已允许 Bearer 透传，客户端凭据可能直接发往上游"
+        : "未配置独立密钥";
+    }
+    if (!Array.isArray(t.key_statuses) || !t.key_statuses.length) {
+      return counts.total + " 个密钥；运行态明细尚未上报";
+    }
+    var parts = [counts.total + " 个密钥"];
+    if (counts.blocked) parts.push("屏蔽 " + counts.blocked);
+    if (counts.exhausted) parts.push("不可用 " + counts.exhausted);
+    if (counts.recoverable) parts.push("可用(待激活) " + counts.recoverable);
+    if (!counts.blocked && !counts.exhausted) {
+      parts.push(counts.recoverable ? "无阻塞异常" : "未报告异常");
+    }
+    return parts.join("；");
+  }
+  function renderTargetOverview(t) {
+    var health = targetHealth(t);
+    var rt = targetRuntimeFor(t);
+    var models = Array.isArray(t.model_mappings) ? t.model_mappings : [];
+    var pausedModels = models.filter(function (m) {
+      return !!m.paused;
+    }).length;
+    var runtimeText;
+    if (!rt) {
+      runtimeText = "运行态不可用（/admin/metrics 未返回该目标）";
+    } else if (!targetPhaseKnown(rt.phase)) {
+      runtimeText = "运行态不可用（调度相位缺失或无法识别）";
+    } else {
+      runtimeText =
+        schemaLabel("target_phases", rt.phase) +
+        " · 在途 " +
+        Number(rt.in_flight || 0) +
+        (rt.max_concurrency > 0 ? "/" + rt.max_concurrency : "") +
+        " · 亲和 " +
+        Number(rt.affinity_hits || 0) +
+        " · 熔断 " +
+        Number(rt.breaker_trips || 0);
+      if (rt.window_15m) {
+        runtimeText += " · 15 分钟峰值 " + Number(rt.window_15m.in_flight_peak || 0);
+      }
+    }
+    return (
+      detailGrid([
+        detailRow(
+          "健康状态",
+          "<span class='target-health-badge tone-" +
+            esc(health.tone) +
+            "'>" +
+            esc(health.label) +
+            "</span> " +
+            esc(health.reason),
+        ),
+        detailRow("类型", esc(epDisplayName(t.endpoint_type) || t.endpoint_type || "—")),
+        detailRow(
+          "Endpoint",
+          t.endpoint
+            ? "<span class='target-detail-mono'>" + esc(t.endpoint) + "</span>"
+            : "未配置",
+        ),
+        detailRow(
+          "部署池",
+          t.pool ? esc(poolDisplayName(t.pool)) : "未加入部署池",
+        ),
+        detailRow("调度观测", esc(runtimeText)),
+        detailRow("密钥", esc(targetKeyDetailSummary(t))),
+        detailRow(
+          "模型",
+          models.length
+            ? esc(
+                models.length +
+                  " 个映射" +
+                  (pausedModels ? "，" + pausedModels + " 个已暂停" : ""),
+              )
+            : "未限定模型",
+        ),
+      ]) +
+      "<p class='target-detail-note'>详情只读取 /admin/data/targets 与 /admin/metrics 的现有字段，不展示明文密钥或逐 Key 请求数。</p>"
+    );
+  }
+  // Go serializes an unset time.Time as 0001-01-01T00:00:00Z. A cooldown that
+  // never existed must not read as a real deadline.
+  function keyCooldownEnd(status) {
+    var value = status && status.cooldown_end;
+    if (!value) return "";
+    var date = new Date(value);
+    if (isNaN(date.getTime()) || date.getUTCFullYear() <= 1) return "";
+    return String(value);
+  }
+  function renderTargetKeys(t) {
+    var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    var counts = targetKeyCounts(t);
+    if (!statuses.length) {
+      return (
+        "<div class='target-detail-empty'>" +
+        (counts.total
+          ? esc(counts.total + " 个密钥已保存，运行状态明细尚未上报。")
+          : "未配置独立密钥。") +
+        "</div><p class='target-detail-note'>明文密钥不会回读。密钥状态由运行中的 Key 池上报；未上报时不推断每个 Key 的请求数。</p>" +
+        (t.allow_bearer_passthrough
+          ? "<p class='target-detail-note'>已允许 Bearer 透传：未配置独立密钥时，客户端凭据可能直接发往上游。</p>"
+          : "")
+      );
+    }
+    return (
+      "<div class='target-detail-keys'>" +
+      statuses
+        .map(function (status) {
+          var meta = [];
+          if (status.blocked) meta.push("已屏蔽");
+          if (keyStatusNeedsAttention(status) && !status.blocked)
+            meta.push("额度或限流不可用");
+          var cooldownEnd = keyCooldownEnd(status);
+          if (cooldownEnd) meta.push("冷却结束 " + cooldownEnd);
+          return (
+            "<div class='target-detail-key'><span class='target-detail-key-mask'>" +
+            esc(status.key_mask || "掩码不可用") +
+            "</span>" +
+            (status.status
+              ? "<span style='" +
+                keyStatusColor(status.status) +
+                ";padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;'>" +
+                esc(status.status) +
+                "</span>"
+              : "") +
+            (meta.length
+              ? "<span class='target-detail-key-meta'>" + esc(meta.join(" · ")) + "</span>"
+              : "") +
+            "</div>"
+          );
+        })
+        .join("") +
+      "</div><p class='target-detail-note'>仅显示密钥掩码和运行状态；不显示明文密钥，也不推导每个 Key 的请求数。</p>"
+    );
+  }
+  function renderTargetModels(t) {
+    var models = Array.isArray(t.model_mappings) ? t.model_mappings : [];
+    if (!models.length) {
+      return (
+        "<div class='target-detail-empty'>未限定模型；上游接受配置中的任意模型。</div>" +
+        "<p class='target-detail-note'>模型行只反映已保存的上游映射，不提供默认模型或测试模型选择。</p>"
+      );
+    }
+    return (
+      "<div class='target-detail-models'><div class='target-model-list'>" +
+      models
+        .map(function (m) {
+          var label = m.fallback
+            ? m.upstream + " (" + m.fallback + ")"
+            : m.upstream;
+          if (m.paused) label = "已暂停 · " + label;
+          return (
+            "<span class='target-model-badge' title='" +
+            esc(label) +
+            "'>" +
+            esc(label) +
+            "</span>"
+          );
+        })
+        .join("") +
+      "</div></div><p class='target-detail-note'>括号内为下游兜底别名；已暂停的模型不接收请求。</p>"
+    );
+  }
+  function renderTargetAdvanced(t) {
+    var headerNames =
+      t.custom_headers && typeof t.custom_headers === "object"
+        ? Object.keys(t.custom_headers)
+        : [];
+    var bodyNames =
+      t.custom_body && typeof t.custom_body === "object"
+        ? Object.keys(t.custom_body)
+        : [];
+    function onOff(value) {
+      return value ? "开启" : "关闭";
+    }
+    function raw(value) {
+      return value ? "<span class='target-detail-mono'>" + esc(value) + "</span>" : "未配置";
+    }
+    return (
+      detailGrid([
+        detailRow(
+          "用量适配",
+          t.usage_adapter
+            ? esc(schemaLabel("usage_adapters", t.usage_adapter))
+            : "未配置",
+        ),
+        detailRow(
+          "认证方式",
+          t.auth_mode ? esc(schemaLabel("auth_modes", t.auth_mode)) : "默认",
+        ),
+        detailRow("允许 Bearer 透传", onOff(t.allow_bearer_passthrough)),
+        detailRow("Key 额度重置时间", raw(t.key_reset_time)),
+        detailRow("模型前缀", raw(t.model_prefix)),
+        detailRow(
+          "图片操作",
+          t.image_operation
+            ? esc(schemaLabel("image_operations", t.image_operation) || t.image_operation)
+            : "未配置",
+        ),
+        detailRow("请求流式用量", onOff(t.request_stream_usage_if_missing)),
+        detailRow("Responses 优先 WebSocket", onOff(t.prefer_websocket)),
+        detailRow("上游支持 Responses", onOff(t.supports_responses)),
+        detailRow("OpenAI 路径前缀", raw(t.openai_prefix)),
+        detailRow("Anthropic 路径前缀", raw(t.anthropic_prefix)),
+        detailRow(
+          "自定义请求头",
+          headerNames.length
+            ? esc(headerNames.join("、")) + "<span class='target-detail-key-meta'>（仅字段名）</span>"
+            : "未配置",
+        ),
+        detailRow(
+          "自定义请求体",
+          bodyNames.length
+            ? esc(bodyNames.join("、")) + "<span class='target-detail-key-meta'>（仅字段名）</span>"
+            : "未配置",
+        ),
+      ]) +
+      "<p class='target-detail-note'>高级设置是当前保存值的只读视图；修改请使用「编辑目标」。自定义请求头与请求体只显示字段名，不显示值。</p>"
+    );
+  }
+  function setTargetDetailTab(tab) {
+    detailTab = tab;
+    document
+      .querySelectorAll("[data-target-detail-tab]")
+      .forEach(function (button) {
+        var active = button.dataset.targetDetailTab === tab;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+        button.tabIndex = active ? 0 : -1;
+      });
+    [
+      ["targetDetailOverview", "overview"],
+      ["targetDetailKeys", "keys"],
+      ["targetDetailModels", "models"],
+      ["targetDetailAdvanced", "advanced"],
+    ].forEach(function (entry) {
+      var panel = document.getElementById(entry[0]);
+      panel.hidden = entry[1] !== tab;
+    });
+  }
+  function switchTargetDetailTab(tab) {
+    var valid = ["overview", "keys", "models", "advanced"];
+    if (valid.indexOf(tab) < 0) return;
+    setTargetDetailTab(tab);
+  }
+  function renderTargetDetail(t) {
+    var health = targetHealth(t);
+    document.getElementById("targetDetailTitle").textContent = t.name;
+    document.getElementById("targetDetailSubtitle").textContent =
+      health.label +
+      " · " +
+      (epDisplayName(t.endpoint_type) || t.endpoint_type || "类型未知");
+    document.getElementById("targetDetailOverview").innerHTML = renderTargetOverview(t);
+    document.getElementById("targetDetailKeys").innerHTML = renderTargetKeys(t);
+    document.getElementById("targetDetailModels").innerHTML = renderTargetModels(t);
+    document.getElementById("targetDetailAdvanced").innerHTML = renderTargetAdvanced(t);
+    setTargetDetailTab(detailTab);
+  }
+  function openTargetDetail(name) {
+    var t = (state.targets || []).find(function (target) {
+      return target.name === name;
+    });
+    if (!t) return false;
+    detailTargetName = name;
+    detailTab = "overview";
+    renderTargetDetail(t);
+    openModal("targetDetailDrawer");
+    return true;
+  }
+  function closeTargetDetail() {
+    closeModal("targetDetailDrawer");
+  }
+  function refreshOpenTargetDetail() {
+    if (!detailTargetName) return;
+    var drawer = document.getElementById("targetDetailDrawer");
+    if (!drawer || !drawer.classList.contains("open")) return;
+    var t = (state.targets || []).find(function (target) {
+      return target.name === detailTargetName;
+    });
+    if (!t) {
+      detailTargetName = "";
+      closeTargetDetail();
+      return;
+    }
+    renderTargetDetail(t);
   }
   // refreshEditingTarget：block/unblock 等改变了 key 运行时状态后，
   // 从后端重新拉取最新数据，同步更新列表 + 编辑模态框内的 key 卡片。
@@ -202,8 +737,9 @@ AdminApp.register("targets", function (app) {
           i +
           "' title='移除' aria-label='移除' style='padding:2px 8px;font-size:11px;color:var(--danger);'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M6 6l12 12M18 6L6 18'></path></svg></button>";
         var cooldownInfo = "";
-        if (item.status && item.status.exhausted && item.status.cooldown_end) {
-          var cd = new Date(item.status.cooldown_end);
+        var itemCooldownEnd = keyCooldownEnd(item.status);
+        if (item.status && item.status.exhausted && itemCooldownEnd) {
+          var cd = new Date(itemCooldownEnd);
           var now = new Date();
           if (cd > now) {
             var mins = Math.ceil((cd - now) / 60000);
@@ -319,21 +855,24 @@ AdminApp.register("targets", function (app) {
 
   function renderTargets() {
     if (modelHint) hideModelHint();
+    renderTargetStatusFilters();
     var tb = document.getElementById("targetsTableBody");
+    var targets = filteredTargets();
     if (!state.targets.length) {
       tb.innerHTML =
-        "<tr class='empty-row'><td colspan='9'>暂无目标配置</td></tr>";
+        "<tr class='empty-row'><td colspan='8'>暂无目标配置</td></tr>";
+      refreshOpenTargetDetail();
       return;
     }
-    tb.innerHTML = state.targets
-      .slice()
-      .sort(function (a, b) {
-        return (
-          Number(!!a.paused) - Number(!!b.paused) ||
-          String(a.name || "").localeCompare(String(b.name || ""))
-        );
-      })
+    if (!targets.length) {
+      tb.innerHTML =
+        "<tr class='empty-row'><td colspan='8'>当前筛选无目标</td></tr>";
+      refreshOpenTargetDetail();
+      return;
+    }
+    tb.innerHTML = targets
       .map(function (t) {
+        var health = targetHealth(t);
         var poolCell = t.pool
           ? "<span class='client-target-pool-tag'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='3' y='4' width='18' height='7' rx='2'></rect><rect x='3' y='13' width='18' height='7' rx='2'></rect><path d='M7 7.5h.01M7 16.5h.01'></path></svg> " +
             esc(poolDisplayName(t.pool)) +
@@ -380,22 +919,31 @@ AdminApp.register("targets", function (app) {
           }).length;
           var quotaSubCount = t.key_statuses.filter(function (s) {
             return (
-              s.exhausted && s.exhaust_reason === "quota_exceeded_subscription"
+              keyStatusNeedsAttention(s) &&
+              s.exhaust_reason === "quota_exceeded_subscription"
             );
           }).length;
           var quotaAPICount = t.key_statuses.filter(function (s) {
-            return s.exhausted && s.exhaust_reason === "quota_exceeded_api";
+            return (
+              keyStatusNeedsAttention(s) &&
+              s.exhaust_reason === "quota_exceeded_api"
+            );
           }).length;
           var quotaCount = t.key_statuses.filter(function (s) {
-            return s.exhausted && s.exhaust_reason === "quota_exceeded";
+            return (
+              keyStatusNeedsAttention(s) &&
+              s.exhaust_reason === "quota_exceeded"
+            );
           }).length;
           var rateCount = t.key_statuses.filter(function (s) {
-            return s.exhausted && s.exhaust_reason === "rate_limited";
+            return (
+              keyStatusNeedsAttention(s) && s.exhaust_reason === "rate_limited"
+            );
           }).length;
           // GLM 限流细分：额度类（5h/周月/未知）与速率类（QPS），与前端 keyStatusColor 文案一一对应
           var glmQuotaCount = t.key_statuses.filter(function (s) {
             return (
-              s.exhausted &&
+              keyStatusNeedsAttention(s) &&
               !s.blocked &&
               (s.exhaust_reason === "glm_rate_limit_5h" ||
                 s.exhaust_reason === "glm_rate_limit_quota" ||
@@ -404,15 +952,14 @@ AdminApp.register("targets", function (app) {
           }).length;
           var glmRateCount = t.key_statuses.filter(function (s) {
             return (
-              s.exhausted &&
-              !s.blocked &&
+              keyStatusNeedsAttention(s) &&
               s.exhaust_reason === "glm_rate_limit_qps"
             );
           }).length;
           // 其他失效原因：invalid_token / billing_error / account_disabled 等（5 分钟冷却自动恢复）
           // 排除所有已命名类（含 glm_ 前缀），避免 GLM reason 被误算进"失效"
           var otherExhaustedCount = t.key_statuses.filter(function (s) {
-            if (!s.exhausted || s.blocked) return false;
+            if (!keyStatusNeedsAttention(s) || s.blocked) return false;
             var r = s.exhaust_reason;
             if (
               r === "quota_exceeded_subscription" ||
@@ -488,14 +1035,20 @@ AdminApp.register("targets", function (app) {
         var rt = state.runtime
           ? state.runtime[String(t.name || "").toLowerCase()]
           : null;
-        if (rt) {
+        if (!rt || !targetPhaseKnown(rt.phase)) {
+          phaseCell =
+            "<span style='background:var(--muted-soft);color:var(--ink-3);padding:2px 8px;border-radius:4px;font-size:12px;'>运行态不可用</span> ";
+        } else {
           var phaseStyles = {
             ready: { bg: "var(--ok-soft)", fg: "var(--ok)" },
             muted: { bg: "var(--warn-soft)", fg: "var(--warn)" },
             "half-open": { bg: "var(--out-soft)", fg: "var(--out)" },
             offline: { bg: "var(--muted-soft)", fg: "var(--ink-3)" },
           };
-          var ph = phaseStyles[rt.phase] || { bg: "var(--muted-soft)", fg: "var(--ink-3)" };
+          var ph = phaseStyles[rt.phase] || {
+            bg: "var(--muted-soft)",
+            fg: "var(--ink-3)",
+          };
           ph.label = schemaLabel("target_phases", rt.phase);
           phaseCell =
             "<span style='background:" +
@@ -521,46 +1074,64 @@ AdminApp.register("targets", function (app) {
               "</span>";
           }
         }
+        // The switch edits only the saved target pause flag. Effective pause can
+        // also come from the pool or runtime; showing that as this switch would
+        // let a resume click clear the pool-pause symptom while changing nothing.
+        var ownPaused = !!t.paused;
         var pauseSwitch =
           "<button type='button' role='switch' class='target-toggle readonly-disable' aria-checked='" +
-          !t.paused +
-          "' aria-label='" +
+          !ownPaused +
+          "' aria-label='目标「" +
           esc(t.name) +
-          " 使用状态' " +
-          (t.paused ? "data-resume-tgt='" : "data-pause-tgt='") +
+          "」自身暂停状态，当前" +
+          (ownPaused ? "已暂停" : "未暂停") +
+          "' title='只控制目标自身暂停设置；部署池暂停只影响运行态和健康状态' " +
+          (ownPaused ? "data-resume-tgt='" : "data-pause-tgt='") +
           esc(t.name) +
           "'" +
           (isReadonlyMode() ? " disabled" : "") +
           ">" +
           "<span class='target-toggle-track' aria-hidden='true'></span><span>" +
-          (t.paused ? "暂停" : "使用") +
+          (ownPaused ? "目标已暂停" : "目标启用") +
           "</span></button>";
         return (
-          "<tr><td>" +
+          "<tr data-target-health='" +
+          esc(health.key) +
+          "'><td><div class='target-status-cell'>" +
           pauseSwitch +
-          "</td><td class='target-text' title='" +
+          "<span class='target-health-badge tone-" +
+          esc(health.tone) +
+          "' title='" +
+          esc(health.reason) +
+          "'>" +
+          esc(health.label) +
+          "</span></div></td>" +
+          "<td class='target-text' title='" +
+          esc(t.name) +
+          "'>" +
+          "<button type='button' class='target-detail-link' data-detail-tgt='" +
           esc(t.name) +
           "'>" +
           esc(t.name) +
-          "</td>" +
+          "</button>" +
+          "<span class='target-endpoint-text' title='" +
+          esc(t.endpoint || "") +
+          "'>" +
+          esc(t.endpoint || "未配置 Endpoint") +
+          "</span></td>" +
           "<td><div class='target-cell-content'>" +
-          phaseCell +
           keyStatus +
           "</div></td>" +
           "<td><span class='badge target-type-badge' style='background:var(--primary-light);color:var(--primary);padding:2px 8px;border-radius:4px;font-size:12px;'>" +
           esc(epDisplayName(t.endpoint_type)) +
           "</span></td>" +
-          "<td style='max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='" +
-          esc(t.endpoint) +
-          "'>" +
-          esc(t.endpoint) +
-          "</td>" +
           "<td class='target-text' title='" +
           esc(poolDisplayName(t.pool || "")) +
           "'>" +
           poolCell +
           "</td>" +
           "<td><div class='target-cell-content'>" +
+          phaseCell +
           schedCell +
           "</div></td>" +
           "<td><div class='target-cell-content'>" +
@@ -577,6 +1148,7 @@ AdminApp.register("targets", function (app) {
         );
       })
       .join("");
+    refreshOpenTargetDetail();
   }
   // Mount outside the scrolling cell so the full name is never clipped by the table.
   var modelHint = document.createElement("div");
@@ -646,6 +1218,9 @@ AdminApp.register("targets", function (app) {
       )
         return;
       if (t.dataset.mcTgt) {
+      }
+      if (t.dataset.detailTgt) {
+        openTargetDetail(t.dataset.detailTgt);
       }
       if (t.dataset.editTgt) {
         var tgt = state.targets.find(function (x) {
@@ -1249,6 +1824,64 @@ AdminApp.register("targets", function (app) {
       loadTargets();
     });
   document
+    .getElementById("targetsMainTab")
+    .addEventListener("click", function () {
+      switchTargetPageTab("targets");
+    });
+  document
+    .getElementById("targetsPoolsTab")
+    .addEventListener("click", function () {
+      switchTargetPageTab("pools");
+    });
+  ["targetsMainTab", "targetsPoolsTab"].forEach(function (id) {
+    document.getElementById(id).addEventListener("keydown", function (event) {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      switchTargetPageTab(id === "targetsMainTab" ? "pools" : "targets");
+      document
+        .getElementById(id === "targetsMainTab" ? "targetsPoolsTab" : "targetsMainTab")
+        .focus();
+    });
+  });
+  document
+    .getElementById("targetStatusFilters")
+    .addEventListener("click", function (event) {
+      var chip = event.target.closest("[data-target-filter]");
+      if (chip) setTargetFilter(chip.dataset.targetFilter);
+    });
+  document
+    .getElementById("targetDetailTabs")
+    .addEventListener("click", function (event) {
+      var tab = event.target.closest("[data-target-detail-tab]");
+      if (tab) switchTargetDetailTab(tab.dataset.targetDetailTab);
+    });
+  document
+    .getElementById("targetDetailTabs")
+    .addEventListener("keydown", function (event) {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      var tabs = Array.prototype.slice.call(
+        document.querySelectorAll("[data-target-detail-tab]"),
+      );
+      var current = tabs.indexOf(document.activeElement);
+      if (current < 0) return;
+      event.preventDefault();
+      var next =
+        (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) %
+        tabs.length;
+      tabs[next].focus();
+      switchTargetDetailTab(tabs[next].dataset.targetDetailTab);
+    });
+  document
+    .getElementById("targetDetailEditBtn")
+    .addEventListener("click", function () {
+      var target = (state.targets || []).find(function (candidate) {
+        return candidate.name === detailTargetName;
+      });
+      if (!target) return;
+      closeTargetDetail();
+      openTargetModal(target);
+    });
+  document
     .getElementById("saveTargetBtn")
     .addEventListener("click", async function () {
       var name = document.getElementById("tgtName").value.trim();
@@ -1368,6 +2001,16 @@ AdminApp.register("targets", function (app) {
   return {
     loadTargets: loadTargets,
     fetchSchedulingRuntime: fetchSchedulingRuntime,
+    targetHealth: targetHealth,
+    targetHealthCounts: targetHealthCounts,
+    filteredTargets: filteredTargets,
+    renderTargetStatusFilters: renderTargetStatusFilters,
+    setTargetFilter: setTargetFilter,
+    switchTargetPageTab: switchTargetPageTab,
+    openTargetDetail: openTargetDetail,
+    closeTargetDetail: closeTargetDetail,
+    switchTargetDetailTab: switchTargetDetailTab,
+    refreshOpenTargetDetail: refreshOpenTargetDetail,
     refreshEditingTarget: refreshEditingTarget,
     keyStatusColor: keyStatusColor,
     renderKeyList: renderKeyList,

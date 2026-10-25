@@ -253,12 +253,6 @@ AdminApp.register("pools", function (app) {
       loadPools();
     });
   document
-    .getElementById("openPoolsModalBtn")
-    .addEventListener("click", function () {
-      openModal("poolsModal");
-      loadPools();
-    });
-  document
     .getElementById("savePoolBtn")
     .addEventListener("click", async function () {
       var name = document.getElementById("poolName").value.trim();
