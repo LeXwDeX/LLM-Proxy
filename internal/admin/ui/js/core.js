@@ -62,7 +62,8 @@ AdminApp.register("core", function (app) {
       Number(r.input_tokens || 0) +
       Number(r.output_tokens || 0) +
       Number(r.cached_tokens || 0) +
-      Number(r.cache_creation_tokens || 0)
+      Number(r.cache_creation_tokens || 0) +
+      Number(r.tool_use_prompt_tokens || 0)
     );
   }
   function maskKey(k) {

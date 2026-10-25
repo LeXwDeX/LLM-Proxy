@@ -8,6 +8,8 @@ AdminApp.register("overview", function (app) {
   var fmtPct = app.bind("core", "fmtPct");
   var totalTok = app.bind("core", "totalTok");
   var api = app.bind("core", "api");
+  var schemaLabel = null;
+  try { schemaLabel = app.bind("schema", "schemaLabel"); } catch (error) { schemaLabel = null; }
   var snapshot = null;
   var selectedClient = null;
   var focusFrom = null;
@@ -16,17 +18,37 @@ AdminApp.register("overview", function (app) {
   var rows = new Map();
   var enabled = false;
   var generation = 0;
+  var aggregateGeneration = 0;
   var timer = null;
   var activityFlight = null;
   var historyFlight = null;
+  var metricsFlight = null;
+  var aggregateFlight = null;
   var activityController = null;
   var historyController = null;
+  var metricsController = null;
+  var aggregateController = null;
   var historyFetchedAt = 0;
+  var metricsFetchedAt = 0;
+  var aggregateFetchedAt = 0;
   var historySnapshot = null;
+  var metricsSnapshot = null;
+  var aggregateSnapshot = null;
+  var historyError = "";
+  var aggregateError = "";
+  var aggregateLoading = false;
+  var selectedRange = "today";
+  var rangeButtons = [];
   var requestTimeoutMs = 12000;
   var tooltipTrigger = null;
   var metricIDs = ["activityActiveRequests", "activityActiveClients", "activityWebsocketSessions", "activityTotalTokens", "activityInputTokens", "activityOutputTokens"];
   var chartIDs = ["activityConcurrencyChart", "activityTokenChart"];
+  var usageRanges = [
+    {key: "1h", summary: "last_hour", label: "近 1 小时"},
+    {key: "today", summary: "today", label: "今日（UTC）"},
+    {key: "7d", summary: "last_7_days", label: "近 7 天"},
+    {key: "30d", summary: "last_30_days", label: "近 30 天"},
+  ];
   var emptyRow = document.createElement("tr");
   var emptyCell = document.createElement("td");
   emptyCell.colSpan = 6;
@@ -42,6 +64,103 @@ AdminApp.register("overview", function (app) {
     return isNaN(date.getTime()) ? String(value || "—") : date.toLocaleTimeString("zh-CN", {hour12: false});
   }
   function number(value) { return fmtNum(value); }
+  function isObject(value) { return !!value && typeof value === "object" && !Array.isArray(value); }
+  function hasFields(value) { return isObject(value) && Object.keys(value).length > 0; }
+  function counter(value) { return typeof value === "number" && isFinite(value) && value >= 0; }
+  function localDate(value) {
+    var date = new Date(value);
+    if (isNaN(date.getTime()) || date.getUTCFullYear() < 2000) return "—";
+    function pad(value) { return String(value).padStart(2, "0"); }
+    return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) + " " + pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+  }
+  function duration(seconds) {
+    if (!counter(seconds)) return "不可用";
+    var total = Math.floor(seconds);
+    var hours = Math.floor(total / 3600);
+    var minutes = Math.floor((total % 3600) / 60);
+    if (hours > 0) return hours + " 小时 " + minutes + " 分钟";
+    if (minutes > 0) return minutes + " 分钟";
+    return total + " 秒";
+  }
+  function targetPhase(target) {
+    if (target && target.Paused === true) return "offline";
+    var phase = String(target && target.Phase || "").toLowerCase();
+    if (phase === "ready" || phase === "muted" || phase === "half-open" || phase === "offline") return phase;
+    if (target && target.Muted === true) return "muted";
+    return "unknown";
+  }
+  function phaseLabel(target) {
+    var phase = targetPhase(target);
+    if (phase === "unknown") return "未知";
+    if (schemaLabel) {
+      try {
+        var label = schemaLabel("target_phases", phase);
+        if (label) return label;
+      } catch (error) { /* Schema may be unavailable; a raw phase is still honest. */ }
+    }
+    return phase;
+  }
+  function keyIssue(target) {
+    if (!counter(target && target.TotalKeys)) return "unknown";
+    if (target.TotalKeys <= 1) return "false";
+    if (counter(target.ActiveKeys) && target.ActiveKeys < target.TotalKeys) return "true";
+    var failures = ["RateLimitedKeys", "BlockedKeys", "ExhaustedSubscriptionKeys", "ExhaustedAPIKeys", "OtherExhaustedKeys"];
+    if (failures.some(function (key) { return counter(target[key]) && target[key] > 0; })) return "true";
+    var complete = ["ActiveKeys"].concat(failures).every(function (key) { return counter(target[key]); });
+    return complete ? "false" : "unknown";
+  }
+  function keySummary(target) {
+    if (!counter(target.TotalKeys) || keyIssue(target) === "unknown") return "密钥状态不可用";
+    if (target.TotalKeys === 0) return "未配置独立密钥，可能使用 Bearer/透传";
+    if (target.TotalKeys === 1) return "目标级状态；无独立密钥池明细";
+    var parts = ["可用 " + (counter(target.ActiveKeys) ? fmtNum(target.ActiveKeys) : "不可用") + " / " + fmtNum(target.TotalKeys)];
+    if (counter(target.RateLimitedKeys) && target.RateLimitedKeys > 0) parts.push("限流 " + fmtNum(target.RateLimitedKeys));
+    if (counter(target.BlockedKeys) && target.BlockedKeys > 0) parts.push("屏蔽 " + fmtNum(target.BlockedKeys));
+    if (counter(target.ExhaustedSubscriptionKeys) && target.ExhaustedSubscriptionKeys > 0) parts.push("订阅额度耗尽 " + fmtNum(target.ExhaustedSubscriptionKeys));
+    if (counter(target.ExhaustedAPIKeys) && target.ExhaustedAPIKeys > 0) parts.push("API 额度耗尽 " + fmtNum(target.ExhaustedAPIKeys));
+    if (counter(target.OtherExhaustedKeys) && target.OtherExhaustedKeys > 0) parts.push("其他失效 " + fmtNum(target.OtherExhaustedKeys));
+    return parts.join(" · ");
+  }
+  function targetRank(target) {
+    var phase = targetPhase(target);
+    if (phase === "muted") return 0;
+    if (phase === "half-open") return 1;
+    if (phase === "offline") return 2;
+    if (phase === "ready") {
+      var issue = keyIssue(target);
+      return issue === "true" ? 3 : issue === "unknown" ? 4 : 5;
+    }
+    return 6;
+  }
+  function selectedUsageRange() {
+    return usageRanges.find(function (range) { return range.key === selectedRange; }) || usageRanges[1];
+  }
+  function currentUsageTotals() {
+    var summary = historySnapshot && isObject(historySnapshot.usage_summary) ? historySnapshot.usage_summary : null;
+    if (!summary) return null;
+    var period = selectedUsageRange();
+    return hasFields(summary[period.summary]) ? summary[period.summary] : null;
+  }
+  function rangeComplete(data) {
+    return isObject(data) && ["requests", "input_tokens", "output_tokens", "estimated_cost"].every(function (key) { return counter(data[key]); });
+  }
+  function statsComplete(stats) {
+    return isObject(stats) && stats.available === true && ["total", "success", "failure", "canceled", "record_failures"].every(function (key) { return counter(stats[key]); });
+  }
+  function persistenceComplete(value) {
+    return isObject(value) && ["usage_async_pending", "usage_async_deferred", "request_stats_dropped"].every(function (key) { return counter(value[key]); });
+  }
+  function metricsComplete() {
+    if (!isObject(metricsSnapshot) || !counter(metricsSnapshot.uptime_seconds)) return false;
+    if (!isObject(metricsSnapshot.requests) || !counter(metricsSnapshot.requests.total)) return false;
+    if (!persistenceComplete(metricsSnapshot.persistence)) return false;
+    var budget = metricsSnapshot.observation_budget;
+    if (!isObject(budget) || !isObject(budget.observation_budget_exhausted)) return false;
+    return counter(budget.observation_budget_exhausted.br) && counter(budget.observation_budget_exhausted.zstd);
+  }
+  function historyStaleText() {
+    return "更新" + (historyError === "加载超时" ? "超时" : "失败") + "，显示上次数据";
+  }
   function schedule() {
     if (timer !== null) clearTimeout(timer);
     timer = null;
@@ -82,12 +201,22 @@ AdminApp.register("overview", function (app) {
   }
   function cancelRequests() {
     generation++;
+    aggregateGeneration++;
     if (timer !== null) clearTimeout(timer);
     timer = null;
     if (activityController) activityController.abort();
     if (historyController) { historyController.abort(); historyFetchedAt = 0; }
-    activityController = historyController = null;
-    activityFlight = historyFlight = null;
+    if (metricsController) { metricsController.abort(); metricsFetchedAt = 0; }
+    if (aggregateController) { aggregateController.abort(); aggregateFetchedAt = 0; }
+    activityController = historyController = metricsController = aggregateController = null;
+    activityFlight = historyFlight = metricsFlight = aggregateFlight = null;
+    metricsSnapshot = null;
+    aggregateSnapshot = null;
+    aggregateError = "";
+    aggregateLoading = false;
+    renderTop();
+    renderChain();
+    renderAttention();
     el("refreshOverviewBtn").disabled = false;
     el("page-overview").setAttribute("aria-busy", "false");
     hideTooltip();
@@ -109,6 +238,360 @@ AdminApp.register("overview", function (app) {
     status.textContent = warnings.length ? warnings.join(" · ") : (snapshot.runtime.active_requests === 0 && snapshot.totals.total_tokens === 0 ? "当前无在途请求，近5分钟暂无已记录用量。" : "");
     status.dataset.state = warnings.length ? "partial" : "ready";
   }
+  function syncRangeButtons() {
+    rangeButtons.forEach(function (button) {
+      button.setAttribute("aria-pressed", button.dataset.overviewRange === selectedRange ? "true" : "false");
+    });
+  }
+  function renderRange() {
+    var period = selectedUsageRange();
+    var summary = historySnapshot && isObject(historySnapshot.usage_summary) ? historySnapshot.usage_summary : null;
+    var data = summary && hasFields(summary[period.summary]) ? summary[period.summary] : null;
+    var complete = rangeComplete(data);
+    var incomplete = complete && ((counter(data.incomplete_usage_count) && data.incomplete_usage_count > 0) || (counter(data.incomplete_cost_count) && data.incomplete_cost_count > 0));
+    var requests = data && counter(data.requests) ? data.requests : null;
+    var input = data && counter(data.input_tokens) ? data.input_tokens : null;
+    var output = data && counter(data.output_tokens) ? data.output_tokens : null;
+    var total = data && counter(data.input_tokens) && counter(data.output_tokens) ? totalTok(data) : null;
+    var cost = data && counter(data.estimated_cost) ? data.estimated_cost : null;
+    text("ovRangeRequests", requests === null ? "不可用" : fmtNum(requests));
+    text("ovRangeTotalTokens", total === null ? "不可用" : fmtNum(total));
+    text("ovRangeInputTokens", input === null ? "不可用" : fmtNum(input));
+    text("ovRangeOutputTokens", output === null ? "不可用" : fmtNum(output));
+    text("ovRangeCost", cost === null ? "不可用" : fmtMoney(cost));
+    var notes = ["费用按官方基础价估算；$0.00 只表示已记录费用为零，不推断为未定价或免费。"];
+    notes.push(period.key === "today" ? "今日按 UTC 自然日。" : period.key === "1h" ? "范围是近 1 小时。" : "7/30 天按小时桶聚合，跨小时请求可能归入相邻桶。");
+    if (data) {
+      if (counter(data.incomplete_usage_count) && data.incomplete_usage_count > 0) notes.push(fmtNum(data.incomplete_usage_count) + " 条用量不完整。");
+      if (counter(data.incomplete_cost_count) && data.incomplete_cost_count > 0) notes.push(fmtNum(data.incomplete_cost_count) + " 条成本覆盖不完整。");
+    }
+    var status = el("ovRangeStatus");
+    if (!summary) {
+      status.textContent = "区间用量不可用：" + (historyError ? historyError + "。" : "概览未返回 usage_summary。") + notes.join(" ");
+      status.dataset.state = "error";
+    } else if (!data) {
+      status.textContent = period.label + "用量不可用。" + notes.join(" ");
+      status.dataset.state = "error";
+    } else {
+      status.textContent = period.label + (complete ? "。" : "部分字段不可用。") + notes.join(" ");
+      status.dataset.state = complete && !incomplete ? "ready" : "partial";
+    }
+    if (historyError && historySnapshot) {
+      status.textContent = "区间用量" + historyStaleText() + "。" + status.textContent;
+      status.dataset.state = "partial";
+    }
+  }
+  function targetRow(target) {
+    var phase = targetPhase(target);
+    var issue = keyIssue(target);
+    var status = '<span class="overview-phase phase-' + esc(phase) + '">' + esc(phaseLabel(target)) + '</span>';
+    if (phase === "muted" && localDate(target.MutedUntil) !== "—") status += ' <span class="overview-status">冷却至 ' + esc(localDate(target.MutedUntil)) + '</span>';
+    if (phase === "offline" && target.Paused === true) status += ' <span class="overview-status">已暂停</span>';
+    var capacity = counter(target.Capacity) ? (target.Capacity === 0 ? "不限" : fmtNum(target.Capacity)) : "不可用";
+    var inflight = counter(target.InFlight) ? fmtNum(target.InFlight) : "不可用";
+    var window = isObject(target.Window15m) ? "峰值 " + (counter(target.Window15m.in_flight_peak) ? fmtNum(target.Window15m.in_flight_peak) : "不可用") + " · 熔断 " + (counter(target.Window15m.breaker_trips) ? fmtNum(target.Window15m.breaker_trips) : "不可用") : "不可用";
+    return '<tr data-target-name="' + esc(String(target.Name || "")) + '" data-target-phase="' + esc(phase) + '" data-target-key-issue="' + issue + '"><td>' + esc(String(target.Name || "未知目标")) + '</td><td>' + status + '</td><td>' + esc(keySummary(target)) + '</td><td>' + esc(inflight + " / " + capacity) + '</td><td>' + esc(window) + '</td></tr>';
+  }
+  function renderTargetHealth() {
+    var body = el("targetHealthBody");
+    var count = el("targetHealthCount");
+    var status = el("targetHealthStatus");
+    var targets = historySnapshot && Array.isArray(historySnapshot.targets) ? historySnapshot.targets.slice() : null;
+    if (!targets) {
+      body.innerHTML = '<tr><td colspan="5">目标数据不可用</td></tr>';
+      count.textContent = "不可用";
+      status.textContent = historyError ? "目标数据" + historyStaleText() + "，目标数据不可用" : "目标数据不可用";
+      status.dataset.state = "error";
+      return;
+    }
+    targets = targets.map(function (target, index) { return {target: target || {}, index: index}; }).sort(function (a, b) {
+      var difference = targetRank(a.target) - targetRank(b.target);
+      return difference || a.index - b.index;
+    });
+    body.innerHTML = targets.length ? targets.map(function (entry) { return targetRow(entry.target); }).join("") : '<tr><td colspan="5">暂无已配置目标</td></tr>';
+    count.textContent = fmtNum(historySnapshot.targets.length) + " 个目标";
+    var attention = targets.filter(function (entry) { return targetRank(entry.target) <= 4; }).length;
+    var unknown = targets.filter(function (entry) { return targetPhase(entry.target) === "unknown"; }).length;
+    if (!targets.length) status.textContent = "暂无目标";
+    else if (attention) status.textContent = fmtNum(attention) + " 个目标需要关注" + (unknown ? "，另有 " + fmtNum(unknown) + " 个目标状态未知" : "");
+    else if (unknown) status.textContent = fmtNum(unknown) + " 个目标状态未知";
+    else status.textContent = "目标均在正常状态";
+    if (historyError) {
+      status.textContent += "；目标数据" + historyStaleText();
+      status.dataset.state = "partial";
+    } else {
+      status.dataset.state = attention || unknown ? "partial" : "ready";
+    }
+  }
+  function topRows(list) {
+    return list.slice().sort(function (a, b) {
+      var ac = counter(a && a.estimated_cost) ? a.estimated_cost : -Infinity;
+      var bc = counter(b && b.estimated_cost) ? b.estimated_cost : -Infinity;
+      if (ac !== bc) return bc - ac;
+      var ar = counter(a && a.requests) ? a.requests : -Infinity;
+      var br = counter(b && b.requests) ? b.requests : -Infinity;
+      if (ar !== br) return br - ar;
+      return String(a && a.key || "").localeCompare(String(b && b.key || ""), "zh-CN");
+    }).slice(0, 5);
+  }
+  function topRow(entry, attribute) {
+    var name = entry && entry.key ? String(entry.key) : "未知";
+    var requests = entry && counter(entry.requests) ? fmtNum(entry.requests) : "不可用";
+    var total = entry && counter(entry.input_tokens) && counter(entry.output_tokens) ? fmtNum(totalTok(entry)) : "不可用";
+    var cost = entry && counter(entry.estimated_cost) ? fmtMoney(entry.estimated_cost) : "不可用";
+    return '<tr data-' + attribute + '="' + esc(name) + '"><td>' + esc(name) + '</td><td>' + requests + '</td><td>' + total + '</td><td>' + cost + '</td></tr>';
+  }
+  function topStatus(kind, available, error) {
+    var caveat = "费用按官方基础价，按日边界聚合（group_by=day）；$0.00 不推断为未定价或免费。";
+    if (error) return "费用排行不可用：" + error + "。" + caveat;
+    if (!available) return "费用排行不可用：聚合响应缺少" + kind + "维度。" + caveat;
+    return "费用按官方基础价；按日边界聚合（group_by=day），跨日记录可能归入相邻日桶。$0.00 不推断为未定价或免费。";
+  }
+  function renderTopPanel(bodyID, statusID, list, kind, attribute) {
+    var body = el(bodyID);
+    var status = el(statusID);
+    if (aggregateError) {
+      body.innerHTML = '<tr><td colspan="4">费用排行不可用</td></tr>';
+      status.textContent = topStatus(kind, false, aggregateError);
+      status.dataset.state = "error";
+      return;
+    }
+    if (!aggregateSnapshot) {
+      body.innerHTML = aggregateLoading ? '<tr><td colspan="4">正在加载费用排行…</td></tr>' : '<tr><td colspan="4">费用排行暂不可用</td></tr>';
+      status.textContent = aggregateLoading ? "正在加载费用排行…" : topStatus(kind, false, "尚未加载聚合");
+      status.dataset.state = aggregateLoading ? "" : "error";
+      return;
+    }
+    if (!Array.isArray(list)) {
+      body.innerHTML = '<tr><td colspan="4">费用排行不可用</td></tr>';
+      status.textContent = topStatus(kind, false, "");
+      status.dataset.state = "error";
+      return;
+    }
+    if (!list.length) {
+      body.innerHTML = '<tr><td colspan="4">该区间暂无可聚合的' + esc(kind) + '用量</td></tr>';
+      status.textContent = "该区间暂无可聚合的" + kind + "用量。" + topStatus(kind, true, "");
+      status.dataset.state = "ready";
+      return;
+    }
+    body.innerHTML = topRows(list).map(function (entry) { return topRow(entry, attribute); }).join("");
+    status.textContent = topStatus(kind, true, "");
+    status.dataset.state = "ready";
+  }
+  function renderTop() {
+    var data = aggregateSnapshot || {};
+    renderTopPanel("topClientsBody", "topClientsStatus", data.by_client, "客户端", "top-client");
+    renderTopPanel("topModelsBody", "topModelsStatus", data.by_model, "模型", "top-model");
+  }
+  function metricsUsable() {
+    return isObject(metricsSnapshot);
+  }
+  function renderChain() {
+    var ov = historySnapshot;
+    var targets = ov && Array.isArray(ov.targets) ? ov.targets : null;
+    var clientCount = ov && counter(ov.client_count) ? ov.client_count : null;
+    var clientText = clientCount === null ? "配置客户端不可用" : fmtNum(clientCount) + " 个配置客户端";
+    if (snapshot && counter(snapshot.runtime.active_clients)) clientText += " · 活跃 " + fmtNum(snapshot.runtime.active_clients);
+    text("chainClients", clientText);
+    var proxyParts = [];
+    if (snapshot && isObject(snapshot.runtime)) {
+      proxyParts.push("在途 " + (counter(snapshot.runtime.active_requests) ? fmtNum(snapshot.runtime.active_requests) : "不可用"));
+      proxyParts.push("WS " + (counter(snapshot.runtime.websocket_sessions) ? fmtNum(snapshot.runtime.websocket_sessions) : "不可用"));
+    } else {
+      proxyParts.push("活动不可用");
+    }
+    var metrics = metricsUsable() ? metricsSnapshot : null;
+    if (metrics) {
+      proxyParts.push(isObject(metrics.requests) && counter(metrics.requests.total) ? "累计 " + fmtNum(metrics.requests.total) : "累计请求不可用");
+      proxyParts.push(counter(metrics.uptime_seconds) ? "运行 " + duration(metrics.uptime_seconds) : "运行时长不可用");
+    } else {
+      proxyParts.push("运行指标不可用");
+    }
+    text("chainProxy", proxyParts.join(" · "));
+    if (targets) {
+      if (!targets.length) {
+        text("chainTargets", "暂无目标");
+      } else {
+        var healthy = targets.filter(function (target) { return targetPhase(target) === "ready" && keyIssue(target) === "false"; }).length;
+        text("chainTargets", fmtNum(targets.length) + " 个目标 · " + fmtNum(healthy) + " 个正常");
+      }
+    } else {
+      text("chainTargets", "目标不可用");
+    }
+    var keys = el("chainKeys");
+    var keysAvailable = !!targets;
+    if (targets && !targets.length) {
+      keys.textContent = "暂无目标";
+      keys.setAttribute("data-active", "0");
+      keys.setAttribute("data-total", "0");
+      keys.setAttribute("data-rate-limited", "0");
+    } else if (targets) {
+      var total = 0, active = 0, rate = 0, complete = true;
+      targets.forEach(function (target) {
+        target = target || {};
+        if (!["TotalKeys", "ActiveKeys", "RateLimitedKeys"].every(function (key) { return counter(target[key]); })) { complete = false; return; }
+        total += target.TotalKeys;
+        active += target.ActiveKeys;
+        rate += target.RateLimitedKeys;
+      });
+      if (complete) {
+        keys.textContent = total === 0 ? "未配置独立密钥" : "可用 " + fmtNum(active) + " / " + fmtNum(total) + (rate > 0 ? " · 限流 " + fmtNum(rate) : "");
+        keys.setAttribute("data-active", String(active));
+        keys.setAttribute("data-total", String(total));
+        keys.setAttribute("data-rate-limited", String(rate));
+      } else {
+        keysAvailable = false;
+        keys.textContent = "密钥状态不可用";
+        keys.setAttribute("data-active", "unavailable");
+        keys.setAttribute("data-total", "unavailable");
+        keys.setAttribute("data-rate-limited", "unavailable");
+      }
+    } else {
+      keys.textContent = "密钥状态不可用";
+      keys.setAttribute("data-active", "unavailable");
+      keys.setAttribute("data-total", "unavailable");
+      keys.setAttribute("data-rate-limited", "unavailable");
+    }
+    var available = [!!targets, !!snapshot, metricsComplete(), clientCount !== null, keysAvailable].filter(Boolean).length;
+    var chain = el("chainSummary");
+    var status = el("chainStatus");
+    if (historyError) {
+      chain.dataset.state = historySnapshot ? "partial" : "error";
+      status.textContent = historySnapshot ? "链路数据" + historyStaleText() : "链路数据" + historyStaleText() + "，目标与客户端数据不可用";
+    } else if (available === 5) {
+      chain.dataset.state = "ready";
+      status.textContent = "链路数据已加载";
+    } else if (available === 0) {
+      chain.dataset.state = "error";
+      status.textContent = "链路数据暂不可用";
+    } else {
+      chain.dataset.state = "partial";
+      status.textContent = "部分链路数据不可用";
+    }
+  }
+  function attentionItem(kind, text) {
+    return '<li data-attention-kind="' + kind + '">' + esc(text) + '</li>';
+  }
+  function renderAttention() {
+    var items = [];
+    var ov = historySnapshot;
+    var targets = ov && Array.isArray(ov.targets) ? ov.targets : null;
+    var persistence = isObject(metricsSnapshot && metricsSnapshot.persistence) ? metricsSnapshot.persistence : null;
+    if (targets) {
+      targets.forEach(function (target) {
+        target = target || {};
+        var name = String(target.Name || "未知目标");
+        var phase = targetPhase(target);
+        if (phase === "muted") items.push(["target", "目标 " + name + " 冷却至 " + localDate(target.MutedUntil)]);
+        else if (phase === "half-open") items.push(["target", "目标 " + name + " 正在恢复探测"]);
+        else if (phase === "offline") items.push(["target", "目标 " + name + " 已暂停，不接收流量"]);
+        else if (phase === "unknown") items.push(["target", "目标 " + name + " 状态未知，无法确认可用性"]);
+        else if (keyIssue(target) === "true") {
+          var total = counter(target.TotalKeys) ? target.TotalKeys : 0;
+          var active = counter(target.ActiveKeys) ? target.ActiveKeys : 0;
+          var details = [];
+          if (counter(target.RateLimitedKeys) && target.RateLimitedKeys > 0) details.push("限流 " + fmtNum(target.RateLimitedKeys));
+          if (counter(target.BlockedKeys) && target.BlockedKeys > 0) details.push("屏蔽 " + fmtNum(target.BlockedKeys));
+          if (counter(target.ExhaustedSubscriptionKeys) && target.ExhaustedSubscriptionKeys > 0) details.push("订阅额度耗尽 " + fmtNum(target.ExhaustedSubscriptionKeys));
+          if (counter(target.ExhaustedAPIKeys) && target.ExhaustedAPIKeys > 0) details.push("API 额度耗尽 " + fmtNum(target.ExhaustedAPIKeys));
+          if (counter(target.OtherExhaustedKeys) && target.OtherExhaustedKeys > 0) details.push("其他失效 " + fmtNum(target.OtherExhaustedKeys));
+          var unavailable = Math.max(0, total - active);
+          items.push(["keys", "目标 " + name + (unavailable > 0 ? " 有 " + fmtNum(unavailable) + " 个密钥不可用" : " 的密钥状态异常") + (details.length ? "（" + details.join("，") + "）" : "")]);
+        } else if (keyIssue(target) === "unknown" && counter(target.TotalKeys) && target.TotalKeys > 1) {
+          items.push(["keys", "目标 " + name + " 的密钥状态未知，无法确认可用性"]);
+        }
+      });
+    }
+    if (persistence) {
+      var pending = counter(persistence.usage_async_pending) ? persistence.usage_async_pending : 0;
+      var deferred = counter(persistence.usage_async_deferred) ? persistence.usage_async_deferred : 0;
+      var dropped = counter(persistence.request_stats_dropped) ? persistence.request_stats_dropped : 0;
+      if (pending > 0) items.push(["persistence", "用量写入积压 " + fmtNum(pending) + " 条"]);
+      if (deferred > 0) items.push(["persistence", "用量等待后台重试 " + fmtNum(deferred) + " 条"]);
+      if (dropped > 0) items.push(["persistence", "请求完成统计队列丢弃 " + fmtNum(dropped) + " 条"]);
+    }
+    var budget = metricsUsable() && isObject(metricsSnapshot.observation_budget) ? metricsSnapshot.observation_budget : null;
+    if (budget && isObject(budget.observation_budget_exhausted)) {
+      var br = counter(budget.observation_budget_exhausted.br) ? budget.observation_budget_exhausted.br : 0;
+      var zstd = counter(budget.observation_budget_exhausted.zstd) ? budget.observation_budget_exhausted.zstd : 0;
+      if (br + zstd > 0) items.push(["persistence", "压缩响应观察预算拒绝 " + fmtNum(br + zstd) + " 次（br " + fmtNum(br) + " / zstd " + fmtNum(zstd) + "）"]);
+    }
+    // Process-lifetime request persistence counters: never present them as a
+    // success rate or as a selected-range figure.
+    var requests = ov && isObject(ov.requests) ? ov.requests : null;
+    if (requests) {
+      [
+        ["usage_record_failures", "用量写入失败"],
+        ["usage_client_gone_no_usage", "客户端断开且未取得用量"],
+        ["usage_upstream_interrupted_no_usage", "上游中断且未取得用量"],
+        ["request_stats_record_failures", "请求完成统计写入失败"],
+      ].forEach(function (entry) {
+        var count = requests[entry[0]];
+        if (counter(count) && count > 0) items.push(["persistence", "自启动累计 " + fmtNum(count) + " 次" + entry[1]]);
+      });
+    }
+    var stats = ov && isObject(ov.request_stats_72h) ? ov.request_stats_72h : null;
+    if (stats && stats.available === true) {
+      if (counter(stats.failure) && stats.failure > 0) items.push(["request-stats", "72 小时完成样本中 " + fmtNum(stats.failure) + " 个失败"]);
+      if (counter(stats.canceled) && stats.canceled > 0) items.push(["request-stats", "72 小时完成样本中 " + fmtNum(stats.canceled) + " 个取消"]);
+    }
+    var usage = currentUsageTotals();
+    if (usage) {
+      if (counter(usage.incomplete_usage_count) && usage.incomplete_usage_count > 0) items.push(["usage", "当前区间有 " + fmtNum(usage.incomplete_usage_count) + " 条用量记录不完整"]);
+      if (counter(usage.incomplete_cost_count) && usage.incomplete_cost_count > 0) items.push(["usage", "当前区间有 " + fmtNum(usage.incomplete_cost_count) + " 条成本覆盖不完整"]);
+    }
+    var list = el("overviewAttentionList");
+    var status = el("overviewAttentionStatus");
+    var known = !!(targets || persistence || usage || requests || stats);
+    var keysKnown = !!targets && targets.every(function (target) { return keyIssue(target) !== "unknown"; });
+    var phasesKnown = !!targets && targets.every(function (target) { return targetPhase(target) !== "unknown"; });
+    var ready = !historyError && !!targets && keysKnown && phasesKnown && metricsComplete() && statsComplete(stats) && rangeComplete(usage);
+    list.innerHTML = items.length ? items.map(function (item) { return attentionItem(item[0], item[1]); }).join("") : '<li class="overview-empty">' + (known ? "暂无需要关注的问题" : "关注数据不可用") + '</li>';
+    text("overviewAttentionCount", fmtNum(items.length) + " 项");
+    if (!known) {
+      status.textContent = "关注数据不可用";
+      status.dataset.state = "error";
+    } else if (!ready && historyError && historySnapshot) {
+      status.textContent = historyStaleText() + (items.length ? "；部分数据不可用，以下为已确认问题" : "；部分数据不可用");
+      status.dataset.state = "partial";
+    } else if (items.length) {
+      status.textContent = ready ? "已检查请求统计、当前区间用量、运行指标与密钥计数" : "部分数据不可用，以下为已确认问题";
+      status.dataset.state = ready ? "ready" : "partial";
+    } else {
+      status.textContent = ready ? "关注数据已加载" : "部分数据不可用";
+      status.dataset.state = ready ? "ready" : "partial";
+    }
+  }
+  function renderRecentChanges() {
+    var body = el("recentChangesBody");
+    var status = el("recentChangesStatus");
+    var events = historySnapshot && Array.isArray(historySnapshot.recent_audit) ? historySnapshot.recent_audit.slice() : null;
+    if (!events) {
+      body.innerHTML = '<tr><td colspan="5">最近变更不可用</td></tr>';
+      status.textContent = historyError ? "最近变更" + historyStaleText() + "，最近变更不可用" : "最近变更不可用";
+      status.dataset.state = "error";
+      return;
+    }
+    if (!events.length) {
+      body.innerHTML = '<tr><td colspan="5">暂无可显示的最近变更</td></tr>';
+      status.textContent = "暂无变更" + (historyError ? "；最近变更" + historyStaleText() : "");
+      status.dataset.state = historyError ? "partial" : "ready";
+      return;
+    }
+    events.sort(function (a, b) {
+      var at = Date.parse(a && a.timestamp), bt = Date.parse(b && b.timestamp);
+      at = isFinite(at) ? at : -Infinity;
+      bt = isFinite(bt) ? bt : -Infinity;
+      return bt - at;
+    });
+    events = events.slice(0, 5);
+    body.innerHTML = events.map(function (event, index) {
+      var id = event && event.id ? String(event.id) : String(event && event.timestamp || index);
+      return '<tr data-audit-id="' + esc(id) + '"><td><time datetime="' + esc(event && event.timestamp || "") + '">' + esc(localDate(event && event.timestamp)) + '</time></td><td>' + esc(event && event.actor || "—") + '</td><td>' + esc(event && event.action || "—") + '</td><td>' + esc(event && event.object || "—") + '</td><td>' + esc(event && event.result || "—") + '</td></tr>';
+    }).join("");
+    status.textContent = "最近 " + fmtNum(events.length) + " 条变更" + (historyError ? "；最近变更" + historyStaleText() : "");
+    status.dataset.state = historyError ? "partial" : "ready";
+  }
   function renderSnapshot(data) {
     snapshot = data;
     text("activityActiveRequests", number(data.runtime.active_requests));
@@ -122,6 +605,8 @@ AdminApp.register("overview", function (app) {
     reportActivityStatus();
     renderClients();
     renderCharts();
+    renderChain();
+    renderAttention();
   }
   function validSnapshot(data) {
     function timestamp(value) { return typeof value === "string" && Number.isFinite(Date.parse(value)); }
@@ -183,6 +668,8 @@ AdminApp.register("overview", function (app) {
           el("activityClientsBody").appendChild(emptyRow);
         }
         reportActivityStatus(error);
+        renderChain();
+        renderAttention();
       } finally {
         if (epoch === generation) {
           activityFlight = null;
@@ -324,20 +811,30 @@ AdminApp.register("overview", function (app) {
       var time = Date.parse(snapshot.window.from) + ratio * (Date.parse(snapshot.window.to) - Date.parse(snapshot.window.from));
       svg += '<text class="activity-axis" x="' + (left + ratio * (right - left)) + '" y="' + (geometry.height - 12) + '" text-anchor="' + (ratio === 0 ? "start" : ratio === 1 ? "end" : "middle") + '">' + esc(clock(time)) + '</text>';
     });
-    keys.forEach(function (key, keyIndex) {
-      var segments = [], points = [];
-      function flush() { if (points.length) { segments.push(points); points = []; } }
+    if (tokenChart) {
+      keys.forEach(function (key, keyIndex) {
+        var segments = [], points = [];
+        function flush() { if (points.length) { segments.push(points); points = []; } }
+        series.forEach(function (bucket, index) {
+          if (bucket[key] === null || bucket[key] === undefined) { flush(); return; }
+          points.push({x: x(index), y: y(Number(bucket[key]))});
+        });
+        flush();
+        var lineClass = keyIndex ? "activity-output" : "activity-input";
+        segments.forEach(function (segment) {
+          if (segment.length === 1) svg += '<circle class="' + lineClass + '" cx="' + segment[0].x + '" cy="' + segment[0].y + '" r="2.5"/>';
+          else svg += '<polyline class="activity-line ' + lineClass + '" points="' + segment.map(function (point) { return point.x + "," + point.y; }).join(" ") + '"/>';
+        });
+      });
+    } else {
+      var barWidth = Math.max(2, Math.min(24, (right - left) / Math.max(1, series.length) * 0.62));
       series.forEach(function (bucket, index) {
-        if (bucket[key] === null || bucket[key] === undefined) { flush(); return; }
-        points.push({x: x(index), y: y(Number(bucket[key]))});
+        if (bucket.active_requests_peak === null || bucket.active_requests_peak === undefined) return;
+        var peak = Number(bucket.active_requests_peak);
+        if (!isFinite(peak) || peak <= 0) return;
+        svg += '<rect class="activity-concurrency-bar" x="' + (x(index) - barWidth / 2) + '" y="' + y(peak) + '" width="' + barWidth + '" height="' + (bottom - y(peak)) + '" rx="2"/>';
       });
-      flush();
-      var lineClass = tokenChart ? (keyIndex ? "activity-output" : "activity-input") : "activity-concurrency";
-      segments.forEach(function (segment) {
-        if (segment.length === 1) svg += '<circle class="' + lineClass + '" cx="' + segment[0].x + '" cy="' + segment[0].y + '" r="2.5"/>';
-        else svg += '<polyline class="activity-line ' + lineClass + '" points="' + segment.map(function (point) { return point.x + "," + point.y; }).join(" ") + '"/>';
-      });
-    });
+    }
     var index = series.findIndex(function (bucket) { return bucket.from === focusFrom; });
     if (index >= 0) {
       svg += '<line class="activity-cursor" x1="' + x(index) + '" x2="' + x(index) + '" y1="' + top + '" y2="' + bottom + '"/>';
@@ -412,23 +909,144 @@ AdminApp.register("overview", function (app) {
 
   // Historical completion samples and cost keep their existing API and semantics.
   function renderHistory(ov) {
-    var stats = ov.request_stats_72h;
-    var available = stats && stats.available === true;
-    text("activityHistoryState", available ? (stats.record_failures > 0 ? "样本可能不完整" : "") : "统计暂不可用");
-    text("ovTotalReqs", available ? number(stats.total) : "不可用");
+    var stats = isObject(ov.request_stats_72h) ? ov.request_stats_72h : null;
+    var available = !!stats && stats.available === true;
+    var totalAvailable = available && counter(stats.total);
+    var failuresAvailable = available && counter(stats.record_failures);
+    var statsStatus;
+    if (!available) statsStatus = "请求完成统计暂不可用，请稍后刷新。";
+    else {
+      statsStatus = "";
+      if (!totalAvailable) statsStatus += "完成样本总数不可用。";
+      else if (stats.total === 0) statsStatus += "暂无完成样本。";
+      if (!failuresAvailable) statsStatus += "统计写入失败计数不可用，无法判断样本完整性。";
+      else if (stats.record_failures > 0) statsStatus += "警告：本进程有 " + number(stats.record_failures) + " 次统计写入失败，样本可能不完整。";
+    }
+    text("activityHistoryState", available ? (!failuresAvailable ? "样本完整性不可用" : stats.record_failures > 0 ? "样本可能不完整" : "") : "统计暂不可用");
+    text("ovTotalReqs", totalAvailable ? fmtNum(stats.total) : "不可用");
     text("ovSuccessRate", available ? (stats.success_rate == null ? "--" : fmtPct(stats.success_rate)) : "不可用");
-    text("ovRequestStatsStatus", available ? (stats.total === 0 ? "暂无完成样本。" : "") + (stats.record_failures > 0 ? "警告：本进程有 " + number(stats.record_failures) + " 次统计写入失败，样本可能不完整。" : "") : "请求完成统计暂不可用，请稍后刷新。");
-    text("activityHistoryTooltip", "按代理请求完成及有效 WebSocket create 轮次计数；成功率 = 成功 / 总量（含失败、取消），不是服务可用率。不含代理前鉴权/IP 拒绝、健康/管理/ping、会话控制及无效或鉴权复核拒绝消息。" + (available ? "采集开始：" + stats.since + "；统计区间：[" + stats.from + "，" + stats.to + ")。当前未结束分钟不计入。" : "请求完成统计暂不可用。"));
-    text("ovTargets", number(ov.active_targets));
-    text("ovClients", number(ov.client_count));
-    text("ovModelCosts", number(ov.model_cost_count));
-    var summary = ov.usage_summary || {};
+    text("ovRequestStatsStatus", statsStatus);
+    text("activityHistoryTooltip", "按代理请求完成及有效 WebSocket create 轮次计数；成功率 = 成功 / 总量（含失败、取消），不是服务可用率。不含代理前鉴权/IP 拒绝、健康/管理/ping、会话控制及无效或鉴权复核拒绝消息。" + (available ? "采集开始：" + (stats.since || "不可用") + "；统计区间：[" + (stats.from || "不可用") + "，" + (stats.to || "不可用") + ")。当前未结束分钟不计入。" : "请求完成统计暂不可用。"));
+    text("ovTargets", counter(ov.active_targets) ? fmtNum(ov.active_targets) : "不可用");
+    text("ovClients", counter(ov.client_count) ? fmtNum(ov.client_count) : "不可用");
+    text("ovModelCosts", counter(ov.model_cost_count) ? fmtNum(ov.model_cost_count) : "不可用");
+    var summary = isObject(ov.usage_summary) ? ov.usage_summary : null;
     var periods = [{k: "last_hour", l: "近1小时"}, {k: "today", l: "今日"}, {k: "yesterday", l: "昨日"}, {k: "last_7_days", l: "近7天"}, {k: "last_30_days", l: "近30天"}];
     el("overviewUsageSummary").innerHTML = '<table class="activity-history-table"><thead><tr><th>区间</th><th>用量事件数</th><th>总 Token</th><th>历史费用</th></tr></thead><tbody>' + periods.map(function (period) {
-      var data = summary[period.k] || {};
-      return '<tr><th scope="row">' + esc(period.l) + '</th><td>' + esc(number(data.requests)) + '</td><td>' + esc(number(totalTok(data))) + '</td><td>' + esc(fmtMoney(data.estimated_cost)) + '</td></tr>';
+      var data = summary && isObject(summary[period.k]) ? summary[period.k] : null;
+      var requests = data && counter(data.requests) ? fmtNum(data.requests) : "不可用";
+      var total = data && counter(data.input_tokens) && counter(data.output_tokens) ? fmtNum(totalTok(data)) : "不可用";
+      var cost = data && counter(data.estimated_cost) ? fmtMoney(data.estimated_cost) : "不可用";
+      return '<tr><th scope="row">' + esc(period.l) + '</th><td>' + esc(requests) + '</td><td>' + esc(total) + '</td><td>' + esc(cost) + '</td></tr>';
     }).join("") + '</tbody></table>';
+    renderRange();
+    renderTargetHealth();
+    renderRecentChanges();
+    renderAttention();
+    renderChain();
     if (tooltipTrigger && tooltipTrigger.dataset.activityInfoSource === "activityHistoryTooltip") showTooltip(tooltipTrigger);
+  }
+  function aggregateWindow() {
+    var to = new Date();
+    var from;
+    if (selectedRange === "1h") from = new Date(to.getTime() - 3600000);
+    else if (selectedRange === "7d") from = new Date(to.getTime() - 7 * 86400000);
+    else if (selectedRange === "30d") from = new Date(to.getTime() - 30 * 86400000);
+    else from = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()));
+    return {from: from, to: to};
+  }
+  function aggregatePath() {
+    var range = aggregateWindow();
+    return "/admin/data/usage/aggregate?group_by=day&from=" + encodeURIComponent(range.from.toISOString()) + "&to=" + encodeURIComponent(range.to.toISOString());
+  }
+  function loadMetrics(force) {
+    if (!visible()) return Promise.resolve();
+    if (metricsFlight) return metricsFlight;
+    if (!force && metricsFetchedAt && Date.now() - metricsFetchedAt < 60000) return Promise.resolve();
+    var epoch = generation;
+    var controller = new AbortController();
+    metricsController = controller;
+    var flight = (async function () {
+      try {
+        var data = await request("/admin/metrics", controller);
+        if (epoch !== generation || controller.signal.aborted || !visible()) return;
+        if (!isObject(data)) throw new Error("指标数据格式无效");
+        metricsSnapshot = data;
+        metricsFetchedAt = Date.now();
+        renderChain();
+        renderAttention();
+      } catch (error) {
+        if (epoch !== generation || !visible() || (controller.signal.aborted && error.name !== "TimeoutError")) return;
+        metricsSnapshot = null;
+        metricsFetchedAt = 0;
+        renderChain();
+        renderAttention();
+      } finally {
+        if (epoch === generation) { metricsFlight = null; metricsController = null; }
+      }
+    })();
+    metricsFlight = flight;
+    return flight;
+  }
+  function loadAggregate(force) {
+    if (!visible()) return Promise.resolve();
+    if (aggregateFlight) return aggregateFlight;
+    if (!force && aggregateFetchedAt && Date.now() - aggregateFetchedAt < 60000) return Promise.resolve();
+    var epoch = aggregateGeneration;
+    var controller = new AbortController();
+    aggregateController = controller;
+    aggregateLoading = true;
+    if (!aggregateSnapshot) {
+      aggregateError = "";
+      renderTop();
+    }
+    var flight = (async function () {
+      try {
+        var data = await request(aggregatePath(), controller);
+        if (epoch !== aggregateGeneration || controller.signal.aborted || !visible()) return;
+        if (!isObject(data) || !isObject(data.totals)) throw new Error("聚合数据格式无效");
+        aggregateSnapshot = data;
+        aggregateError = "";
+        aggregateFetchedAt = Date.now();
+        renderTop();
+        renderAttention();
+      } catch (error) {
+        if (epoch !== aggregateGeneration || !visible() || (controller.signal.aborted && error.name !== "TimeoutError")) return;
+        aggregateSnapshot = null;
+        aggregateError = error.name === "TimeoutError" ? "聚合请求超时" : "聚合请求失败";
+        aggregateFetchedAt = 0;
+        renderTop();
+        renderAttention();
+      } finally {
+        if (epoch === aggregateGeneration) {
+          aggregateLoading = false;
+          aggregateFlight = null;
+          aggregateController = null;
+        }
+      }
+    })();
+    aggregateFlight = flight;
+    return flight;
+  }
+  function selectRange(key) {
+    if (!usageRanges.some(function (range) { return range.key === key; }) || key === selectedRange) {
+      syncRangeButtons();
+      return;
+    }
+    selectedRange = key;
+    aggregateGeneration++;
+    if (aggregateController) aggregateController.abort();
+    aggregateFlight = null;
+    aggregateController = null;
+    aggregateFetchedAt = 0;
+    aggregateSnapshot = null;
+    aggregateError = "";
+    aggregateLoading = true;
+    syncRangeButtons();
+    renderRange();
+    renderTop();
+    renderAttention();
+    if (visible()) loadAggregate(true);
   }
   function loadHistory(force) {
     if (!visible()) return Promise.resolve();
@@ -442,19 +1060,27 @@ AdminApp.register("overview", function (app) {
       try {
         var data = await request("/admin/api/overview", controller);
         if (epoch === generation && !controller.signal.aborted && visible()) {
-          historySnapshot = data || {};
+          historySnapshot = isObject(data) ? data : {};
+          historyError = "";
           renderHistory(historySnapshot);
         }
       } catch (error) {
         if (epoch !== generation || !visible() || (controller.signal.aborted && error.name !== "TimeoutError")) return;
         historyFetchedAt = 0;
         var reason = error.name === "TimeoutError" ? "加载超时" : "加载失败";
+        historyError = reason;
         text("activityHistoryState", reason);
         text("ovRequestStatsStatus", "历史统计" + reason + (historySnapshot ? "，显示上次数据；" : "，") + "请点击刷新重试。");
         if (!historySnapshot) {
           ["ovTotalReqs", "ovSuccessRate", "ovTargets", "ovClients", "ovModelCosts"].forEach(function (id) { text(id, "不可用"); });
           el("overviewUsageSummary").innerHTML = '<p class="activity-history-error">历史费用' + reason + '，请点击刷新重试。</p>';
+          historySnapshot = null;
         }
+        renderRange();
+        renderTargetHealth();
+        renderRecentChanges();
+        renderAttention();
+        renderChain();
       } finally {
         if (epoch === generation) { historyFlight = null; historyController = null; }
       }
@@ -463,7 +1089,7 @@ AdminApp.register("overview", function (app) {
     return flight;
   }
   function loadOverview(forceHistory) {
-    return Promise.all([loadActivity(), loadHistory(forceHistory === true)]);
+    return Promise.all([loadActivity(), loadHistory(forceHistory === true), loadMetrics(forceHistory === true), loadAggregate(forceHistory === true)]);
   }
   function startOverviewAutoRefresh() {
     enabled = true;
@@ -478,6 +1104,11 @@ AdminApp.register("overview", function (app) {
     else if (enabled && visible()) loadOverview();
   });
   el("refreshOverviewBtn").addEventListener("click", function () { loadOverview(true); });
+  rangeButtons = Array.prototype.slice.call(document.querySelectorAll("[data-overview-range]"));
+  rangeButtons.forEach(function (button) {
+    button.addEventListener("click", function () { selectRange(button.dataset.overviewRange); });
+  });
+  syncRangeButtons();
 
   function hideTooltip() {
     el("activityTooltip").hidden = true;
@@ -514,5 +1145,5 @@ AdminApp.register("overview", function (app) {
   document.addEventListener("keydown", function (event) { if (event.key === "Escape") hideTooltip(); });
   document.addEventListener("pointerdown", function (event) { if (tooltipTrigger && event.target !== tooltipTrigger && !tooltipTrigger.contains(event.target)) hideTooltip(); });
   document.addEventListener("scroll", hideTooltip, true);
-  return {loadOverview: loadOverview, startOverviewAutoRefresh: startOverviewAutoRefresh, stopOverviewAutoRefresh: stopOverviewAutoRefresh};
+  return {loadOverview: loadOverview, startOverviewAutoRefresh: startOverviewAutoRefresh, stopOverviewAutoRefresh: stopOverviewAutoRefresh, selectRange: selectRange};
 });

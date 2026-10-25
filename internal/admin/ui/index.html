@@ -1384,12 +1384,65 @@
     #page-overview .activity-history-table th, #page-overview .activity-history-table td { padding:9px 16px; text-align:right; border-bottom:1px solid var(--line); }
     #page-overview .activity-history-table th:first-child { text-align:left; }
     #page-overview .activity-history-table th { font-weight:500; color:var(--activity-secondary); }
+    #page-overview .overview-chain { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); margin-bottom:18px; border:1px solid var(--line); border-radius:12px; background:var(--card); overflow:hidden; }
+    #page-overview .overview-chain-node { min-width:0; padding:14px 18px; border-right:1px solid var(--line); }
+    #page-overview .overview-chain-node:last-of-type { border-right:0; }
+    #page-overview .overview-chain-label { display:block; font-size:12px; color:var(--activity-secondary); margin-bottom:5px; }
+    #page-overview .overview-chain-node strong { display:block; font-size:15px; font-weight:600; overflow-wrap:anywhere; }
+    #page-overview .overview-chain-status { grid-column:1 / -1; padding:9px 18px; border-top:1px solid var(--line); font-size:12px; color:var(--activity-secondary); }
+    #page-overview .overview-chain[data-state=partial] .overview-chain-status { color:var(--warn); }
+    #page-overview .overview-chain[data-state=error] .overview-chain-status { color:var(--bad); }
+    #page-overview .overview-range-section { margin-bottom:18px; }
+    #page-overview .overview-section-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
+    #page-overview .overview-range { display:flex; flex-wrap:wrap; gap:6px; }
+    #page-overview .overview-range button { min-height:34px; padding:5px 12px; border:1px solid var(--line); border-radius:20px; background:var(--card); color:var(--ink-2); font-size:12px; }
+    #page-overview .overview-range button[aria-pressed=true] { border-color:var(--accent); background:var(--accent); color:var(--accent-ink); }
+    #page-overview .overview-range-cards { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
+    #page-overview .overview-card { min-width:0; padding:12px 14px; border:1px solid var(--line); border-radius:10px; background:var(--card); }
+    #page-overview .overview-card span { display:block; font-size:12px; color:var(--activity-secondary); margin-bottom:6px; }
+    #page-overview .overview-card strong { display:block; font-size:20px; line-height:1.25; font-weight:650; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+    #page-overview .overview-card small { display:block; margin-top:4px; font-size:11px; color:var(--activity-secondary); }
+    #page-overview .overview-status { font-size:12px; line-height:1.6; color:var(--activity-secondary); }
+    #page-overview .overview-status[data-state=error] { color:var(--bad); }
+    #page-overview .overview-status[data-state=partial] { color:var(--warn); }
+    #page-overview .overview-panel { min-width:0; margin-bottom:18px; padding:16px 18px; border:1px solid var(--line); border-radius:12px; background:var(--card); }
+    #page-overview .overview-panel-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; }
+    #page-overview .overview-panel-heading h3 { display:flex; align-items:center; gap:8px; }
+    #page-overview #targetHealthCount, #page-overview #overviewAttentionCount { font-size:12px; font-weight:400; color:var(--activity-secondary); }
+    #page-overview .overview-panel-heading .overview-status { max-width:60%; text-align:right; }
+    #page-overview .overview-split { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; margin-bottom:18px; }
+    #page-overview .overview-split .overview-panel { margin-bottom:0; }
+    #page-overview .overview-table-wrap { overflow:auto; scrollbar-color:var(--line) var(--bg); scrollbar-width:thin; }
+    #page-overview .overview-table { width:100%; border-collapse:collapse; font-size:13px; font-variant-numeric:tabular-nums; }
+    #page-overview .overview-table th, #page-overview .overview-table td { padding:9px 8px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }
+    #page-overview .overview-table th { font-size:12px; font-weight:500; color:var(--activity-secondary); }
+    #page-overview .overview-table th:last-child, #page-overview .overview-table td:last-child { text-align:right; }
+    #page-overview .overview-table tr:last-child td { border-bottom:0; }
+    #page-overview .overview-table td:first-child { white-space:normal; overflow-wrap:anywhere; }
+    #page-overview .overview-table td[colspan] { text-align:left; color:var(--activity-secondary); white-space:normal; }
+    #page-overview .overview-phase { display:inline-block; padding:2px 8px; border-radius:4px; font-size:12px; background:var(--muted-soft); color:var(--ink-3); }
+    #page-overview .overview-phase.phase-ready { background:var(--ok-soft); color:var(--ok); }
+    #page-overview .overview-phase.phase-muted { background:var(--warn-soft); color:var(--warn); }
+    #page-overview .overview-phase.phase-half-open { background:var(--out-soft); color:var(--out); }
+    #page-overview .overview-phase.phase-offline { background:var(--muted-soft); color:var(--ink-3); }
+    #page-overview .overview-phase.phase-unknown { background:var(--muted-soft); color:var(--ink-3); }
+    #page-overview .overview-list { list-style:none; margin:0; padding:0; }
+    #page-overview .overview-list li { padding:8px 0; border-bottom:1px solid var(--line); font-size:13px; }
+    #page-overview .overview-list li:last-child { border-bottom:0; }
+    #page-overview .overview-list .overview-empty { color:var(--activity-secondary); font-size:12px; }
+    #page-overview .overview-section-title { margin:6px 0 10px; }
+    #page-overview .activity-concurrency-bar { fill:var(--activity-concurrency); stroke:none; }
     #page-overview .activity-tooltip { position:fixed; z-index:300; max-width:min(380px,calc(100vw - 24px)); padding:12px 14px; border-radius:8px; background:var(--side); color:var(--side-ink); box-shadow:0 6px 18px rgba(15,23,42,.2); font-size:12px; line-height:1.65; pointer-events:none; overflow-wrap:anywhere; }
     @media(max-width:1050px) {
       #page-overview .activity-metric { padding:0 14px; }
       #page-overview .activity-metric-unit { display:block; margin:5px 0 0; }
       #page-overview .activity-client-table th, #page-overview .activity-client-table td { padding:10px 10px; }
       #page-overview .activity-client-table th:first-child { width:24%; }
+      #page-overview .overview-chain { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      #page-overview .overview-chain-node { border-bottom:1px solid var(--line); }
+      #page-overview .overview-chain-node:nth-of-type(2n) { border-right:0; }
+      #page-overview .overview-chain-node:nth-of-type(n+3) { border-bottom:0; }
+      #page-overview .overview-range-cards { grid-template-columns:repeat(3,minmax(0,1fr)); }
     }
     @media(max-width:700px) {
       #page-overview .activity-heading { gap:8px; margin-bottom:14px; align-items:flex-start; }
@@ -1420,6 +1473,12 @@
       #page-overview .activity-history summary span { width:calc(100% - 30px); order:2; }
       #page-overview .activity-history-metrics { gap:16px 24px; }
       #page-overview .activity-history-table th, #page-overview .activity-history-table td { padding:9px 8px; white-space:nowrap; }
+      #page-overview .overview-range-cards { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      #page-overview .overview-split { grid-template-columns:minmax(0,1fr); gap:12px; }
+      #page-overview .overview-panel { padding:14px; }
+      #page-overview .overview-panel-heading { flex-direction:column; gap:4px; }
+      #page-overview .overview-panel-heading .overview-status { max-width:100%; text-align:left; }
+      #page-overview .overview-table { min-width:560px; }
     }
   </style>
 </head>
@@ -1539,9 +1598,61 @@
         <!-- ========== Page: 总览 ========== -->
         <div class="page active" id="page-overview" aria-busy="false">
           <div class="activity-heading">
-            <h2>实时活动</h2>
+            <h2>总览</h2>
             <div class="activity-refresh"><time id="activityUpdatedAt">等待首次采样</time><button class="btn" id="refreshOverviewBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"/></svg>刷新</button></div>
           </div>
+          <section class="overview-chain" id="chainSummary" data-state="loading" aria-label="托管链路摘要">
+            <div class="overview-chain-node"><span class="overview-chain-label">下游客户端</span><strong id="chainClients">—</strong></div>
+            <div class="overview-chain-node"><span class="overview-chain-label">代理</span><strong id="chainProxy">—</strong></div>
+            <div class="overview-chain-node"><span class="overview-chain-label">上游目标</span><strong id="chainTargets">—</strong></div>
+            <div class="overview-chain-node"><span class="overview-chain-label">密钥池</span><strong id="chainKeys">—</strong></div>
+            <div class="overview-chain-status" id="chainStatus" role="status">正在加载链路数据…</div>
+          </section>
+          <section class="overview-range-section" aria-label="区间用量">
+            <div class="overview-section-heading">
+              <h3>区间用量</h3>
+              <div class="overview-range" id="overviewRange" role="group" aria-label="区间选择">
+                <button type="button" data-overview-range="1h" aria-pressed="false">近 1 小时</button>
+                <button type="button" data-overview-range="today" aria-pressed="true">今日</button>
+                <button type="button" data-overview-range="7d" aria-pressed="false">近 7 天</button>
+                <button type="button" data-overview-range="30d" aria-pressed="false">近 30 天</button>
+              </div>
+            </div>
+            <div class="overview-range-cards">
+              <article class="overview-card"><span>请求数</span><strong id="ovRangeRequests">—</strong></article>
+              <article class="overview-card"><span>总 Token</span><strong id="ovRangeTotalTokens">—</strong></article>
+              <article class="overview-card"><span title="普通输入 Token，不含缓存读取、缓存写入和工具输入">基础输入 Token</span><strong id="ovRangeInputTokens">—</strong></article>
+              <article class="overview-card"><span>输出 Token</span><strong id="ovRangeOutputTokens">—</strong></article>
+              <article class="overview-card"><span>预估费用</span><strong id="ovRangeCost">—</strong><small>官方基础价</small></article>
+            </div>
+            <p id="ovRangeStatus" class="overview-status" role="status" aria-live="polite">正在加载区间用量…</p>
+          </section>
+          <section class="overview-panel" id="targetHealth" aria-label="目标健康">
+            <div class="overview-panel-heading">
+              <div><h3>目标健康</h3><span id="targetHealthCount">—</span></div>
+              <span class="overview-status" id="targetHealthStatus" role="status">正在加载目标健康…</span>
+            </div>
+            <div class="table-wrap overview-table-wrap"><table class="overview-table"><thead><tr><th scope="col">目标</th><th scope="col">状态</th><th scope="col">密钥</th><th scope="col">在途 / 容量</th><th scope="col">近 15 分钟</th></tr></thead><tbody id="targetHealthBody"><tr><td colspan="5">正在加载目标健康…</td></tr></tbody></table></div>
+          </section>
+          <div class="overview-split">
+            <section class="overview-panel" id="topClients" aria-label="客户端费用 Top 5">
+              <div class="overview-panel-heading"><div><h3>客户端费用 Top 5</h3></div><span class="overview-status" id="topClientsStatus" role="status">正在加载费用排行…</span></div>
+              <div class="table-wrap overview-table-wrap"><table class="overview-table"><thead><tr><th scope="col">客户端</th><th scope="col">请求</th><th scope="col">总 Token</th><th scope="col">费用（官方基础价）</th></tr></thead><tbody id="topClientsBody"><tr><td colspan="4">正在加载费用排行…</td></tr></tbody></table></div>
+            </section>
+            <section class="overview-panel" id="topModels" aria-label="模型费用 Top 5">
+              <div class="overview-panel-heading"><div><h3>模型费用 Top 5</h3></div><span class="overview-status" id="topModelsStatus" role="status">正在加载费用排行…</span></div>
+              <div class="table-wrap overview-table-wrap"><table class="overview-table"><thead><tr><th scope="col">模型</th><th scope="col">请求</th><th scope="col">总 Token</th><th scope="col">费用（官方基础价）</th></tr></thead><tbody id="topModelsBody"><tr><td colspan="4">正在加载费用排行…</td></tr></tbody></table></div>
+            </section>
+          </div>
+          <section class="overview-panel" id="overviewAttention" aria-label="需要关注">
+            <div class="overview-panel-heading"><div><h3>需要关注</h3><span id="overviewAttentionCount">—</span></div><span class="overview-status" id="overviewAttentionStatus" role="status">正在加载需要关注的信息…</span></div>
+            <ul class="overview-list" id="overviewAttentionList"><li class="overview-empty">正在加载需要关注的信息…</li></ul>
+          </section>
+          <section class="overview-panel" id="recentChanges" aria-label="最近变更">
+            <div class="overview-panel-heading"><div><h3>最近变更</h3></div><span class="overview-status" id="recentChangesStatus" role="status">正在加载最近变更…</span></div>
+            <div class="table-wrap overview-table-wrap"><table class="overview-table"><thead><tr><th scope="col">时间</th><th scope="col">操作者</th><th scope="col">动作</th><th scope="col">对象</th><th scope="col">结果</th></tr></thead><tbody id="recentChangesBody"><tr><td colspan="5">正在加载最近变更…</td></tr></tbody></table></div>
+          </section>
+          <h3 class="overview-section-title">实时活动</h3>
           <div class="activity-metrics" aria-label="全站当前活动与近5分钟用量">
             <div class="activity-metric"><div class="activity-metric-label">当前在途<button type="button" class="activity-info" aria-label="当前在途说明" aria-describedby="activityTooltip" data-activity-info="HTTP/SSE 在途请求与有效 WebSocket 推理轮次；不含空闲连接。数值为全站当前请求数。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></div><strong id="activityActiveRequests">—</strong><span class="activity-metric-unit">个请求</span></div>
             <div class="activity-metric"><div class="activity-metric-label">当前请求客户端<button type="button" class="activity-info" aria-label="当前请求客户端说明" aria-describedby="activityTooltip" data-activity-info="当前有在途请求的客户端数量；已有连接但未请求的客户端不计入。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></div><strong id="activityActiveClients">—</strong><span class="activity-metric-unit">个客户端</span></div>

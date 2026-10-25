@@ -43,6 +43,16 @@ const group = {
   monthly_usd: 500,
   bindings: [{ target: "removed-target", model: "<unsafe-model>" }],
 };
+function aggregateFixture() {
+  const now = new Date();
+  const from = new Date(now.getTime() - 3600000);
+  const totals = { requests: 1, input_tokens: 60, output_tokens: 20, estimated_cost: 0 };
+  return {
+    from: from.toISOString(), to: now.toISOString(), group_by: "day", totals, buckets: [],
+    by_client: [{ key: client.name, ...totals }],
+    by_model: [{ key: "fixture-model", ...totals }],
+  };
+}
 function activityFixture() {
   const end = Math.floor(Date.now() / 10000) * 10000;
   const iso = ms => new Date(ms).toISOString();
@@ -115,11 +125,16 @@ async function main() {
       "/admin/api/me": { username: "fixture-admin", role },
       "/admin/api/overview": {},
       "/admin/api/activity": activityFixture(),
+      "/admin/data/usage/aggregate": aggregateFixture(),
       "/admin/data/targets": { targets: [target, {...target, name: "z-fixture-target", model_prefix: "Other/"}] },
       "/admin/data/pools": {
         pools: [{ name: "fixture-pool", display_name: "Fixture-POOL", description: "Fixture pool" }],
       },
       "/admin/metrics": {
+        uptime_seconds: 60,
+        active_requests: 2,
+        requests: { total: 1 },
+        persistence: { usage_async_pending: 0, usage_async_deferred: 0, request_stats_dropped: 0 },
         targets_runtime: [
           {
             name: "fixture-target",

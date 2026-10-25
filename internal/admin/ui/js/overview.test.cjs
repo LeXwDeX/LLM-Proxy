@@ -24,10 +24,34 @@ function activity(overrides = {}) {
   const series = [0, 1, 2].map(i => ({from: `2026-10-14T03:00:${i}0Z`, to: `2026-10-14T03:00:${i + 1}0Z`, partial: i === 0, active_requests_peak: i ? i + 2 : null, input_tokens: 10 * i, output_tokens: 4 * i, total_tokens: 14 * i, incomplete_usage_count: 0}));
   return {generated_at: "2026-10-14T03:00:30Z", window: {from: series[0].from, to: series[2].to, step_seconds: 10}, runtime: {since: series[0].from, complete: false, active_requests: 2, active_clients: 1, websocket_sessions: 3}, totals: {input_tokens: 30, output_tokens: 12, total_tokens: 42, incomplete_usage_count: 0}, series, clients: [{name: '<A & "B">', configured: false, active_requests: 2, websocket_sessions: 3, totals: {input_tokens: 30, output_tokens: 12, total_tokens: 42, incomplete_usage_count: 0}, series: series.map(b => ({...b, active_requests_peak: b.active_requests_peak == null ? null : 1}))}], ...overrides};
 }
-function harness({sortButtons = [], infoButtons = []} = {}) {
+function completeStats(overrides = {}) {
+  return {
+    available: true, total: 0, success: 0, failure: 0, canceled: 0, record_failures: 0, success_rate: null,
+    since: "2026-10-20T00:00:00Z", from: "2026-10-20T00:00:00Z", to: "2026-10-23T00:00:00Z", ...overrides,
+  };
+}
+function completeRange(overrides = {}) {
+  return {requests: 0, input_tokens: 0, output_tokens: 0, estimated_cost: 0, incomplete_usage_count: 0, incomplete_cost_count: 0, ...overrides};
+}
+function completeMetrics(overrides = {}) {
+  return {
+    uptime_seconds: 1,
+    requests: {total: 0},
+    persistence: {usage_async_pending: 0, usage_async_deferred: 0, request_stats_dropped: 0},
+    observation_budget: {observation_budget_exhausted: {br: 0, zstd: 0}},
+    ...overrides,
+  };
+}
+function rangeButton(key) {
+  const button = new Element("button");
+  button.dataset.overviewRange = key;
+  button.attrs["aria-pressed"] = "false";
+  return button;
+}
+function harness({sortButtons = [], infoButtons = [], rangeButtons = []} = {}) {
   const elements = new Map(); const get = id => { if (!elements.has(id)) elements.set(id, new Element(id === "activityClientsBody" ? "tbody" : "div")); return elements.get(id); };
-  const doc = {getElementById: get, querySelectorAll: selector => selector === "[data-activity-sort]" ? sortButtons : selector === "[data-activity-info]" ? infoButtons : [], documentElement: {clientWidth: 390, clientHeight: 844}, createElement: tag => new Element(tag), listeners: {}, hidden: false, activeElement: null, addEventListener(name, fn) { this.listeners[name] = fn; }};
-  let module; let answer = activity(); let overview = {}; let handler; const calls = []; const timers = new Map(); let nextTimer = 0; let now = Date.now();
+  const doc = {getElementById: get, querySelectorAll: selector => selector === "[data-activity-sort]" ? sortButtons : selector === "[data-activity-info]" ? infoButtons : selector === "[data-overview-range]" ? rangeButtons : [], documentElement: {clientWidth: 390, clientHeight: 844}, createElement: tag => new Element(tag), listeners: {}, hidden: false, activeElement: null, addEventListener(name, fn) { this.listeners[name] = fn; }};
+  let module; let answer = activity(); let overview = {}; let metrics = {}; let aggregate = {}; let aggregateHandler; let handler; const calls = []; const timers = new Map(); let nextTimer = 0; let now = Date.now();
   class TestDate extends Date { static now() { return now; } }
   async function advance(ms) {
     for (let i = 0; i < 12; i++) await Promise.resolve();
@@ -41,10 +65,10 @@ function harness({sortButtons = [], infoButtons = []} = {}) {
     now = end;
     for (let i = 0; i < 12; i++) await Promise.resolve();
   }
-  const core = {esc: v => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"), fmtNum: v => String(v || 0), fmtMoney: String, fmtPct: v => v + "%", totalTok: d => (d.input_tokens || 0) + (d.output_tokens || 0), api: async (url, opts) => { calls.push({url, opts}); if (handler) return handler(url, opts); return url.endsWith("activity") ? answer : overview; }};
+  const core = {esc: v => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"), fmtNum: v => String(v || 0), fmtMoney: v => "$" + Number(v || 0).toFixed(2), fmtPct: v => v + "%", totalTok: d => (d.input_tokens || 0) + (d.output_tokens || 0) + (d.cached_tokens || 0) + (d.cache_creation_tokens || 0) + (d.tool_use_prompt_tokens || 0), schemaLabel: (list, value) => value, api: async (url, opts) => { calls.push({url, opts}); if (handler) return handler(url, opts); if (url.endsWith("activity")) return answer; if (url.endsWith("overview")) return overview; if (url.endsWith("/admin/metrics")) return metrics; if (url.includes("/admin/data/usage/aggregate")) return aggregateHandler ? aggregateHandler(url, opts) : aggregate; return overview; }};
   const state = {currentPage: "overview"};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "overview.js"), "utf8"), {document: doc, AbortController, Date: TestDate, Map, setTimeout: (fn, delay) => {timers.set(++nextTimer, {fn, at: now + delay}); return nextTimer;}, clearTimeout: id => timers.delete(id), setInterval: () => 1, clearInterval() {}, AdminApp: {register: (name, factory) => {module = factory({state, bind: (m, n) => core[n]}); }}});
-  return {module, get, doc, state, calls, timers, advance, setActivity: a => answer = a, setOverview: o => overview = o, setHandler: h => handler = h};
+  return {module, get, doc, state, calls, timers, advance, setActivity: a => answer = a, setOverview: o => overview = o, setMetrics: m => metrics = m, setAggregate: a => aggregate = a, setAggregateHandler: h => aggregateHandler = h, setHandler: h => handler = h};
 }
 test("homepage requests real activity, uses provided totals, and has no audit dependency", async () => {
   const h = harness(); await h.module.loadOverview();
@@ -161,13 +185,14 @@ test("information tips update on hover, work on touch and focus, and close with 
   await lower.fire("focus"); assert.equal(h.get("activityTooltip").hidden, false); await lower.fire("blur"); assert.equal(h.get("activityTooltip").hidden, true);
 });
 
-test("concurrency lines break at unknown samples instead of connecting across gaps", async () => {
+test("concurrency peaks render as bars and unknown samples leave gaps", async () => {
   const h = harness(); const data = activity();
   data.series[0].active_requests_peak = 3; data.series[1].active_requests_peak = null; data.series[2].active_requests_peak = 5;
   h.setActivity(data); await h.module.loadOverview();
   const svg = h.get("activityConcurrencyChart").innerHTML;
-  assert.equal((svg.match(/<circle class="activity-concurrency"/g) || []).length, 2);
-  assert.doesNotMatch(svg, /<polyline class="activity-line activity-concurrency"/);
+  assert.equal((svg.match(/<rect class="activity-concurrency-bar"/g) || []).length, 2);
+  assert.doesNotMatch(svg, /activity-line activity-concurrency/);
+  assert.doesNotMatch(svg, /<rect[^>]*class="activity-concurrency-bar"[^>]*height="0"/);
 });
 
 
@@ -258,4 +283,620 @@ test("a transport response arriving after timeout cannot overwrite the recovered
   await h.module.loadOverview(); resolve(activity());
   for (let i = 0; i < 12; i++) await Promise.resolve();
   assert.equal(h.get("activityActiveRequests").textContent, "7");
+});
+
+test("range cards distinguish missing totals from real zero and reload only aggregate", async () => {
+  const ranges = ["1h", "today", "7d", "30d"].map(rangeButton);
+  const h = harness({rangeButtons: ranges});
+  h.setOverview({
+    client_count: 2,
+    targets: [],
+    usage_summary: {
+      last_hour: {requests: 7, input_tokens: 30, output_tokens: 12, tool_use_prompt_tokens: 5, estimated_cost: 1.23, incomplete_usage_count: 1},
+      today: {requests: 0, input_tokens: 0, output_tokens: 0, tool_use_prompt_tokens: 0, estimated_cost: 0, incomplete_usage_count: 0},
+      last_7_days: null,
+      last_30_days: {},
+    },
+    recent_audit: [],
+  });
+  h.setAggregate({totals: {}, by_client: [], by_model: []});
+  await h.module.loadOverview();
+  const activityCalls = () => h.calls.filter(c => c.url.endsWith("activity")).length;
+  const initialActivity = activityCalls();
+  assert.equal(h.get("ovRangeRequests").textContent, "0");
+  assert.equal(h.get("ovRangeTotalTokens").textContent, "0");
+  assert.equal(h.get("ovRangeInputTokens").textContent, "0");
+  assert.equal(h.get("ovRangeOutputTokens").textContent, "0");
+  assert.equal(h.get("ovRangeCost").textContent, "$0.00");
+  assert.equal(h.get("ovRangeStatus").dataset.state, "ready");
+  assert.equal(ranges[1].attrs["aria-pressed"], "true");
+  await ranges[0].fire("click"); await h.advance(0);
+  assert.equal(h.get("ovRangeRequests").textContent, "7");
+  assert.equal(h.get("ovRangeTotalTokens").textContent, "47");
+  assert.equal(h.get("ovRangeInputTokens").textContent, "30");
+  assert.equal(h.get("ovRangeOutputTokens").textContent, "12");
+  assert.equal(h.get("ovRangeCost").textContent, "$1.23");
+  assert.equal(ranges[0].attrs["aria-pressed"], "true");
+  assert.equal(ranges[1].attrs["aria-pressed"], "false");
+  assert.match(h.get("ovRangeStatus").textContent, /官方基础价/);
+  assert.match(h.get("ovRangeStatus").textContent, /1 条用量不完整/);
+  assert.equal(h.get("ovRangeStatus").dataset.state, "partial");
+  assert.equal(activityCalls(), initialActivity);
+  assert.ok(h.calls.filter(c => c.url.includes("usage/aggregate")).some(c => c.url.includes("group_by=day")));
+  await ranges[2].fire("click"); await h.advance(0);
+  assert.equal(h.get("ovRangeRequests").textContent, "不可用");
+  assert.equal(h.get("ovRangeTotalTokens").textContent, "不可用");
+  assert.equal(h.get("ovRangeCost").textContent, "不可用");
+  assert.match(h.get("ovRangeStatus").textContent, /不可用/);
+  assert.match(h.get("ovRangeStatus").textContent, /7 天/);
+  assert.equal(activityCalls(), initialActivity);
+  await ranges[3].fire("click"); await h.advance(0);
+  assert.equal(h.get("ovRangeRequests").textContent, "不可用");
+  assert.equal(h.get("ovRangeTotalTokens").textContent, "不可用");
+  assert.equal(h.get("ovRangeCost").textContent, "不可用");
+  assert.notEqual(h.get("ovRangeStatus").dataset.state, "ready");
+  assert.match(h.get("ovRangeStatus").textContent, /不可用/);
+  assert.equal(activityCalls(), initialActivity);
+  await ranges[1].fire("click"); await h.advance(0);
+  assert.equal(h.get("ovRangeStatus").dataset.state, "ready");
+  h.setOverview({usage_summary: {today: completeRange({requests: 1, incomplete_cost_count: 1})}});
+  await h.module.loadOverview(true);
+  assert.equal(h.get("ovRangeStatus").dataset.state, "partial");
+  assert.match(h.get("ovRangeStatus").textContent, /1 条成本覆盖不完整/);
+});
+
+test("legacy history table keeps missing periods and fields distinct from real zero", async () => {
+  const h = harness();
+  h.setOverview({
+    usage_summary: {
+      last_hour: {requests: 0, input_tokens: 0, output_tokens: 0, tool_use_prompt_tokens: 0, estimated_cost: 0},
+      today: {requests: 5, input_tokens: 2, output_tokens: 3, tool_use_prompt_tokens: 4, estimated_cost: 0.5},
+      yesterday: {},
+      last_7_days: {requests: 4},
+      last_30_days: null,
+    },
+  });
+  await h.module.loadOverview(true);
+  const html = h.get("overviewUsageSummary").innerHTML;
+  assert.match(html, /<th scope="row">近1小时<\/th><td>0<\/td><td>0<\/td><td>\$0\.00<\/td>/);
+  assert.match(html, /<th scope="row">今日<\/th><td>5<\/td><td>9<\/td><td>\$0\.50<\/td>/);
+  assert.match(html, /<th scope="row">昨日<\/th><td>不可用<\/td><td>不可用<\/td><td>不可用<\/td>/);
+  assert.match(html, /<th scope="row">近7天<\/th><td>4<\/td><td>不可用<\/td><td>不可用<\/td>/);
+  assert.match(html, /<th scope="row">近30天<\/th><td>不可用<\/td><td>不可用<\/td><td>不可用<\/td>/);
+});
+
+test("target health sorts unknown states last and degrades single and zero key targets", async () => {
+  const target = (name, phase, extra = {}) => ({
+    Name: name, Phase: phase, Paused: false, MutedUntil: "0001-01-01T00:00:00Z",
+    TotalKeys: 2, ActiveKeys: 2, ExhaustedSubscriptionKeys: 0, ExhaustedAPIKeys: 0,
+    RateLimitedKeys: 0, BlockedKeys: 0, OtherExhaustedKeys: 0,
+    Capacity: 4, InFlight: 1, Utilization: 0.25,
+    Window15m: {in_flight_peak: 2, affinity_hits: 1, breaker_trips: 0}, ...extra,
+  });
+  const h = harness();
+  h.setOverview({
+    client_count: 2,
+    targets: [
+      target("normal", "ready"),
+      target("muted", "muted", {MutedUntil: "2099-01-01T00:00:00Z"}),
+      target("half", "half-open"),
+      target("offline", "offline", {Paused: true}),
+      target("keyed", "ready", {TotalKeys: 3, ActiveKeys: 1, RateLimitedKeys: 2}),
+      target("partial", "ready", {BlockedKeys: undefined}),
+      target("unknown", "future-phase"),
+      target("single", "ready", {TotalKeys: 1, ActiveKeys: 1, Endpoint: "https://secret.example/v1"}),
+      target("zero", "ready", {TotalKeys: 0, ActiveKeys: 0}),
+    ],
+    usage_summary: {today: {requests: 1, input_tokens: 1, output_tokens: 0, estimated_cost: 0}},
+    recent_audit: [],
+  });
+  h.setAggregate({totals: {}, by_client: [], by_model: []});
+  await h.module.loadOverview();
+  const names = [...h.get("targetHealthBody").innerHTML.matchAll(/data-target-name="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(names, ["muted", "half", "offline", "keyed", "partial", "normal", "single", "zero", "unknown"]);
+  assert.match(h.get("targetHealthBody").innerHTML, /data-target-key-issue="true"[^>]*data-target-name="keyed"|data-target-name="keyed"[^>]*data-target-key-issue="true"/);
+  assert.match(h.get("targetHealthBody").innerHTML, /data-target-key-issue="unknown"[^>]*data-target-name="partial"|data-target-name="partial"[^>]*data-target-key-issue="unknown"/);
+  assert.match(h.get("targetHealthBody").innerHTML, /data-target-phase="muted"/);
+  assert.match(h.get("targetHealthBody").innerHTML, /冷却至/);
+  assert.match(h.get("targetHealthBody").innerHTML, /限流 2/);
+  assert.match(h.get("targetHealthBody").innerHTML, /目标级/);
+  assert.match(h.get("targetHealthBody").innerHTML, /Bearer|透传/);
+  assert.match(h.get("targetHealthBody").innerHTML, /密钥状态不可用/);
+  assert.match(h.get("overviewAttentionList").innerHTML, /partial[^<]*密钥状态未知/);
+  assert.match(h.get("chainTargets").textContent, /9 个目标 · 3 个正常/);
+  assert.equal(h.get("targetHealthCount").textContent, "9 个目标");
+  assert.match(h.get("targetHealthStatus").textContent, /需要关注/);
+  assert.match(h.get("targetHealthStatus").textContent, /状态未知/);
+  assert.match(h.get("overviewAttentionList").innerHTML, /unknown[^<]*状态未知/);
+  assert.doesNotMatch(h.get("targetHealth").innerHTML, /secret\.example/);
+});
+
+test("top five ranks cost then requests then name and never fabricates zero", async () => {
+  const h = harness();
+  h.setOverview({client_count: 1, targets: [], usage_summary: {}, recent_audit: []});
+  h.setAggregate({
+    totals: {requests: 24, estimated_cost: 19},
+    by_client: [
+      {key: "c0", requests: 1, input_tokens: 1, output_tokens: 0, estimated_cost: 0},
+      {key: "c1", requests: 10, input_tokens: 1, output_tokens: 0, estimated_cost: 5},
+      {key: "c2", requests: 9, input_tokens: 1, output_tokens: 0, estimated_cost: 5},
+      {key: "c3", requests: 12, input_tokens: 1, output_tokens: 0, tool_use_prompt_tokens: 6, estimated_cost: 5},
+      {key: "c4", requests: 2, input_tokens: 1, output_tokens: 0, estimated_cost: 1},
+      {key: "c5", requests: 100, input_tokens: 1, output_tokens: 0, estimated_cost: 3},
+    ],
+    by_model: [
+      {key: "m-b", requests: 2, input_tokens: 1, output_tokens: 0, estimated_cost: 2},
+      {key: "m-a", requests: 2, input_tokens: 1, output_tokens: 0, estimated_cost: 2},
+      {key: "m-no-cost", requests: 3, input_tokens: 1, output_tokens: 0},
+    ],
+  });
+  await h.module.loadOverview();
+  const clients = [...h.get("topClientsBody").innerHTML.matchAll(/data-top-client="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(clients, ["c3", "c1", "c2", "c5", "c4"]);
+  assert.match(h.get("topClientsBody").innerHTML, /\$5\.00/);
+  assert.match(h.get("topClientsBody").innerHTML, /data-top-client="c3"><td>c3<\/td><td>12<\/td><td>7<\/td>/);
+  const models = [...h.get("topModelsBody").innerHTML.matchAll(/data-top-model="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(models, ["m-a", "m-b", "m-no-cost"]);
+  assert.match(h.get("topModelsBody").innerHTML, /不可用/);
+  assert.match(h.get("topClientsStatus").textContent, /官方基础价/);
+  assert.match(h.get("topClientsStatus").textContent, /按日/);
+  assert.doesNotMatch(h.get("topClientsStatus").textContent, /按小时/);
+
+  h.setAggregateHandler(() => Promise.reject(new Error("aggregate rejected")));
+  await h.module.loadOverview(true);
+  assert.match(h.get("topClientsStatus").textContent, /不可用/);
+  assert.match(h.get("topModelsStatus").textContent, /不可用/);
+  assert.doesNotMatch(h.get("topClientsBody").innerHTML, /\$0\.00|>0</);
+
+  h.setAggregateHandler(null);
+  h.setAggregate({totals: {}, by_client: [], by_model: []});
+  await h.module.loadOverview(true);
+  assert.match(h.get("topClientsBody").innerHTML, /暂无/);
+  assert.match(h.get("topClientsStatus").textContent, /暂无可聚合/);
+  assert.doesNotMatch(h.get("topClientsBody").innerHTML, /\$0\.00/);
+
+  h.setAggregate({totals: {}});
+  await h.module.loadOverview(true);
+  assert.match(h.get("topClientsStatus").textContent, /缺少/);
+  assert.match(h.get("topModelsStatus").textContent, /缺少/);
+});
+
+test("attention uses measured warnings and recent changes omit detail", async () => {
+  const h = harness();
+  h.setOverview({
+    client_count: 1,
+    targets: [
+      {Name: "muted-target", Phase: "muted", MutedUntil: "2099-01-01T00:00:00Z", TotalKeys: 2, ActiveKeys: 1, RateLimitedKeys: 1},
+      {Name: "offline-target", Phase: "offline", Paused: true, TotalKeys: 0, ActiveKeys: 0},
+    ],
+    usage_summary: {today: {requests: 3, input_tokens: 5, output_tokens: 1, estimated_cost: 0, incomplete_usage_count: 2, incomplete_cost_count: 1}},
+    requests: {
+      usage_record_failures: 2,
+      usage_client_gone_no_usage: 1,
+      usage_upstream_interrupted_no_usage: 1,
+      request_stats_record_failures: 3,
+    },
+    request_stats_72h: {available: true, total: 10, success: 7, failure: 2, canceled: 1, record_failures: 0, since: "start", from: "from", to: "to"},
+    recent_audit: [
+      {id: "old", timestamp: "2026-10-14T02:00:00Z", actor: "alice", action: "create", object: "old-object", result: "ok", detail: "secret detail old"},
+      {id: "new", timestamp: "2026-10-14T03:00:00Z", actor: "bob", action: "update", object: "new-object", result: "fail", detail: "secret detail new"},
+    ],
+  });
+  h.setMetrics({uptime_seconds: 3660, requests: {total: 12}, persistence: {usage_async_pending: 2, usage_async_deferred: 1, request_stats_dropped: 3}, observation_budget: {observation_budget_exhausted: {br: 4, zstd: 0}}});
+  h.setAggregate({totals: {requests: 3}, by_client: [], by_model: []});
+  await h.module.loadOverview();
+  const attention = h.get("overviewAttentionList").innerHTML;
+  assert.match(attention, /muted-target/);
+  assert.match(attention, /offline-target/);
+  assert.match(attention, /用量写入积压 2 条/);
+  assert.match(attention, /用量等待后台重试 1 条/);
+  assert.match(attention, /请求完成统计队列丢弃 3 条/);
+  assert.match(attention, /压缩响应观察预算拒绝 4 次/);
+  assert.match(attention, /自启动累计 2 次用量写入失败/);
+  assert.match(attention, /自启动累计 1 次客户端断开且未取得用量/);
+  assert.match(attention, /自启动累计 1 次上游中断且未取得用量/);
+  assert.match(attention, /自启动累计 3 次请求完成统计写入失败/);
+  assert.match(attention, /72 小时完成样本中 2 个失败/);
+  assert.match(attention, /72 小时完成样本中 1 个取消/);
+  assert.doesNotMatch(attention, /成功率/);
+  assert.match(attention, /2 条用量记录不完整/);
+  assert.match(h.get("overviewAttentionCount").textContent, /项/);
+  const recent = h.get("recentChangesBody").innerHTML;
+  assert.ok(recent.indexOf("new-object") < recent.indexOf("old-object"));
+  assert.doesNotMatch(recent, /secret detail/);
+  assert.match(h.get("recentChangesStatus").textContent, /2 条/);
+
+  h.setMetrics({uptime_seconds: 1, requests: {total: 0}, persistence: {usage_async_pending: 0, usage_async_deferred: 0, request_stats_dropped: 0}});
+  h.setOverview({
+    client_count: 1,
+    targets: [],
+    usage_summary: {},
+    requests: {usage_record_failures: 0, usage_client_gone_no_usage: 0, usage_upstream_interrupted_no_usage: 0, request_stats_record_failures: 0},
+    request_stats_72h: {available: true, total: 0, failure: 0, canceled: 0},
+    recent_audit: [],
+  });
+  await h.module.loadOverview(true);
+  assert.match(h.get("recentChangesBody").innerHTML, /暂无/);
+  assert.match(h.get("overviewAttentionList").innerHTML, /暂无需要关注/);
+  assert.doesNotMatch(h.get("overviewAttentionList").innerHTML, /自启动累计|72 小时完成样本/);
+});
+
+test("managed chain summarizes available values and marks missing sources", async () => {
+  const h = harness();
+  h.setOverview({
+    client_count: 3,
+    targets: [
+      {Name: "healthy", Phase: "ready", TotalKeys: 2, ActiveKeys: 2, RateLimitedKeys: 0, Capacity: 4, InFlight: 1, Window15m: {in_flight_peak: 1, affinity_hits: 0, breaker_trips: 0}},
+      {Name: "limited", Phase: "ready", TotalKeys: 2, ActiveKeys: 1, RateLimitedKeys: 1, Capacity: 4, InFlight: 1, Window15m: {in_flight_peak: 1, affinity_hits: 0, breaker_trips: 0}},
+    ],
+    usage_summary: {today: {requests: 3, input_tokens: 10, output_tokens: 2, estimated_cost: 0}},
+    recent_audit: [],
+  });
+  h.setMetrics(completeMetrics({uptime_seconds: 3660, requests: {total: 12}}));
+  await h.module.loadOverview();
+  assert.match(h.get("chainClients").textContent, /3 个配置客户端/);
+  assert.match(h.get("chainClients").textContent, /活跃 1/);
+  assert.match(h.get("chainProxy").textContent, /在途 2/);
+  assert.match(h.get("chainProxy").textContent, /累计 12/);
+  assert.match(h.get("chainProxy").textContent, /1 小时 1 分钟/);
+  assert.match(h.get("chainTargets").textContent, /2 个目标/);
+  assert.equal(h.get("chainKeys").attrs["data-total"], "4");
+  assert.equal(h.get("chainKeys").attrs["data-active"], "3");
+  assert.equal(h.get("chainKeys").attrs["data-rate-limited"], "1");
+  assert.equal(h.get("chainStatus").textContent, "链路数据已加载");
+
+  h.setMetrics(completeMetrics({uptime_seconds: 0}));
+  await h.module.loadOverview(true);
+  assert.match(h.get("chainProxy").textContent, /运行 0 秒/);
+  assert.equal(h.get("chainStatus").textContent, "链路数据已加载");
+
+  h.setOverview({
+    client_count: 3,
+    targets: [{Name: "unknown-keys", Phase: "ready"}],
+    usage_summary: {},
+    recent_audit: [],
+  });
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainKeys").attrs["data-total"], "unavailable");
+  assert.match(h.get("chainKeys").textContent, /不可用/);
+  assert.match(h.get("chainStatus").textContent, /部分链路数据不可用/);
+
+  h.setMetrics(null);
+  await h.module.loadOverview(true);
+  assert.match(h.get("chainStatus").textContent, /部分链路数据不可用/);
+});
+
+test("activity polling refreshes the managed chain without another overview request", async () => {
+  const h = harness();
+  h.setOverview({client_count: 3, targets: [], usage_summary: {}, recent_audit: []});
+  h.setMetrics({uptime_seconds: 1, requests: {total: 1}, persistence: {}});
+  await h.module.loadOverview();
+  assert.match(h.get("chainClients").textContent, /活跃 1/);
+  h.setActivity(activity({runtime: {...activity().runtime, active_clients: 5, active_requests: 6, websocket_sessions: 2}}));
+  await h.module.loadOverview();
+  assert.match(h.get("chainClients").textContent, /活跃 5/);
+  assert.match(h.get("chainProxy").textContent, /在途 6/);
+  assert.equal(h.calls.filter(c => c.url.endsWith("overview")).length, 1);
+});
+
+test("hidden overview aborts metrics and aggregate and reloads them on return", async () => {
+  const h = harness(); const pending = [];
+  h.setHandler(url => {
+    if (url.endsWith("activity")) return Promise.resolve(activity());
+    if (url.endsWith("overview")) return Promise.resolve({});
+    if (url.endsWith("/admin/metrics") || url.includes("usage/aggregate")) return new Promise((resolve, reject) => pending.push({url, resolve, reject}));
+    return Promise.resolve({});
+  });
+  const loading = h.module.loadOverview(true);
+  const metricsCall = h.calls.find(c => c.url.endsWith("/admin/metrics"));
+  const aggregateCall = h.calls.find(c => c.url.includes("usage/aggregate"));
+  h.module.stopOverviewAutoRefresh();
+  assert.equal(metricsCall.opts.signal.aborted, true);
+  assert.equal(aggregateCall.opts.signal.aborted, true);
+  await loading;
+  h.setHandler(url => Promise.resolve(url.endsWith("activity") ? activity() : url.endsWith("overview") ? {} : url.endsWith("/admin/metrics") ? {uptime_seconds: 1} : {totals: {}, by_client: [], by_model: []}));
+  h.module.startOverviewAutoRefresh();
+  await h.module.loadOverview(true);
+  assert.ok(h.calls.filter(c => c.url.endsWith("/admin/metrics")).length >= 2);
+  assert.ok(h.calls.filter(c => c.url.includes("usage/aggregate")).length >= 2);
+  h.module.stopOverviewAutoRefresh();
+  assert.equal(pending.length, 2);
+});
+
+test("range input card labels base input tokens without cache or tool usage", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+  const card = html.match(/<article class="overview-card"><span([^>]*)>([^<]+)<\/span><strong id="ovRangeInputTokens">/);
+  assert.ok(card, "range input token card is present");
+  assert.equal(card[2], "基础输入 Token");
+  assert.match(card[1], /title="[^"]*不含缓存读取[^"]*"/);
+});
+
+test("chain key summary refuses partial counters and keeps real zero", async () => {
+  const h = harness();
+  h.setMetrics(completeMetrics());
+  h.setOverview({
+    client_count: 1,
+    targets: [
+      {Name: "complete", Phase: "ready", TotalKeys: 2, ActiveKeys: 1, RateLimitedKeys: 1},
+      {Name: "missing-active", Phase: "ready", TotalKeys: 2, RateLimitedKeys: 0},
+    ],
+    usage_summary: {},
+    recent_audit: [],
+  });
+  await h.module.loadOverview();
+  assert.equal(h.get("chainKeys").attrs["data-total"], "unavailable");
+  assert.equal(h.get("chainKeys").attrs["data-active"], "unavailable");
+  assert.equal(h.get("chainKeys").attrs["data-rate-limited"], "unavailable");
+  assert.match(h.get("chainKeys").textContent, /不可用/);
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.match(h.get("chainStatus").textContent, /部分链路数据不可用/);
+
+  h.setOverview({
+    client_count: 1,
+    targets: [
+      {Name: "complete", Phase: "ready", TotalKeys: 2, ActiveKeys: 1, RateLimitedKeys: 1},
+      {Name: "missing-rate", Phase: "ready", TotalKeys: 2, ActiveKeys: 2},
+    ],
+    usage_summary: {},
+    recent_audit: [],
+  });
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainKeys").attrs["data-total"], "unavailable");
+  assert.equal(h.get("chainKeys").attrs["data-active"], "unavailable");
+  assert.equal(h.get("chainKeys").attrs["data-rate-limited"], "unavailable");
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+
+  h.setOverview({
+    client_count: 1,
+    targets: [{Name: "zero", Phase: "ready", TotalKeys: 0, ActiveKeys: 0, RateLimitedKeys: 0}],
+    usage_summary: {},
+    recent_audit: [],
+  });
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainKeys").textContent, "未配置独立密钥");
+  assert.equal(h.get("chainKeys").attrs["data-total"], "0");
+  assert.equal(h.get("chainKeys").attrs["data-active"], "0");
+  assert.equal(h.get("chainKeys").attrs["data-rate-limited"], "0");
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+
+  h.setOverview({client_count: 1, targets: [], usage_summary: {}, recent_audit: []});
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainKeys").textContent, "暂无目标");
+  assert.equal(h.get("chainKeys").attrs["data-total"], "0");
+  assert.equal(h.get("chainKeys").attrs["data-active"], "0");
+  assert.equal(h.get("chainKeys").attrs["data-rate-limited"], "0");
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+});
+
+test("attention reports ready only when every consumed source is complete", async () => {
+  const h = harness();
+  const target = {Name: "target", Phase: "ready", TotalKeys: 0, ActiveKeys: 0, RateLimitedKeys: 0};
+  const overview = () => ({
+    client_count: 1,
+    targets: [target],
+    usage_summary: {today: completeRange()},
+    request_stats_72h: completeStats(),
+    recent_audit: [],
+  });
+  h.setOverview(overview());
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview();
+  assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
+  assert.equal(h.get("overviewAttentionStatus").textContent, "关注数据已加载");
+
+  const scenario = async (change, note) => {
+    h.setOverview(overview());
+    h.setMetrics(completeMetrics());
+    change();
+    await h.module.loadOverview(true);
+    assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial", note);
+    assert.match(h.get("overviewAttentionStatus").textContent, /部分数据不可用/, note);
+  };
+
+  await scenario(() => h.setOverview({...overview(), request_stats_72h: undefined}), "missing request stats");
+  await scenario(() => h.setOverview({...overview(), request_stats_72h: completeStats({available: false})}), "unavailable request stats");
+  await scenario(() => h.setOverview({...overview(), request_stats_72h: completeStats({failure: undefined})}), "partial request stats");
+  await scenario(() => h.setOverview({...overview(), usage_summary: {}}), "missing selected range");
+  await scenario(() => h.setOverview({...overview(), usage_summary: {today: completeRange({estimated_cost: undefined})}}), "partial selected range");
+  await scenario(() => h.setOverview({...overview(), targets: undefined}), "missing targets");
+  await scenario(() => h.setMetrics(completeMetrics({observation_budget: undefined})), "missing observation budget");
+  await scenario(() => h.setMetrics(completeMetrics({observation_budget: {observation_budget_exhausted: {br: 0}}})), "partial observation budget");
+  await scenario(() => h.setMetrics(completeMetrics({requests: {}})), "missing requests total");
+  await scenario(() => h.setMetrics(completeMetrics({uptime_seconds: undefined})), "missing uptime");
+  await scenario(() => h.setMetrics(completeMetrics({persistence: {usage_async_pending: 0, usage_async_deferred: 0}})), "partial persistence");
+  await scenario(() => h.setMetrics(completeMetrics({persistence: undefined})), "missing persistence");
+  await scenario(() => {
+    h.setOverview({...overview(), targets: [{Name: "partial", Phase: "ready", TotalKeys: 2, ActiveKeys: 2, RateLimitedKeys: 0}]});
+    h.setMetrics(completeMetrics());
+  }, "unknown key counters");
+
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: 2, usage_async_deferred: 0, request_stats_dropped: 0}}));
+  h.setOverview({...overview(), usage_summary: {today: completeRange({incomplete_usage_count: 2})}});
+  await h.module.loadOverview(true);
+  assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
+  assert.match(h.get("overviewAttentionStatus").textContent, /已检查/);
+  assert.match(h.get("overviewAttentionList").innerHTML, /用量写入积压 2 条/);
+  assert.match(h.get("overviewAttentionList").innerHTML, /2 条用量记录不完整/);
+
+  h.setMetrics(completeMetrics());
+  h.setOverview(overview());
+  await h.module.loadOverview(true);
+  assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
+
+  h.setHandler(url => {
+    if (url.endsWith("activity")) return Promise.resolve(activity());
+    if (url.endsWith("overview")) return Promise.reject(new Error("offline"));
+    if (url.endsWith("/admin/metrics")) return Promise.resolve(completeMetrics());
+    return Promise.resolve({totals: {}, by_client: [], by_model: []});
+  });
+  await h.module.loadOverview(true);
+  assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial");
+  assert.match(h.get("overviewAttentionStatus").textContent, /部分数据不可用/);
+  assert.match(h.get("overviewAttentionList").innerHTML, /暂无需要关注的问题/);
+
+  h.setOverview({});
+  h.setMetrics(null);
+  h.setHandler(null);
+  await h.module.loadOverview(true);
+  assert.equal(h.get("overviewAttentionStatus").dataset.state, "error");
+  assert.match(h.get("overviewAttentionStatus").textContent, /不可用/);
+});
+
+test("a failed overview refresh keeps old panels but marks them partial", async () => {
+  const h = harness();
+  h.setOverview({
+    client_count: 1,
+    targets: [{Name: "target", Phase: "ready", TotalKeys: 0, ActiveKeys: 0, RateLimitedKeys: 0}],
+    usage_summary: {today: completeRange()},
+    request_stats_72h: completeStats(),
+    recent_audit: [{id: "audit-1", timestamp: "2026-10-20T00:00:00Z", actor: "alice", action: "update", object: "target", result: "ok"}],
+  });
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview();
+  assert.equal(h.get("chainStatus").textContent, "链路数据已加载");
+
+  h.setHandler(url => {
+    if (url.endsWith("overview")) return Promise.reject(new Error("offline"));
+    if (url.endsWith("activity")) return Promise.resolve(activity());
+    if (url.endsWith("/admin/metrics")) return Promise.resolve(completeMetrics());
+    return Promise.resolve({totals: {}, by_client: [], by_model: []});
+  });
+  await h.module.loadOverview(true);
+
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.match(h.get("chainStatus").textContent, /更新失败.*上次数据/);
+  for (const id of ["targetHealthStatus", "recentChangesStatus"]) {
+    assert.equal(h.get(id).dataset.state, "partial", id);
+    assert.match(h.get(id).textContent, /更新失败.*上次数据/, id);
+  }
+  assert.match(h.get("targetHealthBody").innerHTML, /target/);
+  assert.match(h.get("recentChangesBody").innerHTML, /audit-1/);
+  assert.match(h.get("chainTargets").textContent, /1 个目标/);
+  assert.equal(h.get("ovRangeStatus").dataset.state, "partial");
+  assert.match(h.get("ovRangeStatus").textContent, /更新失败.*上次数据/);
+
+  const empty = harness();
+  empty.setHandler(url => {
+    if (url.endsWith("overview")) return Promise.reject(new Error("offline"));
+    if (url.endsWith("activity")) return Promise.resolve(activity());
+    if (url.endsWith("/admin/metrics")) return Promise.resolve(completeMetrics());
+    return Promise.resolve({totals: {}});
+  });
+  await empty.module.loadOverview(true);
+  assert.equal(empty.get("chainSummary").dataset.state, "error");
+  assert.match(empty.get("chainStatus").textContent, /更新失败|不可用/);
+  assert.equal(empty.get("targetHealthStatus").dataset.state, "error");
+  assert.equal(empty.get("recentChangesStatus").dataset.state, "error");
+  assert.match(empty.get("targetHealthBody").innerHTML, /不可用/);
+  assert.match(empty.get("recentChangesBody").innerHTML, /不可用/);
+});
+
+test("empty target lists say no targets instead of claiming health or keyless mode", async () => {
+  const h = harness();
+  h.setOverview({
+    client_count: 0,
+    targets: [],
+    usage_summary: {today: completeRange()},
+    request_stats_72h: completeStats(),
+    recent_audit: [],
+  });
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview();
+  assert.equal(h.get("targetHealthStatus").textContent, "暂无目标");
+  assert.equal(h.get("targetHealthStatus").dataset.state, "ready");
+  assert.match(h.get("targetHealthBody").innerHTML, /暂无已配置目标/);
+  assert.equal(h.get("chainTargets").textContent, "暂无目标");
+  assert.equal(h.get("chainKeys").textContent, "暂无目标");
+  assert.doesNotMatch(h.get("chainTargets").textContent, /正常/);
+  assert.doesNotMatch(h.get("chainKeys").textContent, /未配置独立密钥/);
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+});
+
+test("history counters stay unavailable when the overview omits them", async () => {
+  const h = harness();
+  h.setOverview({
+    usage_summary: {today: completeRange()},
+    request_stats_72h: {
+      available: true, success: 0, failure: 0, canceled: 0, success_rate: null,
+      record_failures: undefined, since: undefined, from: undefined, to: undefined,
+    },
+  });
+  await h.module.loadOverview(true);
+  assert.equal(h.get("ovTargets").textContent, "不可用");
+  assert.equal(h.get("ovClients").textContent, "不可用");
+  assert.equal(h.get("ovModelCosts").textContent, "不可用");
+  assert.equal(h.get("ovTotalReqs").textContent, "不可用");
+  assert.equal(h.get("ovSuccessRate").textContent, "--");
+  assert.match(h.get("activityHistoryState").textContent, /完整性不可用/);
+  assert.match(h.get("ovRequestStatsStatus").textContent, /总数不可用/);
+  assert.match(h.get("ovRequestStatsStatus").textContent, /写入失败计数不可用/);
+  assert.doesNotMatch(h.get("activityHistoryTooltip").textContent, /undefined/);
+
+  h.setOverview({
+    active_targets: 0, client_count: 0, model_cost_count: 0,
+    usage_summary: {today: completeRange()},
+    request_stats_72h: completeStats(),
+  });
+  await h.module.loadOverview(true);
+  assert.equal(h.get("ovTargets").textContent, "0");
+  assert.equal(h.get("ovClients").textContent, "0");
+  assert.equal(h.get("ovModelCosts").textContent, "0");
+  assert.equal(h.get("ovTotalReqs").textContent, "0");
+  assert.equal(h.get("activityHistoryState").textContent, "");
+  assert.match(h.get("ovRequestStatsStatus").textContent, /暂无完成样本/);
+});
+
+test("chain shows partial metrics values but does not claim ready", async () => {
+  const h = harness();
+  h.setOverview({
+    client_count: 1,
+    targets: [{Name: "t", Phase: "ready", TotalKeys: 0, ActiveKeys: 0, RateLimitedKeys: 0}],
+    usage_summary: {today: completeRange()},
+    request_stats_72h: completeStats(),
+    recent_audit: [],
+  });
+  h.setMetrics({
+    uptime_seconds: 10,
+    requests: {total: 12},
+    persistence: {usage_async_pending: 0, usage_async_deferred: 0, request_stats_dropped: 0},
+  });
+  await h.module.loadOverview();
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.equal(h.get("chainStatus").textContent, "部分链路数据不可用");
+  assert.match(h.get("chainProxy").textContent, /累计 12/);
+  assert.match(h.get("chainProxy").textContent, /运行 10 秒/);
+  assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial");
+
+  h.setMetrics({
+    uptime_seconds: 10,
+    persistence: {usage_async_pending: 0, usage_async_deferred: 0, request_stats_dropped: 0},
+    observation_budget: {observation_budget_exhausted: {br: 0, zstd: 0}},
+  });
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.match(h.get("chainProxy").textContent, /累计请求不可用/);
+  assert.match(h.get("chainProxy").textContent, /运行 10 秒/);
+
+  h.setMetrics(completeMetrics({uptime_seconds: 10, requests: {total: 12}}));
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
+});
+
+test("unknown target phases never claim every target is normal", async () => {
+  const h = harness();
+  h.setOverview({
+    client_count: 1,
+    targets: [{Name: "mystery", Phase: "future-phase", TotalKeys: 0, ActiveKeys: 0, RateLimitedKeys: 0}],
+    usage_summary: {today: completeRange()},
+    request_stats_72h: completeStats(),
+    recent_audit: [],
+  });
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview();
+  assert.equal(h.get("targetHealthStatus").dataset.state, "partial");
+  assert.match(h.get("targetHealthStatus").textContent, /状态未知/);
+  assert.doesNotMatch(h.get("targetHealthStatus").textContent, /均在正常状态/);
+  assert.match(h.get("overviewAttentionList").innerHTML, /mystery[^<]*状态未知/);
+  assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial");
 });
