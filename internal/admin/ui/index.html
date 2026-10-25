@@ -713,8 +713,21 @@
     .quota-bar-inner.q-warn { background: var(--warning); }
     .quota-bar-inner.q-over { background: var(--danger); }
     .quota-bar-inner.q-none { background: var(--line); }
-    .quota-pct { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
-    .quota-cell { min-width: 110px; }
+    .quota-pct { font-size: 12px; color: var(--text-secondary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .quota-cell { min-width: 128px; }
+    .quota-number { font-variant-numeric: tabular-nums; }
+    .quota-usage-unavailable { display:block; color:var(--ink-3); }
+    .quota-cost-note, .quota-usage-note { display:block; margin-top:2px; color:var(--ink-3); font-size:11px; font-weight:400; line-height:1.4; white-space:normal; font-variant-numeric:tabular-nums; }
+    .quota-reset { display:block; margin-top:3px; color:var(--ink-3); font-size:11px; font-weight:400; font-variant-numeric:tabular-nums; }
+
+    /* ===== Quota Formula ===== */
+    .quota-formula { margin:12px 16px 0; padding:12px 14px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); display:grid; grid-template-columns:minmax(240px,0.9fr) minmax(0,1.6fr); gap:8px 18px; align-items:start; }
+    .quota-formula-main { display:flex; flex-direction:column; gap:4px; }
+    .quota-formula-label { color:var(--ink-3); font-size:11px; font-weight:500; }
+    .quota-formula-equation { color:var(--ink); font-size:14px; font-weight:600; line-height:1.5; font-variant-numeric:tabular-nums; }
+    .quota-formula-op { color:var(--ink-3); font-weight:400; }
+    .quota-formula-note { margin:0; color:var(--ink-2); font-size:12px; line-height:1.55; }
+    .quota-formula-note + .quota-formula-note { margin-top:4px; }
 
     /* ===== Quota Page Tabs ===== */
     .quota-tabs {
@@ -744,6 +757,7 @@
 
     /* ===== Quota Summary Table ===== */
     .quota-summary-toolbar { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; padding:12px 16px; }
+    #quotaSummaryStatusFilter { font-variant-numeric: tabular-nums; }
     .quota-person-cell { min-width: 150px; }
     .quota-expand-btn { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; background:none; border:none; border-radius:6px; cursor:pointer; color:var(--text-muted); font-size:14px; padding:0; }
     .quota-expand-btn:hover { color: var(--primary); }
@@ -815,6 +829,7 @@
       .usage-model-group-filter { width:100%; }
     }
     .quota-detail-row > td { background:var(--surface-2); padding:14px 16px; }
+    .quota-detail-note { padding:10px 12px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--ink-2); line-height:1.6; }
     .quota-detail-group { margin-top:10px; }
     .quota-detail-group h4 { font-size:12px; color:var(--text-secondary); margin-bottom:6px; font-weight:600; }
     .quota-badge { display:inline-block; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:600; }
@@ -1143,7 +1158,7 @@
      .quota-sync-sub { color:var(--text-muted); font-size:12px; }
      .quota-detail { min-width:320px; font-size:12px; color:var(--text-secondary); }
      .quota-detail-scroll { overflow-x:auto; border:1px solid var(--line); border-radius:6px; background:var(--card); }
-     .quota-detail-table { width:100%; border-collapse:collapse; white-space:nowrap; }
+     .quota-detail-table { width:100%; border-collapse:collapse; white-space:nowrap; font-variant-numeric:tabular-nums; }
      .quota-detail-table th, .quota-detail-table td { padding:6px 10px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); text-align:right; }
      .quota-detail-table th { background:var(--surface-2); color:var(--text-secondary); font-size:11px; font-weight:600; }
      .quota-detail-table thead th { text-align:center; }
@@ -1155,6 +1170,8 @@
      .quota-group-table { min-width:1080px; }
      .quota-group-table td { min-width:86px; }
      .quota-group-table td:nth-child(3n+2) { min-width:130px; }
+     /* Wrapping keeps the explanatory formula from sizing the summary table; the table itself keeps nowrap for figures. */
+     .quota-group-table td small { display:block; max-width:240px; white-space:normal; overflow-wrap:anywhere; }
      .quota-detail-total > * { background:var(--muted-soft); color:var(--text); font-weight:600; }
        .quota-detail-total td { font-family:ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; text-align:right; }
 
@@ -1241,6 +1258,7 @@
        .quota-edit-group-header { gap:10px; }
        .quota-bar { max-width: none; }
        .quota-summary-toolbar .form-group { width: 100% !important; }
+        .quota-formula { margin:10px 12px 0; padding:10px 12px; grid-template-columns:1fr; gap:6px; }
         .quota-drawer { width: 94vw; }
         .pricing-modal { width:96%; }
         .pricing-detail { padding:10px; }
@@ -1910,13 +1928,23 @@
                 <h3>人员可用额度与已折算消耗</h3>
                 <button class="btn" id="refreshQuotaBtn">刷新</button>
               </div>
+              <section class="quota-formula" id="quotaFormula" aria-label="额度计算口径">
+                <div class="quota-formula-main">
+                  <span class="quota-formula-label">可用额度上限</span>
+                  <span class="quota-formula-equation">模型组基数 <span class="quota-formula-op">×</span> 职级系数 <span class="quota-formula-op">×</span> 个人系数</span>
+                </div>
+                <div>
+                  <p class="quota-formula-note">模型组基数、职级系数、个人系数和模型组扣费系数均为正数时才生成正上限；任一为 0 时，该模型组在该周期显示“不限”。扣费系数不乘入上限公式，只用于已用费用折算一次；扣费系数为 0 时该组不限。未绑定职级或未加入模型组显示“未配置”，不按 0 或免费处理。</p>
+                  <p class="quota-formula-note">人员行的各周期进度是各独立限额组的合计，不是共享额度池；每个模型组的上限分别生效。展开明细可查看各组可用上限和各自的重置时间。</p>
+                </div>
+              </section>
               <div class="quota-summary-toolbar">
                 <div class="form-group" style="width:200px;margin-bottom:0;"><label>搜索</label><input class="form-control" id="quotaSearch" type="text" placeholder="名称 / IP"></div>
                 <div class="form-group" style="width:160px;margin-bottom:0;"><label>项目组</label><select class="form-control" id="quotaSummaryProjectFilter"><option value="">全部项目组</option></select></div>
                 <div class="form-group" style="width:160px;margin-bottom:0;"><label>职级</label><select class="form-control" id="quotaSummaryJobFilter"><option value="">全部职级</option></select></div>
-                <div class="form-group" style="width:150px;margin-bottom:0;"><label>状态</label><select class="form-control" id="quotaSummaryStatusFilter"><option value="">全部状态</option><option value="ok">正常</option><option value="warn">接近限额</option><option value="joblevel">职级未配置</option><option value="accounting">计费校准不可用</option><option value="group">模型组超限</option><option value="unlimited">不限</option><option value="none">未配置</option></select></div>
+                <div class="form-group" style="width:200px;margin-bottom:0;"><label>状态</label><select class="form-control" id="quotaSummaryStatusFilter"><option value="">全部状态</option><option value="ok">正常</option><option value="warn">接近限额</option><option value="joblevel">职级未配置</option><option value="accounting">计费校准不可用</option><option value="group">模型组超限</option><option value="unlimited">不限</option><option value="none">未配置</option></select></div>
               </div>
-              <div class="panel-body billing-basis-note" id="quotaBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;"><strong>计费口径：</strong>费用 = 上游官方 token 用量 × 适用的价格（目标模板、全局模板或目录默认价，均无则按 0 计），系统不估算 token。</div>
+              <div class="panel-body billing-basis-note" id="quotaBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;"><strong>计费口径：</strong>费用按上游官方 token 用量和已配置价格估算，价格依次取目标计费模板、全局模板和内置模型目录默认价，均未配置时按 0 计。金额已应用模型组扣费系数（每次费用只折算一次），是估算金额，不是厂商官方账单；系统不估算 token，也不补算 token。30 天费用直接展示聚合接口 estimated_cost，不再次折算；返回 0 显示 $0.00，字段缺失或加载失败显示不可用。</div>
               <div class="panel-body no-pad table-wrap">
                 <table>
                   <thead id="quotaSummaryTableHead"></thead>

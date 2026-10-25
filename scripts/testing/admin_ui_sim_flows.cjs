@@ -7,6 +7,8 @@ const assert = require("node:assert/strict");
 const S = {
   pool: "sim-ui-pool",
   level: "sim-ui-level",
+  project: "sim-ui-project",
+  group: "sim-ui-quota-group",
   tgtOpenAI: "sim-ui-openai",
   tgtGLM: "sim-ui-glm",
   client: "sim-ui-client",
@@ -82,6 +84,37 @@ async function refreshOverview(page) {
     { what: "overview refresh finished", timeoutMs: 20000 });
 }
 
+// settleQuotaShot waits for the page's own transient UI before the harness
+// captures this flow: toasts run out their real lifetime, and finite CSS
+// transitions/animations finish. Infinite ambient animations may continue.
+async function settleQuotaShot(page) {
+  await page.waitFor(`document.querySelectorAll("#toastContainer .toast").length === 0`,
+    { what: "quota toasts cleared", timeoutMs: 8000 });
+  await page.waitFor(`document.getAnimations().every(a => !a.effect || a.effect.getTiming().iterations === Infinity || a.playState !== "running")`,
+    { what: "quota transitions settled", timeoutMs: 5000 });
+}
+
+// scrollQuotaTableIntoView keeps mobile screenshots on the quota table when
+// the formula and billing note push it below the fold. The page scrolls in
+// .content, not in the window.
+async function scrollQuotaTableIntoView(page) {
+  await page.eval(`(() => {
+    const table = document.querySelector("#quotaSummaryBody").closest("table");
+    const scroller = document.querySelector(".content");
+    const rect = table.getBoundingClientRect();
+    const view = scroller.getBoundingClientRect();
+    if (rect.top < view.top || rect.top > view.bottom - 160) {
+      scroller.scrollTop += rect.top - view.top - 8;
+    }
+    return true;
+  })()`);
+  await page.waitFor(`(() => {
+    const rect = document.querySelector("#quotaSummaryBody").closest("table").getBoundingClientRect();
+    const view = document.querySelector(".content").getBoundingClientRect();
+    return rect.top >= view.top - 1 && rect.top < view.bottom - 100;
+  })()`, { what: "quota table in the mobile viewport", timeoutMs: 3000 });
+}
+
 async function fakeControl(base, body) {
   const r = await fetch(base + "/_control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   assert.equal(r.status, 200, "fake /_control");
@@ -137,10 +170,37 @@ const list = [
       await page.eval(`__sim.click('.quota-tab[data-quota-tab="settings"]')`);
       await page.eval(`__sim.click("#newJobLevelBtn")`);
       await page.waitFor(`__sim.open("jobLevelModal")`);
-      await page.eval(`__sim.fill("#jobLevelName", ${js(S.level)}) && __sim.fill("#jobLevel-daily", "0") && __sim.fill("#jobLevel-weekly", "0") && __sim.fill("#jobLevel-monthly", "0")`);
+      await page.eval(`__sim.fill("#jobLevelName", ${js(S.level)}) && __sim.fill("#jobLevel-daily", "1") && __sim.fill("#jobLevel-weekly", "1") && __sim.fill("#jobLevel-monthly", "1")`);
       await page.eval(`__sim.click("#saveJobLevelBtn")`);
       await expectToast(page, "职级已保存");
       await page.waitFor(`__sim.text("#jobLevelsBody").includes(${js(S.level)})`, { what: "job level row" });
+    },
+  },
+  {
+    name: "create-project-group",
+    async run({ page }) {
+      await goto(page, "quota");
+      await page.eval(`__sim.click('.quota-tab[data-quota-tab="settings"]')`);
+      await page.eval(`__sim.click("#newProjectGroupBtn")`);
+      await page.waitFor(`__sim.open("dictModal")`);
+      await page.eval(`__sim.fill("#dictEntryName", ${js(S.project)})`);
+      await page.eval(`__sim.click("#saveDictEntryBtn")`);
+      await expectToast(page, "项目组已保存");
+      await page.waitFor(`__sim.text("#projectGroupsBody").includes(${js(S.project)})`, { what: "project group row" });
+    },
+  },
+  {
+    name: "create-quota-model-group",
+    async run({ page }) {
+      await goto(page, "quota");
+      await page.eval(`__sim.click('.quota-tab[data-quota-tab="policy"]')`);
+      await page.eval(`__sim.click("#newModelGroupBtn")`);
+      await page.waitFor(`__sim.open("modelGroupModal")`);
+      await page.eval(`__sim.fill("#modelGroupName", ${js(S.group)}) && __sim.fill("#modelGroupCoefficient", "1") && __sim.fill("#modelGroup-daily", "100") && __sim.fill("#modelGroup-weekly", "500") && __sim.fill("#modelGroup-monthly", "1000")`);
+      await page.eval(`__sim.click("#saveModelGroupBtn")`);
+      await expectToast(page, "模型组已保存");
+      await page.waitFor(`__sim.text("#modelGroupsBody").includes(${js(S.group)})`, { what: "model group row" });
+      await page.eval(`__sim.click('.quota-tab[data-quota-tab="people"]')`);
     },
   },
   {
@@ -204,9 +264,9 @@ const list = [
       await goto(page, "clients");
       await page.eval(`AdminApp.state.dictsLoaded = false, true`);
       await page.eval(`__sim.click("#newClientBtn")`);
-      await page.waitFor(`__sim.open("clientModal") && [...document.querySelectorAll("#clientJobLevel option")].some(o => o.value === ${js(S.level)})`,
-        { what: "client modal with job levels" });
-      await page.eval(`__sim.fill("#clientName", ${js(S.client)}) && __sim.fill("#clientAccessKey", ${js(S.clientKey)}) && __sim.fill("#clientJobLevel", ${js(S.level)})`);
+      await page.waitFor(`__sim.open("clientModal") && [...document.querySelectorAll("#clientJobLevel option")].some(o => o.value === ${js(S.level)}) && [...document.querySelectorAll("#clientProjectGroup option")].some(o => o.value === ${js(S.project)})`,
+        { what: "client modal with job and project options" });
+      await page.eval(`__sim.fill("#clientName", ${js(S.client)}) && __sim.fill("#clientAccessKey", ${js(S.clientKey)}) && __sim.fill("#clientJobLevel", ${js(S.level)}) && __sim.fill("#clientProjectGroup", ${js(S.project)})`);
       await page.waitFor(`document.querySelector('#clientPoolTags span[data-pool=${js(S.pool)}]') && document.querySelector('#clientTargetTags span[data-target=${js(S.tgtGLM)}]')`,
         { what: "pool/target chips" });
       await page.eval(`__sim.click('#clientPoolTags span[data-pool=${js(S.pool)}]') && __sim.click('#clientTargetTags span[data-target=${js(S.tgtGLM)}]')`);
@@ -626,11 +686,202 @@ const list = [
     },
   },
   {
-    name: "quota-people-lists-client",
+    name: "quota-redesign-people-formula-status-filters",
     async run({ page }) {
       await goto(page, "quota");
       await page.eval(`__sim.click('.quota-tab[data-quota-tab="people"]')`);
-      await page.waitFor(`__sim.text("#quotaSummaryBody").includes(${js(S.client)})`, { what: "client in quota people", timeoutMs: 10000 });
+      await page.waitFor(`__sim.text("#quotaSummaryBody").includes(${js(S.client)})`, { what: "client in quota people", timeoutMs: 15000 });
+      const formula = await page.eval(`__sim.text("#quotaFormula")`);
+      for (const text of ["模型组基数", "职级系数", "个人系数", "扣费系数", "不是共享额度池"])
+        assert.ok(formula.includes(text), `quota formula explains ${text}`);
+      const billing = await page.eval(`__sim.text("#quotaBillingBasis")`);
+      for (const text of ["官方", "目录默认价", "不估算 token", "模型组扣费系数"])
+        assert.ok(billing.includes(text), `quota billing basis keeps ${text}`);
+      await page.waitFor(`(() => {
+        const select = document.getElementById("quotaSummaryStatusFilter");
+        return select.options.length > 1 && [...select.options].every(o => /\\(\\d+\\)$/.test(o.textContent.trim()));
+      })()`, { what: "status counts in existing options", timeoutMs: 10000 });
+
+      const picked = await page.eval(`(() => {
+        const select = document.getElementById("quotaSummaryStatusFilter");
+        const option = [...select.options].find(o => o.value && Number((o.textContent.match(/\\((\\d+)\\)$/ ) || [])[1]) > 0);
+        if (!option) return null;
+        const label = option.textContent.replace(/\\s*\\(\\d+\\)$/, "");
+        select.value = option.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        return { value: option.value, label };
+      })()`);
+      assert.ok(picked, "one quota status has a positive count");
+      await page.waitFor(`document.querySelectorAll("#quotaSummaryBody tr[data-quota-person]").length > 0`, { what: "status-filtered quota rows" });
+      const badges = await page.eval(`[...document.querySelectorAll("#quotaSummaryBody tr[data-quota-person]")].map(row => {
+        const cells = row.querySelectorAll("td");
+        return cells[cells.length - 2] ? cells[cells.length - 2].textContent.trim() : "";
+      })`);
+      assert.ok(badges.length > 0 && badges.every(text => text === picked.label),
+        `status filter ${picked.label} showed ${JSON.stringify(badges)}`);
+      await page.eval(`(() => { const s = document.getElementById("quotaSummaryStatusFilter"); s.value = ""; s.dispatchEvent(new Event("change", {bubbles:true})); })()`);
+
+      await page.eval(`__sim.fill("#quotaSearch", ${js(S.client)})`);
+      await page.waitFor(`document.querySelectorAll("#quotaSummaryBody tr[data-quota-person]").length === 1 && __sim.text("#quotaSummaryStatusFilter").includes("全部状态 (1)")`,
+        { what: "search narrows rows and status counts" });
+      await page.eval(`__sim.fill("#quotaSearch", "")`);
+
+      await page.waitFor(`[...document.querySelectorAll("#quotaSummaryProjectFilter option")].some(o => o.value === ${js(S.project)})`, { what: "project filter option" });
+      await page.eval(`__sim.fill("#quotaSummaryProjectFilter", ${js(S.project)})`);
+      await page.waitFor(`document.querySelectorAll("#quotaSummaryBody tr[data-quota-person]").length === 1`, { what: "project filter keeps the client" });
+      await page.eval(`__sim.fill("#quotaSummaryProjectFilter", "")`);
+
+      await page.waitFor(`[...document.querySelectorAll("#quotaSummaryJobFilter option")].some(o => o.value === ${js(S.level)})`, { what: "job filter option" });
+      await page.eval(`__sim.fill("#quotaSummaryJobFilter", ${js(S.level)})`);
+      await page.waitFor(`document.querySelectorAll("#quotaSummaryBody tr[data-quota-person]").length === 1`, { what: "job filter keeps the client" });
+      await page.eval(`__sim.fill("#quotaSummaryJobFilter", "")`);
+
+      await page.waitFor(`/^[0-9]/.test(__sim.text("#quotaSummaryBody tr[data-quota-person] .quota-token-cell")) && __sim.text("#quotaSummaryBody tr[data-quota-person] .quota-cost-cell").startsWith("$")`,
+        { what: "quota usage cells are available", timeoutMs: 15000 });
+      const tokenCell = await page.eval(`__sim.text("#quotaSummaryBody tr[data-quota-person] .quota-token-cell")`);
+      assert.match(tokenCell, /^[0-9]/, `quota token cell is numeric: ${tokenCell}`);
+      const costCell = await page.eval(`__sim.text("#quotaSummaryBody tr[data-quota-person] .quota-cost-cell")`);
+      assert.match(costCell, /^\$/, `quota cost cell is an amount: ${costCell}`);
+      assert.ok(await page.eval(`!!document.querySelector("#quotaSummaryTableHead th[title*='estimated_cost']")`),
+        "estimated cost header discloses the model coefficient");
+    },
+  },
+  {
+    name: "quota-redesign-detail-and-drawer",
+    async run({ page }) {
+      await goto(page, "quota");
+      await page.eval(`__sim.click('.quota-tab[data-quota-tab="people"]')`);
+      await page.waitFor(`document.querySelector('[data-edit-quota=${js(S.client)}]')`, { what: "quota edit action", timeoutMs: 15000 });
+      await page.eval(`__sim.click('[data-edit-quota=${js(S.client)}]')`);
+      await page.waitFor(`__sim.open("quotaEditDrawer")`, { what: "quota edit drawer" });
+      assert.equal(await page.eval(`__sim.$("#quotaEditJobLevel").value`), S.level);
+      await page.waitFor(`[...document.querySelectorAll("#quotaEditGroupPicker option")].some(o => o.value === ${js(S.group)})`,
+        { what: "model group in quota drawer" });
+      await page.eval(`__sim.fill("#quotaEditGroupPicker", ${js(S.group)})`);
+      await page.waitFor(`document.querySelector("#quotaEditGroupEditor [data-edit-group-index='0']")`, { what: "selected group card" });
+      await page.eval(`__sim.click("#saveQuotaEditBtn")`);
+      await expectToast(page, "额度已更新");
+      await page.waitFor(`!__sim.open("quotaEditDrawer")`, { what: "quota drawer closed after save" });
+      // The save handler closes the drawer before reloading the summary. Wait
+      // for the reloaded state that carries the saved group; the row still on
+      // screen at this point is the pre-save one, which has no reset time.
+      await page.waitFor(`(() => {
+        const item = (AdminApp.state.quotaSummary || []).find(x => (x.client || {}).name === ${js(S.client)});
+        const group = item && item.status && item.status.groups && item.status.groups[${js(S.group)}];
+        return !!group && !!group.quotas;
+      })()`, { what: "reloaded quota summary contains the saved group", timeoutMs: 15000 });
+      await page.eval(`__sim.click('[data-expand-quota=${js(S.client)}]')`);
+      await page.waitFor(`document.querySelector('[data-quota-detail=${js(S.client)}]')`, { what: "expanded group details" });
+      await page.waitFor(`document.querySelector('[data-quota-detail=${js(S.client)}] .quota-reset')`, { what: "group reset time" });
+      const detail = await page.eval(`__sim.text('[data-quota-detail=${js(S.client)}]')`);
+      assert.match(detail, /独立限额组/, "detail explains independent limit groups");
+      assert.match(detail, /不是共享额度池/, "detail denies a shared pool");
+      assert.match(detail, /下次重置/, "detail shows the group reset time");
+      assert.match(detail, /本地时间/, "reset time is labelled local");
+      assert.doesNotMatch(detail, /0001-01-01/, "zero Go time is not shown");
+      const fit = await page.eval(`(() => {
+        const box = document.querySelector('[data-quota-detail=${js(S.client)}] .quota-detail-scroll');
+        return {scroll: box.scrollWidth, client: box.clientWidth};
+      })()`);
+      assert.ok(fit.scroll <= fit.client + 1,
+        `quota detail table overflows its cell: ${fit.scroll}/${fit.client}`);
+      await settleQuotaShot(page);
+    },
+  },
+  {
+    name: "quota-redesign-tabs-and-drawer",
+    async run({ page }) {
+      await goto(page, "quota");
+      const tab = async (name) => {
+        await page.eval(`__sim.click('.quota-tab[data-quota-tab=${js(name)}]')`);
+        await page.waitFor(`document.getElementById("quota-tab-${name}").classList.contains("active")`, { what: `quota tab ${name}` });
+      };
+      await tab("policy");
+      await page.waitFor(`__sim.text("#modelGroupsBody").includes(${js(S.group)})`, { what: "policy tab group row" });
+      await tab("batch");
+      assert.ok(await page.eval(`getComputedStyle(document.getElementById("syncQuotaBtn")).display !== "none"`), "batch sync is visible to admin");
+      await tab("settings");
+      await page.waitFor(`__sim.text("#jobLevelsBody").includes(${js(S.level)})`, { what: "settings tab job level row" });
+      await tab("people");
+      await page.waitFor(`document.querySelector('[data-edit-quota=${js(S.client)}]')`, { what: "people tab quota row" });
+      await page.eval(`__sim.click('[data-edit-quota=${js(S.client)}]')`);
+      await page.waitFor(`__sim.open("quotaEditDrawer")`, { what: "quota drawer opens from people tab" });
+      await page.eval(`closeModal("quotaEditDrawer"), true`);
+      await page.waitFor(`!__sim.open("quotaEditDrawer")`, { what: "quota drawer closes" });
+      await settleQuotaShot(page);
+    },
+  },
+  {
+    name: "quota-redesign-desktop-dark",
+    async run({ page }) {
+      await goto(page, "quota");
+      await page.eval(`(() => {
+        if (!document.documentElement.classList.contains("dark")) document.getElementById("themeToggle").click();
+        return true;
+      })()`);
+      await page.waitFor(`document.documentElement.classList.contains("dark")`, { what: "dark theme applied" });
+      await page.waitFor(`__sim.text("#quotaFormula").includes("模型组基数")`, { what: "dark quota formula" });
+      const shot = await page.eval(`({width: document.documentElement.scrollWidth, client: document.documentElement.clientWidth})`);
+      assert.ok(shot.width <= shot.client + 1, `dark quota desktop overflows: ${shot.width}/${shot.client}`);
+      await settleQuotaShot(page);
+    },
+  },
+  {
+    name: "quota-redesign-mobile-390-light",
+    async run({ page }) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+      try {
+        await page.eval(`(() => {
+          if (document.documentElement.classList.contains("dark")) document.getElementById("themeToggle").click();
+          return true;
+        })()`);
+        await page.waitFor(`!document.documentElement.classList.contains("dark")`, { what: "light theme for mobile screenshot" });
+        await page.waitFor(`document.querySelector('[data-expand-quota=${js(S.client)}]')`, { what: "mobile quota row", timeoutMs: 10000 });
+        const width = await page.eval(`({scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth})`);
+        assert.ok(width.scroll <= width.client + 1, `mobile quota overflows: ${width.scroll}/${width.client}`);
+        assert.ok(await page.eval(`getComputedStyle(document.getElementById("quotaFormula")).display !== "none"`), "mobile formula is visible");
+        await scrollQuotaTableIntoView(page);
+        await settleQuotaShot(page);
+      } catch (err) {
+        await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+        throw err;
+      }
+    },
+  },
+  {
+    name: "quota-redesign-mobile-390-dark",
+    async run({ page }) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+      try {
+        await page.eval(`(() => {
+          if (!document.documentElement.classList.contains("dark")) document.getElementById("themeToggle").click();
+          return true;
+        })()`);
+        await page.waitFor(`document.documentElement.classList.contains("dark")`, { what: "mobile dark theme applied" });
+        await page.waitFor(`document.querySelector('[data-expand-quota=${js(S.client)}]')`, { what: "mobile dark quota row", timeoutMs: 10000 });
+        const width = await page.eval(`({scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth})`);
+        assert.ok(width.scroll <= width.client + 1, `mobile dark quota overflows: ${width.scroll}/${width.client}`);
+        assert.ok(await page.eval(`getComputedStyle(document.getElementById("quotaFormula")).display !== "none"`), "mobile dark formula is visible");
+        await scrollQuotaTableIntoView(page);
+        await settleQuotaShot(page);
+      } catch (err) {
+        await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+        throw err;
+      }
+    },
+  },
+  {
+    name: "quota-redesign-restore-desktop-light",
+    async run({ page }) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+      await page.eval(`(() => {
+        if (document.documentElement.classList.contains("dark")) document.getElementById("themeToggle").click();
+        return true;
+      })()`);
+      await page.waitFor(`!document.documentElement.classList.contains("dark")`, { what: "light theme restored" });
+      await page.waitFor(`__sim.text("#quotaFormula").includes("模型组基数")`, { what: "light quota formula" });
+      await page.eval(`document.querySelector(".content").scrollTop = 0, true`);
+      await settleQuotaShot(page);
     },
   },
   {
