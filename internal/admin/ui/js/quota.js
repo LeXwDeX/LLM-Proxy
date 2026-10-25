@@ -175,7 +175,7 @@ AdminApp.register("quota", function (app) {
     }
     if (status.job_level_missing) {
       html +=
-        "<div class='quota-detail-group'><h4>职级</h4><div style='padding:6px 0;color:#ef4444;font-size:12px;'>未绑定职级：未配置额度，请求将被 429 拒绝。请在「编辑额度」中绑定职级。</div></div>";
+        "<div class='quota-detail-group'><h4>职级</h4><div style='padding:6px 0;color:var(--bad);font-size:12px;'>未绑定职级：未配置额度，请求将被 429 拒绝。请在「编辑额度」中绑定职级。</div></div>";
     } else if (status.job_level) {
       var level = jobLevelByName(status.job_level);
       html +=

@@ -28,8 +28,8 @@ AdminApp.register("users", function (app) {
       var data = await api("/admin/api/me");
       if (data && data.username) {
         state.currentUser = data.username;
-        document.getElementById("userBadge").textContent =
-          "👤 " + data.username;
+        var badgeName = document.getElementById("userBadgeName");
+        if (badgeName) badgeName.textContent = data.username;
         if (data.role === "readonly") {
           document.body.classList.add("readonly-mode");
           applyReadonlyMode(document);

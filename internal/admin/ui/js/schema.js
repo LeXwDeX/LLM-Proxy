@@ -30,7 +30,7 @@ AdminApp.register("schema", function (app) {
       return (
         "background:" + m.badge_background + ";color:" + m.badge_foreground
       );
-    return "background:#f1f5f9;color:#64748b";
+    return "background:var(--muted-soft);color:var(--ink-3)";
   }
 
   // A failed or partial schema must never turn form fields into empty options.

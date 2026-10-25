@@ -128,36 +128,36 @@ AdminApp.register("targets", function (app) {
   function keyStatusColor(s) {
     switch (s) {
       case "已屏蔽":
-        return "background:#fee2e2;color:#dc2626";
+        return "background:var(--bad-soft);color:var(--bad)";
       case "额度超限":
-        return "background:#fef3c7;color:#d97706";
+        return "background:var(--warn-soft);color:var(--warn)";
       case "额度超限(自动恢复)":
-        return "background:#fef3c7;color:#d97706";
+        return "background:var(--warn-soft);color:var(--warn)";
       case "额度超限(人工恢复)":
-        return "background:#fef3c7;color:#b45309";
+        return "background:var(--warn-soft);color:var(--warn)";
       case "限流中":
-        return "background:#ffedd5;color:#c2410c";
+        return "background:var(--out-soft);color:var(--out)";
       case "使用中":
-        return "background:#dcfce7;color:#16a34a";
+        return "background:var(--ok-soft);color:var(--ok)";
       case "等待中":
-        return "background:#f1f5f9;color:#64748b";
+        return "background:var(--muted-soft);color:var(--ink-3)";
       case "使用过":
-        return "background:#e0e7ff;color:#4f46e5";
+        return "background:var(--accent-soft);color:var(--accent)";
       // 新增文案（status() GLM 分类 / 冷却过期区分）
       case "可用(待激活)":
-        return "background:#e0f2fe;color:#0369a1"; // 浅蓝（sky-50/sky-700），区别于"使用中"绿色但仍属"接近可用"的冷色调
+        return "background:var(--accent-soft);color:var(--accent)"; // 浅蓝（sky-50/sky-700），区别于"使用中"绿色但仍属"接近可用"的冷色调
       case "失效(待请求验证)":
-        return "background:#fee2e2;color:#dc2626"; // 红色系警示
+        return "background:var(--bad-soft);color:var(--bad)"; // 红色系警示
       case "失效(冷却中)":
-        return "background:#ffedd5;color:#c2410c"; // 橙色系
+        return "background:var(--out-soft);color:var(--out)"; // 橙色系
       case "GLM额度限流":
-        return "background:#fef3c7;color:#d97706"; // 黄色系额度超限色
+        return "background:var(--warn-soft);color:var(--warn)"; // 黄色系额度超限色
       case "GLM速率限流":
-        return "background:#ffedd5;color:#c2410c"; // 橙色系限流色
+        return "background:var(--out-soft);color:var(--out)"; // 橙色系限流色
       case "失效":
-        return "background:#fee2e2;color:#dc2626"; // 兜底失效
+        return "background:var(--bad-soft);color:var(--bad)"; // 兜底失效
       default:
-        return "background:#f1f5f9;color:#64748b";
+        return "background:var(--muted-soft);color:var(--ink-3)";
     }
   }
 
@@ -189,18 +189,18 @@ AdminApp.register("targets", function (app) {
             actions =
               "<button class='btn btn-sm readonly-hide' data-unblock-key-idx='" +
               idx +
-              "' title='解除屏蔽' style='padding:2px 8px;font-size:11px;'>🔓</button>";
+              "' title='解除屏蔽' aria-label='解除屏蔽' style='padding:2px 8px;font-size:11px;'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='4' y='11' width='16' height='10' rx='2'></rect><path d='M8 11V7a4 4 0 0 1 7.5-2'></path></svg></button>";
           } else {
             actions =
               "<button class='btn btn-sm readonly-hide' data-block-key-idx='" +
               idx +
-              "' title='屏蔽' style='padding:2px 8px;font-size:11px;'>🔒</button>";
+              "' title='屏蔽' aria-label='屏蔽' style='padding:2px 8px;font-size:11px;'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='4' y='11' width='16' height='10' rx='2'></rect><path d='M8 11V7a4 4 0 0 1 8 0v4'></path></svg></button>";
           }
         }
         var removeBtn =
           "<button class='btn btn-sm readonly-hide' data-remove-key-idx='" +
           i +
-          "' title='移除' style='padding:2px 8px;font-size:11px;color:var(--danger);'>✕</button>";
+          "' title='移除' aria-label='移除' style='padding:2px 8px;font-size:11px;color:var(--danger);'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M6 6l12 12M18 6L6 18'></path></svg></button>";
         var cooldownInfo = "";
         if (item.status && item.status.exhausted && item.status.cooldown_end) {
           var cd = new Date(item.status.cooldown_end);
@@ -214,8 +214,8 @@ AdminApp.register("targets", function (app) {
           }
         }
         return (
-          "<div style='display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;margin-bottom:4px;background:#fafbfc;'>" +
-          "<span style='font-family:monospace;font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='" +
+          "<div style='display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;margin-bottom:4px;background:var(--surface-2);'>" +
+          "<span style='font-family:ui-monospace, SF Mono, Menlo, Consolas, monospace;font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='" +
           esc(mask) +
           "'>" +
           esc(mask) +
@@ -335,7 +335,7 @@ AdminApp.register("targets", function (app) {
       })
       .map(function (t) {
         var poolCell = t.pool
-          ? "<span style='background:#ede9fe;color:#6d28d9;padding:2px 8px;border-radius:4px;font-size:12px;'>🧩 " +
+          ? "<span class='client-target-pool-tag'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='3' y='4' width='18' height='7' rx='2'></rect><rect x='3' y='13' width='18' height='7' rx='2'></rect><path d='M7 7.5h.01M7 16.5h.01'></path></svg> " +
             esc(poolDisplayName(t.pool)) +
             "</span>"
           : "<span style='color:var(--text-muted)'>—</span>";
@@ -345,7 +345,7 @@ AdminApp.register("targets", function (app) {
           var label = m.fallback
             ? m.upstream + " (" + m.fallback + ")"
             : m.upstream;
-          return m.paused ? "⏸ " + label : label;
+          return m.paused ? "已暂停 · " + label : label;
         });
         var models = modelNames.length
           ? "<div class='target-model-list'>" +
@@ -370,7 +370,7 @@ AdminApp.register("targets", function (app) {
         var keyStatus =
           "<span title='" +
           esc(keyHint) +
-          "' style='background:#dbeafe;color:#2563eb;padding:1px 6px;border-radius:4px;font-size:11px;'>" +
+          "' style='background:var(--accent-soft);color:var(--accent);padding:1px 6px;border-radius:4px;font-size:11px;'>" +
           totalKeyCount +
           " keys</span>";
         var keyPoolInfo = "";
@@ -427,42 +427,42 @@ AdminApp.register("targets", function (app) {
           }).length;
           if (blockedCount > 0)
             keyPoolInfo +=
-              " <span style='background:#fee2e2;color:#dc2626;padding:1px 6px;border-radius:4px;font-size:11px;'>" +
+              " <span style='background:var(--bad-soft);color:var(--bad);padding:1px 6px;border-radius:4px;font-size:11px;'>" +
               blockedCount +
               " 屏蔽</span>";
           if (quotaSubCount > 0)
             keyPoolInfo +=
-              " <span style='background:#fef3c7;color:#d97706;padding:1px 6px;border-radius:4px;font-size:11px;'>" +
+              " <span style='background:var(--warn-soft);color:var(--warn);padding:1px 6px;border-radius:4px;font-size:11px;'>" +
               quotaSubCount +
               " 超限(自动)</span>";
           if (quotaAPICount > 0)
             keyPoolInfo +=
-              " <span style='background:#fef3c7;color:#b45309;padding:1px 6px;border-radius:4px;font-size:11px;'>" +
+              " <span style='background:var(--warn-soft);color:var(--warn);padding:1px 6px;border-radius:4px;font-size:11px;'>" +
               quotaAPICount +
               " 超限(人工)</span>";
           if (quotaCount > 0)
             keyPoolInfo +=
-              " <span style='background:#fef3c7;color:#d97706;padding:1px 6px;border-radius:4px;font-size:11px;'>" +
+              " <span style='background:var(--warn-soft);color:var(--warn);padding:1px 6px;border-radius:4px;font-size:11px;'>" +
               quotaCount +
               " 超限</span>";
           if (glmQuotaCount > 0)
             keyPoolInfo +=
-              " <span style='background:#fef3c7;color:#d97706;padding:1px 6px;border-radius:4px;font-size:11px;'>" +
+              " <span style='background:var(--warn-soft);color:var(--warn);padding:1px 6px;border-radius:4px;font-size:11px;'>" +
               glmQuotaCount +
               " GLM额度限流</span>";
           if (glmRateCount > 0)
             keyPoolInfo +=
-              " <span style='background:#ffedd5;color:#c2410c;padding:1px 6px;border-radius:4px;font-size:11px;'>" +
+              " <span style='background:var(--out-soft);color:var(--out);padding:1px 6px;border-radius:4px;font-size:11px;'>" +
               glmRateCount +
               " GLM速率限流</span>";
           if (rateCount > 0)
             keyPoolInfo +=
-              " <span style='background:#ffedd5;color:#c2410c;padding:1px 6px;border-radius:4px;font-size:11px;'>" +
+              " <span style='background:var(--out-soft);color:var(--out);padding:1px 6px;border-radius:4px;font-size:11px;'>" +
               rateCount +
               " 限流</span>";
           if (otherExhaustedCount > 0)
             keyPoolInfo +=
-              " <span style='background:#f3e8ff;color:#7c3aed;padding:1px 6px;border-radius:4px;font-size:11px;'>" +
+              " <span style='background:var(--accent-soft);color:var(--accent);padding:1px 6px;border-radius:4px;font-size:11px;'>" +
               otherExhaustedCount +
               " 失效</span>";
           // 唤醒按钮：当存在任何被屏蔽/超额/失效的 key 时显示（探测成功才会恢复）
@@ -479,7 +479,7 @@ AdminApp.register("targets", function (app) {
             keyPoolInfo +=
               " <button class='btn btn-sm readonly-hide' data-wakeup-target='" +
               esc(t.name) +
-              "' title='唤醒探测被屏蔽/失效的Key' style='padding:1px 6px;font-size:11px;background:#10b981;color:white;border:none;border-radius:4px;cursor:pointer;'>🔄 唤醒</button>";
+              "' title='唤醒探测被屏蔽/失效的Key' style='padding:1px 6px;font-size:11px;background:var(--ok);color:var(--accent-ink);border:none;border-radius:4px;cursor:pointer;'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M20 7v5h-5M4 17v-5h5'></path><path d='M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1'></path></svg> 唤醒</button>";
           }
         }
         keyStatus += keyPoolInfo;
@@ -490,12 +490,12 @@ AdminApp.register("targets", function (app) {
           : null;
         if (rt) {
           var phaseStyles = {
-            ready: { bg: "#dcfce7", fg: "#16a34a" },
-            muted: { bg: "#fef3c7", fg: "#d97706" },
-            "half-open": { bg: "#ffedd5", fg: "#c2410c" },
-            offline: { bg: "#e2e8f0", fg: "#64748b" },
+            ready: { bg: "var(--ok-soft)", fg: "var(--ok)" },
+            muted: { bg: "var(--warn-soft)", fg: "var(--warn)" },
+            "half-open": { bg: "var(--out-soft)", fg: "var(--out)" },
+            offline: { bg: "var(--muted-soft)", fg: "var(--ink-3)" },
           };
-          var ph = phaseStyles[rt.phase] || { bg: "#f1f5f9", fg: "#64748b" };
+          var ph = phaseStyles[rt.phase] || { bg: "var(--muted-soft)", fg: "var(--ink-3)" };
           ph.label = schemaLabel("target_phases", rt.phase);
           phaseCell =
             "<span style='background:" +
@@ -511,11 +511,11 @@ AdminApp.register("targets", function (app) {
               "<span style='font-size:12px;' title='过去15分钟在途峰值'>在途 " +
               recent.in_flight_peak +
               "</span>" +
-              " <span style='font-size:12px;color:#2563eb;' title='过去15分钟粘连回粘命中次数'>亲和 " +
+              " <span style='font-size:12px;color:var(--accent);' title='过去15分钟粘连回粘命中次数'>亲和 " +
               recent.affinity_hits +
               "</span>" +
               " <span style='font-size:12px;color:" +
-              (recent.breaker_trips > 0 ? "#dc2626" : "#94a3b8") +
+              (recent.breaker_trips > 0 ? "var(--bad)" : "var(--ink-3)") +
               ";' title='过去15分钟进入或延长冷却的次数'>熔断 " +
               recent.breaker_trips +
               "</span>";
@@ -918,7 +918,7 @@ AdminApp.register("targets", function (app) {
           var errMsg = res && res.error ? res.error : "未知错误";
           var status =
             res && res.statusCode ? " (HTTP " + res.statusCode + ")" : "";
-          toast("✗ 测试失败: " + errMsg + status, "error");
+          toast("测试失败: " + errMsg + status, "error");
         }
       })
       .catch(function (e) {
@@ -1013,7 +1013,7 @@ AdminApp.register("targets", function (app) {
       '<input class="form-control" placeholder="Field Name" style="flex:1;font-size:13px;" value="' +
       (name || "").replace(/"/g, "&quot;") +
       '">' +
-      '<input class="form-control" placeholder="Value (JSON)" style="flex:2;font-size:13px;font-family:monospace;" value="' +
+      '<input class="form-control" placeholder="Value (JSON)" style="flex:2;font-size:13px;font-family:ui-monospace, SF Mono, Menlo, Consolas, monospace;" value="' +
       (value || "").replace(/"/g, "&quot;") +
       '">' +
       '<button type="button" class="btn btn-sm btn-danger" style="padding:2px 8px;">&times;</button>';

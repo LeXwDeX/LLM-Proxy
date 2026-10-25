@@ -1,23 +1,31 @@
 ---
 name: LLMs Proxy 管理台
-description: 深蓝导航与浅色工作区构成的中文运维界面，以清晰读数和紧凑表格支持日常管理。
+description: 深色侧栏与主题化工作区构成的中文运维界面，用一套离线可用的亮/暗 token 承载清晰的读数、表格与配置表单。
 colors:
-  primary: "#3b82f6"
-  primary-hover: "#2563eb"
-  activity-input: "#2563eb"
-  activity-output: "#087f74"
-  activity-concurrency: "#355d9d"
-  sidebar: "#1e293b"
-  text: "#1e293b"
-  secondary-text: "#64748b"
-  activity-secondary: "#526174"
-  muted-text: "#94a3b8"
-  workspace: "#f1f5f9"
-  surface: "#ffffff"
-  border: "#e2e8f0"
-  danger: "#ef4444"
-  success: "#22c55e"
-  warning: "#f59e0b"
+  bg: "#F4F5F7"
+  surface: "#FFFFFF"
+  surface-2: "#F8F9FB"
+  line: "#E3E6EB"
+  line-2: "#EEF0F3"
+  ink: "#14171C"
+  ink-2: "#444C59"
+  ink-3: "#5C6573"
+  accent: "#2B59D9"
+  accent-ink: "#FFFFFF"
+  accent-soft: "#E9EEFC"
+  out: "#A65314"
+  out-soft: "#FBEEE2"
+  ok: "#1C7A4A"
+  ok-soft: "#E2F2E9"
+  warn: "#8A5700"
+  warn-soft: "#FAF0DA"
+  bad: "#B42318"
+  bad-soft: "#FCE8E6"
+  muted-soft: "#EEF0F3"
+  side: "#11141A"
+  side-2: "#1D222B"
+  side-ink: "#D3D8DF"
+  side-ink-2: "#8E97A4"
 typography:
   body:
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif'
@@ -34,12 +42,16 @@ typography:
     fontSize: "12px"
     fontWeight: 500
     lineHeight: 1.5
+  mono:
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace'
+    fontSize: "12px"
+    fontWeight: 400
+    lineHeight: 1.5
 rounded:
-  xs: "3px"
-  sm: "4px"
-  md: "6px"
-  lg: "8px"
-  xl: "12px"
+  card: "10px"
+  control: "8px"
+  badge: "6px"
+  nav: "7px"
   pill: "20px"
 spacing:
   xs: "4px"
@@ -51,31 +63,36 @@ spacing:
 components:
   button-secondary:
     backgroundColor: "{colors.surface}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.md}"
+    textColor: "{colors.ink}"
+    rounded: "{rounded.control}"
     padding: "7px 14px"
   button-primary:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.surface}"
-    rounded: "{rounded.md}"
+    backgroundColor: "{colors.accent}"
+    textColor: "{colors.accent-ink}"
+    rounded: "{rounded.control}"
     padding: "7px 14px"
   input:
     backgroundColor: "{colors.surface}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.md}"
+    textColor: "{colors.ink}"
+    rounded: "{rounded.control}"
     height: "34px"
   panel:
     backgroundColor: "{colors.surface}"
-    rounded: "{rounded.lg}"
+    rounded: "{rounded.card}"
     padding: "16px 20px"
   stat-card:
     backgroundColor: "{colors.surface}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.lg}"
+    textColor: "{colors.ink}"
+    rounded: "{rounded.card}"
     padding: "16px 20px"
+  badge:
+    backgroundColor: "{colors.muted-soft}"
+    textColor: "{colors.ink-3}"
+    rounded: "{rounded.badge}"
+    padding: "2px 8px"
   client-table:
     backgroundColor: "{colors.surface}"
-    textColor: "{colors.text}"
+    textColor: "{colors.ink}"
     padding: "10px 16px"
 ---
 
@@ -83,120 +100,226 @@ components:
 
 ## Overview
 
-**Creative North Star: "深蓝侧栏里的清晰工作面"**
+**Creative North Star: "深色侧栏里的双主题工作面"**
 
-这是一个面向中文运维工作的管理界面：稳定的深蓝导航为浅色内容区提供清楚边界，蓝色动作色标出可操作位置，内容以易扫读的数字、表格和分区面板为主。整体使用系统无衬线字体，信息密度偏高但层次直接，适合长时间查看和维护配置。
+这是一个面向中文运维工作的管理界面。固定的深色侧栏为工作区提供清楚边界，工作区本身可以在亮色与暗色之间切换。两套主题共用同一组语义 token：背景、表面、线条、文字、强调色和状态色，不按页面重复定义颜色。
 
-首页把全站活动、双趋势图和客户端明细放在同一条工作流中。图表中的输入、输出和并发各有颜色标记；两张图分别可获得键盘焦点，并同步同一时间桶游标；表格仍是识别并切换客户端的主要入口。全站统计保持可见，历史完成统计和费用作为次级信息折叠展示。
+页面以数字、表格和分区面板组织高密度信息。系统字体提供自然的跨平台中文呈现；数字、ID 和技术值使用系统等宽字体并开启表格数字，便于比较和对齐。所有图标为内联线性 SVG，不依赖外部字体、图标库或 CDN。
 
 **Key Characteristics:**
-- 深蓝侧栏与浅灰工作区形成稳定的框架。
-- 明亮蓝色标识主要操作和选中状态。
-- 以数字、趋势和可排序表格组织高密度运营信息。
-- 系统中文字体保持各平台自然呈现。
+- 深色侧栏固定，工作区亮/暗主题同源。
+- 蓝色强调动作与选中状态，状态色只用 soft 背景加深色前景。
+- 高密度表格与清楚的数字对齐。
+- 全部资源内联，断网或内网部署可加载。
 
 ## Colors
 
-蓝色承担导航选中、主要操作和输入趋势；青绿区分输出，深蓝区分并发，灰阶承载背景、文字和边界。sidecar 中的八阶色带仅供色板预览，不定义新的语义色值。
+以下两套值来自已确认原型的 `.app` 与 `.app.dark`，实现中逐字保留。所有 token 定义在 `html.app`；暗色由 `html.app.dark` 覆盖。组件只能使用这些语义 token 或由它们派生的兼容别名。
 
-### Primary
-- **工作蓝** (`{colors.primary}`)：主要按钮、选中导航和关键交互状态。
-- **按压蓝** (`{colors.primary-hover}`)：按钮悬停、聚焦与当前可操作文字的加深状态。
-- **输入蓝** (`{colors.activity-input}`)：首页 Token 输入曲线与图例。
-- **输出青绿** (`{colors.activity-output}`)：首页 Token 输出曲线与图例，和输入线保持可辨识差异。
-- **并发靛蓝** (`{colors.activity-concurrency}`)：首页并发峰值曲线。
+### Light tokens
 
-### Neutral
-- **深石板** (`{colors.sidebar}`)：侧栏背景；同一深色也用于主要文本。
-- **次级石板** (`{colors.secondary-text}`)：说明、单位、图表轴和辅助读数。
-- **雾灰文字** (`{colors.muted-text}`)：沿用在深色侧栏文字和旧通用统计卡标签上；后者在浅底上的对比不足，不作为新浅底正文或小号说明用色。
-- **首页辅助石板** (`{colors.activity-secondary}`)：首页时间、图表轴、单位和状态说明。
-- **工作区浅灰** (`{colors.workspace}`)：应用内容区底色。
-- **纯白表面** (`{colors.surface}`)：顶栏、卡片、面板、按钮和表单背景。
-- **细线灰** (`{colors.border}`)：表格分隔、面板描边和表单边框。
-- **错误红** (`{colors.danger}`)：错误和危险操作。
-- **成功绿** (`{colors.success}`)：成功状态和正向额度状态。
-- **提醒橙** (`{colors.warning}`)：警告状态和提醒信息。
+| Token | Value | 用途 |
+|---|---|---|
+| `--bg` | `#F4F5F7` | 工作区底色 |
+| `--surface` | `#FFFFFF` | 卡片、面板、输入、按钮表面 |
+| `--surface-2` | `#F8F9FB` | 表头、悬停、次级表面 |
+| `--line` | `#E3E6EB` | 面板、输入、表格边界 |
+| `--line-2` | `#EEF0F3` | 表格内分隔线 |
+| `--ink` | `#14171C` | 主文字 |
+| `--ink-2` | `#444C59` | 次级文字 |
+| `--ink-3` | `#5C6573` | 说明、单位、弱化文字 |
+| `--accent` | `#2B59D9` | 主操作、选中、输入趋势 |
+| `--accent-ink` | `#FFFFFF` | 强调色表面上的文字 |
+| `--accent-soft` | `#E9EEFC` | 蓝色浅底、选中行、信息徽章 |
+| `--out` | `#A65314` | 输出趋势、输出型徽章前景 |
+| `--out-soft` | `#FBEEE2` | 输出型徽章背景 |
+| `--ok` | `#1C7A4A` | 成功、正常、额度充足 |
+| `--ok-soft` | `#E2F2E9` | 成功徽章背景 |
+| `--warn` | `#8A5700` | 警告、接近限额 |
+| `--warn-soft` | `#FAF0DA` | 警告徽章背景 |
+| `--bad` | `#B42318` | 错误、危险操作、超额 |
+| `--bad-soft` | `#FCE8E6` | 错误徽章背景 |
+| `--muted-soft` | `#EEF0F3` | 禁用、中性徽章、未配置 |
+| `--side` | `#11141A` | 侧栏背景 |
+| `--side-2` | `#1D222B` | 侧栏悬停、选中、分隔 |
+| `--side-ink` | `#D3D8DF` | 侧栏正文 |
+| `--side-ink-2` | `#8E97A4` | 侧栏分组标题、版本、辅助文字 |
+
+### Dark tokens
+
+| Token | Value |
+|---|---|
+| `--bg` | `#0D0F12` |
+| `--surface` | `#15181D` |
+| `--surface-2` | `#1A1E24` |
+| `--line` | `#272C34` |
+| `--line-2` | `#20252C` |
+| `--ink` | `#E7EAEE` |
+| `--ink-2` | `#B9C0CA` |
+| `--ink-3` | `#959EAB` |
+| `--accent` | `#7D9CFF` |
+| `--accent-ink` | `#0D0F12` |
+| `--accent-soft` | `#1C2645` |
+| `--out` | `#F0A15C` |
+| `--out-soft` | `#3A2715` |
+| `--ok` | `#5CC48C` |
+| `--ok-soft` | `#14301F` |
+| `--warn` | `#E6B450` |
+| `--warn-soft` | `#33270F` |
+| `--bad` | `#F2796D` |
+| `--bad-soft` | `#3A1916` |
+| `--muted-soft` | `#22272E` |
+| `--side` | `#090B0E` |
+| `--side-2` | `#181C23` |
+
+`--side-ink` 与 `--side-ink-2` 在暗色下继承亮色值，因为侧栏本身在两种主题中都保持深色。
 
 ### Named Rules
-**The One Accent Rule.** 蓝色是主要交互强调色；输入、输出和并发趋势使用各自的图例颜色，不以颜色作为唯一的数据区分方式，输出线同时使用虚线。
+
+**The Token Pair Rule.** 状态徽章始终由 `*-soft` 背景与对应前景 token 组成：成功用 `--ok-soft`/`--ok`，警告用 `--warn-soft`/`--warn`，错误用 `--bad-soft`/`--bad`，输出型用 `--out-soft`/`--out`，中性用 `--muted-soft`/`--ink-3`。不要在组件或动态 HTML 中写十六进制状态色。
+
+**The One Accent Rule.** `--accent` 是唯一主交互强调色。输出、成功、警告、错误只表达数据或状态语义，不替代主操作色。图表同时用颜色和线型区分数据，颜色不是唯一线索。
 
 ## Typography
 
-**Display Font:** 无独立展示字体；标题沿用系统无衬线字体栈。
-**Body Font:** 系统无衬线字体栈（含 PingFang SC、Microsoft YaHei 回退）。
-**Label/Mono Font:** 数字使用等宽数字特性；密钥、代码和技术值使用 SF Mono、Consolas 或系统等宽回退。
+**Body Font:** 系统无衬线字体栈：`-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif`。
 
-**Character:** 字形克制、紧凑，中文优先适配操作系统自带字体。数字采用表格数字对齐，便于比较读数。
+**Mono Font:** 系统等宽字体栈：`ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace`，并启用 `font-variant-numeric: tabular-nums`。
+
+**Character:** 中文使用操作系统自带字形；数字、ID、Key 掩码、时间戳、价格和技术值使用等宽字体。页面不请求网络字体。
 
 ### Hierarchy
-- **Title** (600，16px，1.5)：顶栏标题、面板标题及对话框标题。
-- **Body** (400，14px，1.5)：后台默认正文和主要表单文字。
-- **Body Small** (400，13px，1.5)：表格内容与按钮文字。
+
+- **Title** (700，18px，1.2)：顶栏页面标题。
+- **Panel Title** (600，15px，1.5)：面板标题。
+- **Body** (400，14px，1.5)：默认正文和表单文字。
+- **Body Small** (400，13px，1.5)：表格内容、按钮文字、说明。
 - **Label** (500，12px，1.5)：表头、字段标签、状态和辅助说明。
-- **Metric** (650，30px，1.2)：首页实时汇总数字；移动端缩至26px。
-- **Micro Label** (400，10–11px)：图表轴、徽标和低优先级元数据。
+- **Metric** (650，30px，1.2)：首页实时汇总数字；移动端缩至 26px。
+- **Micro Label** (400–500，10–11px)：图表轴、DEBUG 标记和低优先级元数据。
 
 ### Named Rules
-**The Readable Numbers Rule.** 计数和时间读数使用表格数字，避免刷新或对齐变化妨碍比较。
+
+**The Readable Numbers Rule.** 数字表格、统计值、ID 和技术值使用等宽字体和 `tabular-nums`。不要在普通正文里混用等宽字体。
 
 ## Layout
 
-后台采用固定宽度侧栏与弹性主工作区的横向框架。桌面侧栏宽240px，顶栏高56px，内容区通常使用24px内边距；窄屏内容区收至16px，侧栏转为可展开的覆盖层。页面内部用网格、弹性行和面板组织表单与数据表，表格在空间不足时横向滚动。
+后台采用固定侧栏与弹性工作区的横向框架。桌面侧栏宽 240px，顶栏高 56px，内容区通常使用 24px 内边距。侧栏内边距为 12px，导航项高 36px，分组之间保留 18px 间距。
 
-首页依次放置标题与刷新状态、四列汇总带、并排双图、客户端搜索与可排序表格，历史统计折叠在底部。窄屏汇总变为两列，图表改为单列，客户端表格保留姓名列并可横向滚动。常见间距落在4、8、12、16、20与24px节奏中。
+在 768px 以下，侧栏变为从左滑入的覆盖层，内容区内边距缩至 16px。600px 以下顶栏收紧：用户徽章只保留头像，修改密码按钮只保留图标；图标按钮保留 `aria-label`。表格始终放在横向滚动容器内，首列按现有页面规则固定，不因主题改造压缩列宽。
+
+首页保持现有布局：标题与更新时间、四列汇总带、并排双图、客户端搜索与表格、历史统计折叠区。窄屏汇总变两列、图表单列，表格横向滚动。
 
 ## Elevation & Depth
 
-界面采用轻量阴影配合边框和背景色差分层。普通卡片仅有细微底部投影，悬停时稍加强；菜单、提示和模态框以更明显的阴影表达浮层关系。阴影用于层级和交互反馈，不替代边框或状态颜色。
+界面用表面色差和细边框分层，阴影只表达轻微浮起或浮层关系。亮色主题使用低透明黑投影；暗色主题使用更深、更弱的投影，避免灰色光晕。
 
-### Shadow Vocabulary
-- **轻表面** (`0 1px 3px rgba(0,0,0,0.08)`)：常规统计卡片、面板和顶栏。
-- **悬停面板** (`0 4px 12px rgba(0,0,0,0.1)`)：统计卡片与短提示的浮起状态。
-- **模态层** (`0 20px 60px rgba(0,0,0,0.2)`)：聚焦的编辑对话框。
+- **轻表面**：卡片、面板、顶栏的边缘层次。
+- **悬停面板**：统计卡片和短提示的浮起状态。
+- **模态层**：编辑对话框和抽屉的独立层级。
 
-### Named Rules
-**The Border Before Shadow Rule.** 静态内容先靠表面和细边框分组；更明显的阴影留给悬停或浮层。
+**The Border Before Shadow Rule.** 静态内容先靠 `--surface` 与 `--line` 分组；更明显的阴影只留给悬停或浮层。侧栏与内容区之间不使用大面积阴影。
 
 ## Shapes
 
-基础控件使用轻微圆角，数据面板和卡片通常为8px；首页图表与客户端容器为12px。筛选标签采用胶囊形，徽标和表格标记用更紧凑的直角圆角。输入框以细边框界定，聚焦时切换蓝色边框并出现柔和外环。
+- **卡片与面板**：10px 圆角，1px `--line` 边框。
+- **按钮与输入**：8px 圆角；输入高度 34px。
+- **徽章与标签**：6px 圆角；状态徽章内边距 2px 8px。
+- **导航项**：7px 圆角，36px 高。
+- **胶囊控件**：时间范围按钮、用户徽章和计数徽章使用 20px 或 999px 胶囊圆角。
+- **模态框**：12px 圆角；抽屉保持右侧贴边。
+
+**The Compact Chip Rule.** 徽章不做胶囊形；胶囊只用于可切换的时间范围、用户身份和计数摘要。
 
 ## Components
 
 ### Buttons
-按钮紧凑、直截了当，文字沿用页面系统字体。次级按钮为白底细边框；主要按钮使用工作蓝，悬停加深；危险按钮使用红色。常用按钮内边距为7px 14px，圆角6px；小按钮缩小内边距和字号。可聚焦控件应保留清楚的键盘焦点。
 
-### Chips
-状态徽标使用浅色背景和深色文字；紧凑标签以3–4px圆角呈现。首页趋势图例以短实线区分并发与输入，以虚线区分输出。
+按钮使用页面系统字体，内边距 7px 14px，8px 圆角。次级按钮为 `--surface` 背景、`--line` 边框和 `--ink` 文字，悬停改为 `--surface-2`。主要按钮为 `--accent` 背景和 `--accent-ink` 文字。危险按钮使用 `--bad` 背景和 `--accent-ink` 文字。按钮内 SVG 统一 16px，不拉伸文字。
 
-### Cards / Containers
-统计卡和通用面板使用白色表面、浅灰描边、8px圆角与轻微阴影，内边距通常为16px 20px。旧通用统计卡标签沿用雾灰变量；首页辅助文字使用更深的首页辅助石板。首页图表容器使用12px圆角，客户端表格容器裁切内部边界并在表头下方使用分隔线。
+仅图标按钮必须带 `aria-label`，并保留至少 34px 的可点击尺寸。按钮的键盘焦点使用清晰的外环，不依赖悬停。
 
-### Inputs / Fields
-表单控件为白底、浅灰边框、6px圆角，标准高度34px、水平内边距12px。聚焦时边框变为工作蓝并显示淡蓝外环；禁用或只读状态转为灰底并降低交互提示。
+### Badges and Chips
+
+状态徽章统一使用 6px 圆角和 `*-soft`/前景 token 组合。`DEBUG`、只读、额度、模型类别和客户端授权标签都遵循此规则。动态生成的徽章通过 CSS 类或 `var(--...)` 内联样式取色，不写死颜色值。
+
+首页趋势图例用短实线区分并发与输入，用虚线区分输出；图例文字始终与颜色同时出现。
+
+### Cards and Containers
+
+统计卡和面板使用 `--surface`、`--line`、10px 圆角和轻阴影，内边距通常为 16px 20px。面板标题使用 15px/600，标题区与内容区用 `--line` 分隔。首页图表和客户端容器保留 12px 圆角。
+
+代码块、Trace 详情和提示浮层使用 `--side` 深色背景及 `--side-ink` 文字，在两种主题下保持稳定的代码阅读表面。
+
+### Inputs and Fields
+
+输入、下拉和多行文本使用 `--surface` 背景、`--line` 边框、8px 圆角和 34px 标准高度。聚焦时边框切换为 `--accent` 并显示柔和外环。禁用和只读控件使用 `--muted-soft` 背景与 `--ink-3` 文字，保持明确但降低交互提示。
 
 ### Navigation
-侧栏固定在桌面左侧，深蓝底色，文字和图标纵向居中排列。悬停使用较浅的深蓝底，当前项以蓝色左边线和低透明蓝底标识。移动端侧栏从左侧滑入并配合遮罩层。
+
+侧栏使用 `--side` 背景和 `--side-ink` 正文。导航分为五组，顺序固定：
+
+1. **首页**：总览。
+2. **上游与接入**：目标与部署池、客户端。
+3. **计费与额度**：模型计费、额度管理、模型目录。
+4. **观测**：消费统计、审计日志、请求记录。
+5. **系统**：后台用户。
+
+分组标题使用 11px、字距 0.06em 和 `--side-ink-2`。导航项高 36px、7px 圆角；悬停和当前项使用 `--side-2` 背景与白色文字，当前项的图标使用浅蓝强调色。当前项设置 `aria-current="page"`；导航项可用 Tab 聚焦，并可用 Enter 或空格激活。后台用户和请求记录入口默认隐藏，分别由角色和 Trace 能力开关控制。
+
+移动端顶栏的菜单按钮切换侧栏覆盖层，并同步更新 `aria-expanded`。
 
 ### Client Activity Table
-首页客户端表格是主要的对象选择控件。列标题可排序，行悬停有浅灰底色，选中行使用浅蓝底色；客户端名称可以聚焦并激活。窄屏表格横向滚动，首列固定以便持续辨认客户端。
+
+首页客户端表格仍是主要的对象选择控件。列标题可排序，行悬停使用 `--surface-2`，选中行使用 `--accent-soft`；客户端名称可聚焦并激活。窄屏时表格横向滚动并固定首列。其他业务表沿用现有滚动容器，不因主题改造改变列顺序或操作方式。
 
 ### Activity Charts
-双图共享时间范围和同一时间桶游标；每张图分别可获得键盘焦点，悬停或在当前聚焦图上使用方向键时，两张图同步显示对应时间桶。并发曲线使用靛蓝，输入使用蓝色，输出使用青绿虚线；读数始终包含时间段和单位。
+
+双图共享时间范围和同一时间桶游标。每张图可独立获得键盘焦点，悬停或在聚焦图上使用方向键时，两图同步显示对应时间桶。并发使用 `--activity-concurrency`（亮色 `#355d9d`，暗色 `#8FA9FF`），输入使用 `--accent`，输出使用 `--out` 并带虚线。读数包含时间段和单位。
+
+### Theme Toggle
+
+顶栏的主题按钮是纯图标按钮，带 `aria-label`、`aria-pressed` 和动态标题。亮色主题显示月亮图标，暗色主题显示太阳图标。初始主题读取 `localStorage` 的 `llms-proxy-admin-theme`，缺省为亮色；切换后写回同一键。主题在 `core.js` 中应用，不改变模块注册、Schema 就绪或启动顺序。
+
+**The Predictable Theme Rule.** 主题只由用户选择和已保存的偏好决定，不跟随系统自动切换。存储不可用时回退到亮色且不阻断启动。
+
+## Dark Mode
+
+暗色主题只覆盖 `.app.dark` 中的语义 token。组件不得写死亮色值，否则暗色下会出现亮块。覆盖范围包括：
+
+- 工作区、表面、表头、悬停、选中行和输入。
+- 文字、次级文字、说明文字和边框。
+- 主按钮、危险按钮、Toast、徽章、进度条和滚动条。
+- 图表曲线、轴、网格线与提示层。
+- 侧栏、顶栏和弹层。
+
+`color-scheme` 随主题在 `light` 与 `dark` 之间切换，以匹配原生表单控件和滚动条。品牌标记的蓝色、侧栏当前项的白字和遮罩层保持固定，不随主题取反。
+
+## Accessibility
+
+- **图标**：所有 emoji 图标已替换为内联线性 SVG；装饰性 SVG 设置 `aria-hidden="true"`。
+- **名称**：仅图标按钮必须带 `aria-label`；可见文本与可访问名称保持一致。
+- **状态**：主题按钮暴露 `aria-pressed`；导航项暴露 `aria-current`；移动菜单按钮暴露 `aria-expanded`。
+- **键盘**：导航项可聚焦并用 Enter/空格激活；弹层继续由 `openModal`/`closeModal` 控制，关闭按钮有可访问名称；焦点环使用 `--accent` 或侧栏浅蓝色，宽度至少 2px。
+- **颜色**：状态同时用文字说明，不以颜色为唯一识别方式。
+- **数据表**：表头保留语义和排序状态；表格在窄屏可横向滚动，不隐藏关键列。
+- **动效**：保留现有短过渡；不新增连续动画或滚动计数。
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** 使用深蓝侧栏、浅色内容区和蓝色主要操作色维持页面框架。
-- **Do** 在浅色背景上使用首页辅助石板呈现小号说明，避免沿用对比不足的旧雾灰标签色。
-- **Do** 通过文字、单位和图例说明数据含义，不只依赖颜色。
-- **Do** 为数据表保留清楚的列对齐、分隔线和可见排序状态。
-- **Do** 在窄屏缩小间距并保留表格横向浏览能力。
+- **Do** 所有页面共用 `.app` 与 `.app.dark` 的语义 token。
+- **Do** 在动态 HTML 中使用 `var(--...)` 或语义 class 表达状态色。
+- **Do** 使用系统字体栈和 `tabular-nums` 呈现数字、ID 与价格。
+- **Do** 为图标按钮提供 `aria-label`，为装饰图标提供 `aria-hidden`。
+- **Do** 保持弹层挂在 body、只允许 `.modal-overlay` 与 `.quota-drawer-overlay`，开关只经 `openModal`/`closeModal`。
+- **Do** 保留现有 `AdminApp.register`、bootstrap 顺序、Schema ready 和 ReadonlyGuard。
 - **Do** 让键盘聚焦状态与悬停状态同样清楚。
 
 ### Don't:
-- **Don't** 用大面积饱和色替代浅色工作区。
-- **Don't** 让颜色成为输入、输出或并发数据的唯一识别方式。
-- **Don't** 用持续动画或滚动计数干扰实时读数。
-- **Don't** 把全站样式规则误当成要求其他页面采用首页图表布局。
+- **Don't** 加载 Google Fonts、CDN、外部图标库或任何远程资源。
+- **Don't** 在组件或动态字符串中写死亮色十六进制值。
+- **Don't** 使用 emoji 作为界面图标。
+- **Don't** 把示意图或固定业务数字写进页面代码。
+- **Don't** 为暗色模式复制第二套组件样式；只覆盖 token。
+- **Don't** 用颜色作为输入、输出、并发或状态数据的唯一区分方式。

@@ -103,6 +103,48 @@ AdminApp.register("core", function (app) {
     return d.toISOString();
   }
 
+  /* ===== Theme ===== */
+  var THEME_STORAGE_KEY = "llms-proxy-admin-theme";
+  function savedTheme() {
+    try {
+      return localStorage.getItem(THEME_STORAGE_KEY) === "dark"
+        ? "dark"
+        : "light";
+    } catch (e) {
+      return "light";
+    }
+  }
+  function applyTheme(theme) {
+    var dark = theme === "dark";
+    var root = document.documentElement;
+    if (root && root.classList) {
+      root.classList.toggle("dark", dark);
+      root.setAttribute("data-theme", dark ? "dark" : "light");
+    }
+    var toggle = document.getElementById("themeToggle");
+    if (toggle) {
+      var label = dark ? "切换到亮色模式" : "切换到暗色模式";
+      toggle.setAttribute("aria-pressed", dark ? "true" : "false");
+      toggle.setAttribute("aria-label", label);
+      toggle.setAttribute("title", label);
+    }
+  }
+  applyTheme(savedTheme());
+  var themeToggle = document.getElementById("themeToggle");
+  if (themeToggle) {
+    themeToggle.addEventListener("click", function () {
+      var root = document.documentElement;
+      if (!root || !root.classList) return;
+      var next = root.classList.contains("dark") ? "light" : "dark";
+      applyTheme(next);
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, next);
+      } catch (e) {
+        /* storage can be unavailable in private or embedded contexts */
+      }
+    });
+  }
+
   /* ===== Toast ===== */
   var toastContainer = document.getElementById("toastContainer");
   function toast(msg, type) {
