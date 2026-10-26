@@ -597,7 +597,7 @@ const list = [
     },
   },
   {
-    name: "overview-attention-and-recent-changes",
+    name: "overview-recent-changes",
     async run({ page }) {
       await goto(page, "overview");
       await page.waitFor(`!document.getElementById("refreshOverviewBtn").disabled`, { what: "overview refresh enabled", timeoutMs: 10000 });
@@ -606,12 +606,8 @@ const list = [
         { what: "recent audit rows", timeoutMs: 15000 });
       assert.equal(await page.eval(`document.querySelectorAll("#recentChangesBody tr:first-child td").length`), 5,
         "recent changes render only timestamp/actor/action/object/result");
-      await page.waitFor(`document.querySelectorAll("#overviewAttentionList li[data-attention-kind]").length > 0`,
-        { what: "attention items", timeoutMs: 10000 });
-      const attention = await page.eval(`document.getElementById("overviewAttentionList").textContent`);
-      assert.ok(attention.includes(S.tgtGLM), `attention list: ${attention}`);
-      const status = await page.eval(`document.getElementById("overviewAttentionStatus").textContent`);
-      assert.ok(status.length > 0, "attention status is present");
+      assert.equal(await page.eval(`!!document.getElementById("overviewAttention")`), false,
+        "the overview no longer renders a 需要关注 panel");
     },
   },
   {

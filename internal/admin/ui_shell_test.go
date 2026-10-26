@@ -262,6 +262,26 @@ func TestUISidebarGroupsAndInlineIcons(t *testing.T) {
 	}
 }
 
+// TestUISidebarFooterVersionAligned 锁定侧栏底部版本号的排版：底部留白，不贴窗口下沿；
+// 版本文字与退出按钮的文字左对齐（按钮内边距 10px + 图标 18px + 间距 10px = 38px）。
+func TestUISidebarFooterVersionAligned(t *testing.T) {
+	footer := uiCSSBlock(t, ".sidebar-footer")
+	if !strings.Contains(footer, "padding: 12px 12px 16px;") {
+		t.Errorf(".sidebar-footer 底部须留白，避免版本号贴住窗口下沿：%s", footer)
+	}
+	version := uiCSSBlock(t, ".sidebar-version")
+	if !strings.Contains(version, "padding: 0 10px 0 38px;") {
+		t.Errorf(".sidebar-version 须与退出按钮文字左对齐（左内边距 38px）：%s", version)
+	}
+	button := uiCSSBlock(t, ".sidebar-footer .logout-btn")
+	if !strings.Contains(button, "padding: 0 10px;") || !strings.Contains(button, "gap: 10px;") {
+		t.Errorf("退出按钮内边距或图标间距变化后须同步 .sidebar-version 左内边距：%s", button)
+	}
+	if !strings.Contains(adminUIHTML, `<div class="sidebar-version mono">版本 __APP_VERSION__</div>`) {
+		t.Error("侧栏须保留 __APP_VERSION__ 占位符，由 handlers_ui.go 在响应时替换")
+	}
+}
+
 func TestUIShellHasNoExternalResources(t *testing.T) {
 	for _, banned := range []string{"fonts.googleapis", "fonts.gstatic", "@import", "<link"} {
 		if strings.Contains(adminUIHTML, banned) {

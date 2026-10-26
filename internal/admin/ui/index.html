@@ -154,14 +154,18 @@
 
     .sidebar-footer {
       margin-top: auto;
-      padding: 12px 12px 0;
+      padding: 12px 12px 16px;
       border-top: 1px solid var(--side-2);
     }
+    /* Left padding = logout button padding (10px) + icon (18px) + gap (10px),
+       so the version lines up under the 退出登录 label. */
     .sidebar-version {
-      margin-top: 8px;
-      padding: 0 10px;
+      margin-top: 4px;
+      padding: 0 10px 0 38px;
       color: var(--side-ink-2);
-      font-size: 12px;
+      font-size: 11px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
       user-select: text;
     }
     .sidebar-footer .logout-btn {
@@ -1476,15 +1480,16 @@
     #page-overview .overview-bar-cost { fill:var(--overview-cost); stroke:none; }
     #page-overview .overview-trend-focus { fill:var(--muted-soft); stroke:none; }
     /* Fixed desktop layout: table panels sit in two columns at every width.
-       DOM order is the visual order (no dense packing). Recent changes and the wide
-       client activity table each span the whole row. */
+       DOM order is the visual order (no dense packing). The two rankings share the
+       first row; target health, recent changes and the wide client activity table
+       each span the whole row. */
     #page-overview .overview-tables { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; align-items:start; }
-    #page-overview .overview-tables > #recentChanges, #page-overview .overview-tables > .activity-clients { grid-column:1 / -1; }
+    #page-overview .overview-tables > #targetHealth, #page-overview .overview-tables > #recentChanges, #page-overview .overview-tables > .activity-clients { grid-column:1 / -1; }
     #page-overview .overview-panel { min-width:0; padding:16px 18px; border:1px solid var(--line); border-radius:12px; background:var(--card); }
     #page-overview .overview-panel-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; }
     #page-overview .overview-panel-heading > div { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     #page-overview .overview-panel-heading h3 { display:flex; align-items:center; gap:8px; }
-    #page-overview #targetHealthCount, #page-overview #overviewAttentionCount { font-size:12px; font-weight:400; color:var(--activity-secondary); }
+    #page-overview #targetHealthCount { font-size:12px; font-weight:400; color:var(--activity-secondary); }
     #page-overview .overview-panel-heading .overview-status { max-width:60%; text-align:right; }
     #page-overview .overview-status { font-size:12px; line-height:1.6; color:var(--activity-secondary); }
     #page-overview .overview-panel-note { margin-top:10px; }
@@ -1505,10 +1510,6 @@
     #page-overview .overview-phase.phase-half-open { background:var(--out-soft); color:var(--out); }
     #page-overview .overview-phase.phase-offline { background:var(--muted-soft); color:var(--ink-3); }
     #page-overview .overview-phase.phase-unknown { background:var(--muted-soft); color:var(--ink-3); }
-    #page-overview .overview-list { list-style:none; margin:0; padding:0; }
-    #page-overview .overview-list li { padding:8px 0; border-bottom:1px solid var(--line); font-size:13px; }
-    #page-overview .overview-list li:last-child { border-bottom:0; }
-    #page-overview .overview-list .overview-empty { color:var(--activity-secondary); font-size:12px; }
     #page-overview .overview-panel.activity-clients { padding:0; overflow:hidden; }
     #page-overview .activity-table-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px 18px 12px; }
     #page-overview .activity-table-heading h3 { display:flex; align-items:center; gap:4px; }
@@ -1773,10 +1774,6 @@
                 <span class="overview-status" id="targetHealthStatus" role="status">正在加载目标健康…</span>
               </div>
               <div class="table-wrap overview-table-wrap"><table class="overview-table"><thead><tr><th scope="col">目标</th><th scope="col">状态</th><th scope="col">密钥</th><th scope="col">在途 / 容量</th><th scope="col">近 15 分钟</th></tr></thead><tbody id="targetHealthBody"><tr><td colspan="5">正在加载目标健康…</td></tr></tbody></table></div>
-            </section>
-            <section class="overview-panel" id="overviewAttention" aria-label="需要关注">
-              <div class="overview-panel-heading"><div><h3>需要关注</h3><span id="overviewAttentionCount">—</span></div><span class="overview-status" id="overviewAttentionStatus" role="status">正在加载需要关注的信息…</span></div>
-              <ul class="overview-list" id="overviewAttentionList"><li class="overview-empty">正在加载需要关注的信息…</li></ul>
             </section>
             <section class="overview-panel" id="recentChanges" aria-label="最近变更">
               <div class="overview-panel-heading"><div><h3>最近变更</h3></div><span class="overview-status" id="recentChangesStatus" role="status">正在加载最近变更…</span></div>
