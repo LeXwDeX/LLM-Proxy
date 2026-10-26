@@ -173,7 +173,7 @@ AdminApp.register("catalog", function (app) {
               "<td>" +
               epBadge(m.endpoint_type) +
               "</td>" +
-              "<td style='font-family:ui-monospace, SF Mono, Menlo, Consolas, monospace;font-size:12px;'>" +
+              "<td style='font-family:var(--font-mono);font-size:12px;'>" +
               esc(m.model) +
               "</td>" +
               "<td style='color:var(--text-secondary)'>" +

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -175,6 +176,21 @@ func TestLoginPageRedesign(t *testing.T) {
 	}
 	if got := loginCSSValue(t, loginDarkCSSBlock(t, body), "surface"); got != "#15181D" {
 		t.Errorf("dark --surface = %q, want #15181D", got)
+	}
+	// A 360px card felt cramped on desktop; keep it roomy but let phones shrink it.
+	card := loginCSSBlock(t, body, ".login-card")
+	width := regexp.MustCompile(`max-width:(\d+)px`).FindStringSubmatch(card)
+	if width == nil {
+		t.Fatalf(".login-card must declare a px max-width: %s", card)
+	}
+	if n, _ := strconv.Atoi(width[1]); n < 420 || n > 480 {
+		t.Errorf(".login-card max-width = %spx, want 420–480px", width[1])
+	}
+	if !strings.Contains(card, "width:100%") {
+		t.Error(".login-card must keep width:100% so narrow screens are not overflowed")
+	}
+	if !regexp.MustCompile(`@media \(max-width:480px\) \{ \.login-card \{ padding:24px 20px; \} \}`).MatchString(body) {
+		t.Error("narrow screens must reduce .login-card padding")
 	}
 }
 

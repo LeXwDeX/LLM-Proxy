@@ -568,13 +568,30 @@ const list = [
         requests: document.getElementById("ovRangeRequests").textContent,
         clients: [...document.querySelectorAll("#topClientsBody tr[data-top-client]")].map(tr => tr.dataset.topClient),
         models: [...document.querySelectorAll("#topModelsBody tr[data-top-model]")].map(tr => tr.dataset.topModel),
+        window: document.getElementById("ovRangeWindow").textContent,
+        bars: document.querySelectorAll("#ovBarTrend rect.overview-bar").length,
+        lines: document.querySelectorAll("#ovTokenTrend polyline.activity-line").length,
+        trendStatus: document.getElementById("ovTrendStatus").textContent,
       })`);
       assert.match(range.status, /含模型组系数/);
+      assert.match(range.window, /本地时区 UTC[+-]\d\d:\d\d/, `range window note: ${range.window}`);
+      assert.ok(range.bars > 0, "7d request bars are drawn from aggregate buckets");
+      assert.ok(range.lines >= 2, "7d token trend draws input and output");
+      assert.notEqual(range.trendStatus, "", "trend status is present");
+      assert.doesNotMatch(range.trendStatus, /不可用/);
       assert.notEqual(range.requests, "不可用");
       assert.notEqual(range.cost, "不可用");
       assert.ok(range.clients.includes(S.client), `top clients ${range.clients.join(",")}`);
       assert.ok(range.models.length > 0, "top models are derived from aggregate by_model");
       assert.ok(range.models.every(model => model && model !== "不可用"), `top models ${range.models.join(",")}`);
+      await page.eval(`__sim.click('[data-overview-range="yesterday"]')`);
+      await page.waitFor(`document.querySelector('[data-overview-range="yesterday"]').getAttribute("aria-pressed") === "true" && document.getElementById("ovRangeLabel").textContent === "昨日" && !/正在加载/.test(document.getElementById("ovRangeStatus").textContent)`,
+        { what: "yesterday range settles", timeoutMs: 15000 });
+      const yesterdayRequests = await page.eval(`__sim.text("#ovRangeRequests")`);
+      assert.match(yesterdayRequests, /^[0-9][0-9,]*$/, `yesterday requests: ${yesterdayRequests}`);
+      await page.eval(`__sim.click('[data-overview-range="today"]')`);
+      await page.waitFor(`document.querySelector('[data-overview-range="today"]').getAttribute("aria-pressed") === "true" && document.querySelectorAll("#topClientsBody tr[data-top-client]").length > 0`,
+        { what: "today range restored", timeoutMs: 15000 });
     },
   },
   {
@@ -598,7 +615,7 @@ const list = [
   {
     name: "overview-mobile-no-overflow",
     async run({ page }) {
-      await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 375, height: 812, deviceScaleFactor: 1, mobile: true });
       try {
         await goto(page, "overview");
         await page.waitFor(`!document.getElementById("refreshOverviewBtn").disabled`, { what: "overview refresh enabled", timeoutMs: 10000 });
@@ -607,6 +624,74 @@ const list = [
           { what: "mobile overview", timeoutMs: 15000 });
         const width = await page.eval(`({scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth})`);
         assert.ok(width.scroll <= width.client + 1, `mobile overview overflows: ${width.scroll}/${width.client}`);
+        const content = await page.eval(`(() => { const main = document.getElementById("mainContent"); return {scroll: main.scrollWidth, client: main.clientWidth}; })()`);
+        assert.ok(content.scroll <= content.client + 1, `mobile overview content overflows: ${content.scroll}/${content.client}`);
+      } finally {
+        await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+      }
+    },
+  },
+  {
+    name: "overview-ultrawide-fills-grid",
+    async run({ page }) {
+      await page.send("Emulation.setDeviceMetricsOverride", { width: 2560, height: 1440, deviceScaleFactor: 1, mobile: false });
+      try {
+        await goto(page, "overview");
+        await page.waitFor(`document.querySelectorAll("#targetHealthBody tr[data-target-name]").length >= 2`,
+          { what: "ultrawide overview", timeoutMs: 15000 });
+        const layout = await page.eval(`(() => {
+          const columns = el => getComputedStyle(el).gridTemplateColumns.split(" ").filter(Boolean).length;
+          const bands = [...document.querySelectorAll("#page-overview .overview-band")];
+          return {
+            scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
+            bands: bands.map(columns), tables: columns(document.querySelector("#page-overview .overview-tables")),
+          };
+        })()`);
+        assert.ok(layout.scroll <= layout.client + 1, `ultrawide overview overflows: ${layout.scroll}/${layout.client}`);
+        assert.deepEqual(layout.bands, [2, 2], "cards and charts place range and live groups side by side");
+        assert.equal(layout.tables, 3, "ultrawide tables use three columns");
+      } finally {
+        await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
+      }
+    },
+  },
+  {
+    name: "overview-mid-width-activity-table-readable",
+    async run({ page }) {
+      try {
+        for (const width of [1180, 1280, 1440, 2560]) {
+          await page.send("Emulation.setDeviceMetricsOverride", { width, height: 960, deviceScaleFactor: 1, mobile: false });
+          await goto(page, "overview");
+          await page.waitFor(`document.querySelectorAll("#activityClientsBody tr").length > 0`, { what: `activity rows at ${width}`, timeoutMs: 15000 });
+          const layout = await page.eval(`(() => {
+            const grid = document.querySelector("#page-overview .overview-tables");
+            const panel = grid.querySelector(".activity-clients");
+            const table = panel.querySelector(".activity-client-table");
+            const heads = [...table.querySelectorAll("thead th")];
+            const gap = parseFloat(getComputedStyle(grid).columnGap) || 0;
+            const panels = [...grid.children].map(node => ({id: node.id || "activity-clients", rect: node.getBoundingClientRect()}));
+            const rows = new Map();
+            panels.forEach(item => { const key = Math.round(item.rect.top); rows.set(key, (rows.get(key) || []).concat(item)); });
+            const holes = [...rows.values()].filter(row => Math.abs(row.reduce((sum, item) => sum + item.rect.width, 0) + gap * (row.length - 1) - grid.getBoundingClientRect().width) > 2).map(row => row.map(item => item.id).join("+"));
+            const visual = panels.slice().sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left).map(item => item.id);
+            return {
+              holes, visual, dom: panels.map(item => item.id),
+              columns: getComputedStyle(grid).gridTemplateColumns.split(" ").filter(Boolean).length,
+              gridWidth: grid.getBoundingClientRect().width, panelWidth: panel.getBoundingClientRect().width,
+              tableWidth: table.getBoundingClientRect().width,
+              overflowing: heads.filter(th => th.querySelector("button").getBoundingClientRect().width > th.getBoundingClientRect().width + 1).map(th => th.textContent.trim()),
+              scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
+            };
+          })()`);
+          assert.equal(layout.columns, width >= 2200 ? 3 : width >= 1280 ? 2 : 1, `table grid columns at ${width}`);
+          assert.deepEqual(layout.holes, [], `table grid rows leave holes at ${width}`);
+          assert.deepEqual(layout.visual, layout.dom, `visual panel order matches DOM/Tab order at ${width}`);
+          assert.equal(layout.dom.at(-1), "activity-clients", "client activity is the last panel");
+          assert.ok(Math.abs(layout.panelWidth - layout.gridWidth) <= 1, `activity panel spans the grid at ${width}: ${layout.panelWidth}/${layout.gridWidth}`);
+          assert.ok(layout.tableWidth >= 580, `activity table keeps its minimum width at ${width}: ${layout.tableWidth}`);
+          assert.deepEqual(layout.overflowing, [], `activity headers overflow their cells at ${width}`);
+          assert.ok(layout.scroll <= layout.client + 1, `overview overflows at ${width}: ${layout.scroll}/${layout.client}`);
+        }
       } finally {
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
       }

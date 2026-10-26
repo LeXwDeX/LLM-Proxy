@@ -224,6 +224,11 @@ function createHarness({
   metrics = { targets_runtime: [] },
   metricsFailure = false,
   routes = {},
+  // Optional overrides for transport and clock tests (bootstrap.test.cjs):
+  // fetch(url, options, defaultFetch) may delegate to the fixture transport.
+  fetch: fetchOverride = null,
+  timers = null,
+  location = {},
 } = {}) {
   const elements = [],
     ids = new Map(),
@@ -293,67 +298,72 @@ function createHarness({
     console,
     URLSearchParams,
     AbortController,
-    setTimeout: () => 1,
-    clearTimeout() {},
+    setTimeout: timers ? timers.setTimeout : () => 1,
+    clearTimeout: timers ? timers.clearTimeout : () => {},
     setInterval: () => 1,
     clearInterval() {},
     navigator: { clipboard: { writeText: async () => {} } },
     addEventListener() {},
-    location: {},
+    location,
     requestAnimationFrame: (fn) => fn(),
-    fetch: async (url, options) => {
+    fetch: (url, options) => {
       requests.push({ url, options });
-      if (url === "/admin/data/schema") {
-        if (failure)
-          return {
-            ok: false,
-            status: 503,
-            text: async () => JSON.stringify({ error: failure }),
-          };
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify(schema),
-        };
-      }
-      if (url === "/admin/metrics") {
-        if (metricsFailure)
-          return {
-            ok: false,
-            status: 503,
-            text: async () => JSON.stringify({ error: "metrics offline" }),
-          };
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify(metrics),
-        };
-      }
-      if (routeFailures.has(url)) {
+      return fetchOverride
+        ? fetchOverride(url, options, fixtureFetch)
+        : fixtureFetch(url, options);
+    },
+  };
+  async function fixtureFetch(url, options) {
+    if (url === "/admin/data/schema") {
+      if (failure)
         return {
           ok: false,
           status: 503,
-          text: async () => JSON.stringify({ error: "route failed" }),
+          text: async () => JSON.stringify({ error: failure }),
         };
-      }
-      if (Object.prototype.hasOwnProperty.call(routes, url)) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(schema),
+      };
+    }
+    if (url === "/admin/metrics") {
+      if (metricsFailure)
         return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify(routes[url]),
+          ok: false,
+          status: 503,
+          text: async () => JSON.stringify({ error: "metrics offline" }),
         };
-      }
-      const data =
-        url === "/admin/api/me" ? { username: "fixture-user", role } :
-        url === "/admin/api/activity" ? {
-          generated_at: new Date().toISOString(),
-          window: {from: new Date(Date.now() - 300000).toISOString(), to: new Date().toISOString(), step_seconds: 10},
-          runtime: {since: new Date().toISOString(), complete: false, active_requests: 0, active_clients: 0, websocket_sessions: 0},
-          totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, incomplete_usage_count: 0}, series: [], clients: [],
-        } : {};
-      return { ok: true, status: 200, text: async () => JSON.stringify(data) };
-    },
-  };
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(metrics),
+      };
+    }
+    if (routeFailures.has(url)) {
+      return {
+        ok: false,
+        status: 503,
+        text: async () => JSON.stringify({ error: "route failed" }),
+      };
+    }
+    if (Object.prototype.hasOwnProperty.call(routes, url)) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(routes[url]),
+      };
+    }
+    const data =
+      url === "/admin/api/me" ? { username: "fixture-user", role } :
+      url === "/admin/api/activity" ? {
+        generated_at: new Date().toISOString(),
+        window: {from: new Date(Date.now() - 300000).toISOString(), to: new Date().toISOString(), step_seconds: 10},
+        runtime: {since: new Date().toISOString(), complete: false, active_requests: 0, active_clients: 0, websocket_sessions: 0},
+        totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, incomplete_usage_count: 0}, series: [], clients: [],
+      } : {};
+    return { ok: true, status: 200, text: async () => JSON.stringify(data) };
+  }
   sandbox.window = sandbox;
   const context = vm.createContext(sandbox);
   return {
@@ -375,6 +385,12 @@ function createHarness({
     },
     setRouteFailure: (url, value) => {
       value ? routeFailures.add(url) : routeFailures.delete(url);
+    },
+    // start() runs the scripts without waiting for boot, for hung-transport tests.
+    start: () => {
+      for (const script of scripts)
+        vm.runInContext(script.source, context, { filename: script.name });
+      return context.AdminApp;
     },
     run: async () => {
       for (const script of scripts)

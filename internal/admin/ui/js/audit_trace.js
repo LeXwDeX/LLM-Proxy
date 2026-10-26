@@ -7,6 +7,7 @@ AdminApp.register("audit_trace", function (app) {
   var fmtTime = app.bind("core", "fmtTime");
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
+  var isTransientError = app.bind("core", "isTransientError");
   /* ===== Audit ===== */
   async function loadAudit() {
     try {
@@ -99,6 +100,7 @@ AdminApp.register("audit_trace", function (app) {
       }
     } catch (e) {
       traceEnabled = false;
+      if (isTransientError(e)) throw e; // bootstrap retries, then treats trace as off
     }
   }
 
@@ -134,6 +136,7 @@ AdminApp.register("audit_trace", function (app) {
 
       var data = await api(
         "/admin/data/trace?limit=" + limit + "&offset=" + traceOffset,
+        { timeoutMs: 60000 }, // trace pages scan the trace store
       );
       var records = data.records || [];
 
@@ -183,6 +186,7 @@ AdminApp.register("audit_trace", function (app) {
     try {
       var data = await api(
         "/admin/data/trace?limit=" + limit + "&offset=" + traceOffset,
+        { timeoutMs: 60000 }, // trace pages scan the trace store
       );
       stopBrailleSpinner();
       if (data && data.records && data.records.length > 0) {
@@ -222,7 +226,7 @@ AdminApp.register("audit_trace", function (app) {
         "<td>" +
         esc(fmtTime(r.timestamp)) +
         "</td>" +
-        "<td style='font-family:monospace;font-size:12px;'>" +
+        "<td style='font-family:var(--font-mono);font-size:12px;'>" +
         esc((r.trace_id || "").substring(0, 8)) +
         "...</td>" +
         "<td>" +
@@ -338,7 +342,7 @@ AdminApp.register("audit_trace", function (app) {
           "<td>" +
           esc(fmtTime(r.timestamp)) +
           "</td>" +
-          "<td style='font-family:monospace;font-size:12px;'>" +
+          "<td style='font-family:var(--font-mono);font-size:12px;'>" +
           esc((r.trace_id || "").substring(0, 8)) +
           "...</td>" +
           "<td>" +

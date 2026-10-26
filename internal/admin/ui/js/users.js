@@ -7,6 +7,7 @@ AdminApp.register("users", function (app) {
   var fmtTime = app.bind("core", "fmtTime");
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
+  var isTransientError = app.bind("core", "isTransientError");
   var openModal = app.bind("core", "openModal");
   var closeModal = app.bind("core", "closeModal");
   var showConfirm = app.bind("core", "showConfirm");
@@ -46,7 +47,9 @@ AdminApp.register("users", function (app) {
         }
       }
     } catch (e) {
-      /* ignore - may not be logged in via session */
+      // Timeouts and network failures surface so bootstrap can retry them;
+      // other failures keep the historical "no session info" behavior.
+      if (isTransientError(e)) throw e;
     }
   }
 

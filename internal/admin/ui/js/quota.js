@@ -292,6 +292,7 @@ AdminApp.register("quota", function (app) {
           ) +
           "&to=" +
           encodeURIComponent(new Date().toISOString()),
+        { timeoutMs: 60000 }, // 30-day aggregate scans many usage events
       ).then(
         function (data) {
           return data;
@@ -1811,7 +1812,8 @@ AdminApp.register("quota", function (app) {
           try {
             var res = await api(
               "/admin/data/quota/" + encodeURIComponent(source) + "/sync",
-              { method: "POST", body: body },
+              // One write transaction per synced client; large job levels take longer.
+              { method: "POST", body: body, timeoutMs: 60000 },
             );
             var synced = (res && res.synced_clients) || [];
             toast(
