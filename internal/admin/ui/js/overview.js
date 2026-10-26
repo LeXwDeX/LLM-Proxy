@@ -1097,7 +1097,8 @@ AdminApp.register("overview", function (app) {
     var keys = tokenChart ? ["input_tokens", "output_tokens"] : ["active_requests_peak"];
     var axis = chartAxis(Math.max.apply(null, [0].concat(series.map(function (bucket) { return keys.reduce(function (sum, key) { return sum + (bucket[key] == null ? 0 : Number(bucket[key])); }, 0); }))));
     var maximum = axis.maximum;
-    var x = function (index) { return timeX((Math.max(windowFrom, Date.parse(series[index].from)) + Math.min(windowTo, Date.parse(series[index].to))) / 2); };
+    var slotLeft = function (index) { return timeX(Math.max(windowFrom, Date.parse(series[index].from))); };
+    var slotRight = function (index) { return timeX(Math.min(windowTo, Date.parse(series[index].to))); };
     var y = function (value) { return bottom - value / maximum * (bottom - top); };
     var svg = "";
     for (var i = 0; i <= axis.ticks; i++) {
@@ -1110,14 +1111,15 @@ AdminApp.register("overview", function (app) {
     });
     var index = series.findIndex(function (bucket) { return bucket.from === focusFrom; });
     if (index >= 0) {
-      var focusLeft = timeX(Math.max(windowFrom, Date.parse(series[index].from)));
-      var focusRight = timeX(Math.min(windowTo, Date.parse(series[index].to)));
-      svg = '<rect class="overview-trend-focus" x="' + focusLeft + '" y="' + top + '" width="' + Math.max(0, focusRight - focusLeft) + '" height="' + (bottom - top) + '"/>' + svg;
+      svg = '<rect class="overview-trend-focus" x="' + slotLeft(index) + '" y="' + top + '" width="' + Math.max(0, slotRight(index) - slotLeft(index)) + '" height="' + (bottom - top) + '"/>' + svg;
     }
-    var width = barWidth((right - left) / Math.max(1, series.length));
+    // The window starts and ends mid-bucket, so edge buckets are clipped; each bar
+    // is sized from its own visible span to stay inside it instead of sharing one
+    // width that would run into the neighbouring bar.
     series.forEach(function (bucket, index) {
-      if (tokenChart) svg += stackedBars(x(index) - width / 2, width, keys.map(function (key) { return bucket[key] == null ? 0 : Number(bucket[key]); }), y);
-      else if (bucket.active_requests_peak != null) svg += barRect("activity-concurrency-bar", x(index) - width / 2, width, 0, Number(bucket.active_requests_peak), y);
+      var span = Math.max(0, slotRight(index) - slotLeft(index)), width = Math.min(barWidth(span), span), barLeft = slotLeft(index) + (span - width) / 2;
+      if (tokenChart) svg += stackedBars(barLeft, width, keys.map(function (key) { return bucket[key] == null ? 0 : Number(bucket[key]); }), y);
+      else if (bucket.active_requests_peak != null) svg += barRect("activity-concurrency-bar", barLeft, width, 0, Number(bucket.active_requests_peak), y);
     });
     return svg;
   }

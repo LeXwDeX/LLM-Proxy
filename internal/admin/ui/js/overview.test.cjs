@@ -225,6 +225,32 @@ test("concurrency peaks render as bars and unknown samples leave gaps", async ()
   assert.doesNotMatch(svg, /<rect[^>]*class="activity-concurrency-bar"[^>]*height="0"/);
 });
 
+test("clipped edge buckets keep their bars inside their own time span", async () => {
+  // A live window starts and ends mid-bucket: a window ending 2s (or 0.3s) into a
+  // bucket yields a clipped first bucket, full buckets and a short last bucket.
+  for (const offset of [2000, 300]) {
+    const base = Date.parse("2026-10-14T03:00:00Z"), iso = ms => new Date(ms).toISOString();
+    const from = base + offset, to = base + 300000 + offset, series = [];
+    for (let at = base; at < to; at += 10000) {
+      const start = Math.max(at, from), end = Math.min(at + 10000, to);
+      series.push({from: iso(start), to: iso(end), partial: end - start !== 10000, active_requests_peak: 3, input_tokens: 10, output_tokens: 4, total_tokens: 14, incomplete_usage_count: 0});
+    }
+    const h = harness(); const data = activity({window: {from: iso(from), to: iso(to), step_seconds: 10}, series});
+    data.clients[0].series = series.map(b => ({...b})); h.setActivity(data); await h.module.loadOverview();
+    const plotLeft = 44, plotRight = 560 - 12, timeX = ms => plotLeft + (ms - from) / (to - from) * (plotRight - plotLeft);
+    for (const [id, cls] of [["activityConcurrencyChart", "activity-concurrency-bar"], ["activityTokenChart", "activity-bar activity-input"]]) {
+      const bars = [...h.get(id).innerHTML.matchAll(new RegExp('<rect class="' + cls + '" x="([^"]+)" y="[^"]+" width="([^"]+)"', "g"))].map(m => ({left: Number(m[1]), width: Number(m[2]), right: Number(m[1]) + Number(m[2])}));
+      assert.equal(bars.length, series.length);
+      bars.forEach((bar, index) => {
+        const slotLeft = timeX(Date.parse(series[index].from)), slotRight = timeX(Date.parse(series[index].to));
+        assert.ok(bar.left >= slotLeft - 1e-9 && bar.right <= slotRight + 1e-9, `${id} bar ${index} stays inside its bucket span (offset ${offset})`);
+        assert.ok(bar.width >= Math.min(1.5, slotRight - slotLeft) - 1e-9, `${id} bar ${index} keeps the minimum visible width (offset ${offset})`);
+        if (index) assert.ok(bar.left - bars[index - 1].right >= 1, `${id} bar ${index} keeps a visible gap from its neighbour (offset ${offset})`);
+      });
+    }
+  }
+});
+
 test("every overview chart draws bars and token charts stack output on input", async () => {
   const h = harness(); const data = activity();
   data.series[2].input_tokens = 300; data.series[2].output_tokens = 100;
