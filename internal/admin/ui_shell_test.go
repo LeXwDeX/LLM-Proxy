@@ -2,6 +2,7 @@ package admin
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -69,22 +70,117 @@ func TestUIShellDefinesPrototypeThemeTokens(t *testing.T) {
 	}
 }
 
+// Issue #55: one platform-ordered system font stack, shared through tokens.
+// CJK faces are listed per platform (macOS, then Windows, then Linux) ahead of
+// the Latin fallbacks so Chinese text never falls through to a Latin face.
+const (
+	wantFontSans = `-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif`
+	wantFontMono = `ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Cascadia Mono", Consolas, "Liberation Mono", monospace`
+)
+
 func TestUIShellUsesSystemFontsAndTabularNumbers(t *testing.T) {
-	app := uiCSSBlock(t, ".app")
-	for _, want := range []string{"-apple-system", "BlinkMacSystemFont", `"Segoe UI"`, `"PingFang SC"`, `"Microsoft YaHei"`} {
-		if !strings.Contains(app, want) {
-			t.Errorf("正文系统字体栈缺少 %q", want)
+	root := uiCSSBlock(t, ":root")
+	if got := uiCSSValue(t, root, "font-sans"); got != wantFontSans {
+		t.Errorf("--font-sans = %s\nwant %s", got, wantFontSans)
+	}
+	if got := uiCSSValue(t, root, "font-mono"); got != wantFontMono {
+		t.Errorf("--font-mono = %s\nwant %s", got, wantFontMono)
+	}
+	if app := uiCSSBlock(t, ".app"); !regexp.MustCompile(`font-family:\s*var\(--font-sans\)`).MatchString(app) {
+		t.Errorf(".app 正文字体必须引用 var(--font-sans)")
+	}
+	body := uiCSSBlock(t, "body")
+	for _, want := range []string{"-webkit-font-smoothing: antialiased", "-moz-osx-font-smoothing: grayscale", "text-rendering: optimizeLegibility"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body 缺少字体渲染设置 %q", want)
 		}
 	}
-	for _, banned := range []string{"Noto Sans", "IBM Plex", "fonts.googleapis", "fonts.gstatic"} {
+	mono := uiCSSBlock(t, ".mono")
+	for _, want := range []string{"var(--font-mono)", "font-variant-numeric:tabular-nums"} {
+		if !strings.Contains(mono, want) {
+			t.Errorf(".mono 缺少 %q", want)
+		}
+	}
+	// Only local system faces: no web font loading of any kind.
+	for _, banned := range []string{"@font-face", "IBM Plex", "fonts.googleapis", "fonts.gstatic"} {
 		if strings.Contains(adminUIHTML, banned) {
 			t.Errorf("管理台不得依赖外部字体或 CDN：发现 %q", banned)
 		}
 	}
-	mono := uiCSSBlock(t, ".mono")
-	for _, want := range []string{`"SF Mono"`, "Menlo", "Consolas", "font-variant-numeric:tabular-nums"} {
-		if !strings.Contains(mono, want) {
-			t.Errorf(".mono 缺少 %q", want)
+}
+
+// Every font-family declaration (CSS, inline styles, JS-rendered markup) uses
+// the tokens or inherit; scattered literal stacks drift apart over time.
+func TestUIFontFamiliesUseTokens(t *testing.T) {
+	decl := regexp.MustCompile(`font-family\s*:\s*([^;'"}]+)`)
+	allowed := regexp.MustCompile(`^(var\(--font-(sans|mono)\)|inherit)\s*$`)
+	sources := map[string]string{"index.html": adminUIHTML}
+	entries, err := adminUIJSFS.ReadDir("ui/js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		data, err := adminUIJSFS.ReadFile("ui/js/" + entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources[entry.Name()] = string(data)
+	}
+	for name, source := range sources {
+		for _, match := range decl.FindAllStringSubmatch(source, -1) {
+			if !allowed.MatchString(match[1]) {
+				t.Errorf("%s: font-family 必须使用 var(--font-sans)/var(--font-mono)/inherit，发现 %q", name, strings.TrimSpace(match[0]))
+			}
+		}
+	}
+}
+
+// Issue #55: on ultra-wide screens percentage name/key columns spread sparse
+// content; they are bounded so the model list column absorbs the remainder.
+func TestUITargetsTableBoundsNameAndKeyColumns(t *testing.T) {
+	px := regexp.MustCompile(`width:\s*(\d+)px`)
+	name := uiCSSBlock(t, ".targets-table .col-name")
+	keys := uiCSSBlock(t, ".targets-table .col-keys")
+	for label, block := range map[string]string{"col-name": name, "col-keys": keys} {
+		if strings.Contains(block, "%") {
+			t.Errorf("%s 不得使用百分比宽度: %s", label, block)
+		}
+	}
+	if !strings.Contains(name, "clamp(") && !px.MatchString(name) {
+		t.Errorf("col-name 必须使用 clamp() 或固定 px 宽度: %s", name)
+	}
+	// Keys hold up to ~4 status chips on one line: clamp(180px, 13vw, 240px).
+	clamp := regexp.MustCompile(`width:\s*clamp\((\d+)px,\s*[\d.]+vw,\s*(\d+)px\)`).FindStringSubmatch(keys)
+	if clamp == nil {
+		t.Fatalf("col-keys 必须使用 clamp(<min>px, <n>vw, <max>px): %s", keys)
+	}
+	if lo, _ := strconv.Atoi(clamp[1]); lo < 180 {
+		t.Errorf("col-keys 最小宽度应 ≥180px，实际 %dpx", lo)
+	}
+	if hi, _ := strconv.Atoi(clamp[2]); hi > 240 {
+		t.Errorf("col-keys 最大宽度应 ≤240px，实际 %dpx", hi)
+	}
+	if !strings.Contains(uiCSSBlock(t, ".targets-table"), "min-width:1360px") {
+		t.Errorf("目标表格须保留 min-width:1360px，窄屏横向滚动行为不变")
+	}
+	if !strings.Contains(adminUIHTML, `<col class="col-scheduling"><col><col class="col-actions">`) {
+		t.Errorf("模型列表列须保持无宽度 <col>，以吸收剩余宽度")
+	}
+}
+
+// The login portal is a standalone page; it inlines the same stack and rendering.
+func TestLoginPageUsesSharedFontStack(t *testing.T) {
+	portal, _ := newPortalTestFixture(t)
+	body := renderPortalLoginPage(t, portal, "/login").Body.String()
+	if !strings.Contains(body, wantFontSans) {
+		t.Errorf("登录页字体栈须与管理台 --font-sans 一致")
+	}
+	if ping, segoe := strings.Index(body, `"PingFang SC"`), strings.Index(body, `"Segoe UI"`); ping < 0 || segoe < 0 || ping > segoe {
+		t.Errorf("登录页字体栈中 PingFang SC 须排在 Segoe UI 之前")
+	}
+	for _, want := range []string{"-webkit-font-smoothing:antialiased", "-moz-osx-font-smoothing:grayscale", "text-rendering:optimizeLegibility"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("登录页缺少字体渲染设置 %q", want)
 		}
 	}
 }

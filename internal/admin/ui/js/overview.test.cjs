@@ -42,16 +42,44 @@ function completeMetrics(overrides = {}) {
     ...overrides,
   };
 }
+function aggTotals(overrides = {}) {
+  return {requests: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_creation_tokens: 0, estimated_cost: 0, ...overrides};
+}
+// buckets is null on purpose: Go serializes an empty slice that way.
+function aggregateResult(overrides = {}) {
+  return {group_by: "hour", totals: aggTotals(), buckets: null, by_client: [], by_model: [], ...overrides};
+}
+function hourBucket(date, overrides = {}) {
+  const start = new Date(date);
+  return {bucket_start: start.toISOString(), bucket_end: new Date(start.getTime() + 3600000).toISOString(), ...aggTotals({requests: 1, input_tokens: 10, output_tokens: 2, estimated_cost: 0.5}), ...overrides};
+}
+function withTZ(zone, fn) {
+  const previous = process.env.TZ;
+  process.env.TZ = zone;
+  const restore = () => { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; };
+  let result;
+  try { result = fn(); } catch (error) { restore(); throw error; }
+  if (result && typeof result.then === "function") return result.finally(restore);
+  restore();
+  return result;
+}
+const rangeKeys = ["today", "yesterday", "7d", "30d", "last_month"];
+function barButton(key) {
+  const button = new Element("button");
+  button.dataset.overviewBar = key;
+  button.attrs["aria-pressed"] = key === "requests" ? "true" : "false";
+  return button;
+}
 function rangeButton(key) {
   const button = new Element("button");
   button.dataset.overviewRange = key;
   button.attrs["aria-pressed"] = "false";
   return button;
 }
-function harness({sortButtons = [], infoButtons = [], rangeButtons = []} = {}) {
+function harness({sortButtons = [], infoButtons = [], rangeButtons = [], barButtons = [], storage} = {}) {
   const elements = new Map(); const get = id => { if (!elements.has(id)) elements.set(id, new Element(id === "activityClientsBody" ? "tbody" : "div")); return elements.get(id); };
-  const doc = {getElementById: get, querySelectorAll: selector => selector === "[data-activity-sort]" ? sortButtons : selector === "[data-activity-info]" ? infoButtons : selector === "[data-overview-range]" ? rangeButtons : [], documentElement: {clientWidth: 390, clientHeight: 844}, createElement: tag => new Element(tag), listeners: {}, hidden: false, activeElement: null, addEventListener(name, fn) { this.listeners[name] = fn; }};
-  let module; let answer = activity(); let overview = {}; let metrics = {}; let aggregate = {}; let aggregateHandler; let handler; const calls = []; const timers = new Map(); let nextTimer = 0; let now = Date.now();
+  const doc = {getElementById: get, querySelectorAll: selector => selector === "[data-activity-sort]" ? sortButtons : selector === "[data-activity-info]" ? infoButtons : selector === "[data-overview-range]" ? rangeButtons : selector === "[data-overview-bar]" ? barButtons : [], documentElement: {clientWidth: 390, clientHeight: 844}, createElement: tag => new Element(tag), listeners: {}, hidden: false, activeElement: null, addEventListener(name, fn) { this.listeners[name] = fn; }};
+  let module; let answer = activity(); let overview = {}; let metrics = {}; let aggregate = aggregateResult(); let aggregateHandler; let handler; const calls = []; const timers = new Map(); let nextTimer = 0; let now = Date.now();
   class TestDate extends Date { static now() { return now; } }
   async function advance(ms) {
     for (let i = 0; i < 12; i++) await Promise.resolve();
@@ -67,8 +95,10 @@ function harness({sortButtons = [], infoButtons = [], rangeButtons = []} = {}) {
   }
   const core = {esc: v => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"), fmtNum: v => String(v || 0), fmtMoney: v => "$" + Number(v || 0).toFixed(2), fmtPct: v => v + "%", totalTok: d => (d.input_tokens || 0) + (d.output_tokens || 0) + (d.cached_tokens || 0) + (d.cache_creation_tokens || 0) + (d.tool_use_prompt_tokens || 0), schemaLabel: (list, value) => value, api: async (url, opts) => { calls.push({url, opts}); if (handler) return handler(url, opts); if (url.endsWith("activity")) return answer; if (url.endsWith("overview")) return overview; if (url.endsWith("/admin/metrics")) return metrics; if (url.includes("/admin/data/usage/aggregate")) return aggregateHandler ? aggregateHandler(url, opts) : aggregate; return overview; }};
   const state = {currentPage: "overview"};
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "overview.js"), "utf8"), {document: doc, AbortController, Date: TestDate, Map, setTimeout: (fn, delay) => {timers.set(++nextTimer, {fn, at: now + delay}); return nextTimer;}, clearTimeout: id => timers.delete(id), setInterval: () => 1, clearInterval() {}, AdminApp: {register: (name, factory) => {module = factory({state, bind: (m, n) => core[n]}); }}});
-  return {module, get, doc, state, calls, timers, advance, setActivity: a => answer = a, setOverview: o => overview = o, setMetrics: m => metrics = m, setAggregate: a => aggregate = a, setAggregateHandler: h => aggregateHandler = h, setHandler: h => handler = h};
+  const context = {document: doc, AbortController, Date: TestDate, Map, setTimeout: (fn, delay) => {timers.set(++nextTimer, {fn, at: now + delay}); return nextTimer;}, clearTimeout: id => timers.delete(id), setInterval: () => 1, clearInterval() {}, AdminApp: {register: (name, factory) => {module = factory({state, bind: (m, n) => core[n]}); }}};
+  if (storage !== undefined) context.localStorage = storage;
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "overview.js"), "utf8"), context);
+  return {module, get, doc, state, calls, timers, advance, setNow: value => now = new Date(value).getTime(), setActivity: a => answer = a, setOverview: o => overview = o, setMetrics: m => metrics = m, setAggregate: a => aggregate = a, setAggregateHandler: h => aggregateHandler = h, setHandler: h => handler = h};
 }
 test("homepage requests real activity, uses provided totals, and has no audit dependency", async () => {
   const h = harness(); await h.module.loadOverview();
@@ -285,21 +315,18 @@ test("a transport response arriving after timeout cannot overwrite the recovered
   assert.equal(h.get("activityActiveRequests").textContent, "7");
 });
 
-test("range cards distinguish missing totals from real zero and reload only aggregate", async () => {
-  const ranges = ["1h", "today", "7d", "30d"].map(rangeButton);
+test("range cards distinguish missing totals from real zero and reload only aggregate", () => withTZ("Asia/Shanghai", async () => {
+  const ranges = rangeKeys.map(rangeButton);
   const h = harness({rangeButtons: ranges});
-  h.setOverview({
-    client_count: 2,
-    targets: [],
-    usage_summary: {
-      last_hour: {requests: 7, input_tokens: 30, output_tokens: 12, tool_use_prompt_tokens: 5, estimated_cost: 1.23, incomplete_usage_count: 1},
-      today: {requests: 0, input_tokens: 0, output_tokens: 0, tool_use_prompt_tokens: 0, estimated_cost: 0, incomplete_usage_count: 0},
-      last_7_days: null,
-      last_30_days: {},
-    },
-    recent_audit: [],
-  });
-  h.setAggregate({totals: {}, by_client: [], by_model: []});
+  h.setOverview({client_count: 2, targets: [], recent_audit: []});
+  h.setNow(new Date(2026, 9, 26, 11));
+  const byFrom = {
+    [new Date(2026, 9, 26).toISOString()]: aggregateResult(),
+    [new Date(2026, 9, 25).toISOString()]: aggregateResult({totals: aggTotals({requests: 7, input_tokens: 30, output_tokens: 12, tool_use_prompt_tokens: 5, estimated_cost: 1.23, incomplete_usage_count: 1})}),
+    [new Date(2026, 9, 20).toISOString()]: {totals: null},
+    [new Date(2026, 8, 27).toISOString()]: {totals: {}},
+  };
+  h.setAggregateHandler(url => byFrom[new URL(url, "http://local").searchParams.get("from")] || aggregateResult());
   await h.module.loadOverview();
   const activityCalls = () => h.calls.filter(c => c.url.endsWith("activity")).length;
   const initialActivity = activityCalls();
@@ -309,20 +336,20 @@ test("range cards distinguish missing totals from real zero and reload only aggr
   assert.equal(h.get("ovRangeOutputTokens").textContent, "0");
   assert.equal(h.get("ovRangeCost").textContent, "$0.00");
   assert.equal(h.get("ovRangeStatus").dataset.state, "ready");
-  assert.equal(ranges[1].attrs["aria-pressed"], "true");
-  await ranges[0].fire("click"); await h.advance(0);
+  assert.equal(ranges[0].attrs["aria-pressed"], "true");
+  await ranges[1].fire("click"); await h.advance(0);
   assert.equal(h.get("ovRangeRequests").textContent, "7");
   assert.equal(h.get("ovRangeTotalTokens").textContent, "47");
-  assert.equal(h.get("ovRangeInputTokens").textContent, "30");
+  assert.equal(h.get("ovRangeInputTokens").textContent, "35", "input includes the 5 tool input tokens so input + output = total");
   assert.equal(h.get("ovRangeOutputTokens").textContent, "12");
   assert.equal(h.get("ovRangeCost").textContent, "$1.23");
-  assert.equal(ranges[0].attrs["aria-pressed"], "true");
-  assert.equal(ranges[1].attrs["aria-pressed"], "false");
+  assert.equal(ranges[1].attrs["aria-pressed"], "true");
+  assert.equal(ranges[0].attrs["aria-pressed"], "false");
   assert.match(h.get("ovRangeStatus").textContent, /含模型组系数/);
   assert.match(h.get("ovRangeStatus").textContent, /1 条用量不完整/);
   assert.equal(h.get("ovRangeStatus").dataset.state, "partial");
   assert.equal(activityCalls(), initialActivity);
-  assert.ok(h.calls.filter(c => c.url.includes("usage/aggregate")).some(c => c.url.includes("group_by=day")));
+  assert.ok(h.calls.filter(c => c.url.includes("usage/aggregate")).every(c => c.url.includes("group_by=hour")));
   await ranges[2].fire("click"); await h.advance(0);
   assert.equal(h.get("ovRangeRequests").textContent, "不可用");
   assert.equal(h.get("ovRangeTotalTokens").textContent, "不可用");
@@ -337,13 +364,14 @@ test("range cards distinguish missing totals from real zero and reload only aggr
   assert.notEqual(h.get("ovRangeStatus").dataset.state, "ready");
   assert.match(h.get("ovRangeStatus").textContent, /不可用/);
   assert.equal(activityCalls(), initialActivity);
-  await ranges[1].fire("click"); await h.advance(0);
+  await ranges[0].fire("click"); await h.advance(0);
   assert.equal(h.get("ovRangeStatus").dataset.state, "ready");
-  h.setOverview({usage_summary: {today: completeRange({requests: 1, incomplete_cost_count: 1})}});
+  h.setAggregateHandler(null);
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 1, incomplete_cost_count: 1})}));
   await h.module.loadOverview(true);
   assert.equal(h.get("ovRangeStatus").dataset.state, "partial");
   assert.match(h.get("ovRangeStatus").textContent, /1 条成本覆盖不完整/);
-});
+}));
 
 test("legacy history table keeps missing periods and fields distinct from real zero", async () => {
   const h = harness();
@@ -403,7 +431,7 @@ test("target health sorts unknown states last and degrades single and zero key t
   assert.match(h.get("targetHealthBody").innerHTML, /Bearer|透传/);
   assert.match(h.get("targetHealthBody").innerHTML, /密钥状态不可用/);
   assert.match(h.get("overviewAttentionList").innerHTML, /partial[^<]*密钥状态未知/);
-  assert.match(h.get("chainTargets").textContent, /9 个目标 · 3 个正常/);
+  assert.equal(h.get("chainTargets").textContent, "3 / 9");
   assert.equal(h.get("targetHealthCount").textContent, "9 个目标");
   assert.match(h.get("targetHealthStatus").textContent, /需要关注/);
   assert.match(h.get("targetHealthStatus").textContent, /状态未知/);
@@ -411,7 +439,7 @@ test("target health sorts unknown states last and degrades single and zero key t
   assert.doesNotMatch(h.get("targetHealth").innerHTML, /secret\.example/);
 });
 
-test("top five ranks cost then requests then name and never fabricates zero", async () => {
+test("rankings order cost then requests then name and never fabricate zero", async () => {
   const h = harness();
   h.setOverview({client_count: 1, targets: [], usage_summary: {}, recent_audit: []});
   h.setAggregate({
@@ -432,21 +460,28 @@ test("top five ranks cost then requests then name and never fabricates zero", as
   });
   await h.module.loadOverview();
   const clients = [...h.get("topClientsBody").innerHTML.matchAll(/data-top-client="([^"]+)"/g)].map(m => m[1]);
-  assert.deepEqual(clients, ["c3", "c1", "c2", "c5", "c4"]);
+  assert.deepEqual(clients, ["c3", "c1", "c2", "c5", "c4", "c0"]);
   assert.match(h.get("topClientsBody").innerHTML, /\$5\.00/);
-  assert.match(h.get("topClientsBody").innerHTML, /data-top-client="c3"><td>c3<\/td><td>12<\/td><td>7<\/td>/);
+  assert.match(h.get("topClientsBody").innerHTML, /data-top-client="c3"><td>c3<\/td><td>12<\/td><td>7<\/td><td>\$5\.00<\/td><td>26\.3%<\/td>/);
   const models = [...h.get("topModelsBody").innerHTML.matchAll(/data-top-model="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(models, ["m-a", "m-b", "m-no-cost"]);
   assert.match(h.get("topModelsBody").innerHTML, /不可用/);
   assert.match(h.get("topClientsStatus").textContent, /含模型组系数/);
-  assert.match(h.get("topClientsStatus").textContent, /UTC 自然日/);
-  assert.doesNotMatch(h.get("topClientsStatus").textContent, /按小时/);
+  assert.match(h.get("topClientsStatus").textContent, /占比/);
+  assert.doesNotMatch(h.get("topClientsStatus").textContent, /UTC|group_by=day/);
 
   h.setAggregateHandler(() => Promise.reject(new Error("aggregate rejected")));
   await h.module.loadOverview(true);
-  assert.match(h.get("topClientsStatus").textContent, /不可用/);
-  assert.match(h.get("topModelsStatus").textContent, /不可用/);
-  assert.doesNotMatch(h.get("topClientsBody").innerHTML, /\$0\.00|>0</);
+  assert.match(h.get("topClientsStatus").textContent, /更新失败.*上次数据/);
+  assert.equal(h.get("topClientsStatus").dataset.state, "partial");
+  assert.match(h.get("topClientsBody").innerHTML, /data-top-client="c3"/);
+
+  const failed = harness();
+  failed.setAggregateHandler(() => Promise.reject(new Error("aggregate rejected")));
+  await failed.module.loadOverview(true);
+  assert.match(failed.get("topClientsStatus").textContent, /不可用/);
+  assert.match(failed.get("topModelsStatus").textContent, /不可用/);
+  assert.doesNotMatch(failed.get("topClientsBody").innerHTML, /\$0\.00|>0</);
 
   h.setAggregateHandler(null);
   h.setAggregate({totals: {}, by_client: [], by_model: []});
@@ -483,7 +518,7 @@ test("attention uses measured warnings and recent changes omit detail", async ()
     ],
   });
   h.setMetrics({uptime_seconds: 3660, requests: {total: 12}, persistence: {usage_async_pending: 2, usage_async_deferred: 1, request_stats_dropped: 3}, observation_budget: {observation_budget_exhausted: {br: 4, zstd: 0}}});
-  h.setAggregate({totals: {requests: 3}, by_client: [], by_model: []});
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 3, input_tokens: 5, output_tokens: 1, incomplete_usage_count: 2, incomplete_cost_count: 1})}));
   await h.module.loadOverview();
   const attention = h.get("overviewAttentionList").innerHTML;
   assert.match(attention, /muted-target/);
@@ -500,6 +535,7 @@ test("attention uses measured warnings and recent changes omit detail", async ()
   assert.match(attention, /72 小时完成样本中 1 个取消/);
   assert.doesNotMatch(attention, /成功率/);
   assert.match(attention, /2 条用量记录不完整/);
+  assert.match(attention, /1 条成本覆盖不完整/);
   assert.match(h.get("overviewAttentionCount").textContent, /项/);
   const recent = h.get("recentChangesBody").innerHTML;
   assert.ok(recent.indexOf("new-object") < recent.indexOf("old-object"));
@@ -515,13 +551,14 @@ test("attention uses measured warnings and recent changes omit detail", async ()
     request_stats_72h: {available: true, total: 0, failure: 0, canceled: 0},
     recent_audit: [],
   });
+  h.setAggregate(aggregateResult());
   await h.module.loadOverview(true);
   assert.match(h.get("recentChangesBody").innerHTML, /暂无/);
   assert.match(h.get("overviewAttentionList").innerHTML, /暂无需要关注/);
   assert.doesNotMatch(h.get("overviewAttentionList").innerHTML, /自启动累计|72 小时完成样本/);
 });
 
-test("managed chain summarizes available values and marks missing sources", async () => {
+test("live status cards summarize available values and mark missing sources", async () => {
   const h = harness();
   h.setOverview({
     client_count: 3,
@@ -536,19 +573,21 @@ test("managed chain summarizes available values and marks missing sources", asyn
   await h.module.loadOverview();
   assert.match(h.get("chainClients").textContent, /3 个配置客户端/);
   assert.match(h.get("chainClients").textContent, /活跃 1/);
-  assert.match(h.get("chainProxy").textContent, /在途 2/);
+  assert.equal(h.get("activityActiveRequests").textContent, "2");
+  assert.doesNotMatch(h.get("chainProxy").textContent, /在途/, "in-flight has its own card");
   assert.match(h.get("chainProxy").textContent, /累计 12/);
   assert.match(h.get("chainProxy").textContent, /1 小时 1 分钟/);
-  assert.match(h.get("chainTargets").textContent, /2 个目标/);
+  assert.match(h.get("chainTargets").textContent, /^\d+ \/ 2$/);
+  assert.match(h.get("chainKeysDetail").textContent, /限流 1/);
   assert.equal(h.get("chainKeys").attrs["data-total"], "4");
   assert.equal(h.get("chainKeys").attrs["data-active"], "3");
   assert.equal(h.get("chainKeys").attrs["data-rate-limited"], "1");
-  assert.equal(h.get("chainStatus").textContent, "链路数据已加载");
+  assert.equal(h.get("chainStatus").textContent, "实时状态已加载");
 
   h.setMetrics(completeMetrics({uptime_seconds: 0}));
   await h.module.loadOverview(true);
   assert.match(h.get("chainProxy").textContent, /运行 0 秒/);
-  assert.equal(h.get("chainStatus").textContent, "链路数据已加载");
+  assert.equal(h.get("chainStatus").textContent, "实时状态已加载");
 
   h.setOverview({
     client_count: 3,
@@ -559,14 +598,14 @@ test("managed chain summarizes available values and marks missing sources", asyn
   await h.module.loadOverview(true);
   assert.equal(h.get("chainKeys").attrs["data-total"], "unavailable");
   assert.match(h.get("chainKeys").textContent, /不可用/);
-  assert.match(h.get("chainStatus").textContent, /部分链路数据不可用/);
+  assert.match(h.get("chainStatus").textContent, /部分实时状态不可用/);
 
   h.setMetrics(null);
   await h.module.loadOverview(true);
-  assert.match(h.get("chainStatus").textContent, /部分链路数据不可用/);
+  assert.match(h.get("chainStatus").textContent, /部分实时状态不可用/);
 });
 
-test("activity polling refreshes the managed chain without another overview request", async () => {
+test("activity polling refreshes the live status cards without another overview request", async () => {
   const h = harness();
   h.setOverview({client_count: 3, targets: [], usage_summary: {}, recent_audit: []});
   h.setMetrics({uptime_seconds: 1, requests: {total: 1}, persistence: {}});
@@ -575,7 +614,7 @@ test("activity polling refreshes the managed chain without another overview requ
   h.setActivity(activity({runtime: {...activity().runtime, active_clients: 5, active_requests: 6, websocket_sessions: 2}}));
   await h.module.loadOverview();
   assert.match(h.get("chainClients").textContent, /活跃 5/);
-  assert.match(h.get("chainProxy").textContent, /在途 6/);
+  assert.equal(h.get("activityActiveRequests").textContent, "6");
   assert.equal(h.calls.filter(c => c.url.endsWith("overview")).length, 1);
 });
 
@@ -628,26 +667,30 @@ test("completed metrics and aggregate refetch after leaving and returning instea
   h.doc.hidden = true;
   h.module.stopOverviewAutoRefresh();
   h.doc.hidden = false;
-  assert.equal(h.get("chainSummary").dataset.state, "partial");
-  assert.equal(h.get("topClientsStatus").dataset.state, "error");
+  // Leaving keeps the last snapshots on screen (like activity and history); only the cache age is reset.
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  assert.equal(h.get("topClientsStatus").dataset.state, "ready");
+  assert.match(h.get("topClientsBody").innerHTML, /data-top-client="c1"/);
 
   h.module.startOverviewAutoRefresh();
   await h.module.loadOverview();
   assert.ok(metricsCalls() > metricsBefore, "metrics request must be sent again");
   assert.ok(aggregateCalls() > aggregateBefore, "aggregate request must be sent again");
   assert.equal(h.get("chainSummary").dataset.state, "ready");
-  assert.equal(h.get("chainStatus").textContent, "链路数据已加载");
+  assert.equal(h.get("chainStatus").textContent, "实时状态已加载");
   assert.equal(h.get("topClientsStatus").dataset.state, "ready");
   assert.equal(h.get("topModelsStatus").dataset.state, "ready");
   h.module.stopOverviewAutoRefresh();
 });
 
-test("range input card labels base input tokens without cache or tool usage", () => {
+test("range token card explains that input includes cache and tool input", () => {
   const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
-  const card = html.match(/<article class="overview-card"><span([^>]*)>([^<]+)<\/span><strong id="ovRangeInputTokens">/);
-  assert.ok(card, "range input token card is present");
-  assert.equal(card[2], "基础输入 Token");
-  assert.match(card[1], /title="[^"]*不含缓存读取[^"]*"/);
+  const card = html.match(/<article class="overview-card"><div class="overview-card-label"([^>]*)>总 Token<\/div><strong id="ovRangeTotalTokens">[\s\S]*?<\/article>/);
+  assert.ok(card, "range total token card is present");
+  assert.match(card[1], /title="[^"]*缓存读取[^"]*工具输入[^"]*"/);
+  assert.match(card[1], /输入 \+ 输出 = 总 Token/);
+  assert.match(card[0], /id="ovRangeInputTokens"/);
+  assert.match(card[0], /id="ovRangeOutputTokens"/);
 });
 
 test("chain key summary refuses partial counters and keeps real zero", async () => {
@@ -668,7 +711,7 @@ test("chain key summary refuses partial counters and keeps real zero", async () 
   assert.equal(h.get("chainKeys").attrs["data-rate-limited"], "unavailable");
   assert.match(h.get("chainKeys").textContent, /不可用/);
   assert.equal(h.get("chainSummary").dataset.state, "partial");
-  assert.match(h.get("chainStatus").textContent, /部分链路数据不可用/);
+  assert.match(h.get("chainStatus").textContent, /部分实时状态不可用/);
 
   h.setOverview({
     client_count: 1,
@@ -726,6 +769,7 @@ test("attention reports ready only when every consumed source is complete", asyn
   const scenario = async (change, note) => {
     h.setOverview(overview());
     h.setMetrics(completeMetrics());
+    h.setAggregate(aggregateResult());
     change();
     await h.module.loadOverview(true);
     assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial", note);
@@ -735,8 +779,8 @@ test("attention reports ready only when every consumed source is complete", asyn
   await scenario(() => h.setOverview({...overview(), request_stats_72h: undefined}), "missing request stats");
   await scenario(() => h.setOverview({...overview(), request_stats_72h: completeStats({available: false})}), "unavailable request stats");
   await scenario(() => h.setOverview({...overview(), request_stats_72h: completeStats({failure: undefined})}), "partial request stats");
-  await scenario(() => h.setOverview({...overview(), usage_summary: {}}), "missing selected range");
-  await scenario(() => h.setOverview({...overview(), usage_summary: {today: completeRange({estimated_cost: undefined})}}), "partial selected range");
+  await scenario(() => h.setAggregate({by_client: [], by_model: []}), "missing selected range");
+  await scenario(() => h.setAggregate(aggregateResult({totals: aggTotals({estimated_cost: undefined})})), "partial selected range");
   await scenario(() => h.setOverview({...overview(), targets: undefined}), "missing targets");
   await scenario(() => h.setMetrics(completeMetrics({observation_budget: undefined})), "missing observation budget");
   await scenario(() => h.setMetrics(completeMetrics({observation_budget: {observation_budget_exhausted: {br: 0}}})), "partial observation budget");
@@ -750,7 +794,8 @@ test("attention reports ready only when every consumed source is complete", asyn
   }, "unknown key counters");
 
   h.setMetrics(completeMetrics({persistence: {usage_async_pending: 2, usage_async_deferred: 0, request_stats_dropped: 0}}));
-  h.setOverview({...overview(), usage_summary: {today: completeRange({incomplete_usage_count: 2})}});
+  h.setOverview(overview());
+  h.setAggregate(aggregateResult({totals: aggTotals({incomplete_usage_count: 2})}));
   await h.module.loadOverview(true);
   assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
   assert.match(h.get("overviewAttentionStatus").textContent, /已检查/);
@@ -759,6 +804,7 @@ test("attention reports ready only when every consumed source is complete", asyn
 
   h.setMetrics(completeMetrics());
   h.setOverview(overview());
+  h.setAggregate(aggregateResult());
   await h.module.loadOverview(true);
   assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
 
@@ -773,12 +819,14 @@ test("attention reports ready only when every consumed source is complete", asyn
   assert.match(h.get("overviewAttentionStatus").textContent, /部分数据不可用/);
   assert.match(h.get("overviewAttentionList").innerHTML, /暂无需要关注的问题/);
 
-  h.setOverview({});
-  h.setMetrics(null);
-  h.setHandler(null);
-  await h.module.loadOverview(true);
-  assert.equal(h.get("overviewAttentionStatus").dataset.state, "error");
-  assert.match(h.get("overviewAttentionStatus").textContent, /不可用/);
+  // Every source unavailable from the start (a fresh page has no stale range data).
+  const none = harness();
+  none.setOverview({});
+  none.setMetrics(null);
+  none.setAggregateHandler(() => Promise.reject(new Error("offline")));
+  await none.module.loadOverview(true);
+  assert.equal(none.get("overviewAttentionStatus").dataset.state, "error");
+  assert.match(none.get("overviewAttentionStatus").textContent, /不可用/);
 });
 
 test("a failed overview refresh keeps old panels but marks them partial", async () => {
@@ -792,7 +840,7 @@ test("a failed overview refresh keeps old panels but marks them partial", async 
   });
   h.setMetrics(completeMetrics());
   await h.module.loadOverview();
-  assert.equal(h.get("chainStatus").textContent, "链路数据已加载");
+  assert.equal(h.get("chainStatus").textContent, "实时状态已加载");
 
   h.setHandler(url => {
     if (url.endsWith("overview")) return Promise.reject(new Error("offline"));
@@ -810,9 +858,8 @@ test("a failed overview refresh keeps old panels but marks them partial", async 
   }
   assert.match(h.get("targetHealthBody").innerHTML, /target/);
   assert.match(h.get("recentChangesBody").innerHTML, /audit-1/);
-  assert.match(h.get("chainTargets").textContent, /1 个目标/);
-  assert.equal(h.get("ovRangeStatus").dataset.state, "partial");
-  assert.match(h.get("ovRangeStatus").textContent, /更新失败.*上次数据/);
+  assert.equal(h.get("chainTargets").textContent, "1 / 1");
+  assert.doesNotMatch(h.get("ovRangeStatus").textContent, /更新失败/, "range cards come from the aggregate, not the overview response");
 
   const empty = harness();
   empty.setHandler(url => {
@@ -901,7 +948,7 @@ test("chain shows partial metrics values but does not claim ready", async () => 
   });
   await h.module.loadOverview();
   assert.equal(h.get("chainSummary").dataset.state, "partial");
-  assert.equal(h.get("chainStatus").textContent, "部分链路数据不可用");
+  assert.equal(h.get("chainStatus").textContent, "部分实时状态不可用");
   assert.match(h.get("chainProxy").textContent, /累计 12/);
   assert.match(h.get("chainProxy").textContent, /运行 10 秒/);
   assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial");
@@ -938,4 +985,422 @@ test("unknown target phases never claim every target is normal", async () => {
   assert.doesNotMatch(h.get("targetHealthStatus").textContent, /均在正常状态/);
   assert.match(h.get("overviewAttentionList").innerHTML, /mystery[^<]*状态未知/);
   assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial");
+});
+
+// ---- Range windows, local-day rollup and range-driven panels (Issue #53) ----
+
+test("rangeWindow computes local boundaries; closed ranges end 1ms before the next boundary", () => withTZ("Asia/Shanghai", () => {
+  const h = harness();
+  const now = new Date(2026, 9, 26, 11, 15, 30);
+  const today = h.module.rangeWindow("today", now);
+  assert.equal(today.from.getTime(), new Date(2026, 9, 26).getTime());
+  assert.equal(today.to.getTime(), now.getTime());
+  assert.equal(today.granularity, "hour");
+  assert.equal(today.closed, false);
+  const yesterday = h.module.rangeWindow("yesterday", now);
+  assert.equal(yesterday.from.getTime(), new Date(2026, 9, 25).getTime());
+  assert.equal(yesterday.end.getTime(), new Date(2026, 9, 26).getTime());
+  assert.equal(yesterday.to.getTime(), new Date(2026, 9, 26).getTime() - 1, "yesterday must not include today's first hour");
+  assert.equal(yesterday.granularity, "hour");
+  assert.equal(yesterday.closed, true);
+  const week = h.module.rangeWindow("7d", now);
+  assert.equal(week.from.getTime(), new Date(2026, 9, 20).getTime(), "7 local days including today");
+  assert.equal(week.to.getTime(), now.getTime());
+  assert.equal(week.granularity, "day");
+  const month = h.module.rangeWindow("30d", now);
+  assert.equal(month.from.getTime(), new Date(2026, 8, 27).getTime(), "30 local days including today");
+  assert.equal(month.granularity, "day");
+  const last = h.module.rangeWindow("last_month", now);
+  assert.equal(last.from.getTime(), new Date(2026, 8, 1).getTime());
+  assert.equal(last.end.getTime(), new Date(2026, 9, 1).getTime());
+  assert.equal(last.to.getTime(), new Date(2026, 9, 1).getTime() - 1);
+  assert.equal(last.granularity, "day");
+  const january = h.module.rangeWindow("last_month", new Date(2027, 0, 5, 8));
+  assert.equal(january.from.getTime(), new Date(2026, 11, 1).getTime(), "January rolls back to last December");
+  assert.equal(january.to.getTime(), new Date(2027, 0, 1).getTime() - 1);
+  assert.equal(h.module.rangeWindow("30d", new Date(2026, 2, 15, 9)).from.getTime(), new Date(2026, 1, 14).getTime(), "30 days crosses February");
+  assert.equal(h.module.rangeWindow("1h", now), null, "the removed last-hour range is not accepted");
+}));
+
+test("rollupBuckets sums hourly buckets into local days and zero-fills only slots inside the range", () => withTZ("Asia/Shanghai", () => {
+  const h = harness();
+  const window = h.module.rangeWindow("7d", new Date(2026, 9, 26, 11, 15));
+  const slots = h.module.rollupBuckets([
+    hourBucket(new Date(2026, 9, 20, 0), {cached_tokens: 3}),
+    hourBucket(new Date(2026, 9, 20, 23), {cached_tokens: 3, tool_use_prompt_tokens: 4}),
+    hourBucket(new Date(2026, 9, 26, 11), {incomplete_usage_count: 1}),
+  ], window);
+  assert.equal(slots.length, 7);
+  assert.deepEqual(Array.from(slots, slot => slot.start.getDate()), [20, 21, 22, 23, 24, 25, 26]);
+  assert.equal(slots[0].requests, 2);
+  assert.equal(slots[0].input, 30, "input includes cache read/write and tool input");
+  assert.equal(slots[0].output, 4);
+  assert.equal(slots[0].cost, 1);
+  assert.equal(slots[3].requests, 0);
+  assert.equal(slots[3].empty, true, "a day without buckets is a real empty day");
+  assert.equal(slots[6].incompleteUsage, 1);
+  const today = h.module.rangeWindow("today", new Date(2026, 9, 26, 3, 20));
+  const hours = h.module.rollupBuckets([hourBucket(new Date(2026, 9, 26, 2))], today);
+  assert.deepEqual(Array.from(hours, slot => slot.start.getHours()), [0, 1, 2, 3], "no zero buckets for future hours");
+  assert.equal(hours[2].requests, 1);
+  const yesterday = h.module.rangeWindow("yesterday", new Date(2026, 9, 26, 3, 20));
+  const closed = h.module.rollupBuckets([hourBucket(new Date(2026, 9, 25, 23))], yesterday);
+  assert.equal(closed.length, 24);
+  assert.equal(closed[23].start.getHours(), 23);
+  assert.equal(closed[23].requests, 1);
+}));
+
+test("rollupBuckets keeps half-hour zones and DST days inside the selected local days", () => {
+  withTZ("Asia/Kolkata", () => {
+    const h = harness();
+    const window = h.module.rangeWindow("7d", new Date(2026, 9, 26, 11));
+    // UTC truncation makes the first returned bucket start 30 minutes before local midnight.
+    const early = new Date(window.from.getTime() - 30 * 60000);
+    const slots = h.module.rollupBuckets([hourBucket(early)], window);
+    assert.equal(slots.length, 7);
+    assert.equal(slots[0].requests, 1, "a truncated leading bucket is kept in the first day");
+  });
+  withTZ("America/New_York", () => {
+    const h = harness();
+    const window = h.module.rangeWindow("7d", new Date(2026, 10, 3, 10));
+    const slots = h.module.rollupBuckets([hourBucket(new Date(2026, 10, 1, 23))], window);
+    assert.deepEqual(Array.from(slots, slot => slot.start.getDate()), [28, 29, 30, 31, 1, 2, 3]);
+    assert.equal(slots[4].requests, 1, "the 25-hour DST day is still one local day");
+  });
+});
+
+test("range data comes from one hourly aggregate request with local boundaries", () => withTZ("Asia/Shanghai", async () => {
+  const ranges = rangeKeys.map(rangeButton);
+  const h = harness({rangeButtons: ranges});
+  h.setNow(new Date(2026, 9, 26, 11, 15, 30));
+  await h.module.loadOverview();
+  const aggregates = () => h.calls.filter(c => c.url.includes("/admin/data/usage/aggregate"));
+  assert.equal(aggregates().length, 1);
+  const first = new URL(aggregates()[0].url, "http://local");
+  assert.equal(first.searchParams.get("group_by"), "hour");
+  assert.equal(first.searchParams.get("from"), new Date(2026, 9, 26).toISOString());
+  assert.equal(first.searchParams.get("to"), new Date(2026, 9, 26, 11, 15, 30).toISOString());
+  assert.equal(ranges[0].attrs["aria-pressed"], "true");
+  assert.ok(h.calls.every(c => !c.url.includes("group_by=day")));
+  await ranges[1].fire("click"); await h.advance(0);
+  const second = new URL(aggregates().at(-1).url, "http://local");
+  assert.equal(second.searchParams.get("from"), new Date(2026, 9, 25).toISOString());
+  assert.equal(second.searchParams.get("to"), new Date(new Date(2026, 9, 26).getTime() - 1).toISOString());
+  assert.equal(ranges[1].attrs["aria-pressed"], "true");
+  assert.equal(ranges[0].attrs["aria-pressed"], "false");
+  await ranges[4].fire("click"); await h.advance(0);
+  const third = new URL(aggregates().at(-1).url, "http://local");
+  assert.equal(third.searchParams.get("from"), new Date(2026, 8, 1).toISOString());
+  assert.equal(third.searchParams.get("to"), new Date(new Date(2026, 9, 1).getTime() - 1).toISOString());
+  assert.match(h.get("ovRangeWindow").textContent, /UTC\+08:00/);
+  assert.match(h.get("ovRangeWindow").textContent, /09-01 00:00/);
+  assert.doesNotMatch(h.get("ovRangeWindow").textContent, /整点/);
+}));
+
+test("half-hour time zones explain that range edges follow whole UTC hours", () => withTZ("Asia/Kolkata", async () => {
+  const h = harness({rangeButtons: rangeKeys.map(rangeButton)});
+  h.setNow(new Date(2026, 9, 26, 11, 15));
+  await h.module.loadOverview();
+  assert.match(h.get("ovRangeWindow").textContent, /UTC\+05:30/);
+  assert.match(h.get("ovRangeWindow").textContent, /整点/);
+}));
+
+test("switching ranges aborts the old aggregate and a late old response cannot overwrite the new range", () => withTZ("Asia/Shanghai", async () => {
+  const ranges = rangeKeys.map(rangeButton);
+  const h = harness({rangeButtons: ranges});
+  h.setNow(new Date(2026, 9, 26, 11, 15));
+  const pending = [];
+  h.setAggregateHandler((url, opts) => new Promise(resolve => pending.push({url, opts, resolve})));
+  const load = h.module.loadOverview();
+  await ranges[1].fire("click");
+  assert.equal(pending.length, 2);
+  assert.equal(pending[0].opts.signal.aborted, true, "old range request is aborted");
+  pending[1].resolve(aggregateResult({
+    totals: aggTotals({requests: 5, input_tokens: 50, output_tokens: 10, estimated_cost: 2}),
+    buckets: [hourBucket(new Date(2026, 9, 25, 9), {requests: 5, input_tokens: 50, output_tokens: 10, estimated_cost: 2})],
+    by_client: [{key: "yesterday-client", ...aggTotals({requests: 5, input_tokens: 50, output_tokens: 10, estimated_cost: 2})}],
+    by_model: [{key: "yesterday-model", ...aggTotals({requests: 5, input_tokens: 50, output_tokens: 10, estimated_cost: 2})}],
+  }));
+  await h.advance(0);
+  pending[0].resolve(aggregateResult({totals: aggTotals({requests: 999}), by_client: [{key: "stale-client", ...aggTotals({requests: 999})}], by_model: []}));
+  await load; await h.advance(0);
+  assert.equal(h.get("ovRangeRequests").textContent, "5");
+  assert.match(h.get("topClientsBody").innerHTML, /yesterday-client/);
+  assert.doesNotMatch(h.get("topClientsBody").innerHTML, /stale-client/);
+  assert.match(h.get("ovTokenTrend").getAttribute("aria-label"), /昨日/);
+}));
+
+test("cards, both trend charts and both rankings follow the selected range", () => withTZ("Asia/Shanghai", async () => {
+  const ranges = rangeKeys.map(rangeButton);
+  const h = harness({rangeButtons: ranges, barButtons: [barButton("requests"), barButton("cost")]});
+  h.setNow(new Date(2026, 9, 26, 3, 20));
+  h.setAggregateHandler(url => {
+    const from = new URL(url, "http://local").searchParams.get("from");
+    if (from === new Date(2026, 9, 26).toISOString()) return aggregateResult({
+      totals: aggTotals({requests: 3, input_tokens: 30, output_tokens: 6, cached_tokens: 4, estimated_cost: 1.5}),
+      buckets: [hourBucket(new Date(2026, 9, 26, 1), {requests: 3, input_tokens: 30, output_tokens: 6, cached_tokens: 4, estimated_cost: 1.5})],
+      by_client: [{key: "alpha", ...aggTotals({requests: 3, input_tokens: 30, output_tokens: 6, cached_tokens: 4, estimated_cost: 1.5})}],
+      by_model: [{key: "m-today", ...aggTotals({requests: 3, input_tokens: 30, output_tokens: 6, cached_tokens: 4, estimated_cost: 1.5})}],
+    });
+    return aggregateResult({
+      totals: aggTotals({requests: 9, input_tokens: 90, output_tokens: 18, estimated_cost: 4}),
+      buckets: [hourBucket(new Date(2026, 9, 21, 5), {requests: 4, input_tokens: 40, output_tokens: 8, estimated_cost: 1}), hourBucket(new Date(2026, 9, 25, 7), {requests: 5, input_tokens: 50, output_tokens: 10, estimated_cost: 3})],
+      by_client: [{key: "alpha", ...aggTotals({requests: 4, estimated_cost: 1})}, {key: "beta", ...aggTotals({requests: 5, estimated_cost: 3})}],
+      by_model: [{key: "m-a", ...aggTotals({requests: 9, estimated_cost: 4})}],
+    });
+  });
+  await h.module.loadOverview();
+  assert.equal(h.get("ovRangeRequests").textContent, "3");
+  assert.equal(h.get("ovRangeTotalTokens").textContent, "40");
+  assert.equal(h.get("ovRangeInputTokens").textContent, "34", "input includes cached tokens so input + output = total");
+  assert.equal(h.get("ovRangeOutputTokens").textContent, "6");
+  assert.equal(h.get("ovRangeCost").textContent, "$1.50");
+  assert.equal(h.get("ovRangeClients").textContent, "1");
+  assert.equal(h.get("ovRangeModels").textContent, "1");
+  assert.equal((h.get("ovBarTrend").innerHTML.match(/<rect class="overview-bar/g) || []).length, 1, "one non-zero hour bar");
+  assert.match(h.get("ovTokenTrend").innerHTML, /activity-input/);
+  assert.match(h.get("ovTokenTrend").innerHTML, /activity-output/);
+  assert.match(h.get("ovTrendUnit").textContent, /小时/);
+  await h.get("ovTokenTrend").fire("keydown", {key: "Home"});
+  await h.get("ovTokenTrend").fire("keydown", {key: "ArrowRight"});
+  for (const id of ["ovTokenTrendReadout", "ovBarTrendReadout"]) {
+    const readout = h.get(id).textContent;
+    assert.match(readout, /01:00/, id);
+    assert.match(readout, /请求 3/, id);
+    assert.match(readout, /输入 34/, id);
+    assert.match(readout, /输出 6/, id);
+    assert.match(readout, /\$1\.50/, id);
+  }
+  await ranges[2].fire("click"); await h.advance(0);
+  assert.equal(h.get("ovRangeRequests").textContent, "9");
+  assert.equal(h.get("ovRangeCost").textContent, "$4.00");
+  assert.equal(h.get("ovRangeClients").textContent, "2");
+  assert.match(h.get("ovTrendUnit").textContent, /天/);
+  assert.equal((h.get("ovBarTrend").innerHTML.match(/<rect class="overview-bar/g) || []).length, 2);
+  assert.match(h.get("ovBarTrend").getAttribute("aria-label"), /近 7 天/);
+  assert.deepEqual([...h.get("topClientsBody").innerHTML.matchAll(/data-top-client="([^"]+)"/g)].map(m => m[1]), ["beta", "alpha"]);
+  assert.deepEqual([...h.get("topModelsBody").innerHTML.matchAll(/data-top-model="([^"]+)"/g)].map(m => m[1]), ["m-a"]);
+  const [, cost] = h.doc.querySelectorAll("[data-overview-bar]");
+  await cost.fire("click");
+  assert.equal(cost.attrs["aria-pressed"], "true");
+  assert.match(h.get("ovBarTrend").getAttribute("aria-label"), /估算费用/);
+  assert.match(h.get("ovBarTrend").innerHTML, /overview-bar-cost/);
+  assert.match(h.get("ovBarTrend").innerHTML, /\$/);
+  assert.doesNotMatch(h.get("ovBarTrend").innerHTML + h.get("ovTokenTrend").innerHTML, /NaN|Infinity|undefined/);
+}));
+
+test("range panels separate unavailable data from an empty range and flag incomplete usage", () => withTZ("Asia/Shanghai", async () => {
+  const h = harness({rangeButtons: rangeKeys.map(rangeButton)});
+  h.setNow(new Date(2026, 9, 26, 11));
+  h.setAggregate(aggregateResult());
+  await h.module.loadOverview();
+  assert.equal(h.get("ovRangeRequests").textContent, "0");
+  assert.equal(h.get("ovRangeTotalTokens").textContent, "0");
+  assert.equal(h.get("ovRangeCost").textContent, "$0.00");
+  assert.equal(h.get("ovRangeClients").textContent, "0");
+  assert.match(h.get("ovTrendStatus").textContent, /暂无/);
+  assert.doesNotMatch(h.get("ovTrendStatus").textContent, /不可用/);
+  assert.equal(h.get("ovRangeStatus").dataset.state, "ready");
+  assert.match(h.get("ovRangeStatus").textContent, /估算/);
+  assert.match(h.get("ovRangeStatus").textContent, /含模型组系数/);
+
+  h.setAggregate({totals: {requests: 3}});
+  await h.module.loadOverview(true);
+  assert.equal(h.get("ovRangeRequests").textContent, "3");
+  assert.equal(h.get("ovRangeTotalTokens").textContent, "不可用");
+  assert.equal(h.get("ovRangeCost").textContent, "不可用");
+  assert.equal(h.get("ovRangeClients").textContent, "不可用");
+  assert.equal(h.get("ovRangeModels").textContent, "不可用");
+  assert.match(h.get("ovTrendStatus").textContent, /不可用/);
+  assert.match(h.get("ovTokenTrendReadout").textContent, /不可用/);
+  assert.notEqual(h.get("ovRangeStatus").dataset.state, "ready");
+  assert.match(h.get("topClientsStatus").textContent, /缺少/);
+
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 2, incomplete_usage_count: 2, incomplete_cost_count: 1}), buckets: [hourBucket(new Date(2026, 9, 26, 9), {incomplete_usage_count: 2})]}));
+  await h.module.loadOverview(true);
+  assert.equal(h.get("ovRangeStatus").dataset.state, "partial");
+  assert.match(h.get("ovRangeStatus").textContent, /2 条用量不完整/);
+  assert.match(h.get("ovRangeStatus").textContent, /1 条成本覆盖不完整/);
+  await h.get("ovTokenTrend").fire("keydown", {key: "End"});
+  await h.get("ovTokenTrend").fire("keydown", {key: "ArrowLeft"});
+  await h.get("ovTokenTrend").fire("keydown", {key: "ArrowLeft"});
+  assert.match(h.get("ovTokenTrendReadout").textContent, /用量不完整/);
+
+  h.setAggregateHandler(() => Promise.reject(new Error("offline")));
+  await h.module.loadOverview(true);
+  assert.equal(h.get("ovRangeRequests").textContent, "2", "a failed refresh of the same range keeps the last data");
+  assert.match(h.get("ovRangeStatus").textContent, /更新失败.*上次数据/);
+  assert.equal(h.get("ovRangeStatus").dataset.state, "partial");
+
+  const empty = harness({rangeButtons: rangeKeys.map(rangeButton)});
+  empty.setAggregateHandler(() => Promise.reject(new Error("offline")));
+  await empty.module.loadOverview();
+  for (const id of ["ovRangeRequests", "ovRangeTotalTokens", "ovRangeCost", "ovRangeClients", "ovRangeModels"]) assert.equal(empty.get(id).textContent, "不可用", id);
+  assert.equal(empty.get("ovRangeStatus").dataset.state, "error");
+  assert.match(empty.get("ovTrendStatus").textContent, /不可用/);
+}));
+
+test("a hung aggregate times out after 12s and keeps the last data of the same range", () => withTZ("Asia/Shanghai", async () => {
+  const h = harness({rangeButtons: rangeKeys.map(rangeButton)});
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 4})}));
+  await h.module.loadOverview();
+  h.setAggregateHandler(() => new Promise(() => {}));
+  const hung = h.module.loadOverview(true);
+  const call = h.calls.filter(c => c.url.includes("usage/aggregate")).at(-1);
+  await h.advance(11999);
+  assert.equal(call.opts.signal.aborted, false);
+  await h.advance(1); await hung;
+  assert.equal(call.opts.signal.aborted, true);
+  assert.equal(h.get("ovRangeRequests").textContent, "4");
+  assert.match(h.get("ovRangeStatus").textContent, /超时.*上次数据/);
+}));
+
+test("rankings show top ten with cost share and never fabricate a share", () => withTZ("Asia/Shanghai", async () => {
+  const h = harness();
+  const clients = Array.from({length: 12}, (_, i) => ({key: "c" + String(i).padStart(2, "0"), ...aggTotals({requests: i + 1, input_tokens: 1, estimated_cost: i})}));
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 78, estimated_cost: 66}), by_client: clients, by_model: [{key: "m-no-cost", requests: 3, input_tokens: 1, output_tokens: 0}]}));
+  await h.module.loadOverview();
+  const rows = [...h.get("topClientsBody").innerHTML.matchAll(/data-top-client="([^"]+)"/g)].map(m => m[1]);
+  assert.equal(rows.length, 10);
+  assert.deepEqual(rows.slice(0, 2), ["c11", "c10"]);
+  assert.match(h.get("topClientsBody").innerHTML, /data-top-client="c11">.*16\.7%/);
+  assert.match(h.get("topModelsBody").innerHTML, /data-top-model="m-no-cost">.*不可用/);
+  assert.match(h.get("topClientsStatus").textContent, /前 10/);
+  assert.match(h.get("topClientsStatus").textContent, /12/);
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 2, estimated_cost: 0}), by_client: [{key: "free", ...aggTotals({requests: 2, estimated_cost: 0})}]}));
+  await h.module.loadOverview(true);
+  assert.match(h.get("topClientsBody").innerHTML, /data-top-client="free">.*\$0\.00.*—/);
+}));
+
+test("the selected range is remembered and unusable storage falls back to today", () => withTZ("Asia/Shanghai", async () => {
+  const saved = [];
+  const storage = {getItem: () => "last_month", setItem: (key, value) => saved.push([key, value])};
+  const ranges = rangeKeys.map(rangeButton);
+  const h = harness({rangeButtons: ranges, storage});
+  h.setNow(new Date(2026, 9, 26, 11));
+  await h.module.loadOverview();
+  assert.equal(ranges[4].attrs["aria-pressed"], "true");
+  const url = new URL(h.calls.find(c => c.url.includes("usage/aggregate")).url, "http://local");
+  assert.equal(url.searchParams.get("from"), new Date(2026, 8, 1).toISOString());
+  await ranges[2].fire("click");
+  assert.equal(saved.at(-1)[1], "7d");
+  const broken = {getItem() { throw new Error("denied"); }, setItem() { throw new Error("denied"); }};
+  const b = harness({rangeButtons: rangeKeys.map(rangeButton), storage: broken});
+  await b.module.loadOverview();
+  assert.equal(b.doc.querySelectorAll("[data-overview-range]")[0].attrs["aria-pressed"], "true");
+  await b.doc.querySelectorAll("[data-overview-range]")[1].fire("click");
+  assert.equal(b.doc.querySelectorAll("[data-overview-range]")[1].attrs["aria-pressed"], "true");
+  const stale = harness({rangeButtons: rangeKeys.map(rangeButton), storage: {getItem: () => "1h", setItem() {}}});
+  await stale.module.loadOverview();
+  assert.equal(stale.doc.querySelectorAll("[data-overview-range]")[0].attrs["aria-pressed"], "true", "an obsolete saved key falls back to today");
+}));
+
+test("live status cards merge the former chain summary and show the 72h success rate", async () => {
+  const h = harness();
+  h.setOverview({
+    client_count: 3,
+    targets: [
+      {Name: "healthy", Phase: "ready", TotalKeys: 2, ActiveKeys: 2, RateLimitedKeys: 0, BlockedKeys: 0, ExhaustedSubscriptionKeys: 0, ExhaustedAPIKeys: 0, OtherExhaustedKeys: 0},
+      {Name: "limited", Phase: "ready", TotalKeys: 2, ActiveKeys: 1, RateLimitedKeys: 1},
+    ],
+    request_stats_72h: completeStats({total: 8, success: 6, failure: 2, success_rate: 75}),
+    recent_audit: [],
+  });
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview();
+  assert.equal(h.get("activityActiveRequests").textContent, "2");
+  assert.equal(h.get("activityWebsocketSessions").textContent, "3");
+  assert.equal(h.get("chainTargets").textContent, "1 / 2");
+  assert.equal(h.get("chainKeys").textContent, "3 / 4");
+  assert.match(h.get("chainKeysDetail").textContent, /限流 1/);
+  assert.equal(h.get("ovLiveSuccessRate").textContent, "75%");
+  assert.match(h.get("ovLiveSuccessDetail").textContent, /8/);
+  const missing = harness();
+  missing.setOverview({});
+  await missing.module.loadOverview();
+  assert.equal(missing.get("ovLiveSuccessRate").textContent, "不可用");
+  assert.equal(missing.get("chainTargets").textContent, "不可用");
+});
+
+test("trend charts redraw on resize and keep readable axes at mobile width", () => withTZ("Asia/Shanghai", async () => {
+  const h = harness();
+  for (const id of ["ovTokenTrend", "ovBarTrend"]) h.get(id).getBoundingClientRect = () => ({left: 0, top: 0, width: 300, height: 195});
+  h.setNow(new Date(2026, 9, 26, 11));
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 1}), buckets: [hourBucket(new Date(2026, 9, 26, 3), {input_tokens: 9000000})]}));
+  await h.module.loadOverview();
+  assert.equal(h.get("ovTokenTrend").attrs.viewBox, "0 0 300 195");
+  assert.match(h.get("ovTokenTrend").innerHTML, /M<\/text>/);
+  const labels = [...h.get("ovBarTrend").innerHTML.matchAll(/class="activity-axis"[^>]*text-anchor="(?:start|middle|end)">(\d\d:\d\d)<\/text>/g)].map(m => m[1]);
+  assert.ok(labels.length >= 2 && labels.length <= 4, `x labels ${labels.join(",")}`);
+  await h.get("ovBarTrend").fire("pointermove", {clientX: 299});
+  assert.match(h.get("ovBarTrendReadout").textContent, /11:00/);
+}));
+
+test("leaving and returning keeps the last range and metrics values until fresh data arrives", () => withTZ("Asia/Shanghai", async () => {
+  const h = harness({rangeButtons: rangeKeys.map(rangeButton)});
+  h.setOverview({client_count: 1, targets: [], recent_audit: []});
+  h.setMetrics(completeMetrics({requests: {total: 7}}));
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 4, estimated_cost: 2}), by_client: [{key: "old-client", ...aggTotals({requests: 4, estimated_cost: 2})}], by_model: []}));
+  h.module.startOverviewAutoRefresh();
+  await h.module.loadOverview();
+  assert.equal(h.get("ovRangeRequests").textContent, "4");
+  assert.match(h.get("chainProxy").textContent, /累计 7/);
+  h.doc.hidden = true; h.doc.listeners.visibilitychange();
+  const pending = [];
+  h.setAggregateHandler(() => new Promise(resolve => pending.push(resolve)));
+  h.setHandler(url => url.endsWith("/admin/metrics") ? new Promise(() => {}) : url.endsWith("activity") ? Promise.resolve(activity()) : url.endsWith("overview") ? Promise.resolve({client_count: 1, targets: [], recent_audit: []}) : new Promise(resolve => pending.push(resolve)));
+  h.doc.hidden = false; h.doc.listeners.visibilitychange();
+  await h.advance(0);
+  assert.equal(pending.length, 1, "returning forces a fresh aggregate request");
+  assert.equal(h.get("ovRangeRequests").textContent, "4", "old card value stays while the new request is in flight");
+  assert.equal(h.get("ovRangeCost").textContent, "$2.00");
+  assert.match(h.get("topClientsBody").innerHTML, /data-top-client="old-client"/);
+  assert.doesNotMatch(h.get("topClientsStatus").textContent, /正在加载|不可用/);
+  assert.notEqual(h.get("ovRangeStatus").dataset.state, "error");
+  assert.match(h.get("chainProxy").textContent, /累计 7/, "metrics stay visible while the refetch is pending");
+  pending[0](aggregateResult({totals: aggTotals({requests: 6}), by_client: [{key: "new-client", ...aggTotals({requests: 6})}], by_model: []}));
+  await h.advance(0);
+  assert.equal(h.get("ovRangeRequests").textContent, "6");
+  assert.match(h.get("topClientsBody").innerHTML, /new-client/);
+  h.module.stopOverviewAutoRefresh();
+}));
+
+test("overview requests rely only on the page deadline, not the core api default timeout", async () => {
+  const h = harness();
+  await h.module.loadOverview(true);
+  for (const url of ["/admin/api/activity", "/admin/api/overview", "/admin/metrics", "/admin/data/usage/aggregate"]) {
+    const call = h.calls.find(c => c.url.startsWith(url));
+    assert.ok(call, url);
+    assert.equal(call.opts.timeoutMs, 0, url + " disables the core api timeout");
+    assert.ok(call.opts.signal, url + " keeps the page abort signal");
+  }
+});
+
+test("client activity table spans the table grid and keeps its scroll width at every viewport", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+  const start = html.indexOf("    #page-overview { --activity-secondary");
+  const css = html.slice(start, html.indexOf("</style>", start));
+  // Rules outside any @media block apply at every width.
+  const base = css.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, "");
+  assert.match(base, /#page-overview \.overview-tables > \.activity-clients \{[^}]*grid-column:1 \/ -1/);
+  assert.match(base, /#page-overview \.activity-client-table \{[^}]*min-width:580px/);
+  assert.match(base, /#page-overview \.activity-client-table td:first-child \{[^}]*position:sticky/);
+  const twoColumns = css.match(/@media\(min-width:(\d+)px\) \{\s*#page-overview \.overview-tables \{ grid-template-columns:repeat\(2/);
+  assert.ok(twoColumns, "two-column table grid breakpoint exists");
+  assert.equal(Number(twoColumns[1]), 1280);
+});
+
+test("table panels keep DOM order equal to visual order and leave no grid holes", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+  const start = html.indexOf("    #page-overview { --activity-secondary");
+  const css = html.slice(start, html.indexOf("</style>", start));
+  assert.doesNotMatch(css, /grid-auto-flow:[^;}]*dense/, "dense packing would reorder panels visually but not for Tab or screen readers");
+  const grid = html.slice(html.indexOf('<div class="overview-tables">'), html.indexOf('<details class="activity-history">'));
+  const panels = [...grid.matchAll(/<section class="overview-panel([^"]*)"(?: id="([^"]+)")?/g)].map(m => m[2] || m[1].trim());
+  assert.deepEqual(panels, ["topClients", "topModels", "targetHealth", "overviewAttention", "recentChanges", "activity-clients"]);
+  // Five panels precede the full-width activity table; the fifth spans two columns,
+  // which completes the last row in both the two-column and three-column grids.
+  const multi = css.match(/@media\(min-width:1280px\) \{([^}]*\}[^}]*)\}/);
+  assert.ok(multi, "multi-column media block exists");
+  assert.match(multi[1], /#page-overview \.overview-tables > #recentChanges \{ grid-column:span 2;/);
 });

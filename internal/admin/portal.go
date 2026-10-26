@@ -185,8 +185,8 @@ var adminLoginHTML = `<!doctype html>
     }
     * { box-sizing: border-box; }
     html { height: 100%; }
-    body { margin:0; min-height:100vh; min-height:100dvh; display:grid; place-items:center; padding:24px 16px; background:var(--bg); color:var(--ink); font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif; font-size:14px; line-height:1.5; }
-    .login-card { width:100%; max-width:360px; margin:0; padding:24px; background:var(--surface); border:1px solid var(--line); border-radius:10px; box-shadow:var(--shadow); }
+    body { margin:0; min-height:100vh; min-height:100dvh; display:grid; place-items:center; padding:24px 16px; background:var(--bg); color:var(--ink); font-family:-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; text-rendering:optimizeLegibility; font-size:14px; line-height:1.5; }
+    .login-card { width:100%; max-width:440px; margin:0; padding:32px 36px; background:var(--surface); border:1px solid var(--line); border-radius:10px; box-shadow:var(--shadow); }
     .brand { display:flex; align-items:center; gap:10px; margin-bottom:20px; }
     .brand-mark { width:30px; height:30px; border-radius:8px; background:var(--brand); color:var(--brand-ink); display:grid; place-items:center; flex:0 0 auto; }
     .brand-name { font-size:15px; font-weight:700; letter-spacing:-.01em; }
@@ -194,15 +194,16 @@ var adminLoginHTML = `<!doctype html>
     .login-error { margin:0 0 16px; padding:8px 10px; border-radius:8px; background:var(--bad-soft); color:var(--bad); font-size:13px; line-height:1.5; }
     .field { margin-bottom:14px; }
     label { display:block; margin-bottom:6px; color:var(--ink-2); font-size:12px; font-weight:500; }
-    input { width:100%; height:34px; padding:0 10px; background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:8px; font:inherit; font-size:14px; caret-color:var(--accent); }
+    input { width:100%; height:40px; padding:0 12px; background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:8px; font:inherit; font-size:14px; caret-color:var(--accent); }
     input:hover { border-color:var(--ink-3); }
     input:focus { border-color:var(--accent); }
     input:focus-visible, button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-    button[type=submit] { width:100%; height:36px; margin-top:4px; border:0; border-radius:8px; background:var(--accent); color:var(--accent-ink); font:inherit; font-size:14px; font-weight:600; cursor:pointer; transition:background .15s ease; }
+    button[type=submit] { width:100%; height:40px; margin-top:8px; border:0; border-radius:8px; background:var(--accent); color:var(--accent-ink); font:inherit; font-size:14px; font-weight:600; cursor:pointer; transition:background .15s ease; }
     button[type=submit]:hover { background:var(--accent-hover); }
     button[type=submit]:active { transform:translateY(1px); }
     .login-meta { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px 12px; margin-top:20px; padding-top:14px; border-top:1px solid var(--line-2); color:var(--ink-3); font-size:12px; }
     .login-version { font-variant-numeric:tabular-nums; }
+    @media (max-width:480px) { .login-card { padding:24px 20px; } }
     ::selection { background:var(--accent-soft); color:var(--ink); }
   </style>
 </head>

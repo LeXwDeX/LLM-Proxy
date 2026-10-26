@@ -129,3 +129,36 @@ func uiPageSection(t *testing.T, pageID string) string {
 	}
 	return rest
 }
+
+// TestUIOverviewRangeLayout 锁定总览的区间选择与分区结构：五个本地区间（不含旧的近 1 小时），
+// 区间卡片、两张区间趋势图、两张排行表与实时卡片均存在；区间数据只请求小时粒度聚合。
+func TestUIOverviewRangeLayout(t *testing.T) {
+	overview := uiPageSection(t, "page-overview")
+	var ranges []string
+	for rest := overview; ; {
+		i := strings.Index(rest, `data-overview-range="`)
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len(`data-overview-range="`):]
+		ranges = append(ranges, rest[:strings.Index(rest, `"`)])
+	}
+	if got, want := strings.Join(ranges, ","), "today,yesterday,7d,30d,last_month"; got != want {
+		t.Errorf("总览区间按钮 = %s，want %s", got, want)
+	}
+	for _, id := range []string{"ovRangeWindow", "ovRangeRequests", "ovRangeTotalTokens", "ovRangeCost", "ovRangeClients", "ovRangeModels",
+		"chainSummary", "activityActiveRequests", "chainTargets", "chainKeys", "ovLiveSuccessRate",
+		"ovTokenTrend", "ovBarTrend", "activityConcurrencyChart", "activityTokenChart", "topClientsBody", "topModelsBody",
+		"targetHealthBody", "activityClientsBody", "overviewAttentionList", "recentChangesBody"} {
+		if !strings.Contains(overview, `id="`+id+`"`) {
+			t.Errorf("总览缺少 #%s", id)
+		}
+	}
+	if strings.Contains(overview, "overview-chain-node") {
+		t.Error("链路摘要已并入实时状态卡片，不应再单独渲染")
+	}
+	js := adminUIJSSources()["ui/js/overview.js"]
+	if !strings.Contains(js, "group_by=hour") || strings.Contains(js, "group_by=day") {
+		t.Error("总览区间数据必须只请求 group_by=hour 聚合，由前端汇总本地自然日")
+	}
+}

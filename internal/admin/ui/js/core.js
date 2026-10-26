@@ -159,16 +159,107 @@ AdminApp.register("core", function (app) {
   }
 
   /* ===== API ===== */
+  // Every request has a deadline: a keep-alive socket silently dropped by a
+  // middlebox would otherwise leave fetch pending forever (Issue #54).
+  // opts.timeoutMs overrides it; 0 disables it for intentionally long calls.
+  var API_TIMEOUT_MS = 15000;
+  var loginRedirecting = false;
+  function namedError(name, message) {
+    var error = new Error(message);
+    error.name = name;
+    return error;
+  }
+  // Timeouts and fetch network failures (TypeError) are worth a fresh attempt;
+  // HTTP errors and validation failures are deterministic and are not.
+  function isTransientError(error) {
+    return (
+      !!error && (error.name === "TimeoutError" || error.name === "TypeError")
+    );
+  }
+  // Matches SessionManager.unauthorized (session.go): 401 {"error":"unauthorized"}.
+  // Other 401 bodies (e.g. "not authenticated") and other statuses never navigate.
+  // next returns the user to this page; portal.sanitizeNext accepts /admin paths
+  // and falls back to /admin for anything else.
+  function redirectToLogin() {
+    if (loginRedirecting) return;
+    loginRedirecting = true;
+    if (
+      typeof location === "undefined" ||
+      !location ||
+      typeof location.assign !== "function"
+    )
+      return;
+    var here =
+      (location.pathname || "") + (location.search || "") + (location.hash || "");
+    location.assign("/login" + (here ? "?next=" + encodeURIComponent(here) : ""));
+  }
   async function api(url, opts) {
     var init = Object.assign({}, opts || {});
+    var timeoutMs =
+      init.timeoutMs === undefined || init.timeoutMs === null
+        ? API_TIMEOUT_MS
+        : Number(init.timeoutMs) || 0;
+    delete init.timeoutMs;
+    var callerSignal = init.signal || null;
     init.headers = Object.assign({}, init.headers || {});
     init.headers["X-Requested-With"] = "XMLHttpRequest";
     if (init.body && typeof init.body !== "string") {
       init.body = JSON.stringify(init.body);
       init.headers["Content-Type"] = "application/json";
     }
-    var resp = await fetch(url, init);
-    var text = await resp.text();
+    // Either the caller's signal or the deadline aborts the real fetch. The
+    // guard also settles the request when a transport ignores abort, and it
+    // spans reading the body, not only the response headers.
+    var controller =
+      typeof AbortController === "function" ? new AbortController() : null;
+    if (controller) init.signal = controller.signal;
+    var timer = null;
+    var onCallerAbort = null;
+    var failure = null;
+    var guard = new Promise(function (resolve, reject) {
+      function fail(error) {
+        if (failure) return;
+        failure = error;
+        reject(error);
+        if (controller) controller.abort();
+      }
+      if (callerSignal) {
+        onCallerAbort = function () {
+          fail(namedError("AbortError", "请求已取消"));
+        };
+        if (callerSignal.aborted) onCallerAbort();
+        else
+          callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+      if (timeoutMs > 0)
+        timer = setTimeout(function () {
+          fail(
+            namedError(
+              "TimeoutError",
+              "请求超时（" + Math.round(timeoutMs / 1000) + " 秒无响应）",
+            ),
+          );
+        }, timeoutMs);
+    });
+    guard.catch(function () {});
+    var exchange = (async function () {
+      var resp = await fetch(url, init);
+      var text = await resp.text();
+      return { resp: resp, text: text };
+    })();
+    exchange.catch(function () {});
+    var result;
+    try {
+      result = await Promise.race([exchange, guard]);
+    } catch (e) {
+      throw failure || e;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      if (callerSignal && onCallerAbort)
+        callerSignal.removeEventListener("abort", onCallerAbort);
+    }
+    var resp = result.resp;
+    var text = result.text;
     var data = {};
     if (text) {
       try {
@@ -177,6 +268,8 @@ AdminApp.register("core", function (app) {
         data = { raw: text };
       }
     }
+    if (resp.status === 401 && data && data.error === "unauthorized")
+      redirectToLogin();
     if (!resp.ok)
       throw new Error(data.error || "请求失败 (HTTP " + resp.status + ")");
     return data;
@@ -282,6 +375,7 @@ AdminApp.register("core", function (app) {
     inputToISO: inputToISO,
     toast: toast,
     api: api,
+    isTransientError: isTransientError,
     openModal: openModal,
     closeModal: closeModal,
     showConfirm: showConfirm,

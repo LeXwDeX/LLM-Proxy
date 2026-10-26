@@ -37,6 +37,7 @@ AdminApp.register("clients", function (app) {
             ) +
             "&to=" +
             encodeURIComponent(new Date().toISOString()),
+          { timeoutMs: 60000 }, // 30-day aggregate scans many usage events
         ).then(function (r) {
           return { key: "agg", data: r };
         }),

@@ -309,6 +309,7 @@ AdminApp.register("usage", function (app) {
           groupBy +
           "&" +
           qs.toString(),
+        { timeoutMs: 60000 }, // wide ranges scan many usage events
       );
       if (version !== usageLoadVersion) return;
       mainAgg = mainAgg && typeof mainAgg === "object" ? mainAgg : {};

@@ -751,7 +751,7 @@ AdminApp.register("targets", function (app) {
         }
         return (
           "<div style='display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;margin-bottom:4px;background:var(--surface-2);'>" +
-          "<span style='font-family:ui-monospace, SF Mono, Menlo, Consolas, monospace;font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='" +
+          "<span style='font-family:var(--font-mono);font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='" +
           esc(mask) +
           "'>" +
           esc(mask) +
@@ -1295,7 +1295,8 @@ AdminApp.register("targets", function (app) {
                 "/admin/data/targets/" +
                   encodeURIComponent(name) +
                   "/keys/wakeup",
-                { method: "POST" },
+                // Server probes keys sequentially, 5s each; no client deadline.
+                { method: "POST", timeoutMs: 0 },
               );
               var recovered = result.recovered || 0;
               toast("唤醒完成: 恢复了 " + recovered + " 个 Key", "success");
@@ -1477,6 +1478,8 @@ AdminApp.register("targets", function (app) {
       {
         method: "POST",
         body: { model: model },
+        // Server bounds each upstream attempt (60s) and may rotate keys/paths.
+        timeoutMs: 0,
       },
     )
       .then(function (res) {
@@ -1588,7 +1591,7 @@ AdminApp.register("targets", function (app) {
       '<input class="form-control" placeholder="Field Name" style="flex:1;font-size:13px;" value="' +
       (name || "").replace(/"/g, "&quot;") +
       '">' +
-      '<input class="form-control" placeholder="Value (JSON)" style="flex:2;font-size:13px;font-family:ui-monospace, SF Mono, Menlo, Consolas, monospace;" value="' +
+      '<input class="form-control" placeholder="Value (JSON)" style="flex:2;font-size:13px;font-family:var(--font-mono);" value="' +
       (value || "").replace(/"/g, "&quot;") +
       '">' +
       '<button type="button" class="btn btn-sm btn-danger" style="padding:2px 8px;">&times;</button>';
