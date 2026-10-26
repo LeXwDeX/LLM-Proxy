@@ -623,8 +623,8 @@ test("live status ops notice lists only non-zero backlog, budget and process-lif
   assert.equal(notice.hidden, false);
   assert.equal(notice.textContent, [
     "用量写入积压 7 条",
-    "用量等待后台重试 8 条",
-    "请求完成统计队列丢弃 9 条",
+    "自启动累计 8 条用量因写入队列满转入后台重放",
+    "自启动累计 9 条请求完成统计因队列满丢弃",
     "压缩响应观察预算拒绝 3 次（br 1 / zstd 2）",
     "自启动累计 2 次用量写入失败",
     "自启动累计 3 次客户端断开且未取得用量",
@@ -641,7 +641,7 @@ test("live status ops notice lists only non-zero backlog, budget and process-lif
   h.setMetrics(completeMetrics({persistence: {usage_async_pending: 0, usage_async_deferred: 1, request_stats_dropped: 0}}));
   await h.module.loadOverview(true);
   assert.equal(notice.hidden, false);
-  assert.equal(notice.textContent, "用量等待后台重试 1 条 · 自启动累计 6 次客户端断开且未取得用量");
+  assert.equal(notice.textContent, "自启动累计 1 条用量因写入队列满转入后台重放 · 自启动累计 6 次客户端断开且未取得用量");
 });
 
 test("live status ops notice is hidden when every counter is zero", async () => {

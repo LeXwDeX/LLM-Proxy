@@ -23,7 +23,7 @@ FORM: 客户端联动的汇总—双曲线—明细工作面继续保留。区�
 
 ## Data and states
 
-- 托管链路只汇总已有值：`/admin/api/overview` 的 `client_count`、`targets`，`/admin/api/activity` 的当前在途/WS 会话与活跃客户端，`/admin/metrics` 的启动累计请求、运行时长、持久化积压和观察预算。缺失部分显示不可用，不推算。实时状态下方一行 `#chainOpsNotice` 以小号警示色文字列出非零的用量写入积压/后台重试、请求统计队列丢弃、压缩响应观察预算拒绝及 `requests` 的自启动累计写入失败/断开/中断计数，以「 · 」连接；全部为零或数据缺失时隐藏，不显示伪造的零或错误文案。
+- 托管链路只汇总已有值：`/admin/api/overview` 的 `client_count`、`targets`，`/admin/api/activity` 的当前在途/WS 会话与活跃客户端，`/admin/metrics` 的启动累计请求、运行时长、持久化积压和观察预算。缺失部分显示不可用，不推算。实时状态下方一行 `#chainOpsNotice` 以小号警示色文字列出非零的用量写入积压（当前值）、自启动累计的队列满转入后台重放与请求统计队列丢弃、压缩响应观察预算拒绝及 `requests` 的自启动累计写入失败/断开/中断计数，以「 · 」连接；全部为零或数据缺失时隐藏，不显示伪造的零或错误文案。
 - 区间卡片只使用 `/admin/api/overview` 的 `usage_summary`：`last_hour`、`today`（UTC 自然日）、`last_7_days`、`last_30_days`。只显示请求数、总 Token、输入/输出、预估费用和不完整计数。不显示任意区间成功率、失败/取消/重试、活跃客户端、缓存命中率、QPS 或延迟，也不单独列出模型组折算费用子项；展示的 `estimated_cost` 已含模型组系数（模型组扣费系数）。显式 `0` 与缺失不同：缺失显示「不可用」，费用 `0` 显示 `$0.00`。
 - 目标健康读取 `/admin/api/overview.targets` 的 `proxy.TargetStatus` JSON。顶层为 PascalCase，`Window15m` 内为 snake_case。排序为 muted、half-open、offline、ready 且存在密钥问题、正常、未知最后。展示 Phase、MutedUntil、在途/容量、15 分钟窗口和各 Key 状态汇总；单 Key 只说明目标级状态，零 Key 明确提示可能使用 Bearer/透传；不展示 Key 掩码、逐 Key 请求数、GLM 子类、目标成功率或端点 URL。
 - 费用排行读取现有 `/admin/data/usage/aggregate?from=...&to=...&group_by=day`，范围与所选区间一致。客户端/模型各取前 5，按 `estimated_cost` 降序、`requests` 降序、名称升序。费用标注为估算费用（含模型组系数），并说明按 UTC 自然日桶边界聚合（`group_by=day`）。缺失或被拒绝的聚合显示不可用，不显示零；`$0.00` 不能推断为免费或未定价。

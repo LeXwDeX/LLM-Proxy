@@ -664,8 +664,8 @@ AdminApp.register("overview", function (app) {
     if (persistence) {
       [
         ["usage_async_pending", "用量写入积压 ", " 条"],
-        ["usage_async_deferred", "用量等待后台重试 ", " 条"],
-        ["request_stats_dropped", "请求完成统计队列丢弃 ", " 条"],
+        ["usage_async_deferred", "自启动累计 ", " 条用量因写入队列满转入后台重放"],
+        ["request_stats_dropped", "自启动累计 ", " 条请求完成统计因队列满丢弃"],
       ].forEach(function (entry) {
         var count = persistence[entry[0]];
         if (counter(count) && count > 0) items.push(entry[1] + fmtNum(count) + entry[2]);
