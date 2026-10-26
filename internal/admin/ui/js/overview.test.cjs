@@ -1404,3 +1404,57 @@ test("table panels keep DOM order equal to visual order and leave no grid holes"
   assert.ok(multi, "multi-column media block exists");
   assert.match(multi[1], /#page-overview \.overview-tables > #recentChanges \{ grid-column:span 2;/);
 });
+
+test("after crossing local midnight a failed refresh keeps the snapshot's own window and says so", () => withTZ("Asia/Shanghai", async () => {
+  const h = harness({rangeButtons: rangeKeys.map(rangeButton)});
+  h.setNow(new Date(2026, 9, 25, 23, 50));
+  h.setAggregate(aggregateResult({
+    totals: aggTotals({requests: 400, estimated_cost: 8}),
+    buckets: [hourBucket(new Date(2026, 9, 25, 22), {requests: 400, estimated_cost: 8})],
+    by_client: [{key: "night-client", ...aggTotals({requests: 400, estimated_cost: 8})}],
+    by_model: [],
+  }));
+  await h.module.loadOverview();
+  assert.match(h.get("ovRangeWindow").textContent, /10-25 00:00 – 10-25 23:50/);
+  h.setNow(new Date(2026, 9, 26, 8, 0));
+  const pending = [];
+  h.setAggregateHandler(() => new Promise((resolve, reject) => pending.push({resolve, reject})));
+  const refresh = h.module.loadOverview(true);
+  assert.match(h.get("ovRangeWindow").textContent, /10-25 00:00 – 10-25 23:50/, "while the new request is in flight the note still describes the shown data");
+  pending[0].reject(new Error("offline"));
+  await refresh; await h.advance(0);
+  const note = h.get("ovRangeWindow").textContent;
+  assert.match(note, /10-25 00:00 – 10-25 23:50/, "note describes the snapshot, not the new day");
+  assert.doesNotMatch(note, /10-26 00:00/);
+  assert.match(note, /更新失败/);
+  assert.equal(h.get("ovRangeRequests").textContent, "400");
+  assert.match(h.get("ovRangeStatus").textContent, /更新失败，显示 10-25 00:00 – 10-25 23:50 的上次数据/);
+  assert.match(h.get("topClientsStatus").textContent, /10-25 00:00 – 10-25 23:50 的上次数据/);
+  assert.match(h.get("ovTrendStatus").textContent, /10-25 00:00 – 10-25 23:50 的上次数据/);
+  // The trend axis stays on the snapshot's own day: 24 hourly slots of 10-25, none of 10-26.
+  assert.match(h.get("ovBarTrend").getAttribute("aria-label"), /共 24 个时间桶/);
+  await h.get("ovBarTrend").fire("keydown", {key: "End"});
+  assert.match(h.get("ovBarTrendReadout").textContent, /^10-25 23:00/);
+  await h.get("ovBarTrend").fire("keydown", {key: "Home"});
+  assert.match(h.get("ovBarTrendReadout").textContent, /^10-25 00:00/);
+  // Success switches to the new window.
+  h.setAggregateHandler(null);
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 3})}));
+  await h.module.loadOverview(true);
+  assert.match(h.get("ovRangeWindow").textContent, /10-26 00:00 – 10-26 08:00/);
+  assert.doesNotMatch(h.get("ovRangeWindow").textContent, /更新失败/);
+  assert.equal(h.get("ovRangeRequests").textContent, "3");
+  assert.match(h.get("ovBarTrend").getAttribute("aria-label"), /共 9 个时间桶/);
+}));
+
+test("a failed refresh within the same window keeps the plain stale wording", () => withTZ("Asia/Shanghai", async () => {
+  const h = harness({rangeButtons: rangeKeys.map(rangeButton)});
+  h.setNow(new Date(2026, 9, 26, 8, 0));
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 2})}));
+  await h.module.loadOverview();
+  h.setNow(new Date(2026, 9, 26, 9, 30));
+  h.setAggregateHandler(() => Promise.reject(new Error("offline")));
+  await h.module.loadOverview(true);
+  assert.match(h.get("ovRangeStatus").textContent, /更新失败，显示上次数据/);
+  assert.doesNotMatch(h.get("ovRangeWindow").textContent, /更新失败/);
+}));

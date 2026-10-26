@@ -38,7 +38,11 @@ AdminApp.register("overview", function (app) {
   var historyError = "";
   var aggregateError = "";
   var aggregateLoading = false;
-  var aggregateWindow = null;
+  // The window that produced aggregateSnapshot; the note, trend axis and slot
+  // rollup always describe this window until a newer request succeeds.
+  var aggregateSnapshotWindow = null;
+  // The window of the latest aggregate request (may differ after local midnight).
+  var aggregateRequestWindow = null;
   var rangeButtons = [];
   var barButtons = [];
   var barMetric = "requests";
@@ -235,8 +239,17 @@ AdminApp.register("overview", function (app) {
   function rangeTotals() {
     return aggregateSnapshot && isObject(aggregateSnapshot.totals) ? aggregateSnapshot.totals : null;
   }
+  // True when the shown snapshot covers a different period than the one just
+  // requested, e.g. yesterday's "today" after the page stayed open past midnight.
+  // Within the same period only `to` advances and `from` stays equal.
+  function snapshotOutdated() {
+    return !!(aggregateSnapshot && aggregateSnapshotWindow && aggregateRequestWindow &&
+      aggregateSnapshotWindow.from.getTime() !== aggregateRequestWindow.from.getTime());
+  }
   function aggregateStaleText() {
-    return "更新" + (aggregateError === "加载超时" ? "超时" : "失败") + "，显示上次数据";
+    var verb = aggregateError === "加载超时" ? "超时" : "失败";
+    if (snapshotOutdated()) return "更新" + verb + "，显示 " + windowSpan(aggregateSnapshotWindow) + " 的上次数据";
+    return "更新" + verb + "，显示上次数据";
   }
   function rangeComplete(data) {
     return isObject(data) && ["requests", "input_tokens", "output_tokens", "estimated_cost"].every(function (key) { return counter(data[key]); });
@@ -350,21 +363,27 @@ AdminApp.register("overview", function (app) {
     minutes = Math.abs(minutes);
     return "UTC" + sign + pad(Math.floor(minutes / 60)) + ":" + pad(minutes % 60);
   }
-  function renderRangeWindow(window) {
-    var note = el("ovRangeWindow");
-    if (!window) { note.textContent = "统计区间不可用"; return; }
+  function windowSpan(window) {
     var year = new Date(Date.now()).getFullYear();
     var withYear = window.from.getFullYear() !== year || window.end.getFullYear() !== year;
     function stamp(date) { return (withYear ? date.getFullYear() + "-" : "") + shortDate(date) + " " + shortTime(date); }
+    return stamp(window.from) + " – " + stamp(window.end);
+  }
+  function renderRangeWindow(window, staleText) {
+    var note = el("ovRangeWindow");
+    if (!window) { note.textContent = "统计区间不可用"; return; }
     var offsets = offsetLabel(window.from);
     if (offsetLabel(window.end) !== offsets) offsets += " / " + offsetLabel(window.end);
-    var parts = [stamp(window.from) + " – " + stamp(window.end) + (window.closed ? "" : "（截至当前）"), "本地时区 " + offsets, window.granularity === "hour" ? "按小时显示" : "小时用量按本地自然日汇总"];
+    var parts = [windowSpan(window) + (window.closed ? "" : "（截至当前）"), "本地时区 " + offsets, window.granularity === "hour" ? "按小时显示" : "小时用量按本地自然日汇总"];
+    if (staleText) parts.push(staleText);
     var uneven = offsetMinutes(window.from) % 60 !== 0 || offsetMinutes(window.end) % 60 !== 0;
     note.textContent = parts.join(" · ") + (uneven ? "。当前时区不是整点偏移，后端按 UTC 整点截取起止，边界可能多含不足一小时的相邻用量。" : "");
-    note.dataset.state = uneven ? "partial" : "ready";
+    note.dataset.state = uneven || staleText ? "partial" : "ready";
   }
   function renderRange() {
     var option = rangeOption(selectedRange);
+    // Describe the data on screen: the snapshot's own window until a newer request succeeds.
+    renderRangeWindow(aggregateSnapshotWindow || aggregateRequestWindow || rangeWindow(selectedRange, Date.now()), aggregateError && snapshotOutdated() ? aggregateStaleText() : "");
     text("ovRangeLabel", option.label);
     text("topClientsRange", option.label);
     text("topModelsRange", option.label);
@@ -408,7 +427,7 @@ AdminApp.register("overview", function (app) {
     return trendGranularity() === "hour" ? shortTime(slot.start) : shortDate(slot.start);
   }
   function trendGranularity() {
-    return aggregateWindow ? aggregateWindow.granularity : (rangeWindow(selectedRange, Date.now()) || {}).granularity;
+    return aggregateSnapshotWindow ? aggregateSnapshotWindow.granularity : (rangeWindow(selectedRange, Date.now()) || {}).granularity;
   }
   function slotReadout(slot) {
     var span = trendGranularity() === "hour" ? shortDate(slot.start) + " " + shortTime(slot.start) + "–" + shortTime(slot.end) : shortDate(slot.start);
@@ -520,7 +539,7 @@ AdminApp.register("overview", function (app) {
     var buckets = aggregateSnapshot ? aggregateSnapshot.buckets : undefined;
     // Go encodes an empty bucket slice as null; a missing key is unavailable.
     if (buckets === null && Object.prototype.hasOwnProperty.call(aggregateSnapshot, "buckets")) buckets = [];
-    trendSlots = Array.isArray(buckets) && aggregateWindow ? rollupBuckets(buckets, aggregateWindow) : null;
+    trendSlots = Array.isArray(buckets) && aggregateSnapshotWindow ? rollupBuckets(buckets, aggregateSnapshotWindow) : null;
     text("ovTrendUnit", trendGranularity() === "hour" ? "按小时" : "按天（本地自然日）");
     var status = el("ovTrendStatus");
     if (!trendSlots) {
@@ -1255,7 +1274,7 @@ AdminApp.register("overview", function (app) {
     var window = rangeWindow(selectedRange, Date.now());
     aggregateController = controller;
     aggregateLoading = true;
-    renderRangeWindow(window);
+    aggregateRequestWindow = window;
     if (!aggregateSnapshot) {
       aggregateError = "";
       renderRangePanels();
@@ -1266,12 +1285,12 @@ AdminApp.register("overview", function (app) {
         if (epoch !== aggregateGeneration || controller.signal.aborted || !visible()) return;
         if (!isObject(data) || !isObject(data.totals)) throw new Error("聚合数据格式无效");
         aggregateSnapshot = data;
-        aggregateWindow = window;
+        aggregateSnapshotWindow = window;
         aggregateError = "";
         aggregateFetchedAt = Date.now();
       } catch (error) {
         if (epoch !== aggregateGeneration || !visible() || (controller.signal.aborted && error.name !== "TimeoutError")) return;
-        // Keep the last snapshot of this same range and mark it stale.
+        // Keep the last snapshot (and its own window) of this range and mark it stale.
         aggregateError = error.name === "TimeoutError" ? "加载超时" : "加载失败";
         aggregateFetchedAt = 0;
       } finally {
@@ -1301,12 +1320,12 @@ AdminApp.register("overview", function (app) {
     aggregateController = null;
     aggregateFetchedAt = 0;
     aggregateSnapshot = null;
-    aggregateWindow = null;
+    aggregateSnapshotWindow = null;
+    aggregateRequestWindow = rangeWindow(key, Date.now());
     aggregateError = "";
     aggregateLoading = true;
     trendFocus = null;
     syncRangeButtons();
-    renderRangeWindow(rangeWindow(key, Date.now()));
     renderRangePanels();
     renderAttention();
     if (visible()) loadAggregate(true);
