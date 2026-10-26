@@ -254,9 +254,6 @@ AdminApp.register("overview", function (app) {
   function rangeComplete(data) {
     return isObject(data) && ["requests", "input_tokens", "output_tokens", "estimated_cost"].every(function (key) { return counter(data[key]); });
   }
-  function statsComplete(stats) {
-    return isObject(stats) && stats.available === true && ["total", "success", "failure", "canceled", "record_failures"].every(function (key) { return counter(stats[key]); });
-  }
   function persistenceComplete(value) {
     return isObject(value) && ["usage_async_pending", "usage_async_deferred", "request_stats_dropped"].every(function (key) { return counter(value[key]); });
   }
@@ -749,101 +746,6 @@ AdminApp.register("overview", function (app) {
       status.textContent = "部分实时状态不可用";
     }
   }
-  function attentionItem(kind, text) {
-    return '<li data-attention-kind="' + kind + '">' + esc(text) + '</li>';
-  }
-  function renderAttention() {
-    var items = [];
-    var ov = historySnapshot;
-    var targets = ov && Array.isArray(ov.targets) ? ov.targets : null;
-    var persistence = isObject(metricsSnapshot && metricsSnapshot.persistence) ? metricsSnapshot.persistence : null;
-    if (targets) {
-      targets.forEach(function (target) {
-        target = target || {};
-        var name = String(target.Name || "未知目标");
-        var phase = targetPhase(target);
-        if (phase === "muted") items.push(["target", "目标 " + name + " 冷却至 " + localDate(target.MutedUntil)]);
-        else if (phase === "half-open") items.push(["target", "目标 " + name + " 正在恢复探测"]);
-        else if (phase === "offline") items.push(["target", "目标 " + name + " 已暂停，不接收流量"]);
-        else if (phase === "unknown") items.push(["target", "目标 " + name + " 状态未知，无法确认可用性"]);
-        else if (keyIssue(target) === "true") {
-          var total = counter(target.TotalKeys) ? target.TotalKeys : 0;
-          var active = counter(target.ActiveKeys) ? target.ActiveKeys : 0;
-          var details = [];
-          if (counter(target.RateLimitedKeys) && target.RateLimitedKeys > 0) details.push("限流 " + fmtNum(target.RateLimitedKeys));
-          if (counter(target.BlockedKeys) && target.BlockedKeys > 0) details.push("屏蔽 " + fmtNum(target.BlockedKeys));
-          if (counter(target.ExhaustedSubscriptionKeys) && target.ExhaustedSubscriptionKeys > 0) details.push("订阅额度耗尽 " + fmtNum(target.ExhaustedSubscriptionKeys));
-          if (counter(target.ExhaustedAPIKeys) && target.ExhaustedAPIKeys > 0) details.push("API 额度耗尽 " + fmtNum(target.ExhaustedAPIKeys));
-          if (counter(target.OtherExhaustedKeys) && target.OtherExhaustedKeys > 0) details.push("其他失效 " + fmtNum(target.OtherExhaustedKeys));
-          var unavailable = Math.max(0, total - active);
-          items.push(["keys", "目标 " + name + (unavailable > 0 ? " 有 " + fmtNum(unavailable) + " 个密钥不可用" : " 的密钥状态异常") + (details.length ? "（" + details.join("，") + "）" : "")]);
-        } else if (keyIssue(target) === "unknown" && counter(target.TotalKeys) && target.TotalKeys > 1) {
-          items.push(["keys", "目标 " + name + " 的密钥状态未知，无法确认可用性"]);
-        }
-      });
-    }
-    if (persistence) {
-      var pending = counter(persistence.usage_async_pending) ? persistence.usage_async_pending : 0;
-      var deferred = counter(persistence.usage_async_deferred) ? persistence.usage_async_deferred : 0;
-      var dropped = counter(persistence.request_stats_dropped) ? persistence.request_stats_dropped : 0;
-      if (pending > 0) items.push(["persistence", "用量写入积压 " + fmtNum(pending) + " 条"]);
-      if (deferred > 0) items.push(["persistence", "用量等待后台重试 " + fmtNum(deferred) + " 条"]);
-      if (dropped > 0) items.push(["persistence", "请求完成统计队列丢弃 " + fmtNum(dropped) + " 条"]);
-    }
-    var budget = metricsUsable() && isObject(metricsSnapshot.observation_budget) ? metricsSnapshot.observation_budget : null;
-    if (budget && isObject(budget.observation_budget_exhausted)) {
-      var br = counter(budget.observation_budget_exhausted.br) ? budget.observation_budget_exhausted.br : 0;
-      var zstd = counter(budget.observation_budget_exhausted.zstd) ? budget.observation_budget_exhausted.zstd : 0;
-      if (br + zstd > 0) items.push(["persistence", "压缩响应观察预算拒绝 " + fmtNum(br + zstd) + " 次（br " + fmtNum(br) + " / zstd " + fmtNum(zstd) + "）"]);
-    }
-    // Process-lifetime request persistence counters: never present them as a
-    // success rate or as a selected-range figure.
-    var requests = ov && isObject(ov.requests) ? ov.requests : null;
-    if (requests) {
-      [
-        ["usage_record_failures", "用量写入失败"],
-        ["usage_client_gone_no_usage", "客户端断开且未取得用量"],
-        ["usage_upstream_interrupted_no_usage", "上游中断且未取得用量"],
-        ["request_stats_record_failures", "请求完成统计写入失败"],
-      ].forEach(function (entry) {
-        var count = requests[entry[0]];
-        if (counter(count) && count > 0) items.push(["persistence", "自启动累计 " + fmtNum(count) + " 次" + entry[1]]);
-      });
-    }
-    var stats = ov && isObject(ov.request_stats_72h) ? ov.request_stats_72h : null;
-    if (stats && stats.available === true) {
-      if (counter(stats.failure) && stats.failure > 0) items.push(["request-stats", "72 小时完成样本中 " + fmtNum(stats.failure) + " 个失败"]);
-      if (counter(stats.canceled) && stats.canceled > 0) items.push(["request-stats", "72 小时完成样本中 " + fmtNum(stats.canceled) + " 个取消"]);
-    }
-    var usage = rangeTotals();
-    if (usage) {
-      // A retained snapshot may cover another period (e.g. yesterday after midnight); name it.
-      var usageStale = aggregateError && aggregateSnapshotWindow ? "（更新" + (aggregateError === "加载超时" ? "超时" : "失败") + "，基于 " + windowSpan(aggregateSnapshotWindow) + " 的上次数据）" : "";
-      if (counter(usage.incomplete_usage_count) && usage.incomplete_usage_count > 0) items.push(["usage", "当前区间有 " + fmtNum(usage.incomplete_usage_count) + " 条用量记录不完整" + usageStale]);
-      if (counter(usage.incomplete_cost_count) && usage.incomplete_cost_count > 0) items.push(["usage", "当前区间有 " + fmtNum(usage.incomplete_cost_count) + " 条成本覆盖不完整" + usageStale]);
-    }
-    var list = el("overviewAttentionList");
-    var status = el("overviewAttentionStatus");
-    var known = !!(targets || persistence || usage || requests || stats);
-    var keysKnown = !!targets && targets.every(function (target) { return keyIssue(target) !== "unknown"; });
-    var phasesKnown = !!targets && targets.every(function (target) { return targetPhase(target) !== "unknown"; });
-    var ready = !historyError && !aggregateError && !!targets && keysKnown && phasesKnown && metricsComplete() && statsComplete(stats) && rangeComplete(usage);
-    list.innerHTML = items.length ? items.map(function (item) { return attentionItem(item[0], item[1]); }).join("") : '<li class="overview-empty">' + (known ? "暂无需要关注的问题" : "关注数据不可用") + '</li>';
-    text("overviewAttentionCount", fmtNum(items.length) + " 项");
-    if (!known) {
-      status.textContent = "关注数据不可用";
-      status.dataset.state = "error";
-    } else if (!ready && historyError && historySnapshot) {
-      status.textContent = historyStaleText() + (items.length ? "；部分数据不可用，以下为已确认问题" : "；部分数据不可用");
-      status.dataset.state = "partial";
-    } else if (items.length) {
-      status.textContent = ready ? "已检查请求统计、当前区间用量、运行指标与密钥计数" : "部分数据不可用，以下为已确认问题";
-      status.dataset.state = ready ? "ready" : "partial";
-    } else {
-      status.textContent = ready ? "关注数据已加载" : "部分数据不可用";
-      status.dataset.state = ready ? "ready" : "partial";
-    }
-  }
   function renderRecentChanges() {
     var body = el("recentChangesBody");
     var status = el("recentChangesStatus");
@@ -888,7 +790,6 @@ AdminApp.register("overview", function (app) {
     renderClients();
     renderCharts();
     renderChain();
-    renderAttention();
   }
   function validSnapshot(data) {
     function timestamp(value) { return typeof value === "string" && Number.isFinite(Date.parse(value)); }
@@ -951,7 +852,6 @@ AdminApp.register("overview", function (app) {
         }
         reportActivityStatus(error);
         renderChain();
-        renderAttention();
       } finally {
         if (epoch === generation) {
           activityFlight = null;
@@ -1219,7 +1119,6 @@ AdminApp.register("overview", function (app) {
     }).join("") + '</tbody></table>';
     renderTargetHealth();
     renderRecentChanges();
-    renderAttention();
     renderChain();
     if (tooltipTrigger && tooltipTrigger.dataset.activityInfoSource === "activityHistoryTooltip") showTooltip(tooltipTrigger);
   }
@@ -1238,13 +1137,11 @@ AdminApp.register("overview", function (app) {
         metricsSnapshot = data;
         metricsFetchedAt = Date.now();
         renderChain();
-        renderAttention();
       } catch (error) {
         if (epoch !== generation || !visible() || (controller.signal.aborted && error.name !== "TimeoutError")) return;
         metricsSnapshot = null;
         metricsFetchedAt = 0;
         renderChain();
-        renderAttention();
       } finally {
         if (epoch === generation) { metricsFlight = null; metricsController = null; }
       }
@@ -1286,7 +1183,6 @@ AdminApp.register("overview", function (app) {
           aggregateFlight = null;
           aggregateController = null;
           renderRangePanels();
-          renderAttention();
         }
       }
     })();
@@ -1314,7 +1210,6 @@ AdminApp.register("overview", function (app) {
     trendFocus = null;
     syncRangeButtons();
     renderRangePanels();
-    renderAttention();
     if (visible()) loadAggregate(true);
   }
   function loadHistory(force) {
@@ -1347,7 +1242,6 @@ AdminApp.register("overview", function (app) {
         }
         renderTargetHealth();
         renderRecentChanges();
-        renderAttention();
         renderChain();
       } finally {
         if (epoch === generation) { historyFlight = null; historyController = null; }

@@ -149,10 +149,13 @@ func TestUIOverviewRangeLayout(t *testing.T) {
 	for _, id := range []string{"ovRangeWindow", "ovRangeRequests", "ovRangeTotalTokens", "ovRangeCost", "ovRangeClients", "ovRangeModels",
 		"chainSummary", "activityActiveRequests", "chainTargets", "chainKeys", "ovLiveSuccessRate",
 		"ovTokenTrend", "ovBarTrend", "activityConcurrencyChart", "activityTokenChart", "topClientsBody", "topModelsBody",
-		"targetHealthBody", "activityClientsBody", "overviewAttentionList", "recentChangesBody"} {
+		"targetHealthBody", "activityClientsBody", "recentChangesBody"} {
 		if !strings.Contains(overview, `id="`+id+`"`) {
 			t.Errorf("总览缺少 #%s", id)
 		}
+	}
+	if strings.Contains(overview, "overviewAttention") {
+		t.Error("总览已移除「需要关注」面板，不应再渲染 #overviewAttention")
 	}
 	if strings.Contains(overview, "overview-chain-node") {
 		t.Error("链路摘要已并入实时状态卡片，不应再单独渲染")

@@ -467,12 +467,10 @@ test("target health sorts unknown states last and degrades single and zero key t
   assert.match(h.get("targetHealthBody").innerHTML, /目标级/);
   assert.match(h.get("targetHealthBody").innerHTML, /Bearer|透传/);
   assert.match(h.get("targetHealthBody").innerHTML, /密钥状态不可用/);
-  assert.match(h.get("overviewAttentionList").innerHTML, /partial[^<]*密钥状态未知/);
   assert.equal(h.get("chainTargets").textContent, "3 / 9");
   assert.equal(h.get("targetHealthCount").textContent, "9 个目标");
   assert.match(h.get("targetHealthStatus").textContent, /需要关注/);
   assert.match(h.get("targetHealthStatus").textContent, /状态未知/);
-  assert.match(h.get("overviewAttentionList").innerHTML, /unknown[^<]*状态未知/);
   assert.doesNotMatch(h.get("targetHealth").innerHTML, /secret\.example/);
 });
 
@@ -533,66 +531,27 @@ test("rankings order cost then requests then name and never fabricate zero", asy
   assert.match(h.get("topModelsStatus").textContent, /缺少/);
 });
 
-test("attention uses measured warnings and recent changes omit detail", async () => {
+test("recent changes sort newest first and omit detail", async () => {
   const h = harness();
   h.setOverview({
     client_count: 1,
-    targets: [
-      {Name: "muted-target", Phase: "muted", MutedUntil: "2099-01-01T00:00:00Z", TotalKeys: 2, ActiveKeys: 1, RateLimitedKeys: 1},
-      {Name: "offline-target", Phase: "offline", Paused: true, TotalKeys: 0, ActiveKeys: 0},
-    ],
-    usage_summary: {today: {requests: 3, input_tokens: 5, output_tokens: 1, estimated_cost: 0, incomplete_usage_count: 2, incomplete_cost_count: 1}},
-    requests: {
-      usage_record_failures: 2,
-      usage_client_gone_no_usage: 1,
-      usage_upstream_interrupted_no_usage: 1,
-      request_stats_record_failures: 3,
-    },
-    request_stats_72h: {available: true, total: 10, success: 7, failure: 2, canceled: 1, record_failures: 0, since: "start", from: "from", to: "to"},
+    targets: [],
+    usage_summary: {},
     recent_audit: [
       {id: "old", timestamp: "2026-10-14T02:00:00Z", actor: "alice", action: "create", object: "old-object", result: "ok", detail: "secret detail old"},
       {id: "new", timestamp: "2026-10-14T03:00:00Z", actor: "bob", action: "update", object: "new-object", result: "fail", detail: "secret detail new"},
     ],
   });
-  h.setMetrics({uptime_seconds: 3660, requests: {total: 12}, persistence: {usage_async_pending: 2, usage_async_deferred: 1, request_stats_dropped: 3}, observation_budget: {observation_budget_exhausted: {br: 4, zstd: 0}}});
-  h.setAggregate(aggregateResult({totals: aggTotals({requests: 3, input_tokens: 5, output_tokens: 1, incomplete_usage_count: 2, incomplete_cost_count: 1})}));
+  h.setAggregate(aggregateResult());
   await h.module.loadOverview();
-  const attention = h.get("overviewAttentionList").innerHTML;
-  assert.match(attention, /muted-target/);
-  assert.match(attention, /offline-target/);
-  assert.match(attention, /用量写入积压 2 条/);
-  assert.match(attention, /用量等待后台重试 1 条/);
-  assert.match(attention, /请求完成统计队列丢弃 3 条/);
-  assert.match(attention, /压缩响应观察预算拒绝 4 次/);
-  assert.match(attention, /自启动累计 2 次用量写入失败/);
-  assert.match(attention, /自启动累计 1 次客户端断开且未取得用量/);
-  assert.match(attention, /自启动累计 1 次上游中断且未取得用量/);
-  assert.match(attention, /自启动累计 3 次请求完成统计写入失败/);
-  assert.match(attention, /72 小时完成样本中 2 个失败/);
-  assert.match(attention, /72 小时完成样本中 1 个取消/);
-  assert.doesNotMatch(attention, /成功率/);
-  assert.match(attention, /2 条用量记录不完整/);
-  assert.match(attention, /1 条成本覆盖不完整/);
-  assert.match(h.get("overviewAttentionCount").textContent, /项/);
   const recent = h.get("recentChangesBody").innerHTML;
   assert.ok(recent.indexOf("new-object") < recent.indexOf("old-object"));
   assert.doesNotMatch(recent, /secret detail/);
   assert.match(h.get("recentChangesStatus").textContent, /2 条/);
 
-  h.setMetrics({uptime_seconds: 1, requests: {total: 0}, persistence: {usage_async_pending: 0, usage_async_deferred: 0, request_stats_dropped: 0}});
-  h.setOverview({
-    client_count: 1,
-    targets: [],
-    usage_summary: {},
-    requests: {usage_record_failures: 0, usage_client_gone_no_usage: 0, usage_upstream_interrupted_no_usage: 0, request_stats_record_failures: 0},
-    request_stats_72h: {available: true, total: 0, failure: 0, canceled: 0},
-    recent_audit: [],
-  });
-  h.setAggregate(aggregateResult());
+  h.setOverview({client_count: 1, targets: [], usage_summary: {}, recent_audit: []});
   await h.module.loadOverview(true);
   assert.match(h.get("recentChangesBody").innerHTML, /暂无/);
-  assert.match(h.get("overviewAttentionList").innerHTML, /暂无需要关注/);
-  assert.doesNotMatch(h.get("overviewAttentionList").innerHTML, /自启动累计|72 小时完成样本/);
 });
 
 test("live status cards summarize available values and mark missing sources", async () => {
@@ -787,85 +746,6 @@ test("chain key summary refuses partial counters and keeps real zero", async () 
   assert.equal(h.get("chainSummary").dataset.state, "ready");
 });
 
-test("attention reports ready only when every consumed source is complete", async () => {
-  const h = harness();
-  const target = {Name: "target", Phase: "ready", TotalKeys: 0, ActiveKeys: 0, RateLimitedKeys: 0};
-  const overview = () => ({
-    client_count: 1,
-    targets: [target],
-    usage_summary: {today: completeRange()},
-    request_stats_72h: completeStats(),
-    recent_audit: [],
-  });
-  h.setOverview(overview());
-  h.setMetrics(completeMetrics());
-  await h.module.loadOverview();
-  assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
-  assert.equal(h.get("overviewAttentionStatus").textContent, "关注数据已加载");
-
-  const scenario = async (change, note) => {
-    h.setOverview(overview());
-    h.setMetrics(completeMetrics());
-    h.setAggregate(aggregateResult());
-    change();
-    await h.module.loadOverview(true);
-    assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial", note);
-    assert.match(h.get("overviewAttentionStatus").textContent, /部分数据不可用/, note);
-  };
-
-  await scenario(() => h.setOverview({...overview(), request_stats_72h: undefined}), "missing request stats");
-  await scenario(() => h.setOverview({...overview(), request_stats_72h: completeStats({available: false})}), "unavailable request stats");
-  await scenario(() => h.setOverview({...overview(), request_stats_72h: completeStats({failure: undefined})}), "partial request stats");
-  await scenario(() => h.setAggregate({by_client: [], by_model: []}), "missing selected range");
-  await scenario(() => h.setAggregate(aggregateResult({totals: aggTotals({estimated_cost: undefined})})), "partial selected range");
-  await scenario(() => h.setOverview({...overview(), targets: undefined}), "missing targets");
-  await scenario(() => h.setMetrics(completeMetrics({observation_budget: undefined})), "missing observation budget");
-  await scenario(() => h.setMetrics(completeMetrics({observation_budget: {observation_budget_exhausted: {br: 0}}})), "partial observation budget");
-  await scenario(() => h.setMetrics(completeMetrics({requests: {}})), "missing requests total");
-  await scenario(() => h.setMetrics(completeMetrics({uptime_seconds: undefined})), "missing uptime");
-  await scenario(() => h.setMetrics(completeMetrics({persistence: {usage_async_pending: 0, usage_async_deferred: 0}})), "partial persistence");
-  await scenario(() => h.setMetrics(completeMetrics({persistence: undefined})), "missing persistence");
-  await scenario(() => {
-    h.setOverview({...overview(), targets: [{Name: "partial", Phase: "ready", TotalKeys: 2, ActiveKeys: 2, RateLimitedKeys: 0}]});
-    h.setMetrics(completeMetrics());
-  }, "unknown key counters");
-
-  h.setMetrics(completeMetrics({persistence: {usage_async_pending: 2, usage_async_deferred: 0, request_stats_dropped: 0}}));
-  h.setOverview(overview());
-  h.setAggregate(aggregateResult({totals: aggTotals({incomplete_usage_count: 2})}));
-  await h.module.loadOverview(true);
-  assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
-  assert.match(h.get("overviewAttentionStatus").textContent, /已检查/);
-  assert.match(h.get("overviewAttentionList").innerHTML, /用量写入积压 2 条/);
-  assert.match(h.get("overviewAttentionList").innerHTML, /2 条用量记录不完整/);
-
-  h.setMetrics(completeMetrics());
-  h.setOverview(overview());
-  h.setAggregate(aggregateResult());
-  await h.module.loadOverview(true);
-  assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
-
-  h.setHandler(url => {
-    if (url.endsWith("activity")) return Promise.resolve(activity());
-    if (url.endsWith("overview")) return Promise.reject(new Error("offline"));
-    if (url.endsWith("/admin/metrics")) return Promise.resolve(completeMetrics());
-    return Promise.resolve({totals: {}, by_client: [], by_model: []});
-  });
-  await h.module.loadOverview(true);
-  assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial");
-  assert.match(h.get("overviewAttentionStatus").textContent, /部分数据不可用/);
-  assert.match(h.get("overviewAttentionList").innerHTML, /暂无需要关注的问题/);
-
-  // Every source unavailable from the start (a fresh page has no stale range data).
-  const none = harness();
-  none.setOverview({});
-  none.setMetrics(null);
-  none.setAggregateHandler(() => Promise.reject(new Error("offline")));
-  await none.module.loadOverview(true);
-  assert.equal(none.get("overviewAttentionStatus").dataset.state, "error");
-  assert.match(none.get("overviewAttentionStatus").textContent, /不可用/);
-});
-
 test("a failed overview refresh keeps old panels but marks them partial", async () => {
   const h = harness();
   h.setOverview({
@@ -988,7 +868,6 @@ test("chain shows partial metrics values but does not claim ready", async () => 
   assert.equal(h.get("chainStatus").textContent, "部分实时状态不可用");
   assert.match(h.get("chainProxy").textContent, /累计 12/);
   assert.match(h.get("chainProxy").textContent, /运行 10 秒/);
-  assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial");
 
   h.setMetrics({
     uptime_seconds: 10,
@@ -1003,7 +882,6 @@ test("chain shows partial metrics values but does not claim ready", async () => 
   h.setMetrics(completeMetrics({uptime_seconds: 10, requests: {total: 12}}));
   await h.module.loadOverview(true);
   assert.equal(h.get("chainSummary").dataset.state, "ready");
-  assert.equal(h.get("overviewAttentionStatus").dataset.state, "ready");
 });
 
 test("unknown target phases never claim every target is normal", async () => {
@@ -1020,8 +898,6 @@ test("unknown target phases never claim every target is normal", async () => {
   assert.equal(h.get("targetHealthStatus").dataset.state, "partial");
   assert.match(h.get("targetHealthStatus").textContent, /状态未知/);
   assert.doesNotMatch(h.get("targetHealthStatus").textContent, /均在正常状态/);
-  assert.match(h.get("overviewAttentionList").innerHTML, /mystery[^<]*状态未知/);
-  assert.equal(h.get("overviewAttentionStatus").dataset.state, "partial");
 });
 
 // ---- Range windows, local-day rollup and range-driven panels (Issue #53) ----
@@ -1441,9 +1317,16 @@ test("table panels keep DOM order equal to visual order and leave no grid holes"
   assert.doesNotMatch(css, /grid-auto-flow:[^;}]*dense/, "dense packing would reorder panels visually but not for Tab or screen readers");
   const grid = html.slice(html.indexOf('<div class="overview-tables">'), html.indexOf('<details class="activity-history">'));
   const panels = [...grid.matchAll(/<section class="overview-panel([^"]*)"(?: id="([^"]+)")?/g)].map(m => m[2] || m[1].trim());
-  assert.deepEqual(panels, ["topClients", "topModels", "targetHealth", "overviewAttention", "recentChanges", "activity-clients"]);
-  // Four panels fill two rows; recent changes and the activity table each span a full row.
-  assert.match(css, /#page-overview \.overview-tables > #recentChanges, #page-overview \.overview-tables > \.activity-clients \{ grid-column:1 \/ -1; \}/);
+  assert.deepEqual(panels, ["topClients", "topModels", "targetHealth", "recentChanges", "activity-clients"]);
+  // The two rankings share the first row; target health, recent changes and the activity table each span a full row.
+  assert.match(css, /#page-overview \.overview-tables > #targetHealth, #page-overview \.overview-tables > #recentChanges, #page-overview \.overview-tables > \.activity-clients \{ grid-column:1 \/ -1; \}/);
+});
+
+test("overview has no attention panel", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+  const js = fs.readFileSync(path.join(__dirname, "overview.js"), "utf8");
+  assert.doesNotMatch(html, /overviewAttention|overview-list|<h3>需要关注<\/h3>/, "the overview no longer renders a 需要关注 panel");
+  assert.doesNotMatch(js, /overviewAttention|renderAttention|attentionItem/, "no attention rendering remains");
 });
 
 test("after crossing local midnight a failed refresh keeps the snapshot's own window and says so", () => withTZ("Asia/Shanghai", async () => {
@@ -1494,7 +1377,6 @@ test("a failed refresh within the same window keeps the plain stale wording", ()
   h.setAggregate(aggregateResult({totals: aggTotals({requests: 2, incomplete_usage_count: 1})}));
   await h.module.loadOverview();
   assert.match(h.get("ovRangeWindow").textContent, /10-26 00:00 – 10-26 08:00（截至当前）/);
-  assert.match(h.get("overviewAttentionList").innerHTML, /当前区间有 1 条用量记录不完整</);
   h.setNow(new Date(2026, 9, 26, 9, 30));
   h.setAggregateHandler(() => Promise.reject(new Error("offline")));
   await h.module.loadOverview(true);
@@ -1503,10 +1385,9 @@ test("a failed refresh within the same window keeps the plain stale wording", ()
   // The shown data stops at the snapshot's end, so the note must not claim "up to now".
   assert.match(h.get("ovRangeWindow").textContent, /10-26 00:00 – 10-26 08:00（截至 08:00）/);
   assert.doesNotMatch(h.get("ovRangeWindow").textContent, /截至当前/);
-  assert.match(h.get("overviewAttentionList").innerHTML, /当前区间有 1 条用量记录不完整（更新失败，基于 10-26 00:00 – 10-26 08:00 的上次数据）/);
 }));
 
-test("attention marks incomplete usage from a snapshot kept across midnight", () => withTZ("Asia/Shanghai", async () => {
+test("a timed-out refresh after midnight freezes the window note at the snapshot's end", () => withTZ("Asia/Shanghai", async () => {
   const h = harness({rangeButtons: rangeKeys.map(rangeButton)});
   h.setNow(new Date(2026, 9, 25, 23, 50));
   h.setAggregate(aggregateResult({totals: aggTotals({requests: 400, incomplete_usage_count: 2, incomplete_cost_count: 1})}));
@@ -1515,8 +1396,6 @@ test("attention marks incomplete usage from a snapshot kept across midnight", ()
   h.setAggregateHandler(() => new Promise((resolve, reject) => setTimeout(() => reject(Object.assign(new Error("timeout"), {name: "TimeoutError"})), 0)));
   const refresh = h.module.loadOverview(true);
   await h.advance(0); await refresh; await h.advance(0);
-  const attention = h.get("overviewAttentionList").innerHTML;
-  assert.match(attention, /当前区间有 2 条用量记录不完整（更新超时，基于 10-25 00:00 – 10-25 23:50 的上次数据）/);
-  assert.match(attention, /当前区间有 1 条成本覆盖不完整（更新超时，基于 10-25 00:00 – 10-25 23:50 的上次数据）/);
-  assert.match(h.get("ovRangeWindow").textContent, /（截至 23:50）/);
+  assert.match(h.get("ovRangeWindow").textContent, /10-25 00:00 – 10-25 23:50（截至 23:50）/);
+  assert.match(h.get("ovRangeStatus").textContent, /更新超时，显示 10-25 00:00 – 10-25 23:50 的上次数据/);
 }));
