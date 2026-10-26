@@ -461,12 +461,12 @@ AdminApp.register("overview", function (app) {
     function x(index) { return left + band * (index + 0.5); }
     var cost = !token && barMetric === "cost";
     var keys = token ? ["input", "output"] : [cost ? "cost" : "requests"];
-    var peak = Math.max.apply(null, [0].concat(slots.flatMap(function (slot) { return keys.map(function (key) { return slot[key]; }); })));
+    var peak = Math.max.apply(null, [0].concat(slots.map(function (slot) { return keys.reduce(function (sum, key) { return sum + slot[key]; }, 0); })));
     var axis = cost ? moneyAxis(peak) : chartAxis(peak);
     function y(value) { return bottom - value / axis.maximum * (bottom - top); }
     var focus = slots.findIndex(function (slot) { return slot.start.getTime() === trendFocus; });
     var svg = "";
-    if (!token && focus >= 0) svg += '<rect class="overview-trend-focus" x="' + (x(focus) - band / 2) + '" y="' + top + '" width="' + band + '" height="' + (bottom - top) + '"/>';
+    if (focus >= 0) svg += '<rect class="overview-trend-focus" x="' + (x(focus) - band / 2) + '" y="' + top + '" width="' + band + '" height="' + (bottom - top) + '"/>';
     for (var i = 0; i <= axis.ticks; i++) {
       var value = axis.step * i;
       svg += '<line class="activity-gridline" x1="' + left + '" x2="' + right + '" y1="' + y(value) + '" y2="' + y(value) + '"/><text class="activity-axis" x="34" y="' + (y(value) + 4) + '" text-anchor="end">' + esc(cost ? moneyLabel(value) : compactNumber(value)) + '</text>';
@@ -477,26 +477,11 @@ AdminApp.register("overview", function (app) {
       var position = anchor === "start" ? left : anchor === "end" ? right : x(index);
       svg += '<text class="activity-axis" x="' + position + '" y="' + (geometry.height - 12) + '" text-anchor="' + anchor + '">' + esc(slotLabel(slots[index])) + '</text>';
     });
-    if (token) {
-      keys.forEach(function (key, keyIndex) {
-        var lineClass = keyIndex ? "activity-output" : "activity-input";
-        if (slots.length === 1) svg += '<circle class="' + lineClass + '" cx="' + x(0) + '" cy="' + y(slots[0][key]) + '" r="2.5"/>';
-        else svg += '<polyline class="activity-line ' + lineClass + '" points="' + slots.map(function (slot, index) { return x(index) + "," + y(slot[key]); }).join(" ") + '"/>';
-      });
-      if (focus >= 0) {
-        svg += '<line class="activity-cursor" x1="' + x(focus) + '" x2="' + x(focus) + '" y1="' + top + '" y2="' + bottom + '"/>';
-        keys.forEach(function (key, keyIndex) {
-          svg += '<circle class="activity-point ' + (keyIndex ? "activity-output" : "activity-input") + '" cx="' + x(focus) + '" cy="' + y(slots[focus][key]) + '" r="4"/>';
-        });
-      }
-    } else {
-      var width = Math.max(1.5, Math.min(28, band * 0.62));
-      slots.forEach(function (slot, index) {
-        var value = slot[keys[0]];
-        if (!(value > 0)) return;
-        svg += '<rect class="overview-bar overview-bar-' + (cost ? "cost" : "requests") + '" x="' + (x(index) - width / 2) + '" y="' + y(value) + '" width="' + width + '" height="' + (bottom - y(value)) + '" rx="2"/>';
-      });
-    }
+    var width = barWidth(band);
+    slots.forEach(function (slot, index) {
+      if (token) svg += stackedBars(x(index) - width / 2, width, [slot.input, slot.output], y);
+      else svg += barRect("overview-bar overview-bar-" + (cost ? "cost" : "requests"), x(index) - width / 2, width, 0, slot[keys[0]], y);
+    });
     return svg;
   }
   function syncBarButtons() {
@@ -959,8 +944,8 @@ AdminApp.register("overview", function (app) {
           metricIDs.forEach(function (id) { text(id, "不可用"); });
           text("activityUpdatedAt", "尚无成功采样");
           chartIDs.forEach(function (id) { el(id).innerHTML = ""; });
-          text("activityConcurrencyReadout", "曲线暂不可用");
-          text("activityTokenReadout", "曲线暂不可用");
+          text("activityConcurrencyReadout", "图表暂不可用");
+          text("activityTokenReadout", "图表暂不可用");
           emptyCell.textContent = "客户端活动暂不可用";
           el("activityClientsBody").appendChild(emptyRow);
         }
@@ -1040,7 +1025,7 @@ AdminApp.register("overview", function (app) {
       if (!row) { row = makeRow(client.name); rows.set(client.name, row); }
       row.node.dataset.selected = String(client.name === selectedClient);
       row.button.setAttribute("aria-pressed", String(client.name === selectedClient));
-      row.button.setAttribute("aria-label", "查看 " + client.name + " 的曲线");
+      row.button.setAttribute("aria-label", "查看 " + client.name + " 的近5分钟图表");
       row.label.hidden = client.configured !== false;
       ["active_requests", "websocket_sessions", "input_tokens", "output_tokens", "total_tokens"].forEach(function (key, i) { row.cells[i + 1].textContent = number(clientValue(client, key)); });
       // Reuse the row and button so five-second refreshes do not replace focus.
@@ -1088,6 +1073,21 @@ AdminApp.register("overview", function (app) {
     if (value >= 1000) return Number((value / 1000).toPrecision(3)) + "k";
     return number(value);
   }
+  // Every overview chart draws bars of the same proportions; token charts stack
+  // input (bottom) and output (top) so the bar height is the bucket total.
+  function barWidth(band) { return Math.max(1.5, Math.min(28, band * 0.62)); }
+  function barRect(className, left, width, base, value, y) {
+    if (!isFinite(value) || value <= 0) return "";
+    return '<rect class="' + className + '" x="' + left + '" y="' + y(base + value) + '" width="' + width + '" height="' + (y(base) - y(base + value)) + '" rx="2"/>';
+  }
+  function stackedBars(left, width, values, y) {
+    var base = 0;
+    return values.map(function (value, index) {
+      var rect = barRect("activity-bar " + (index ? "activity-output" : "activity-input"), left, width, base, value, y);
+      if (value > 0) base += value;
+      return rect;
+    }).join("");
+  }
   function chartHTML(series, tokenChart, chart) {
     var geometry = chartGeometry(chart);
     chart.setAttribute("viewBox", "0 0 " + geometry.width + " " + geometry.height);
@@ -1095,7 +1095,7 @@ AdminApp.register("overview", function (app) {
     var windowFrom = Date.parse(snapshot.window.from), windowTo = Date.parse(snapshot.window.to);
     function timeX(time) { return left + (time - windowFrom) / (windowTo - windowFrom) * (right - left); }
     var keys = tokenChart ? ["input_tokens", "output_tokens"] : ["active_requests_peak"];
-    var axis = chartAxis(Math.max.apply(null, [0].concat(series.flatMap(function (bucket) { return keys.map(function (key) { return bucket[key] === null ? 0 : Number(bucket[key]); }); }))));
+    var axis = chartAxis(Math.max.apply(null, [0].concat(series.map(function (bucket) { return keys.reduce(function (sum, key) { return sum + (bucket[key] == null ? 0 : Number(bucket[key])); }, 0); }))));
     var maximum = axis.maximum;
     var x = function (index) { return timeX((Math.max(windowFrom, Date.parse(series[index].from)) + Math.min(windowTo, Date.parse(series[index].to))) / 2); };
     var y = function (value) { return bottom - value / maximum * (bottom - top); };
@@ -1108,38 +1108,17 @@ AdminApp.register("overview", function (app) {
       var time = Date.parse(snapshot.window.from) + ratio * (Date.parse(snapshot.window.to) - Date.parse(snapshot.window.from));
       svg += '<text class="activity-axis" x="' + (left + ratio * (right - left)) + '" y="' + (geometry.height - 12) + '" text-anchor="' + (ratio === 0 ? "start" : ratio === 1 ? "end" : "middle") + '">' + esc(clock(time)) + '</text>';
     });
-    if (tokenChart) {
-      keys.forEach(function (key, keyIndex) {
-        var segments = [], points = [];
-        function flush() { if (points.length) { segments.push(points); points = []; } }
-        series.forEach(function (bucket, index) {
-          if (bucket[key] === null || bucket[key] === undefined) { flush(); return; }
-          points.push({x: x(index), y: y(Number(bucket[key]))});
-        });
-        flush();
-        var lineClass = keyIndex ? "activity-output" : "activity-input";
-        segments.forEach(function (segment) {
-          if (segment.length === 1) svg += '<circle class="' + lineClass + '" cx="' + segment[0].x + '" cy="' + segment[0].y + '" r="2.5"/>';
-          else svg += '<polyline class="activity-line ' + lineClass + '" points="' + segment.map(function (point) { return point.x + "," + point.y; }).join(" ") + '"/>';
-        });
-      });
-    } else {
-      var barWidth = Math.max(2, Math.min(24, (right - left) / Math.max(1, series.length) * 0.62));
-      series.forEach(function (bucket, index) {
-        if (bucket.active_requests_peak === null || bucket.active_requests_peak === undefined) return;
-        var peak = Number(bucket.active_requests_peak);
-        if (!isFinite(peak) || peak <= 0) return;
-        svg += '<rect class="activity-concurrency-bar" x="' + (x(index) - barWidth / 2) + '" y="' + y(peak) + '" width="' + barWidth + '" height="' + (bottom - y(peak)) + '" rx="2"/>';
-      });
-    }
     var index = series.findIndex(function (bucket) { return bucket.from === focusFrom; });
     if (index >= 0) {
-      svg += '<line class="activity-cursor" x1="' + x(index) + '" x2="' + x(index) + '" y1="' + top + '" y2="' + bottom + '"/>';
-      keys.forEach(function (key, keyIndex) {
-        if (series[index][key] == null) return;
-        svg += '<circle class="activity-point ' + (tokenChart ? (keyIndex ? "activity-output" : "activity-input") : "activity-concurrency") + '" cx="' + x(index) + '" cy="' + y(Number(series[index][key])) + '" r="4"/>';
-      });
+      var focusLeft = timeX(Math.max(windowFrom, Date.parse(series[index].from)));
+      var focusRight = timeX(Math.min(windowTo, Date.parse(series[index].to)));
+      svg = '<rect class="overview-trend-focus" x="' + focusLeft + '" y="' + top + '" width="' + Math.max(0, focusRight - focusLeft) + '" height="' + (bottom - top) + '"/>' + svg;
     }
+    var width = barWidth((right - left) / Math.max(1, series.length));
+    series.forEach(function (bucket, index) {
+      if (tokenChart) svg += stackedBars(x(index) - width / 2, width, keys.map(function (key) { return bucket[key] == null ? 0 : Number(bucket[key]); }), y);
+      else if (bucket.active_requests_peak != null) svg += barRect("activity-concurrency-bar", x(index) - width / 2, width, 0, Number(bucket.active_requests_peak), y);
+    });
     return svg;
   }
   function renderCharts() {
@@ -1156,8 +1135,8 @@ AdminApp.register("overview", function (app) {
     });
     var bucket = series.find(function (candidate) { return candidate.from === focusFrom; });
     var prefix = bucket ? clock(bucket.from) + "–" + clock(bucket.to) + (bucket.partial ? " · 部分桶" : "") + " · " : "";
-    text("activityConcurrencyReadout", bucket ? prefix + (bucket.active_requests_peak === null ? "峰值未采样" : "峰值 " + number(bucket.active_requests_peak) + " 个请求") : (series.length ? "移入曲线或聚焦后使用方向键查看读数" : "暂无曲线数据"));
-    text("activityTokenReadout", bucket ? prefix + "输入 " + number(bucket.input_tokens) + " · 输出 " + number(bucket.output_tokens) + (bucket.incomplete_usage_count > 0 ? " · 用量不完整" : "") : (series.length ? "移入曲线或聚焦后使用方向键查看读数" : "暂无曲线数据"));
+    text("activityConcurrencyReadout", bucket ? prefix + (bucket.active_requests_peak === null ? "峰值未采样" : "峰值 " + number(bucket.active_requests_peak) + " 个请求") : (series.length ? "移入图表或聚焦后使用方向键查看读数" : "暂无图表数据"));
+    text("activityTokenReadout", bucket ? prefix + "输入 " + number(bucket.input_tokens) + " · 输出 " + number(bucket.output_tokens) + (bucket.incomplete_usage_count > 0 ? " · 用量不完整" : "") : (series.length ? "移入图表或聚焦后使用方向键查看读数" : "暂无图表数据"));
   }
   chartIDs.forEach(function (id) {
     var chart = el(id);
