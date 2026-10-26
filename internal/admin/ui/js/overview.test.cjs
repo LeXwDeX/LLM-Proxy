@@ -179,7 +179,7 @@ test("mobile plots keep readable axes, compact large values, and position partia
   assert.match(h.get("activityTokenChart").innerHTML, /M<\/text>/);
   // The first partial bucket lasts 5s, so its midpoint is at 10% of the plot.
   await h.get("activityConcurrencyChart").fire("pointermove", {clientX: 67.4});
-  assert.match(h.get("activityConcurrencyChart").innerHTML, /class="activity-cursor" x1="67.4"/);
+  assert.match(h.get("activityConcurrencyChart").innerHTML, /class="overview-trend-focus" x="44" /);
   assert.match(h.get("activityConcurrencyReadout").textContent, /未采样/);
   await h.get("activityTokenChart").fire("keydown", {key: "End"});
   assert.match(h.get("activityTokenReadout").textContent, /9000000/);
@@ -223,6 +223,17 @@ test("concurrency peaks render as bars and unknown samples leave gaps", async ()
   assert.equal((svg.match(/<rect class="activity-concurrency-bar"/g) || []).length, 2);
   assert.doesNotMatch(svg, /activity-line activity-concurrency/);
   assert.doesNotMatch(svg, /<rect[^>]*class="activity-concurrency-bar"[^>]*height="0"/);
+});
+
+test("every overview chart draws bars and token charts stack output on input", async () => {
+  const h = harness(); const data = activity();
+  data.series[2].input_tokens = 300; data.series[2].output_tokens = 100;
+  data.clients[0].series = data.series.map(b => ({...b})); h.setActivity(data); await h.module.loadOverview();
+  const svg = h.get("activityTokenChart").innerHTML;
+  assert.doesNotMatch(svg + h.get("activityConcurrencyChart").innerHTML, /polyline|activity-line|activity-cursor|<circle/);
+  const rect = cls => [...svg.matchAll(new RegExp('<rect class="activity-bar ' + cls + '" x="[^"]+" y="([^"]+)" width="[^"]+" height="([^"]+)"', "g"))].pop().slice(1).map(Number);
+  const [inputTop] = rect("activity-input"), [outputTop, outputHeight] = rect("activity-output");
+  assert.ok(Math.abs(outputTop + outputHeight - inputTop) < 1e-6, "output bar sits on top of the input bar");
 });
 
 
@@ -1385,9 +1396,16 @@ test("client activity table spans the table grid and keeps its scroll width at e
   assert.match(base, /#page-overview \.overview-tables > \.activity-clients \{[^}]*grid-column:1 \/ -1/);
   assert.match(base, /#page-overview \.activity-client-table \{[^}]*min-width:580px/);
   assert.match(base, /#page-overview \.activity-client-table td:first-child \{[^}]*position:sticky/);
-  const twoColumns = css.match(/@media\(min-width:(\d+)px\) \{\s*#page-overview \.overview-tables \{ grid-template-columns:repeat\(2/);
-  assert.ok(twoColumns, "two-column table grid breakpoint exists");
-  assert.equal(Number(twoColumns[1]), 1280);
+});
+
+test("overview uses one fixed desktop layout with no width breakpoints", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+  const start = html.indexOf("    #page-overview { --activity-secondary");
+  const css = html.slice(start, html.indexOf("</style>", start));
+  assert.doesNotMatch(css, /@media|auto-fit/, "the overview layout does not change with viewport width");
+  assert.match(css, /#page-overview \.overview-cards \{[^}]*grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/);
+  assert.match(css, /#page-overview \.activity-chart-grid \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /#page-overview \.overview-tables \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
 });
 
 test("table panels keep DOM order equal to visual order and leave no grid holes", () => {
@@ -1398,11 +1416,8 @@ test("table panels keep DOM order equal to visual order and leave no grid holes"
   const grid = html.slice(html.indexOf('<div class="overview-tables">'), html.indexOf('<details class="activity-history">'));
   const panels = [...grid.matchAll(/<section class="overview-panel([^"]*)"(?: id="([^"]+)")?/g)].map(m => m[2] || m[1].trim());
   assert.deepEqual(panels, ["topClients", "topModels", "targetHealth", "overviewAttention", "recentChanges", "activity-clients"]);
-  // Five panels precede the full-width activity table; the fifth spans two columns,
-  // which completes the last row in both the two-column and three-column grids.
-  const multi = css.match(/@media\(min-width:1280px\) \{([^}]*\}[^}]*)\}/);
-  assert.ok(multi, "multi-column media block exists");
-  assert.match(multi[1], /#page-overview \.overview-tables > #recentChanges \{ grid-column:span 2;/);
+  // Four panels fill two rows; recent changes and the activity table each span a full row.
+  assert.match(css, /#page-overview \.overview-tables > #recentChanges, #page-overview \.overview-tables > \.activity-clients \{ grid-column:1 \/ -1; \}/);
 });
 
 test("after crossing local midnight a failed refresh keeps the snapshot's own window and says so", () => withTZ("Asia/Shanghai", async () => {

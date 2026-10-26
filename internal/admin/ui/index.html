@@ -1340,7 +1340,7 @@
     .targets-table .col-keys { width:200px; width:clamp(180px, 13vw, 240px); }
     .targets-table .col-type { width:120px; }
     .targets-table .col-pool { width:120px; }
-    .targets-table .col-scheduling { width:200px; }
+    .targets-table .col-scheduling { width:260px; }
     .targets-table .col-actions { width:128px; }
     .targets-table .target-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .target-model-list { display:grid; grid-auto-flow:column; grid-template-rows:repeat(3, 22px); grid-auto-columns:fit-content(240px); justify-content:start; justify-items:start; align-items:start; gap:4px 6px; }
@@ -1428,7 +1428,7 @@
     #page-overview .overview-group-heading { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
     #page-overview .overview-tag { display:inline-block; padding:1px 8px; border-radius:999px; background:var(--muted-soft); color:var(--ink-2); font-size:12px; font-weight:500; white-space:nowrap; }
     #page-overview .overview-tag-live { background:var(--ok-soft); color:var(--ok); }
-    #page-overview .overview-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr)); gap:10px; }
+    #page-overview .overview-cards { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
     #page-overview .overview-card { min-width:0; padding:12px 14px; border:1px solid var(--line); border-radius:10px; background:var(--card); }
     #page-overview .overview-card-label { display:flex; align-items:center; gap:2px; min-height:22px; margin-bottom:4px; font-size:12px; color:var(--activity-secondary); }
     #page-overview .overview-card-label .activity-info { margin:-6px 0 -6px -4px; }
@@ -1453,37 +1453,33 @@
     #page-overview .activity-scope { display:flex; align-items:center; gap:10px; flex-wrap:wrap; min-height:30px; margin-bottom:10px; font-size:12px; color:var(--activity-secondary); }
     #page-overview .activity-scope strong { font-size:14px; color:var(--text); max-width:100%; overflow-wrap:anywhere; }
     #page-overview #activityScopeStatus { color:var(--warn); }
-    #page-overview .activity-chart-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:16px; }
+    #page-overview .activity-chart-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
     #page-overview .activity-chart { min-width:0; margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px 10px; }
     #page-overview figcaption { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; min-height:34px; }
     #page-overview figcaption h4 span { font-size:12px; color:var(--activity-secondary); font-weight:400; white-space:nowrap; }
     #page-overview .activity-chart-legend { display:flex; align-items:center; gap:6px; margin:6px 0 8px; font-size:11px; color:var(--activity-secondary); }
-    #page-overview .activity-legend-line { width:20px; border-top:2px solid currentColor; }
-    #page-overview .activity-legend-line.activity-output { border-top-style:dashed; margin-left:12px; }
+    #page-overview .activity-legend-swatch { width:10px; height:10px; border-radius:2px; background:currentColor; }
+    #page-overview .activity-legend-swatch.activity-output { margin-left:12px; }
     #page-overview .overview-legend-bar { width:10px; height:10px; border-radius:2px; background:var(--activity-concurrency); }
     #page-overview .overview-legend-bar[data-metric=cost] { background:var(--overview-cost); }
     #page-overview .activity-chart-unit { margin-left:auto; }
     #page-overview .activity-plot { width:100%; height:230px; display:block; cursor:crosshair; border-radius:4px; }
     #page-overview .activity-axis { fill:var(--activity-secondary); stroke:none; font-size:11px; font-variant-numeric:tabular-nums; }
     #page-overview .activity-gridline { stroke:var(--line); stroke-width:1; }
-    #page-overview .activity-line { fill:none; stroke-width:2.2; stroke-linecap:butt; }
     #page-overview .activity-concurrency { color:var(--activity-concurrency); stroke:var(--activity-concurrency); }
     #page-overview .activity-input { color:var(--activity-input); stroke:var(--activity-input); }
     #page-overview .activity-output { color:var(--activity-output); stroke:var(--activity-output); }
-    #page-overview .activity-line.activity-output { stroke-dasharray:5 3; }
-    #page-overview circle.activity-input, #page-overview circle.activity-output { fill:var(--card); stroke-width:2; }
-    #page-overview .activity-cursor { stroke:var(--ink-3); stroke-dasharray:3 3; stroke-width:1; }
-    #page-overview .activity-point { fill:var(--card); stroke-width:2.2; }
     #page-overview .activity-chart-readout { min-height:34px; font-size:12px; font-variant-numeric:tabular-nums; color:var(--activity-secondary); margin-top:5px; }
     #page-overview .activity-concurrency-bar, #page-overview .overview-bar-requests { fill:var(--activity-concurrency); stroke:none; }
+    #page-overview .activity-bar.activity-input { fill:var(--activity-input); stroke:none; }
+    #page-overview .activity-bar.activity-output { fill:var(--activity-output); stroke:none; }
     #page-overview .overview-bar-cost { fill:var(--overview-cost); stroke:none; }
     #page-overview .overview-trend-focus { fill:var(--muted-soft); stroke:none; }
-    /* Table panels: one column, two from 1280px, three on ultra-wide screens.
-       DOM order is the visual order (no dense packing). The wide client activity table
-       is last and spans the whole row; recent changes spans two columns so the row
-       before it is complete in both the two- and three-column grids. */
-    #page-overview .overview-tables { display:grid; grid-template-columns:minmax(0,1fr); gap:18px; align-items:start; }
-    #page-overview .overview-tables > .activity-clients { grid-column:1 / -1; }
+    /* Fixed desktop layout: table panels sit in two columns at every width.
+       DOM order is the visual order (no dense packing). Recent changes and the wide
+       client activity table each span the whole row. */
+    #page-overview .overview-tables { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; align-items:start; }
+    #page-overview .overview-tables > #recentChanges, #page-overview .overview-tables > .activity-clients { grid-column:1 / -1; }
     #page-overview .overview-panel { min-width:0; padding:16px 18px; border:1px solid var(--line); border-radius:12px; background:var(--card); }
     #page-overview .overview-panel-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; }
     #page-overview .overview-panel-heading > div { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -1564,39 +1560,6 @@
     #page-overview .activity-history-table th:first-child { text-align:left; }
     #page-overview .activity-history-table th { font-weight:500; color:var(--activity-secondary); }
     #page-overview .activity-tooltip { position:fixed; z-index:300; max-width:min(380px,calc(100vw - 24px)); padding:12px 14px; border-radius:8px; background:var(--side); color:var(--side-ink); box-shadow:0 6px 18px rgba(15,23,42,.2); font-size:12px; line-height:1.65; pointer-events:none; overflow-wrap:anywhere; }
-    @media(min-width:1280px) {
-      #page-overview .overview-tables { grid-template-columns:repeat(2,minmax(0,1fr)); }
-      #page-overview .overview-tables > #recentChanges { grid-column:span 2; }
-    }
-    @media(min-width:2200px) {
-      #page-overview .overview-band { grid-template-columns:repeat(2,minmax(0,1fr)); }
-      #page-overview .overview-tables { grid-template-columns:repeat(3,minmax(0,1fr)); }
-    }
-    @media(max-width:700px) {
-      #page-overview .activity-heading { gap:10px; align-items:flex-start; }
-      #page-overview h2 { font-size:22px; }
-      #page-overview .overview-range { order:3; width:100%; }
-      #page-overview .overview-range button { padding:5px 10px; }
-      #page-overview .activity-refresh { gap:8px; }
-      #page-overview .activity-refresh time { font-size:11px; }
-      #page-overview .overview-card { padding:10px 12px; }
-      #page-overview .overview-card strong { font-size:20px; }
-      #page-overview .activity-chart { padding:12px 12px 8px; }
-      #page-overview .activity-plot { height:195px; }
-      #page-overview .activity-chart-readout { font-size:11px; min-height:34px; }
-      #page-overview .activity-table-heading { align-items:flex-start; flex-direction:column; gap:10px; padding:14px; }
-      #page-overview .activity-search { width:100%; }
-      #page-overview .activity-client-table th:first-child { width:145px; }
-      #page-overview .activity-history summary { gap:8px; flex-wrap:wrap; }
-      #page-overview .activity-history summary span { width:calc(100% - 30px); order:2; }
-      #page-overview .activity-history-metrics { gap:16px 24px; }
-      #page-overview .activity-history-table th, #page-overview .activity-history-table td { padding:9px 8px; white-space:nowrap; }
-      #page-overview .overview-tables { gap:12px; }
-      #page-overview .overview-panel { padding:14px; }
-      #page-overview .overview-panel-heading { flex-direction:column; gap:4px; }
-      #page-overview .overview-panel-heading .overview-status { max-width:100%; text-align:left; }
-      #page-overview .overview-table { min-width:520px; }
-    }
   </style>
 </head>
 <body>
@@ -1755,9 +1718,9 @@
               <div class="overview-group-heading"><h3 id="ovTrendHeading">区间趋势</h3><span class="overview-tag" id="ovTrendUnit">按小时</span></div>
               <div class="activity-chart-grid">
                 <figure class="activity-chart">
-                  <figcaption><h4>Token 趋势</h4><button type="button" class="activity-info" aria-label="Token 趋势说明" aria-describedby="activityTooltip" data-activity-info="每个时间桶已记录的输入与输出 Token；输入含缓存读、缓存写与独立工具输入。今日、昨日按小时；多日区间由小时桶在浏览器中按本地自然日汇总。没有用量的时间桶按 0 显示，不推算未上报的 Token。两图按同一时间桶联动，方向键左右移动，Home/End 跳到首末桶。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></figcaption>
-                  <div class="activity-chart-legend"><span class="activity-legend-line activity-input"></span>输入<span class="activity-legend-line activity-output"></span>输出<span class="activity-chart-unit">Token</span></div>
-                  <svg id="ovTokenTrend" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互曲线图" aria-label="Token 趋势，正在加载" aria-describedby="ovTokenTrendReadout"></svg>
+                  <figcaption><h4>Token 趋势</h4><button type="button" class="activity-info" aria-label="Token 趋势说明" aria-describedby="activityTooltip" data-activity-info="每个时间桶已记录的输入与输出 Token，堆叠显示；输入含缓存读、缓存写与独立工具输入。今日、昨日按小时；多日区间由小时桶在浏览器中按本地自然日汇总。没有用量的时间桶按 0 显示，不推算未上报的 Token。两图按同一时间桶联动，方向键左右移动，Home/End 跳到首末桶。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></figcaption>
+                  <div class="activity-chart-legend"><span class="activity-legend-swatch activity-input"></span><span>输入</span><span class="activity-legend-swatch activity-output"></span><span>输出</span><span class="activity-chart-unit">Token</span></div>
+                  <svg id="ovTokenTrend" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互柱状图" aria-label="Token 趋势，正在加载" aria-describedby="ovTokenTrendReadout"></svg>
                   <p id="ovTokenTrendReadout" class="activity-chart-readout" aria-live="polite">正在加载趋势…</p>
                 </figure>
                 <figure class="activity-chart">
@@ -1775,19 +1738,19 @@
                 <div class="overview-live-item"><span class="overview-live-label">当前请求客户端<button type="button" class="activity-info" aria-label="当前请求客户端说明" aria-describedby="activityTooltip" data-activity-info="当前有在途请求的客户端数量；已有连接但未请求的客户端不计入。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></span><strong id="activityActiveClients">—</strong></div>
                 <div class="overview-live-item"><span class="overview-live-label">近5分钟 Token<button type="button" class="activity-info" aria-label="近5分钟 Token说明" aria-describedby="activityTooltip" data-activity-info="已记录用量的输入与输出之和，不估算在途生成量。输入已包含缓存读、缓存写与独立工具输入，不重复相加。未配置客户端的近期用量也包含在全站合计中。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></span><strong id="activityTotalTokens">—</strong><span class="activity-token-split">输入 <span id="activityInputTokens">—</span><span class="activity-split-divider">/</span>输出 <span id="activityOutputTokens">—</span></span></div>
               </div>
-              <div class="activity-scope"><span>曲线范围</span><strong id="activityChartScope">全站</strong><button class="btn btn-sm" id="activityResetScope" type="button" hidden>返回全站</button><span id="activityScopeStatus" role="status"></span></div>
+              <div class="activity-scope"><span>图表范围</span><strong id="activityChartScope">全站</strong><button class="btn btn-sm" id="activityResetScope" type="button" hidden>返回全站</button><span id="activityScopeStatus" role="status"></span></div>
               <div class="activity-chart-grid">
                 <figure class="activity-chart">
-                  <figcaption><h4>并发峰值 <span>/ 10秒</span></h4><button type="button" class="activity-info" aria-label="并发峰值说明" aria-describedby="activityTooltip" data-activity-info="每个10秒时间桶中同时在途请求的最大值。使用独立的全站采样，不将客户端峰值相加。启动前或已裁剪的未采样峰值会断开显示；部分桶可能不足10秒。两图按同一时间桶联动，方向键左右移动，Home/End 跳到首末桶。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></figcaption>
-                  <div class="activity-chart-legend"><span class="activity-legend-line activity-concurrency"></span>在途请求峰值<span class="activity-chart-unit">个请求</span></div>
-                  <svg id="activityConcurrencyChart" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互曲线图" aria-label="并发峰值，正在加载" aria-describedby="activityConcurrencyReadout"></svg>
-                  <p id="activityConcurrencyReadout" class="activity-chart-readout" aria-live="polite">正在加载曲线…</p>
+                  <figcaption><h4>并发峰值 <span>/ 10秒</span></h4><button type="button" class="activity-info" aria-label="并发峰值说明" aria-describedby="activityTooltip" data-activity-info="每个10秒时间桶中同时在途请求的最大值。使用独立的全站采样，不将客户端峰值相加。启动前或已裁剪的未采样峰值留空；部分桶可能不足10秒。两图按同一时间桶联动，方向键左右移动，Home/End 跳到首末桶。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></figcaption>
+                  <div class="activity-chart-legend"><span class="activity-legend-swatch activity-concurrency"></span>在途请求峰值<span class="activity-chart-unit">个请求</span></div>
+                  <svg id="activityConcurrencyChart" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互柱状图" aria-label="并发峰值，正在加载" aria-describedby="activityConcurrencyReadout"></svg>
+                  <p id="activityConcurrencyReadout" class="activity-chart-readout" aria-live="polite">正在加载图表…</p>
                 </figure>
                 <figure class="activity-chart">
-                  <figcaption><h4>输入 / 输出 Token <span>/ 10秒</span></h4><button type="button" class="activity-info" aria-label="Token 曲线说明" aria-describedby="activityTooltip" data-activity-info="每个10秒时间桶已记录的输入与输出 Token；输入含缓存读、缓存写与独立工具输入。用量不完整时显示短提示，不推算未上报的 Token。曲线使用直线连接真实桶值，没有平滑插值。两图按同一时间桶联动，方向键左右移动，Home/End 跳到首末桶。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></figcaption>
-                  <div class="activity-chart-legend"><span class="activity-legend-line activity-input"></span>输入<span class="activity-legend-line activity-output"></span>输出<span class="activity-chart-unit">Token</span></div>
-                  <svg id="activityTokenChart" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互曲线图" aria-label="Token，正在加载" aria-describedby="activityTokenReadout"></svg>
-                  <p id="activityTokenReadout" class="activity-chart-readout" aria-live="polite">正在加载曲线…</p>
+                  <figcaption><h4>输入 / 输出 Token <span>/ 10秒</span></h4><button type="button" class="activity-info" aria-label="Token 柱状图说明" aria-describedby="activityTooltip" data-activity-info="每个10秒时间桶已记录的输入与输出 Token；输入含缓存读、缓存写与独立工具输入。用量不完整时显示短提示，不推算未上报的 Token。输入与输出堆叠显示，柱高为两者之和。两图按同一时间桶联动，方向键左右移动，Home/End 跳到首末桶。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></figcaption>
+                  <div class="activity-chart-legend"><span class="activity-legend-swatch activity-input"></span><span>输入</span><span class="activity-legend-swatch activity-output"></span><span>输出</span><span class="activity-chart-unit">Token</span></div>
+                  <svg id="activityTokenChart" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互柱状图" aria-label="Token，正在加载" aria-describedby="activityTokenReadout"></svg>
+                  <p id="activityTokenReadout" class="activity-chart-readout" aria-live="polite">正在加载图表…</p>
                 </figure>
               </div>
               <p id="activityStatus" class="activity-status" role="status" aria-live="polite">正在加载实时活动…</p>
@@ -1820,7 +1783,7 @@
               <div class="table-wrap overview-table-wrap"><table class="overview-table"><thead><tr><th scope="col">时间</th><th scope="col">操作者</th><th scope="col">动作</th><th scope="col">对象</th><th scope="col">结果</th></tr></thead><tbody id="recentChangesBody"><tr><td colspan="5">正在加载最近变更…</td></tr></tbody></table></div>
             </section>
             <section class="overview-panel activity-clients" aria-label="客户端实时活动">
-              <div class="activity-table-heading"><div><h3>客户端实时活动<button type="button" class="activity-info" aria-label="客户端活动说明" aria-describedby="activityTooltip" data-activity-info="点击客户端姓名或所在行，近5分钟双曲线切换到该客户端；再次点击或使用“返回全站”恢复。全站汇总数字始终保持全站范围。未配置表示已删除或未知客户端仍有近期用量。姓名、在途、会话与 Token 列均可排序。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></h3><span id="activityClientCount">等待采样</span></div><label class="activity-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input id="activityClientSearch" type="search" placeholder="搜索客户端" aria-label="搜索客户端" autocomplete="off"></label></div>
+              <div class="activity-table-heading"><div><h3>客户端实时活动<button type="button" class="activity-info" aria-label="客户端活动说明" aria-describedby="activityTooltip" data-activity-info="点击客户端姓名或所在行，近5分钟两张图切换到该客户端；再次点击或使用“返回全站”恢复。全站汇总数字始终保持全站范围。未配置表示已删除或未知客户端仍有近期用量。姓名、在途、会话与 Token 列均可排序。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></h3><span id="activityClientCount">等待采样</span></div><label class="activity-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input id="activityClientSearch" type="search" placeholder="搜索客户端" aria-label="搜索客户端" autocomplete="off"></label></div>
               <div class="activity-table-wrap"><table class="activity-client-table"><thead><tr><th scope="col" aria-sort="none"><button type="button" data-activity-sort="name" data-label="客户端">客户端<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="active_requests" data-label="当前在途">当前在途<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="websocket_sessions" data-label="WS 会话">WS 会话<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="input_tokens" data-label="5m 输入">5m 输入<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="output_tokens" data-label="5m 输出">5m 输出<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="total_tokens" data-label="5m 总量">5m 总量<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th></tr></thead><tbody id="activityClientsBody"><tr class="activity-initial-row"><td colspan="6">正在加载客户端活动…</td></tr></tbody></table></div>
             </section>
           </div>

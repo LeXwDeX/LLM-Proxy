@@ -570,13 +570,15 @@ const list = [
         models: [...document.querySelectorAll("#topModelsBody tr[data-top-model]")].map(tr => tr.dataset.topModel),
         window: document.getElementById("ovRangeWindow").textContent,
         bars: document.querySelectorAll("#ovBarTrend rect.overview-bar").length,
-        lines: document.querySelectorAll("#ovTokenTrend polyline.activity-line").length,
+        stacks: ["activity-input", "activity-output"].map(cls => document.querySelectorAll("#ovTokenTrend rect.activity-bar." + cls).length),
+        lines: document.querySelectorAll("#page-overview polyline").length,
         trendStatus: document.getElementById("ovTrendStatus").textContent,
       })`);
       assert.match(range.status, /含模型组系数/);
       assert.match(range.window, /本地时区 UTC[+-]\d\d:\d\d/, `range window note: ${range.window}`);
       assert.ok(range.bars > 0, "7d request bars are drawn from aggregate buckets");
-      assert.ok(range.lines >= 2, "7d token trend draws input and output");
+      assert.ok(range.stacks.every(count => count > 0), `7d token trend stacks input and output bars: ${range.stacks}`);
+      assert.equal(range.lines, 0, "overview charts are all bar charts");
       assert.notEqual(range.trendStatus, "", "trend status is present");
       assert.doesNotMatch(range.trendStatus, /不可用/);
       assert.notEqual(range.requests, "不可用");
@@ -613,26 +615,7 @@ const list = [
     },
   },
   {
-    name: "overview-mobile-no-overflow",
-    async run({ page }) {
-      await page.send("Emulation.setDeviceMetricsOverride", { width: 375, height: 812, deviceScaleFactor: 1, mobile: true });
-      try {
-        await goto(page, "overview");
-        await page.waitFor(`!document.getElementById("refreshOverviewBtn").disabled`, { what: "overview refresh enabled", timeoutMs: 10000 });
-        await page.eval(`__sim.click("#refreshOverviewBtn")`);
-        await page.waitFor(`document.querySelectorAll("#targetHealthBody tr[data-target-name]").length >= 2`,
-          { what: "mobile overview", timeoutMs: 15000 });
-        const width = await page.eval(`({scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth})`);
-        assert.ok(width.scroll <= width.client + 1, `mobile overview overflows: ${width.scroll}/${width.client}`);
-        const content = await page.eval(`(() => { const main = document.getElementById("mainContent"); return {scroll: main.scrollWidth, client: main.clientWidth}; })()`);
-        assert.ok(content.scroll <= content.client + 1, `mobile overview content overflows: ${content.scroll}/${content.client}`);
-      } finally {
-        await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
-      }
-    },
-  },
-  {
-    name: "overview-ultrawide-fills-grid",
+    name: "overview-ultrawide-keeps-desktop-layout",
     async run({ page }) {
       await page.send("Emulation.setDeviceMetricsOverride", { width: 2560, height: 1440, deviceScaleFactor: 1, mobile: false });
       try {
@@ -641,15 +624,18 @@ const list = [
           { what: "ultrawide overview", timeoutMs: 15000 });
         const layout = await page.eval(`(() => {
           const columns = el => getComputedStyle(el).gridTemplateColumns.split(" ").filter(Boolean).length;
-          const bands = [...document.querySelectorAll("#page-overview .overview-band")];
+          const all = selector => [...document.querySelectorAll("#page-overview " + selector)].map(columns);
           return {
             scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
-            bands: bands.map(columns), tables: columns(document.querySelector("#page-overview .overview-tables")),
+            bands: all(".overview-band"), cards: all(".overview-cards"), charts: all(".activity-chart-grid"),
+            tables: columns(document.querySelector("#page-overview .overview-tables")),
           };
         })()`);
         assert.ok(layout.scroll <= layout.client + 1, `ultrawide overview overflows: ${layout.scroll}/${layout.client}`);
-        assert.deepEqual(layout.bands, [2, 2], "cards and charts place range and live groups side by side");
-        assert.equal(layout.tables, 3, "ultrawide tables use three columns");
+        assert.deepEqual(layout.bands, [1, 1], "range and live groups stay stacked on ultrawide screens");
+        assert.deepEqual(layout.cards, [5, 5], "each card row keeps five cards");
+        assert.deepEqual(layout.charts, [2, 2], "each chart row keeps two charts");
+        assert.equal(layout.tables, 2, "ultrawide tables keep two columns");
       } finally {
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 960, deviceScaleFactor: 1, mobile: false });
       }
@@ -683,7 +669,7 @@ const list = [
               scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
             };
           })()`);
-          assert.equal(layout.columns, width >= 2200 ? 3 : width >= 1280 ? 2 : 1, `table grid columns at ${width}`);
+          assert.equal(layout.columns, 2, `table grid columns at ${width}`);
           assert.deepEqual(layout.holes, [], `table grid rows leave holes at ${width}`);
           assert.deepEqual(layout.visual, layout.dom, `visual panel order matches DOM/Tab order at ${width}`);
           assert.equal(layout.dom.at(-1), "activity-clients", "client activity is the last panel");
@@ -703,6 +689,8 @@ const list = [
       await goto(page, "targets");
       await page.waitFor(`[...document.querySelectorAll("#targetsTableBody tr")].some(tr => tr.querySelector('td.target-text[title=${js(S.tgtGLM)}]') && /限流|超限|冷却|1 /.test(tr.innerText))`,
         { what: "GLM row shows a limited key", timeoutMs: 10000 });
+      const clipped = await page.eval(`[...document.querySelectorAll("#targetsTableBody tr td:nth-child(6) .target-cell-content")].filter(cell => cell.scrollWidth > cell.clientWidth + 1).map(cell => cell.innerText)`);
+      assert.deepEqual(clipped, [], "scheduling cells fit without a horizontal scrollbar");
     },
   },
   {
