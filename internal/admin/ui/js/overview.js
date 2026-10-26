@@ -369,12 +369,14 @@ AdminApp.register("overview", function (app) {
     function stamp(date) { return (withYear ? date.getFullYear() + "-" : "") + shortDate(date) + " " + shortTime(date); }
     return stamp(window.from) + " – " + stamp(window.end);
   }
-  function renderRangeWindow(window, staleText) {
+  // frozen: the window describes a retained snapshot after a failed refresh, so an
+  // open range ends at the snapshot's end instead of "now".
+  function renderRangeWindow(window, staleText, frozen) {
     var note = el("ovRangeWindow");
     if (!window) { note.textContent = "统计区间不可用"; return; }
     var offsets = offsetLabel(window.from);
     if (offsetLabel(window.end) !== offsets) offsets += " / " + offsetLabel(window.end);
-    var parts = [windowSpan(window) + (window.closed ? "" : "（截至当前）"), "本地时区 " + offsets, window.granularity === "hour" ? "按小时显示" : "小时用量按本地自然日汇总"];
+    var parts = [windowSpan(window) + (window.closed ? "" : frozen ? "（截至 " + shortTime(window.end) + "）" : "（截至当前）"), "本地时区 " + offsets, window.granularity === "hour" ? "按小时显示" : "小时用量按本地自然日汇总"];
     if (staleText) parts.push(staleText);
     var uneven = offsetMinutes(window.from) % 60 !== 0 || offsetMinutes(window.end) % 60 !== 0;
     note.textContent = parts.join(" · ") + (uneven ? "。当前时区不是整点偏移，后端按 UTC 整点截取起止，边界可能多含不足一小时的相邻用量。" : "");
@@ -383,7 +385,9 @@ AdminApp.register("overview", function (app) {
   function renderRange() {
     var option = rangeOption(selectedRange);
     // Describe the data on screen: the snapshot's own window until a newer request succeeds.
-    renderRangeWindow(aggregateSnapshotWindow || aggregateRequestWindow || rangeWindow(selectedRange, Date.now()), aggregateError && snapshotOutdated() ? aggregateStaleText() : "");
+    var shownWindow = aggregateSnapshotWindow || aggregateRequestWindow || rangeWindow(selectedRange, Date.now());
+    var frozen = !!aggregateError && !!aggregateSnapshot && shownWindow === aggregateSnapshotWindow;
+    renderRangeWindow(shownWindow, aggregateError && snapshotOutdated() ? aggregateStaleText() : "", frozen);
     text("ovRangeLabel", option.label);
     text("topClientsRange", option.label);
     text("topModelsRange", option.label);
@@ -828,8 +832,10 @@ AdminApp.register("overview", function (app) {
     }
     var usage = rangeTotals();
     if (usage) {
-      if (counter(usage.incomplete_usage_count) && usage.incomplete_usage_count > 0) items.push(["usage", "当前区间有 " + fmtNum(usage.incomplete_usage_count) + " 条用量记录不完整"]);
-      if (counter(usage.incomplete_cost_count) && usage.incomplete_cost_count > 0) items.push(["usage", "当前区间有 " + fmtNum(usage.incomplete_cost_count) + " 条成本覆盖不完整"]);
+      // A retained snapshot may cover another period (e.g. yesterday after midnight); name it.
+      var usageStale = aggregateError && aggregateSnapshotWindow ? "（更新" + (aggregateError === "加载超时" ? "超时" : "失败") + "，基于 " + windowSpan(aggregateSnapshotWindow) + " 的上次数据）" : "";
+      if (counter(usage.incomplete_usage_count) && usage.incomplete_usage_count > 0) items.push(["usage", "当前区间有 " + fmtNum(usage.incomplete_usage_count) + " 条用量记录不完整" + usageStale]);
+      if (counter(usage.incomplete_cost_count) && usage.incomplete_cost_count > 0) items.push(["usage", "当前区间有 " + fmtNum(usage.incomplete_cost_count) + " 条成本覆盖不完整" + usageStale]);
     }
     var list = el("overviewAttentionList");
     var status = el("overviewAttentionStatus");

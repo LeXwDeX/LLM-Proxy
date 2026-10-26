@@ -1450,11 +1450,32 @@ test("after crossing local midnight a failed refresh keeps the snapshot's own wi
 test("a failed refresh within the same window keeps the plain stale wording", () => withTZ("Asia/Shanghai", async () => {
   const h = harness({rangeButtons: rangeKeys.map(rangeButton)});
   h.setNow(new Date(2026, 9, 26, 8, 0));
-  h.setAggregate(aggregateResult({totals: aggTotals({requests: 2})}));
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 2, incomplete_usage_count: 1})}));
   await h.module.loadOverview();
+  assert.match(h.get("ovRangeWindow").textContent, /10-26 00:00 – 10-26 08:00（截至当前）/);
+  assert.match(h.get("overviewAttentionList").innerHTML, /当前区间有 1 条用量记录不完整</);
   h.setNow(new Date(2026, 9, 26, 9, 30));
   h.setAggregateHandler(() => Promise.reject(new Error("offline")));
   await h.module.loadOverview(true);
   assert.match(h.get("ovRangeStatus").textContent, /更新失败，显示上次数据/);
   assert.doesNotMatch(h.get("ovRangeWindow").textContent, /更新失败/);
+  // The shown data stops at the snapshot's end, so the note must not claim "up to now".
+  assert.match(h.get("ovRangeWindow").textContent, /10-26 00:00 – 10-26 08:00（截至 08:00）/);
+  assert.doesNotMatch(h.get("ovRangeWindow").textContent, /截至当前/);
+  assert.match(h.get("overviewAttentionList").innerHTML, /当前区间有 1 条用量记录不完整（更新失败，基于 10-26 00:00 – 10-26 08:00 的上次数据）/);
+}));
+
+test("attention marks incomplete usage from a snapshot kept across midnight", () => withTZ("Asia/Shanghai", async () => {
+  const h = harness({rangeButtons: rangeKeys.map(rangeButton)});
+  h.setNow(new Date(2026, 9, 25, 23, 50));
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 400, incomplete_usage_count: 2, incomplete_cost_count: 1})}));
+  await h.module.loadOverview();
+  h.setNow(new Date(2026, 9, 26, 8, 0));
+  h.setAggregateHandler(() => new Promise((resolve, reject) => setTimeout(() => reject(Object.assign(new Error("timeout"), {name: "TimeoutError"})), 0)));
+  const refresh = h.module.loadOverview(true);
+  await h.advance(0); await refresh; await h.advance(0);
+  const attention = h.get("overviewAttentionList").innerHTML;
+  assert.match(attention, /当前区间有 2 条用量记录不完整（更新超时，基于 10-25 00:00 – 10-25 23:50 的上次数据）/);
+  assert.match(attention, /当前区间有 1 条成本覆盖不完整（更新超时，基于 10-25 00:00 – 10-25 23:50 的上次数据）/);
+  assert.match(h.get("ovRangeWindow").textContent, /（截至 23:50）/);
 }));
