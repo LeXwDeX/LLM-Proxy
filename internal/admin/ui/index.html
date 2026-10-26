@@ -1441,6 +1441,7 @@
     #page-overview .overview-group > .overview-status { margin-top:8px; }
     #page-overview #chainSummary[data-state=partial] #chainStatus { color:var(--warn); }
     #page-overview #chainSummary[data-state=error] #chainStatus { color:var(--bad); }
+    #page-overview .overview-group > .overview-ops-notice { margin-top:2px; font-size:12px; color:var(--warn); overflow-wrap:anywhere; }
     #page-overview .overview-live-strip { display:flex; flex-wrap:wrap; gap:8px 28px; margin-bottom:10px; font-variant-numeric:tabular-nums; }
     #page-overview .overview-live-item { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; min-width:0; }
     #page-overview .overview-live-label { display:inline-flex; align-items:center; font-size:12px; color:var(--activity-secondary); }
@@ -1712,6 +1713,7 @@
                 <article class="overview-card"><div class="overview-card-label">72 小时成功率</div><strong id="ovLiveSuccessRate">—</strong><small id="ovLiveSuccessDetail">请求完成样本</small></article>
               </div>
               <p class="overview-status" id="chainStatus" role="status">正在加载实时状态…</p>
+              <p class="overview-status overview-ops-notice" id="chainOpsNotice" role="status" hidden></p>
             </section>
           </div>
           <div class="overview-band">

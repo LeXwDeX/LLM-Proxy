@@ -147,7 +147,7 @@ func TestUIOverviewRangeLayout(t *testing.T) {
 		t.Errorf("总览区间按钮 = %s，want %s", got, want)
 	}
 	for _, id := range []string{"ovRangeWindow", "ovRangeRequests", "ovRangeTotalTokens", "ovRangeCost", "ovRangeClients", "ovRangeModels",
-		"chainSummary", "activityActiveRequests", "chainTargets", "chainKeys", "ovLiveSuccessRate",
+		"chainSummary", "chainStatus", "chainOpsNotice", "activityActiveRequests", "chainTargets", "chainKeys", "ovLiveSuccessRate",
 		"ovTokenTrend", "ovBarTrend", "activityConcurrencyChart", "activityTokenChart", "topClientsBody", "topModelsBody",
 		"targetHealthBody", "activityClientsBody", "recentChangesBody"} {
 		if !strings.Contains(overview, `id="`+id+`"`) {

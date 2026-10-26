@@ -601,6 +601,117 @@ test("live status cards summarize available values and mark missing sources", as
   assert.match(h.get("chainStatus").textContent, /部分实时状态不可用/);
 });
 
+function opsOverview(requests) {
+  return {
+    client_count: 1,
+    targets: [{Name: "healthy", Phase: "ready", TotalKeys: 1, ActiveKeys: 1, RateLimitedKeys: 0}],
+    recent_audit: [],
+    ...(requests === undefined ? {} : {requests}),
+  };
+}
+const zeroRequestCounters = {usage_record_failures: 0, usage_client_gone_no_usage: 0, usage_upstream_interrupted_no_usage: 0, request_stats_record_failures: 0};
+
+test("live status ops notice lists only non-zero backlog, budget and process-lifetime counters", async () => {
+  const h = harness();
+  h.setOverview(opsOverview({usage_record_failures: 2, usage_client_gone_no_usage: 3, usage_upstream_interrupted_no_usage: 4, request_stats_record_failures: 5}));
+  h.setMetrics(completeMetrics({
+    persistence: {usage_async_pending: 7, usage_async_deferred: 8, request_stats_dropped: 9},
+    observation_budget: {observation_budget_exhausted: {br: 1, zstd: 2}},
+  }));
+  await h.module.loadOverview();
+  const notice = h.get("chainOpsNotice");
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent, [
+    "用量写入积压 7 条",
+    "用量等待后台重试 8 条",
+    "请求完成统计队列丢弃 9 条",
+    "压缩响应观察预算拒绝 3 次（br 1 / zstd 2）",
+    "自启动累计 2 次用量写入失败",
+    "自启动累计 3 次客户端断开且未取得用量",
+    "自启动累计 4 次上游中断且未取得用量",
+    "自启动累计 5 次请求完成统计写入失败",
+  ].join(" · "));
+  assert.doesNotMatch(notice.textContent, /%|成功率|区间/, "process-lifetime counters are not a rate or a range figure");
+  // The notice never changes the live status line contract.
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  assert.equal(h.get("chainStatus").textContent, "实时状态已加载");
+
+  // Only the non-zero items are listed.
+  h.setOverview(opsOverview({...zeroRequestCounters, usage_client_gone_no_usage: 6}));
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: 0, usage_async_deferred: 1, request_stats_dropped: 0}}));
+  await h.module.loadOverview(true);
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent, "用量等待后台重试 1 条 · 自启动累计 6 次客户端断开且未取得用量");
+});
+
+test("live status ops notice is hidden when every counter is zero", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview();
+  const notice = h.get("chainOpsNotice");
+  assert.equal(notice.hidden, true);
+  assert.equal(notice.textContent, "");
+  assert.equal(h.get("chainStatus").textContent, "实时状态已加载");
+
+  // A notice shown earlier disappears once the counters drain back to zero.
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: 4, usage_async_deferred: 0, request_stats_dropped: 0}}));
+  await h.module.loadOverview(true);
+  assert.equal(notice.hidden, false);
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview(true);
+  assert.equal(notice.hidden, true);
+  assert.equal(notice.textContent, "");
+});
+
+test("live status ops notice stays hidden without data and never fabricates zeros or errors", async () => {
+  const h = harness();
+  h.setOverview(opsOverview());
+  h.setMetrics(null);
+  await h.module.loadOverview();
+  const notice = h.get("chainOpsNotice");
+  assert.equal(notice.hidden, true);
+  assert.equal(notice.textContent, "");
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.equal(h.get("chainStatus").textContent, "部分实时状态不可用");
+
+  // Missing or malformed fields are skipped; the remaining valid ones still show.
+  h.setOverview(opsOverview({usage_record_failures: "3", usage_client_gone_no_usage: -1, request_stats_record_failures: 2}));
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: "5"}, observation_budget: {}}));
+  await h.module.loadOverview(true);
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent, "自启动累计 2 次请求完成统计写入失败");
+  assert.equal(h.get("chainStatus").textContent, "部分实时状态不可用");
+
+  // Metrics and history both unavailable: hidden, with the existing error line unchanged.
+  const empty = harness();
+  empty.setHandler(url => {
+    if (url.endsWith("overview")) return Promise.reject(new Error("offline"));
+    if (url.endsWith("activity")) return Promise.reject(new Error("offline"));
+    if (url.endsWith("/admin/metrics")) return Promise.reject(new Error("offline"));
+    return Promise.resolve({totals: {}});
+  });
+  await empty.module.loadOverview(true);
+  assert.equal(empty.get("chainOpsNotice").hidden, true);
+  assert.equal(empty.get("chainOpsNotice").textContent, "");
+  assert.equal(empty.get("chainSummary").dataset.state, "error");
+  assert.match(empty.get("chainStatus").textContent, /更新失败|不可用/);
+});
+
+test("live status ops notice is plain text and its element is a hidden status line", async () => {
+  const h = harness();
+  h.setOverview(opsOverview({...zeroRequestCounters, usage_record_failures: 1}));
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: '<img src=x onerror="1">', usage_async_deferred: 0, request_stats_dropped: 0}}));
+  await h.module.loadOverview();
+  const notice = h.get("chainOpsNotice");
+  assert.equal(notice.innerHTML, "", "rendered with textContent, never innerHTML");
+  assert.equal(notice.textContent, "自启动累计 1 次用量写入失败");
+  assert.doesNotMatch(notice.textContent, /</);
+  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+  const section = html.slice(html.indexOf('id="chainSummary"'), html.indexOf("</section>", html.indexOf('id="chainSummary"')));
+  assert.match(section, /id="chainStatus"[^>]*>[^<]*<\/p>\s*<p class="overview-status overview-ops-notice" id="chainOpsNotice" role="status" hidden><\/p>/);
+});
+
 test("activity polling refreshes the live status cards without another overview request", async () => {
   const h = harness();
   h.setOverview({client_count: 3, targets: [], usage_summary: {}, recent_audit: []});

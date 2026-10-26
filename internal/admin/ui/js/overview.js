@@ -656,6 +656,49 @@ AdminApp.register("overview", function (app) {
   function metricsUsable() {
     return isObject(metricsSnapshot);
   }
+  // Ops signals that used to live in the removed attention panel. Only non-zero,
+  // well-formed counters are listed; missing data yields no item (never a fake 0).
+  function opsNoticeItems(metrics, ov) {
+    var items = [];
+    var persistence = metrics && isObject(metrics.persistence) ? metrics.persistence : null;
+    if (persistence) {
+      [
+        ["usage_async_pending", "用量写入积压 ", " 条"],
+        ["usage_async_deferred", "用量等待后台重试 ", " 条"],
+        ["request_stats_dropped", "请求完成统计队列丢弃 ", " 条"],
+      ].forEach(function (entry) {
+        var count = persistence[entry[0]];
+        if (counter(count) && count > 0) items.push(entry[1] + fmtNum(count) + entry[2]);
+      });
+    }
+    var budget = metrics && isObject(metrics.observation_budget) ? metrics.observation_budget.observation_budget_exhausted : null;
+    if (isObject(budget)) {
+      var br = counter(budget.br) ? budget.br : 0;
+      var zstd = counter(budget.zstd) ? budget.zstd : 0;
+      if (br + zstd > 0) items.push("压缩响应观察预算拒绝 " + fmtNum(br + zstd) + " 次（br " + fmtNum(br) + " / zstd " + fmtNum(zstd) + "）");
+    }
+    // Process-lifetime request persistence counters: never present them as a
+    // success rate or as a selected-range figure.
+    var requests = ov && isObject(ov.requests) ? ov.requests : null;
+    if (requests) {
+      [
+        ["usage_record_failures", "用量写入失败"],
+        ["usage_client_gone_no_usage", "客户端断开且未取得用量"],
+        ["usage_upstream_interrupted_no_usage", "上游中断且未取得用量"],
+        ["request_stats_record_failures", "请求完成统计写入失败"],
+      ].forEach(function (entry) {
+        var count = requests[entry[0]];
+        if (counter(count) && count > 0) items.push("自启动累计 " + fmtNum(count) + " 次" + entry[1]);
+      });
+    }
+    return items;
+  }
+  function renderOpsNotice(metrics, ov) {
+    var notice = el("chainOpsNotice");
+    var items = opsNoticeItems(metrics, ov);
+    notice.textContent = items.join(" · ");
+    notice.hidden = !items.length;
+  }
   function renderChain() {
     var ov = historySnapshot;
     var targets = ov && Array.isArray(ov.targets) ? ov.targets : null;
@@ -672,6 +715,7 @@ AdminApp.register("overview", function (app) {
       proxyParts.push("运行指标不可用");
     }
     text("chainProxy", proxyParts.join(" · "));
+    renderOpsNotice(metrics, ov);
     if (targets) {
       if (!targets.length) {
         text("chainTargets", "暂无目标");
