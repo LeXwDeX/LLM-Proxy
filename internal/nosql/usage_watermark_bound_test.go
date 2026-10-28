@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,9 +87,16 @@ func assertNewWriteAccepted(t *testing.T, store *UsageStore, id string) {
 	}
 }
 
-// TestCorruptCellInFutureHourDoesNotMoveWatermark: a corrupt cell in an hour
-// after every surviving raw row cannot cover pruned rows, so it only logs.
-func TestCorruptCellInFutureHourDoesNotMoveWatermark(t *testing.T) {
+func assertNewWriteUnverified(t *testing.T, store *UsageStore, id string) {
+	t.Helper()
+	if added, err := store.RecordOnce(boundEvent(id, boundScanTime.Add(time.Minute))); added || !errors.Is(err, ErrUsageIdentityUnverified) {
+		t.Fatalf("unproven current write: added=%v err=%v", added, err)
+	}
+}
+
+// The persisted legacy watermark is capped, but future corrupt evidence also
+// bounds admission; a current identity cannot be proven new.
+func TestCorruptCellInFutureHourRecordsUntrustedBoundary(t *testing.T) {
 	logs := captureDefaultLog(t)
 	db := testDB(t)
 	seedRawThenResetWatermark(t, db, boundEvent("55555555-5555-4555-8555-555555555501", boundScanTime.Add(-48*time.Hour)))
@@ -96,23 +104,21 @@ func TestCorruptCellInFutureHourDoesNotMoveWatermark(t *testing.T) {
 	putAggRaw(t, db, futureKey, []byte(corruptCell))
 	store := clockedStore(db)
 	replayPending(t, store,
-		pendingCase{event: boundEvent("55555555-5555-4555-8555-555555555502", boundScanTime.Add(-20*time.Minute))},
-		pendingCase{event: boundEvent("55555555-5555-4555-8555-555555555503", boundScanTime.Add(-26*time.Hour))},
+		pendingCase{event: boundEvent("55555555-5555-4555-8555-555555555502", boundScanTime.Add(-20*time.Minute)), rejected: true},
+		pendingCase{event: boundEvent("55555555-5555-4555-8555-555555555503", boundScanTime.Add(-26*time.Hour)), rejected: true},
 	)
-	assertNewWriteAccepted(t, store, "55555555-5555-4555-8555-555555555504")
-	if got := receiptWatermark(t, db); !got.IsZero() {
-		t.Fatalf("future corrupt cell moved the watermark to %v", got)
+	assertNewWriteUnverified(t, store, "55555555-5555-4555-8555-555555555504")
+	if got, want := receiptWatermark(t, db), boundScanTime.Truncate(time.Hour); !got.Equal(want) {
+		t.Fatalf("future corrupt cell watermark=%v, want capped %v", got, want)
 	}
 	if out := logs.String(); !strings.Contains(out, "level=ERROR") || !strings.Contains(out, futureKey) {
 		t.Fatalf("future corrupt cell not logged at ERROR:\n%s", out)
 	}
 }
 
-// TestCorruptCellInRecentHourWithEarlierRawDoesNotMoveWatermark: the newest
-// hour's own cell is corrupt while older raw history survives. The raw rows of
-// that hour no longer match a decodable cell, which is caused by the corrupt
-// cell itself and is not evidence of pruning.
-func TestCorruptCellInRecentHourWithEarlierRawDoesNotMoveWatermark(t *testing.T) {
+// Older raw rows can have arrived after retention. They cannot prove that a
+// later corrupt hour contains no pruned identities.
+func TestCorruptCellInRecentHourWithEarlierRawMovesWatermark(t *testing.T) {
 	db := testDB(t)
 	recent := boundEvent("66666666-6666-4666-8666-666666666602", boundScanTime.Add(-70*time.Minute))
 	seedRawThenResetWatermark(t, db,
@@ -122,18 +128,16 @@ func TestCorruptCellInRecentHourWithEarlierRawDoesNotMoveWatermark(t *testing.T)
 	putAggRaw(t, db, string(aggKey(recent.Timestamp, recent.EndpointType, recent.ClientName, recent.Model, recent.Target)), []byte(corruptCell))
 	putQuotaAggRaw(t, db, string(quotaAggKey(recent.Timestamp, recent.ClientName, recent.Target, recent.Model)), []byte(corruptCell))
 	store := clockedStore(db)
-	// Same hour, another cell: the corrupt cell itself still rejects writes
-	// (bumpAgg never overwrites ledger bytes), which is a separate fail-closed
-	// rule; this case is only about the watermark.
+	// Same hour, another cell would otherwise bypass bumpAgg's corruption check.
 	sameHour := boundEvent("66666666-6666-4666-8666-666666666603", recent.Timestamp.Add(5*time.Minute))
 	sameHour.Model = "advisor"
 	replayPending(t, store,
-		pendingCase{event: sameHour},
+		pendingCase{event: sameHour, rejected: true},
 		pendingCase{event: boundEvent("66666666-6666-4666-8666-666666666604", boundScanTime.Add(-10*time.Minute))},
 	)
 	assertNewWriteAccepted(t, store, "66666666-6666-4666-8666-666666666605")
-	if got := receiptWatermark(t, db); !got.IsZero() {
-		t.Fatalf("recent corrupt cell moved the watermark to %v", got)
+	if got, want := receiptWatermark(t, db), recent.Timestamp.Truncate(time.Hour).Add(time.Hour); !got.Equal(want) {
+		t.Fatalf("recent corrupt cell watermark=%v, want %v", got, want)
 	}
 }
 
@@ -199,17 +203,17 @@ func TestCorruptCellInsidePrunedRangeStillMovesWatermark(t *testing.T) {
 	}
 }
 
-// TestCorruptCellWithoutRawIsConservativeButCapped: with no surviving raw the
-// corrupt hour may have been cleaned, so it stays untrusted, but the watermark
-// never passes the scan hour and current traffic keeps flowing.
+// With no surviving raw, the corrupt hour may have been cleaned. The legacy
+// watermark stays capped, but admission uses the uncapped boundary.
 func TestCorruptCellWithoutRawIsConservativeButCapped(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		bad       time.Time
 		watermark time.Time
+		rejected  bool
 	}{
-		{"past hour", boundScanTime.Add(-72 * time.Hour), boundScanTime.Add(-72 * time.Hour).Truncate(time.Hour).Add(time.Hour)},
-		{"future hour", boundScanTime.Add(120 * time.Hour), boundScanTime.Truncate(time.Hour)},
+		{"past hour", boundScanTime.Add(-72 * time.Hour), boundScanTime.Add(-72 * time.Hour).Truncate(time.Hour).Add(time.Hour), false},
+		{"future hour", boundScanTime.Add(120 * time.Hour), boundScanTime.Truncate(time.Hour), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := captureDefaultLog(t)
@@ -217,10 +221,14 @@ func TestCorruptCellWithoutRawIsConservativeButCapped(t *testing.T) {
 			putAggRaw(t, db, tc.bad.Truncate(time.Hour).Format(hourLayout)+"|claude|bob|executor|anthropic", []byte(corruptCell))
 			store := clockedStore(db)
 			replayPending(t, store,
-				pendingCase{event: boundEvent("88888888-8888-4888-8888-888888888801", boundScanTime.Add(-20*time.Minute))},
+				pendingCase{event: boundEvent("88888888-8888-4888-8888-888888888801", boundScanTime.Add(-20*time.Minute)), rejected: tc.rejected},
 				pendingCase{event: boundEvent("88888888-8888-4888-8888-888888888802", boundScanTime.Add(-96*time.Hour)), rejected: true},
 			)
-			assertNewWriteAccepted(t, store, "88888888-8888-4888-8888-888888888803")
+			if tc.rejected {
+				assertNewWriteUnverified(t, store, "88888888-8888-4888-8888-888888888803")
+			} else {
+				assertNewWriteAccepted(t, store, "88888888-8888-4888-8888-888888888803")
+			}
 			if got := receiptWatermark(t, db); !got.Equal(tc.watermark) {
 				t.Fatalf("watermark=%v, want %v", got, tc.watermark)
 			}
@@ -231,8 +239,8 @@ func TestCorruptCellWithoutRawIsConservativeButCapped(t *testing.T) {
 	}
 }
 
-// TestWatermarkNeverExceedsScanHour applies the cap to decodable evidence too:
-// a legacy four-segment key in a future hour cannot block current writes.
+// The stored legacy watermark stays capped for a decodable four-segment key,
+// but that future evidence still blocks an unproven current write.
 func TestWatermarkNeverExceedsScanHour(t *testing.T) {
 	db := testDB(t)
 	future := boundScanTime.Add(48 * time.Hour).Truncate(time.Hour)
@@ -244,5 +252,5 @@ func TestWatermarkNeverExceedsScanHour(t *testing.T) {
 	if got, want := receiptWatermark(t, db), boundScanTime.Truncate(time.Hour); !got.Equal(want) {
 		t.Fatalf("watermark=%v, want capped %v", got, want)
 	}
-	assertNewWriteAccepted(t, store, "99999999-9999-4999-8999-999999999901")
+	assertNewWriteUnverified(t, store, "99999999-9999-4999-8999-999999999901")
 }

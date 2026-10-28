@@ -49,9 +49,57 @@ func OpenDB(path string) (*bolt.DB, error) {
 	err = db.Update(func(tx *bolt.Tx) error {
 		indexSchemaMissing := tx.Bucket([]byte(BucketUsageEventsByClient)) == nil || tx.Bucket([]byte(BucketUsageClientHours)) == nil
 		receiptsMissing := tx.Bucket([]byte(BucketUsageReceipts)) == nil
+		oldMeta := tx.Bucket([]byte(BucketMeta))
+		indexInitialized := false
+		if oldMeta != nil {
+			indexInitialized = oldMeta.Get([]byte(usageClientIndexDone)) != nil || oldMeta.Get([]byte(usageClientIndexCursor)) != nil || oldMeta.Get([]byte(usageRawRevisionKey)) != nil
+		}
+		for _, name := range []string{BucketUsageEventsByClient, BucketUsageClientHours} {
+			if b := tx.Bucket([]byte(name)); b != nil {
+				key, _ := b.Cursor().First()
+				indexInitialized = indexInitialized || key != nil
+			}
+		}
+		if indexSchemaMissing && indexInitialized {
+			if oldMeta == nil {
+				return fmt.Errorf("usage client index source missing: meta bucket missing")
+			}
+			if value := oldMeta.Get([]byte(usageClientIndexSourceMissing)); value != nil && string(value) != "1" {
+				return fmt.Errorf("invalid usage client index source loss marker")
+			}
+			if err := oldMeta.Put([]byte(usageClientIndexSourceMissing), []byte("1")); err != nil {
+				return fmt.Errorf("record usage client index source loss: %w", err)
+			}
+		}
+		freshUsage := oldMeta == nil
+		for _, name := range []string{BucketUsageEvents, BucketUsageAggHourly, BucketQuotaUsageAggHourly, BucketUsageReceipts, receiptOwnersBucket, rawOwnerBucket, freshAttestationBucket, "usage_rollup_proofs_v1", rollupProofBucket, BucketUsageEventsQuarantine, BucketUsageEventsByClient, BucketUsageClientHours, unresolvedBucket, usageBackfillSnapshotBucket} {
+			if bucket := tx.Bucket([]byte(name)); bucket != nil {
+				if key, _ := bucket.Cursor().First(); key != nil {
+					freshUsage = false
+				}
+			}
+		}
+		usageAggMissing := oldMeta != nil && oldMeta.Get([]byte(usageAggBuiltMetaKey)) != nil && tx.Bucket([]byte(BucketUsageAggHourly)) == nil
+		quotaAggMissing := oldMeta != nil && oldMeta.Get([]byte(quotaUsageAggBuiltMetaKey)) != nil && tx.Bucket([]byte(BucketQuotaUsageAggHourly)) == nil
 		for _, name := range allBuckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %q: %w", name, err)
+			}
+		}
+		meta := tx.Bucket([]byte(BucketMeta))
+		if freshUsage {
+			if err := meta.Put([]byte(usageAccountingProofTrackedKey), []byte("1")); err != nil {
+				return err
+			}
+		}
+		if usageAggMissing {
+			if err := meta.Put([]byte(usageAggregateSourceMissingPrefix+BucketUsageAggHourly), []byte("1")); err != nil {
+				return err
+			}
+		}
+		if quotaAggMissing {
+			if err := meta.Put([]byte(usageAggregateSourceMissingPrefix+BucketQuotaUsageAggHourly), []byte("1")); err != nil {
+				return err
 			}
 		}
 		if indexSchemaMissing {
@@ -66,10 +114,29 @@ func OpenDB(path string) (*bolt.DB, error) {
 			}
 		}
 		if receiptsMissing {
-			// A recreated, empty receipt bucket cannot prove that old identities
-			// were never committed. Recompute the conservative legacy watermark.
+			// A lost initialized receipt bucket may have contained identities at
+			// any time, even if their corresponding rollups have also been lost.
 			meta := tx.Bucket([]byte(BucketMeta))
+			if meta.Get([]byte(usageReceiptsWatermarkDoneKey)) != nil || meta.Get([]byte(usageReceiptsWatermarkDoneV2Key)) != nil {
+				if err := meta.Put([]byte(usageReceiptsUnknownHourKey), []byte("1")); err != nil {
+					return err
+				}
+			}
 			if err := meta.Delete([]byte(usageReceiptsWatermarkDoneKey)); err != nil {
+				return err
+			}
+			if err := meta.Delete([]byte(usageReceiptsWatermarkDoneV2Key)); err != nil {
+				return err
+			}
+		}
+		if err := restoreIdentityOnlyRechecks(tx); err != nil {
+			return err
+		}
+		if evidence := tx.Bucket([]byte(unresolvedBucket)); evidence != nil {
+			if _, err := unresolvedState(tx); err != nil {
+				return err
+			}
+			if err := canonicalizeUnresolvedKeys(tx, evidence); err != nil {
 				return err
 			}
 		}

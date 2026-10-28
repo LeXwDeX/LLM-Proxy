@@ -64,7 +64,8 @@ func TestUsageJournalRejectsInvalidBundleBeforeSyncFallback(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "usage-journal.jsonl")
 			primary := &recordingUsageRecorder{err: errors.New("primary unavailable")}
-			journal, err := NewUsageJournal(primary, path, nil)
+			evidence := withEvidenceStore(t, primary)
+			journal, err := NewUsageJournal(evidence, path, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -75,6 +76,9 @@ func TestUsageJournalRejectsInvalidBundleBeforeSyncFallback(t *testing.T) {
 			}
 			if got := primary.recorded(); len(got) != 0 {
 				t.Fatalf("invalid bundle reached the primary recorder: %+v", got)
+			}
+			if err := evidence.store.checkUnresolvedClient(tc.event.ClientName); !errors.Is(err, ErrUsageHistoryIncomplete) {
+				t.Fatalf("invalid bundle was not registered as unresolved: %v", err)
 			}
 			if data, err := os.ReadFile(path); err == nil && len(data) != 0 {
 				t.Fatalf("invalid bundle left journal bytes: %s", data)
@@ -90,7 +94,8 @@ func TestUsageJournalRejectsInvalidBundleBeforeAsyncAppend(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "usage-journal.jsonl")
 			primary := &recordingUsageRecorder{}
-			journal, err := NewUsageJournal(primary, path, nil)
+			evidence := withEvidenceStore(t, primary)
+			journal, err := NewUsageJournal(evidence, path, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -108,6 +113,9 @@ func TestUsageJournalRejectsInvalidBundleBeforeAsyncAppend(t *testing.T) {
 			}
 			if got := primary.recorded(); len(got) != 0 {
 				t.Fatalf("invalid bundle reached the primary recorder: %+v", got)
+			}
+			if err := evidence.store.checkUnresolvedClient(tc.event.ClientName); !errors.Is(err, ErrUsageHistoryIncomplete) {
+				t.Fatalf("invalid bundle was not registered as unresolved: %v", err)
 			}
 			if data, err := os.ReadFile(path); err == nil && len(data) != 0 {
 				t.Fatalf("invalid bundle left journal bytes: %s", data)

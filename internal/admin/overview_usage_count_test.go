@@ -45,6 +45,12 @@ func TestOverviewCountIncludesLegacyAmbiguousAggregate(t *testing.T) {
 	h := NewHandler(manager, authStore, service, stores.auditStore, stores.userStore, stores.clientStore, stores.targetStore, stores.modelCostStore, stores.usageStore, nil, nil, nil, nil, logger)
 
 	hour := time.Now().UTC().Add(-time.Hour).Truncate(time.Hour)
+	if err := stores.usageStore.Record(usage.Event{
+		Timestamp: hour.Add(10 * time.Minute), ClientName: "alice", Model: "model",
+		EndpointType: "openai", Target: "upstream", StatusCode: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	legacyKey := hour.Format("2006-01-02T15") + "|openai|team|api|model|upstream"
 	if err := stores.db.Update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(nosql.AggCell{RecordCount: 2, Requests: 2, Success: 1})
@@ -52,12 +58,6 @@ func TestOverviewCountIncludesLegacyAmbiguousAggregate(t *testing.T) {
 			return err
 		}
 		return tx.Bucket([]byte(nosql.BucketUsageAggHourly)).Put([]byte(legacyKey), data)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := stores.usageStore.Record(usage.Event{
-		Timestamp: hour.Add(10 * time.Minute), ClientName: "alice", Model: "model",
-		EndpointType: "openai", Target: "upstream", StatusCode: 200,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -104,15 +104,15 @@ func TestOverviewCountSkipsCorruptAggregate(t *testing.T) {
 	h := NewHandler(manager, authStore, service, stores.auditStore, stores.userStore, stores.clientStore, stores.targetStore, stores.modelCostStore, stores.usageStore, nil, nil, nil, nil, logger)
 
 	hour := time.Now().UTC().Add(-time.Hour).Truncate(time.Hour)
-	corruptKey := hour.Format("2006-01-02T15") + "|openai|c|m|t"
-	if err := stores.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte(nosql.BucketUsageAggHourly)).Put([]byte(corruptKey), []byte("{not json"))
-	}); err != nil {
-		t.Fatal(err)
-	}
 	if err := stores.usageStore.Record(usage.Event{
 		Timestamp: hour.Add(10 * time.Minute), ClientName: "alice", Model: "model",
 		EndpointType: "openai", Target: "upstream", StatusCode: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	corruptKey := hour.Format("2006-01-02T15") + "|openai|c|m|t"
+	if err := stores.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(nosql.BucketUsageAggHourly)).Put([]byte(corruptKey), []byte("{not json"))
 	}); err != nil {
 		t.Fatal(err)
 	}

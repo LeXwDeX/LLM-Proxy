@@ -50,6 +50,13 @@ node scripts/testing/usage_table_browser_test.cjs
 - `internal/proxy/usage_final_snapshot_test.go`：`TestClaudeConfirmedFinalSnapshotSurvivesUntrustedTail`、`TestClaudeInvalidLaterFinalDoesNotOverwriteConfirmed`；`internal/fakellm/anthropic_final_tail_test.go`：`TestAnthropicFinalSnapshotTailModes`。
 - `internal/quota/accounting_identity_test.go`：`TestRecordUsageRejectsExplicitIdentityWithoutTimestampWithoutSideEffects`、`TestRecordUsageRetryIgnoresPricingRuleVersion`。
 - `internal/nosql/usage_price_coverage_test.go`：`TestStableAggregateReportsMissingSupplementaryIterationPrice`、`TestStableAggregateIterationPriceScope`、`TestStableAggregatePriceRecoveryDoesNotPersistDerivedIncomplete`、`TestMixedLegacyAndNewCellIsNotAssumedCovered`、`TestStablePriceCoverageSurvivesClearedRawHistory`，以及 Summary、ReadCostUnits、模型组消费者的缺价计数回归。
+- `internal/nosql/usage_watermark_v2_test.go`、`internal/nosql/usage_identity_strict_issue72_test.go`：覆盖收据水位 v2 标记、当前与未来小时的不可信边界、无法识别小时的未知范围标记、重启后边界保持，以及生成 ID、显式身份和批量写入的拒绝边界。
+- `internal/nosql/usage_unresolved_persistence_issue72_test.go`、`internal/nosql/usage_integrity_issue72_test.go`、`internal/nosql/usage_blocking_issue72_test.go`、`internal/quota/accounting_integrity_issue72_test.go`：验证被拒绝或无效记录在移出 journal 前登记为未解决证据、跨重启保留，并阻断受影响客户端的费用与额度校准；只有已提交且账务完整性得到证明的摘要冲突和 bundle 不阻断，仅身份验证不够。
+- `internal/nosql/usage_backfill_evidence_issue72_test.go`、`internal/nosql/usage_backfill_accounting_issue72_test.go`：回填快照保留原始聚合字节，失败回滚，重启后仍可核对。
+- `internal/nosql/usage_recheck_issue72_test.go`、`internal/nosql/usage_review_recheck_p1_test.go`、`internal/nosql/usage_review_resolution_p1_test.go`：复核在身份与账务证明同时成立时把单条证据置为已解决并报告 `accounting_verified`/`accounting_restored`，包括仅剩收据与保留聚合时的证明；账务证明不足时只报告身份已验证（`identity_verified_accounting_unresolved`）并保留未解决状态，身份或证据不足时报告 `insufficient_evidence`，重启后会重新检查此前仅凭身份解决的证据，审计写入失败回滚。
+- `internal/admin/usage_recheck_denials_issue72_test.go`、`internal/admin/usage_recheck_accounting_p1_test.go`、`internal/quota/usage_recheck_accounting_p1_test.go`：覆盖复核 API 的拒绝与审计、证明不足的复核不恢复账务、额度校准仍被阻断。
+- `internal/nosql/usage_journal_window_issue72_test.go`、`internal/nosql/usage_source_activation_issue72_test.go`、`internal/nosql/usage_unresolved_entry_issue72_test.go`：覆盖范围 drain 跳过起点之前的已知外来行、未来或归属/时间未知的行仍使校准失败，以及范围 drain 不证明完整性，以及聚合来源缺失标记跨重启保留并在缺失额度聚合时阻断费用读取。
+- `internal/nosql/usage_client_index_v2_stage1_test.go`、`usage_client_index_v2_requirements_test.go`、`usage_client_index_v2_review_test.go`、`usage_client_index_source_loss_test.go`：覆盖 v2 批次进度与 proof 的原子提交和回滚、重启续建、v1 部分进度拒绝、healthy prune 保留 proof、prune 返回此前批次计数、损坏证据阻断精确费用读取、全部锚点缺失不能认证、reindex 不修补缺失 proof 也不重新认证，以及来源丢失重建仍保留阻断标记。
 
 以上用例覆盖工作区当前合同，不代表部署或真实上游验收。
 

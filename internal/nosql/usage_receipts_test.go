@@ -957,8 +957,8 @@ func TestLegacyFourSegmentAggregateKeyIsConservative(t *testing.T) {
 
 // TestReceiptWatermarkToleratesMalformedAggregateKeys: impossible key shapes
 // no longer block the migration (#35). A key whose prefix still names an hour
-// marks that hour untrusted; a key without any hour cannot bound an identity
-// and is only logged.
+// marks that hour untrusted; a key without any hour is logged and prevents
+// admission of identities that cannot be verified by raw records or receipts.
 func TestReceiptWatermarkToleratesMalformedAggregateKeys(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

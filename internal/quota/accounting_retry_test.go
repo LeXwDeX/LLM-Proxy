@@ -21,6 +21,10 @@ func (r accountingRetryRecorder) RecordExists(event usage.Event) (bool, error) {
 	return r.store.RecordExists(event)
 }
 
+func (r accountingRetryRecorder) RegisterUnresolvedUsage(event usage.Event, original []byte) error {
+	return r.store.RegisterUnresolvedUsage(event, original)
+}
+
 func expireCalibrationBackoff(m *Manager) {
 	m.mu.Lock()
 	m.calibrationRetryAt["alice"] = time.Now().Add(-time.Second)

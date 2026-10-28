@@ -193,6 +193,19 @@ func RequiresEventTimestampsFor(resolver RateResolver, target, model string) boo
 	return RequiresEventTimestamps(resolver)
 }
 
+// RequiresEventTimestampsForModel covers every target, including global rules.
+// Resolvers without this optional capability use their global requirement.
+func RequiresEventTimestampsForModel(resolver RateResolver, model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return RequiresEventTimestamps(resolver)
+	}
+	if scoped, ok := resolver.(interface{ RequiresEventTimestampsForModel(string) bool }); ok {
+		return scoped.RequiresEventTimestampsForModel(model)
+	}
+	return RequiresEventTimestamps(resolver)
+}
+
 // LookupCost finds cost rates by model name only.
 func (ct CostTable) LookupCost(model string) (CostRates, bool) {
 	model = strings.ToLower(strings.TrimSpace(model))
@@ -255,6 +268,10 @@ func (c coefficientResolver) RequiresEventTimestamps() bool {
 
 func (c coefficientResolver) RequiresEventTimestampsFor(target, model string) bool {
 	return RequiresEventTimestampsFor(c.inner, target, model)
+}
+
+func (c coefficientResolver) RequiresEventTimestampsForModel(model string) bool {
+	return RequiresEventTimestampsForModel(c.inner, model)
 }
 
 func (c coefficientResolver) RateFor(target, model string, at time.Time) (CostRates, bool) {

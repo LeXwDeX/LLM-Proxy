@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,12 +10,16 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 	bolt "go.etcd.io/bbolt"
 )
 
 var ErrUsageHistoryIncomplete = errors.New("usage history is incomplete for exact pricing")
+
+// ErrUsageAggregateSourceMissing is an activation blocker with unknown scope.
+var ErrUsageAggregateSourceMissing = errors.New("initialized usage aggregate source is missing; version activation blocked")
 
 type TargetModelCost struct {
 	Target  string
@@ -36,7 +41,9 @@ type CostUnit struct {
 type costReadHooks struct {
 	decoded     func()
 	scan        func(bool) // true: client index; false: legacy raw scan
-	forceLegacy bool       // call-local test/benchmark comparison; never mutable store state
+	evidenceRaw func()     // additional raw rows visited for index completeness
+	direct      *directIntegrityHooks
+	forceLegacy bool // call-local test/benchmark comparison; never mutable store state
 }
 
 type costReadResult struct {
@@ -51,6 +58,96 @@ type costPairFilter func(target, model string) bool
 
 func (allow costPairFilter) includes(target, model string) bool {
 	return allow == nil || allow(target, model)
+}
+
+func observeCostRawHour(ctx context.Context, tx *bolt.Tx, refs *indexRawReferences, progress *indexProgress, evidence map[string]*costRawHourEvidence, key, value []byte, e usage.Event, filter usage.Filter, resolver usage.RateResolver, rawFrom *time.Time, to time.Time, allow costPairFilter) error {
+	client := strings.TrimSpace(e.ClientName)
+	proofValid, proofInvalid := false, false
+	if progress != nil {
+		proof, attributable, invalid, owned, err := indexProofForRaw(ctx, tx, refs, progress, key, value, e)
+		if err != nil {
+			return err
+		}
+		proofValid = attributable && !invalid
+		if invalid {
+			filterClient := strings.TrimSpace(filter.ClientName)
+			if filterClient != "" && client != filterClient {
+				if attributable && bytes.HasPrefix(proof.IndexKey, []byte(clientIndexPrefix(filterClient))) || !attributable && !owned {
+					return fmt.Errorf("%w: invalid client index proof", ErrUsageHistoryIncomplete)
+				}
+			} else {
+				model := strings.ToLower(strings.TrimSpace(filter.Model))
+				disjoint := (model != "" && model != strings.ToLower(e.Model)) || !allow.includes(e.Target, e.Model)
+				proofInvalid = !owned || !disjoint
+			}
+		}
+	}
+	if filterClient := strings.TrimSpace(filter.ClientName); filterClient != "" && client != filterClient {
+		return nil
+	}
+	hour := e.Timestamp.UTC().Truncate(time.Hour)
+	hourKey := string(clientHourKey(client, hour))
+	observed := evidence[hourKey]
+	if observed == nil {
+		observed = &costRawHourEvidence{client: client, hour: hour, owned: true}
+		evidence[hourKey] = observed
+	}
+	observed.count++
+	xorDigest(&observed.digest, rawDigest(key, value))
+	observed.proofInvalid = observed.proofInvalid || proofInvalid
+	if proofInvalid {
+		observed.relevant = true
+	}
+	model := strings.ToLower(strings.TrimSpace(filter.Model))
+	exact := (model == "" || model == strings.ToLower(e.Model)) && allow.includes(e.Target, e.Model) && usage.RequiresEventTimestampsFor(resolver, e.Target, e.Model)
+	detail := rawFrom != nil && !hour.Before(rawFrom.UTC().Truncate(time.Hour)) && !hour.After(to.UTC().Truncate(time.Hour)) && !usage.RequiresEventTimestampsFor(resolver, e.Target, e.Model)
+	if exact || detail {
+		observed.relevant = true
+		owner, known, err := readRawOwner(tx, key)
+		if err != nil {
+			return err
+		}
+		digest, err := usage.RetryEquivalentDigest(e)
+		observed.owned = observed.owned && known && err == nil && owner.Client == receiptClientHash(e.ClientName) && owner.Digest == digest && usageKey(e.Timestamp, e.RecordID) == string(key)
+	}
+	meta := tx.Bucket([]byte(BucketMeta))
+	if meta != nil && meta.Get([]byte(usageClientIndexDone)) == nil {
+		cursor := meta.Get([]byte(usageClientIndexCursor))
+		if cursor != nil {
+			index := tx.Bucket([]byte(BucketUsageEventsByClient))
+			var entry []byte
+			if index != nil {
+				entry = index.Get(clientEventIndexKey(e, key))
+			}
+			covered := bytes.Compare(key, cursor) <= 0
+			if covered || entry != nil {
+				observed.coveredCount++
+				xorDigest(&observed.coveredDigest, rawDigest(key, value))
+				if !bytes.Equal(entry, key) {
+					observed.coverageInvalid = true
+				}
+				if !covered {
+					owner, known, err := readRawOwner(tx, key)
+					if err != nil {
+						return err
+					}
+					digest, err := usage.RetryEquivalentDigest(e)
+					if !proofValid && (!known || err != nil || owner.Client != receiptClientHash(e.ClientName) || owner.Digest != digest || usageKey(e.Timestamp, e.RecordID) != string(key)) {
+						observed.coverageInvalid = true
+					}
+				}
+			} else {
+				_, known, err := readRawOwner(tx, key)
+				if err != nil {
+					return err
+				}
+				if known {
+					observed.coverageInvalid = true
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ReadCostUnits reads a window once. precise clips event-priced units to
@@ -73,36 +170,86 @@ func costBounds(filter usage.Filter) (from, to time.Time) {
 	return
 }
 
-func readCostRollups(tx *bolt.Tx, filter usage.Filter, from, to time.Time, strict bool, allow costPairFilter) ([]TargetModelCell, error) {
+// Malformed hours may sort outside any requested window, so inspect keys once
+// before the bounded rollup scan. Trust a dimension only after validating it.
+func validateQuotaKeys(ctx context.Context, tx *bolt.Tx, filter usage.Filter, from, to time.Time, allow costPairFilter) error {
+	b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
+	if b == nil {
+		return nil
+	}
+	return b.ForEach(func(k, _ []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, err := quotaKeyInScope(k, filter, from, to, allow)
+		return err
+	})
+}
+
+func quotaKeyInScope(key []byte, filter usage.Filter, from, to time.Time, allow costPairFilter) (bool, error) {
+	client, model := strings.TrimSpace(filter.ClientName), strings.ToLower(strings.TrimSpace(filter.Model))
+	parts := strings.Split(string(key), "|")
+	hour, hourErr := parseAggHour(parts[0])
+	owner, ownerKnown := "", false
+	if len(parts) >= 3 {
+		owner = quotaKeyDecode(parts[1])
+		ownerKnown = owner != "" && utf8.ValidString(owner) && owner == strings.TrimSpace(owner) && quotaKeyEncode(owner) == parts[1]
+	}
+	if client != "" && ownerKnown && owner != client {
+		return false, nil
+	}
+	if hourErr == nil && (hour.Before(from.UTC().Truncate(time.Hour)) || hour.After(to.UTC().Truncate(time.Hour))) {
+		return false, nil
+	}
+	if len(parts) == 4 {
+		currentModel, target := quotaKeyDecode(parts[3]), quotaKeyDecode(parts[2])
+		modelKnown := currentModel != "" && utf8.ValidString(currentModel) && currentModel == strings.ToLower(strings.TrimSpace(currentModel)) && quotaKeyEncode(currentModel) == parts[3]
+		targetKnown := utf8.ValidString(target) && target == strings.ToLower(strings.TrimSpace(target)) && quotaKeyEncode(target) == parts[2]
+		if model != "" && modelKnown && model != currentModel {
+			return false, nil
+		}
+		if allow != nil && modelKnown && targetKnown && !allow.includes(target, currentModel) {
+			return false, nil
+		}
+		if !utf8.ValidString(currentModel) || !utf8.ValidString(target) || quotaKeyEncode(currentModel) != parts[3] || !targetKnown || (currentModel != "" && !modelKnown) || (model != "" && !modelKnown) || (allow != nil && !modelKnown) {
+			return false, fmt.Errorf("%w: invalid quota aggregation key", ErrUsageHistoryIncomplete)
+		}
+	}
+	if hourErr != nil || (client != "" && !ownerKnown) {
+		return false, fmt.Errorf("%w: %w: quota aggregation owner or time unknown", ErrUsageHistoryIncomplete, ErrUsageAggregateSourceMissing)
+	}
+	if len(parts) != 4 || (parts[1] != "" && !ownerKnown) {
+		return false, fmt.Errorf("%w: invalid quota aggregation key", ErrUsageHistoryIncomplete)
+	}
+	return true, nil
+}
+
+func readCostRollups(ctx context.Context, tx *bolt.Tx, filter usage.Filter, from, to time.Time, allow costPairFilter) ([]TargetModelCell, error) {
 	var result []TargetModelCell
 	b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
 	if b == nil {
 		return result, nil
 	}
-	client := strings.TrimSpace(filter.ClientName)
-	model := strings.ToLower(strings.TrimSpace(filter.Model))
 	end := to.Truncate(time.Hour).Format(hourLayout) + "}"
 	c := b.Cursor()
 	for k, v := c.Seek(hourPrefix(from)); k != nil && string(k) <= end; k, v = c.Next() {
-		parts := strings.SplitN(string(k), "|", 4)
-		if len(parts) != 4 {
-			if strict {
-				return nil, fmt.Errorf("%w: invalid quota aggregation key", ErrUsageHistoryIncomplete)
-			}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		inScope, err := quotaKeyInScope(k, filter, from, to, allow)
+		if err != nil {
+			return nil, err
+		}
+		if !inScope {
 			continue
 		}
+		parts := strings.Split(string(k), "|")
+		hour, _ := parseAggHour(parts[0])
 		owner, currentModel := quotaKeyDecode(parts[1]), quotaKeyDecode(parts[3])
 		target := quotaKeyDecode(parts[2])
-		if (client != "" && owner != client) || (model != "" && currentModel != model) || !allow.includes(target, currentModel) {
-			continue
-		}
 		var cell AggCell
-		hour, err := time.Parse(hourLayout, parts[0])
-		if err != nil || json.Unmarshal(v, &cell) != nil {
-			if strict {
-				return nil, fmt.Errorf("%w: invalid quota aggregation", ErrUsageHistoryIncomplete)
-			}
-			continue
+		if json.Unmarshal(v, &cell) != nil {
+			return nil, fmt.Errorf("%w: invalid quota aggregation", ErrUsageHistoryIncomplete)
 		}
 		result = append(result, TargetModelCell{Hour: hour, Client: owner, Target: target, Model: currentModel, AggCell: cell})
 	}
@@ -113,11 +260,14 @@ func readCostRollups(tx *bolt.Tx, filter usage.Filter, from, to time.Time, stric
 // use Requests). Supplementary rows contribute records but no requests to this
 // contract. Even events outside precise bounds count towards boundary-hour
 // parity, so missing/pruned history cannot silently reduce the bill.
-func assembleCostUnits(cells []TargetModelCell, events []usage.Event, filter usage.Filter, resolver usage.RateResolver, precise bool, allow costPairFilter) ([]CostUnit, error) {
+func assembleCostUnits(ctx context.Context, cells []TargetModelCell, events []usage.Event, filter usage.Filter, resolver usage.RateResolver, precise bool, allow costPairFilter) ([]CostUnit, error) {
 	from, to := costBounds(filter)
 	var units []CostUnit
 	expected, observed := make(map[string]int64), make(map[string]int64)
 	for _, cell := range cells {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !allow.includes(cell.Target, cell.Model) {
 			continue
 		}
@@ -129,6 +279,9 @@ func assembleCostUnits(cells []TargetModelCell, events []usage.Event, filter usa
 	}
 	client, model := strings.TrimSpace(filter.ClientName), strings.ToLower(strings.TrimSpace(filter.Model))
 	for _, event := range events {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if (client != "" && strings.TrimSpace(event.ClientName) != client) || (model != "" && strings.ToLower(event.Model) != model) || !allow.includes(event.Target, event.Model) || !usage.RequiresEventTimestampsFor(resolver, event.Target, event.Model) {
 			continue
 		}
@@ -142,11 +295,17 @@ func assembleCostUnits(cells []TargetModelCell, events []usage.Event, filter usa
 		}, At: event.Timestamp, EventPriced: true, Event: &event})
 	}
 	for key, count := range expected {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if observed[key] != count {
 			return nil, fmt.Errorf("%w: raw record count %d differs from rollup count %d", ErrUsageHistoryIncomplete, observed[key], count)
 		}
 	}
 	for key, count := range observed {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if expected[key] != count {
 			return nil, fmt.Errorf("%w: raw event lacks matching quota rollup", ErrUsageHistoryIncomplete)
 		}
@@ -179,6 +338,9 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 	if err := ctx.Err(); err != nil {
 		return costReadResult{}, err
 	}
+	if s == nil || s.db == nil {
+		return costReadResult{}, fmt.Errorf("usage source status: store is not initialized")
+	}
 	from, to := costBounds(filter)
 	needsExact := usage.RequiresEventTimestamps(resolver)
 	// Preserve the legacy exact-cost default (now), while reports and stable
@@ -187,92 +349,215 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 		to = time.Now().UTC()
 	}
 	filter.From, filter.To = &from, &to
-	if (precise && needsExact && to.Before(from)) || to.Truncate(time.Hour).Before(from.Truncate(time.Hour)) {
-		return costReadResult{}, nil
-	}
 	start, end := from.Truncate(time.Hour), to.Truncate(time.Hour).Add(time.Hour)
 	result := costReadResult{}
-	useIndex := needsExact && strings.TrimSpace(filter.ClientName) != "" && !from.IsZero() && !hooks.forceLegacy
-	var err error
-	if useIndex {
-		if hooks.scan != nil {
-			hooks.scan(true)
-		}
-		_, err = s.readClientEvents(ctx, filter.ClientName, start, end, 0, clientIndexReadHooks{decoded: hooks.decoded, discardEvents: true, completeHour: func(tx *bolt.Tx, hour time.Time, events []usage.Event) error {
-			cells, err := readCostRollups(tx, filter, hour, hour, true, allow)
-			if err != nil {
-				return err
-			}
-			units, err := assembleCostUnits(cells, events, filter, resolver, precise, allow)
-			if err != nil {
-				return err
-			}
-			result.units = append(result.units, units...)
-			if rawFrom != nil {
-				for _, e := range events {
-					if !e.Timestamp.Before(*rawFrom) && !e.Timestamp.After(to) && !usage.RequiresEventTimestampsFor(resolver, e.Target, e.Model) {
-						result.raw = append(result.raw, e)
-					}
-				}
-			}
-			return nil
-		}})
+	useIndex := needsExact && strings.TrimSpace(filter.ClientName) != "" && !from.IsZero() && !hooks.forceLegacy && (rawFrom != nil || strings.TrimSpace(filter.Model) == "" || usage.RequiresEventTimestampsForModel(resolver, filter.Model))
+	err := s.db.View(func(tx *bolt.Tx) error {
+		refs := &indexRawReferences{tx: tx}
+		missing, err := missingUsageAggregateSources(tx)
 		if err != nil {
-			if ctx.Err() != nil {
-				return costReadResult{}, ctx.Err()
-			}
-			// Do not disclose event bytes/keys. Legacy parity still fails for the
-			// affected owner, while unrelated quarantine does not block everyone.
-			slog.Warn("exact usage pricing: client index unavailable; falling back to legacy scan", "error", err)
-			result = costReadResult{}
+			return err
 		}
-	}
-	if !useIndex || err != nil {
-		err = s.db.View(func(tx *bolt.Tx) error {
-			if err := ctx.Err(); err != nil {
-				return err
+		for _, source := range missing {
+			if source == BucketQuotaUsageAggHourly {
+				return fmt.Errorf("%w: %w: %s", ErrUsageHistoryIncomplete, ErrUsageAggregateSourceMissing, source)
 			}
-			cells, err := readCostRollups(tx, filter, from, to, needsExact, allow)
+		}
+		if (precise && needsExact && to.Before(from)) || to.Truncate(time.Hour).Before(from.Truncate(time.Hour)) {
+			return ctx.Err()
+		}
+		meta := tx.Bucket([]byte(BucketMeta))
+		marker := meta.Get([]byte(usageClientIndexSourceMissing))
+		if marker != nil || meta.Bucket([]byte(usageClientIndexSourceMissing)) != nil {
+			scopeNeedsExact := needsExact
+			if rawFrom == nil && strings.TrimSpace(filter.Model) != "" {
+				scopeNeedsExact = usage.RequiresEventTimestampsForModel(resolver, filter.Model)
+			}
+			if scopeNeedsExact || rawFrom != nil {
+				return fmt.Errorf("%w: %w: client index source missing", ErrUsageHistoryIncomplete, ErrUsageAggregateSourceMissing)
+			}
+		}
+		var progress *indexProgress
+		scopeNeedsEvidence := rawFrom != nil || (needsExact && (strings.TrimSpace(filter.Model) == "" || usage.RequiresEventTimestampsForModel(resolver, filter.Model)))
+		if scopeNeedsEvidence {
+			progress, err = loadIndexProgress(tx)
 			if err != nil {
+				// A lost v1 completion marker can fall back only to independent
+				// raw-owner evidence; validation below enforces that per hour.
+				p, stateErr := loadIndexProgressState(tx, false)
+				if stateErr != nil || p == nil || p.Phase != "complete" || meta.Get([]byte(usageClientIndexDone)) != nil || meta.Get([]byte(usageClientIndexCursor)) != nil {
+					return fmt.Errorf("%w: invalid client index progress: %v", ErrUsageHistoryIncomplete, err)
+				}
+				progress = p
+			}
+			if err := refs.checkOrphans(ctx, progress, filter, from, to, allow); err != nil {
 				return err
 			}
-			// Scan even if no exact rollup exists: an orphan precise-price raw
-			// event must fail the reverse parity check, as on the legacy path.
-			wantEvents := needsExact
-			var events []usage.Event
-			if wantEvents || rawFrom != nil {
-				if hooks.scan != nil {
-					hooks.scan(false)
+		}
+		if err := validateQuotaKeys(ctx, tx, filter, from, to, allow); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := checkUnresolvedUsageInScopeContext(ctx, tx, filter.ClientName, from, to, filter.Model, allow); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := checkDirectQuotaEvidenceContext(ctx, tx, filter, from, to, allow, hooks.direct); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := checkMissingFreshRootsContext(ctx, tx, filter, from, to); err != nil {
+			return err
+		}
+		if useIndex {
+			if hooks.scan != nil {
+				hooks.scan(true)
+			}
+			indexErr := requireClientIndex(tx)
+			for hour := start; indexErr == nil && hour.Before(end); hour = hour.Add(time.Hour) {
+				if err := ctx.Err(); err != nil {
+					return err
 				}
-				seek := start.Format(hourLayout)
-				if !wantEvents {
-					seek = rawFrom.UTC().Truncate(time.Hour).Format(hourLayout)
+				events, err := readClientHourInTx(ctx, tx, strings.TrimSpace(filter.ClientName), hour, hooks.decoded, func(key, data []byte, event usage.Event) error {
+					model := strings.ToLower(strings.TrimSpace(filter.Model))
+					relevant := (model == "" || model == strings.ToLower(event.Model)) && allow.includes(event.Target, event.Model) && usage.RequiresEventTimestampsFor(resolver, event.Target, event.Model)
+					if rawFrom != nil && !usage.RequiresEventTimestampsFor(resolver, event.Target, event.Model) {
+						relevant = true
+					}
+					if relevant {
+						_, _, invalid, _, err := indexProofForRaw(ctx, tx, refs, progress, key, data, event)
+						if err != nil {
+							return err
+						}
+						if invalid {
+							return fmt.Errorf("%w: invalid client index proof", ErrUsageHistoryIncomplete)
+						}
+					}
+					return nil
+				})
+				if err != nil {
+					indexErr = err
+					break
 				}
-				if b := tx.Bucket([]byte(BucketUsageEvents)); b != nil {
-					c := b.Cursor()
-					for k, v := c.Seek([]byte(seek)); k != nil && string(k) < end.Format(hourLayout); k, v = c.Next() {
+				cells, err := readCostRollups(ctx, tx, filter, hour, hour, allow)
+				if err != nil {
+					return err
+				}
+				units, err := assembleCostUnits(ctx, cells, events, filter, resolver, precise, allow)
+				if err != nil {
+					indexErr = err
+					break
+				}
+				result.units = append(result.units, units...)
+				if rawFrom != nil {
+					for _, e := range events {
 						if err := ctx.Err(); err != nil {
 							return err
 						}
-						if hooks.decoded != nil {
-							hooks.decoded()
-						}
-						var e usage.Event
-						if json.Unmarshal(v, &e) != nil {
-							continue
-						} // same legacy bad-record semantics
-						if wantEvents && allow.includes(e.Target, e.Model) && usage.RequiresEventTimestampsFor(resolver, e.Target, e.Model) {
-							events = append(events, e)
-						}
-						if rawFrom != nil && !e.Timestamp.Before(*rawFrom) && !e.Timestamp.After(to) && !usage.RequiresEventTimestampsFor(resolver, e.Target, e.Model) {
+						if !e.Timestamp.Before(*rawFrom) && !e.Timestamp.After(to) && !usage.RequiresEventTimestampsFor(resolver, e.Target, e.Model) {
 							result.raw = append(result.raw, e)
 						}
 					}
 				}
 			}
-			result.units, err = assembleCostUnits(cells, events, filter, resolver, precise, allow)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if indexErr == nil {
+				// The index and its digest can agree while an extra raw row is
+				// absent from both. Compare against raw independently as well.
+				evidence := make(map[string]*costRawHourEvidence)
+				c := tx.Bucket([]byte(BucketUsageEvents)).Cursor()
+				for k, v := c.Seek([]byte(start.Format(hourLayout))); k != nil && string(k) < end.Format(hourLayout); k, v = c.Next() {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					if hooks.evidenceRaw != nil {
+						hooks.evidenceRaw()
+					}
+					var e usage.Event
+					if json.Unmarshal(v, &e) != nil {
+						continue
+					}
+					if err := observeCostRawHour(ctx, tx, refs, progress, evidence, k, v, e, filter, resolver, rawFrom, to, allow); err != nil {
+						return err
+					}
+				}
+				valid, err := validateCostRawHourEvidence(ctx, tx, progress, evidence)
+				if err != nil {
+					return err
+				}
+				if valid {
+					return nil
+				}
+				indexErr = ErrUsageClientIndexIncomplete
+			}
+			slog.Warn("exact usage pricing: client index unavailable; falling back to legacy scan", "error", indexErr)
+			result = costReadResult{}
+		}
+		if err := ctx.Err(); err != nil {
 			return err
-		})
+		}
+		cells, err := readCostRollups(ctx, tx, filter, from, to, allow)
+		if err != nil {
+			return err
+		}
+		// Scan even if no exact rollup exists: an orphan precise-price raw
+		// event must fail the reverse parity check, as on the legacy path.
+		wantEvents := needsExact
+		var events []usage.Event
+		evidence := make(map[string]*costRawHourEvidence)
+		if wantEvents || rawFrom != nil {
+			if hooks.scan != nil {
+				hooks.scan(false)
+			}
+			seek := start.Format(hourLayout)
+			if !wantEvents {
+				seek = rawFrom.UTC().Truncate(time.Hour).Format(hourLayout)
+			}
+			if b := tx.Bucket([]byte(BucketUsageEvents)); b != nil {
+				c := b.Cursor()
+				for k, v := c.Seek([]byte(seek)); k != nil && string(k) < end.Format(hourLayout); k, v = c.Next() {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					if hooks.decoded != nil {
+						hooks.decoded()
+					}
+					var e usage.Event
+					if json.Unmarshal(v, &e) != nil {
+						continue
+					} // same legacy bad-record semantics
+					if needsExact || rawFrom != nil {
+						if err := observeCostRawHour(ctx, tx, refs, progress, evidence, k, v, e, filter, resolver, rawFrom, to, allow); err != nil {
+							return err
+						}
+					}
+					if wantEvents && allow.includes(e.Target, e.Model) && usage.RequiresEventTimestampsFor(resolver, e.Target, e.Model) {
+						events = append(events, e)
+					}
+					if rawFrom != nil && !e.Timestamp.Before(*rawFrom) && !e.Timestamp.After(to) && !usage.RequiresEventTimestampsFor(resolver, e.Target, e.Model) {
+						result.raw = append(result.raw, e)
+					}
+				}
+			}
+		}
+		if scopeNeedsEvidence {
+			if _, err := validateCostRawHourEvidence(ctx, tx, progress, evidence); err != nil {
+				return err
+			}
+		}
+		result.units, err = assembleCostUnits(ctx, cells, events, filter, resolver, precise, allow)
+		return err
+	})
+	if ctx.Err() != nil {
+		return costReadResult{}, ctx.Err()
 	}
 	if err != nil {
 		return costReadResult{}, err

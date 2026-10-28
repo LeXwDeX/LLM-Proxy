@@ -51,14 +51,18 @@ type usageBatchRecorder interface {
 
 type journalAppend struct {
 	line   []byte
-	id     string
 	client string
 	done   chan error
 }
 
+type journalQueued struct {
+	event usage.Event
+	line  string
+}
+
 type usageJournalAsync struct {
 	appendCh   chan *journalAppend
-	queue      chan usage.Event
+	queue      chan journalQueued
 	maxBatch   int
 	syncerDone chan struct{}
 	writerDone chan struct{}
@@ -105,7 +109,7 @@ func (j *UsageJournal) EnableAsyncCommit(opts UsageJournalAsyncOptions) error {
 	j.mu.Unlock()
 	a := &usageJournalAsync{
 		appendCh:   make(chan *journalAppend, opts.QueueSize),
-		queue:      make(chan usage.Event, opts.QueueSize),
+		queue:      make(chan journalQueued, opts.QueueSize),
 		maxBatch:   opts.MaxBatch,
 		syncerDone: make(chan struct{}),
 		writerDone: make(chan struct{}),
@@ -130,7 +134,7 @@ func (j *UsageJournal) recordAsync(a *usageJournalAsync, event usage.Event) erro
 	if err := json.Unmarshal(data, &replayable); err != nil {
 		return fmt.Errorf("usage journal: decode usage event: %w", err)
 	}
-	req := &journalAppend{line: append(data, '\n'), id: event.RecordID, client: strings.TrimSpace(event.ClientName), done: make(chan error, 1)}
+	req := &journalAppend{line: append(data, '\n'), client: strings.TrimSpace(event.ClientName), done: make(chan error, 1)}
 	a.appendCh <- req
 	if appendErr := <-req.done; appendErr != nil {
 		// The journal is unavailable (for example a full disk): keep the old
@@ -147,12 +151,12 @@ func (j *UsageJournal) recordAsync(a *usageJournalAsync, event usage.Event) erro
 	}
 	a.addPending(1)
 	select {
-	case a.queue <- replayable:
+	case a.queue <- journalQueued{event: replayable, line: string(data)}:
 	default:
 		// The event is durable; the periodic Replay commits it.
 		a.addPending(-1)
 		j.mu.Lock()
-		j.disownLocked(event.RecordID)
+		j.disownLocked(string(data))
 		j.foreign = true
 		j.ownedCond.Broadcast()
 		j.mu.Unlock()
@@ -191,13 +195,12 @@ func (j *UsageJournal) runSyncer(a *usageJournalAsync) {
 		err := j.appendLinesLocked(lines)
 		if err == nil {
 			for _, req := range batch {
-				// A RecordID appended again while still owned is one owned
-				// event: the writer's first disown releases it, and
-				// disownLocked ignores the later copy, so count it once.
-				if _, dup := j.owned[req.id]; dup {
+				// Identical lines can share ownership; different payloads cannot.
+				line := string(req.line[:len(req.line)-1])
+				if _, dup := j.owned[line]; dup {
 					continue
 				}
-				j.owned[req.id] = req.client
+				j.owned[line] = req.client
 				j.ownedByClient[req.client]++
 			}
 		} else {
@@ -215,7 +218,7 @@ func (j *UsageJournal) runWriter(a *usageJournalAsync) {
 	defer close(a.writerDone)
 	sinceCompact := 0
 	for first := range a.queue {
-		batch := []usage.Event{first}
+		batch := []journalQueued{first}
 	collect:
 		for len(batch) < a.maxBatch {
 			select {
@@ -228,19 +231,25 @@ func (j *UsageJournal) runWriter(a *usageJournalAsync) {
 				break collect
 			}
 		}
-		failed := j.commitBatch(batch)
+		events := make([]usage.Event, len(batch))
+		for i, queued := range batch {
+			events[i] = queued.event
+		}
+		failed := j.commitBatch(events)
 		j.mu.Lock()
-		for _, event := range batch {
-			j.disownLocked(event.RecordID)
+		for _, queued := range batch {
+			event := queued.event
+			j.disownLocked(queued.line)
 			if _, bad := failed[event.RecordID]; bad {
 				j.foreign = true
 				continue
 			}
-			j.committed[event.RecordID] = struct{}{}
+			j.committed[queued.line] = struct{}{}
 		}
 		j.ownedCond.Broadcast()
 		j.mu.Unlock()
-		for _, event := range batch {
+		for _, queued := range batch {
+			event := queued.event
 			if err, bad := failed[event.RecordID]; bad && j.logger != nil {
 				j.logger.Warn("usage event durably queued for retry",
 					"request_id", event.RequestID,
@@ -316,7 +325,7 @@ func (j *UsageJournal) compact(force bool) error {
 			return nil
 		}
 	}
-	events, corrupt, err := j.readLocked()
+	entries, corrupt, err := j.readEntriesLocked()
 	if err != nil {
 		return err
 	}
@@ -324,13 +333,13 @@ func (j *UsageJournal) compact(force bool) error {
 		// Replay quarantines corrupt lines before any rewrite drops them.
 		return nil
 	}
-	kept := make([]usage.Event, 0, len(events))
-	for _, event := range events {
-		if _, done := j.committed[event.RecordID]; !done {
-			kept = append(kept, event)
+	kept := make([]journalEntry, 0, len(entries))
+	for _, entry := range entries {
+		if _, done := j.committed[entry.line]; !done {
+			kept = append(kept, entry)
 		}
 	}
-	if len(kept) == len(events) {
+	if len(kept) == len(entries) {
 		j.committed = make(map[string]struct{})
 		return nil
 	}
@@ -341,23 +350,23 @@ func (j *UsageJournal) compact(force bool) error {
 	return nil
 }
 
-func (j *UsageJournal) disownLocked(id string) {
-	client, ok := j.owned[id]
+func (j *UsageJournal) disownLocked(line string) {
+	client, ok := j.owned[line]
 	if !ok {
 		return
 	}
-	delete(j.owned, id)
+	delete(j.owned, line)
 	if j.ownedByClient[client]--; j.ownedByClient[client] <= 0 {
 		delete(j.ownedByClient, client)
 	}
 }
 
 // resetCompactionStateLocked records that the file now holds exactly kept.
-func (j *UsageJournal) resetCompactionStateLocked(kept []usage.Event) {
+func (j *UsageJournal) resetCompactionStateLocked(kept []journalEntry) {
 	j.committed = make(map[string]struct{})
 	j.foreign = false
-	for _, event := range kept {
-		if _, owned := j.owned[event.RecordID]; !owned {
+	for _, entry := range kept {
+		if _, owned := j.owned[entry.line]; !owned {
 			j.foreign = true
 			return
 		}

@@ -312,6 +312,9 @@ func TestUsageJournalPendingRetryIgnoresDerivedPricingMetadata(t *testing.T) {
 	if lines := journalEventLines(t, journal); lines != 1 {
 		t.Fatalf("conflicting pending retry changed the journal: %d lines", lines)
 	}
+	if err := store.checkUnresolvedClient(event.ClientName); !errors.Is(err, ErrUsageHistoryIncomplete) {
+		t.Fatalf("conflicting pending retry was not preserved as unresolved: %v", err)
+	}
 }
 
 type failFirstWithExists struct {
@@ -329,6 +332,10 @@ func (r *failFirstWithExists) Record(event usage.Event) error {
 
 func (r *failFirstWithExists) RecordExists(event usage.Event) (bool, error) {
 	return r.store.RecordExists(event)
+}
+
+func (r *failFirstWithExists) RegisterUnresolvedUsage(event usage.Event, raw []byte) error {
+	return r.store.RegisterUnresolvedUsage(event, raw)
 }
 
 func journalEventLines(t *testing.T, journal *UsageJournal) int {

@@ -3,7 +3,9 @@ package nosql
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -20,6 +22,45 @@ type usageQuarantineRecord struct {
 	RawValue      []byte    `json:"raw_value"`
 	QuarantinedAt time.Time `json:"quarantined_at"`
 	Reason        string    `json:"reason"`
+}
+
+// Quarantine bytes may be corrupt, so only bound owner and raw key can
+// establish that a quarantined identity is outside a proof's scope.
+func quarantineOutsideProof(tx *bolt.Tx, owners map[string]bool, hours map[time.Time]bool) bool {
+	b := tx.Bucket([]byte(BucketUsageEventsQuarantine))
+	meta := tx.Bucket([]byte(BucketMeta))
+	if b == nil || meta == nil {
+		return false
+	}
+	var count uint64
+	err := b.ForEach(func(key, data []byte) error {
+		count++
+		var record usageQuarantineRecord
+		if json.Unmarshal(data, &record) != nil {
+			return errors.New("invalid quarantine")
+		}
+		owner, known, err := readRawOwner(tx, key)
+		if err != nil || !known {
+			return errors.New("unknown quarantine owner")
+		}
+		scope, ambiguous := backfillRawScope(record.RawValue)
+		if ambiguous && json.Valid(record.RawValue) || (!ambiguous && scope.ClientName != "" && receiptClientHash(scope.ClientName) != owner.Client) {
+			return errors.New("conflicting quarantine owner")
+		}
+		if owners[owner.Client] {
+			stamp, _, found := strings.Cut(string(key), "_")
+			at, err := time.Parse(time.RFC3339Nano, stamp)
+			if !found || err != nil || hours[at.UTC().Truncate(time.Hour)] {
+				return errors.New("intersecting quarantine")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false
+	}
+	rawCount := meta.Get([]byte(usageQuarantineCountKey))
+	return rawCount == nil && count == 0 || len(rawCount) == 8 && binary.BigEndian.Uint64(rawCount) == count
 }
 
 func hasUsageQuarantine(tx *bolt.Tx) bool {

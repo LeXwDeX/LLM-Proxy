@@ -233,6 +233,16 @@ func (r *poisonUsageRecorder) Record(event usage.Event) error {
 	return r.next.Record(event)
 }
 
+func (r *poisonUsageRecorder) RegisterUnresolvedUsage(event usage.Event, original []byte) error {
+	registrar, ok := r.next.(interface {
+		RegisterUnresolvedUsage(usage.Event, []byte) error
+	})
+	if !ok {
+		return errors.New("test recorder cannot register unresolved usage")
+	}
+	return registrar.RegisterUnresolvedUsage(event, original)
+}
+
 func journalLine(t *testing.T, event usage.Event) string {
 	t.Helper()
 	data, err := json.Marshal(event)
@@ -249,6 +259,20 @@ func mustWriteFile(t *testing.T, path string, content string) {
 	}
 }
 
+type registeredTestRecorder struct {
+	usage.Recorder
+	store *UsageStore
+}
+
+func (r registeredTestRecorder) RegisterUnresolvedUsage(event usage.Event, raw []byte) error {
+	return r.store.RegisterUnresolvedUsage(event, raw)
+}
+
+func withEvidenceStore(t *testing.T, recorder usage.Recorder) registeredTestRecorder {
+	t.Helper()
+	return registeredTestRecorder{Recorder: recorder, store: NewUsageStore(testDB(t))}
+}
+
 func TestUsageJournalReplayToleratesTornTailLine(t *testing.T) {
 	journalPath := filepath.Join(t.TempDir(), "usage-journal.jsonl")
 	valid := usage.Event{
@@ -261,7 +285,7 @@ func TestUsageJournalReplayToleratesTornTailLine(t *testing.T) {
 	torn := `{"timestamp":"2026-09-26T03:00:00Z","client_name":"dave","record_id":"`
 	mustWriteFile(t, journalPath, journalLine(t, valid)+"\n"+torn)
 
-	journal, err := NewUsageJournal(noopUsageRecorder{}, journalPath, nil)
+	journal, err := NewUsageJournal(withEvidenceStore(t, noopUsageRecorder{}), journalPath, nil)
 	if err != nil {
 		t.Fatalf("NewUsageJournal: %v", err)
 	}
@@ -307,7 +331,7 @@ func TestUsageJournalReplayQuarantinesCorruptMiddleLine(t *testing.T) {
 	second := usage.Event{Timestamp: time.Date(2026, 9, 26, 4, 1, 0, 0, time.UTC), ClientName: "gina", RecordID: uuid.NewString()}
 	mustWriteFile(t, journalPath, journalLine(t, first)+"\n"+"not-json-at-all\n"+journalLine(t, second)+"\n")
 
-	journal, err := NewUsageJournal(noopUsageRecorder{}, journalPath, nil)
+	journal, err := NewUsageJournal(withEvidenceStore(t, noopUsageRecorder{}), journalPath, nil)
 	if err != nil {
 		t.Fatalf("NewUsageJournal: %v", err)
 	}
@@ -336,7 +360,7 @@ func TestUsageJournalReplayQuarantinesLineWithInvalidRecordID(t *testing.T) {
 	badID := `{"timestamp":"2026-09-26T05:00:00Z","client_name":"iris","record_id":"not-a-uuid"}`
 	mustWriteFile(t, journalPath, journalLine(t, valid)+"\n"+badID+"\n")
 
-	journal, err := NewUsageJournal(noopUsageRecorder{}, journalPath, nil)
+	journal, err := NewUsageJournal(withEvidenceStore(t, noopUsageRecorder{}), journalPath, nil)
 	if err != nil {
 		t.Fatalf("NewUsageJournal: %v", err)
 	}
@@ -575,7 +599,7 @@ func TestUsageJournalAppendTrimsTornTailBeforeWrite(t *testing.T) {
 	mustWriteFile(t, journalPath, torn)
 
 	first := usage.Event{Timestamp: time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC), ClientName: "grace", RecordID: uuid.NewString()}
-	journal := &UsageJournal{path: journalPath, primary: &countingUsageRecorder{}}
+	journal := &UsageJournal{path: journalPath, primary: withEvidenceStore(t, &countingUsageRecorder{})}
 	journal.mu.Lock()
 	err := journal.appendLocked(first)
 	journal.mu.Unlock()
@@ -799,11 +823,15 @@ func (r *corruptAppendingUsageRecorder) Record(event usage.Event) error {
 	return r.store.Record(event)
 }
 
+func (r *corruptAppendingUsageRecorder) RegisterUnresolvedUsage(event usage.Event, raw []byte) error {
+	return r.store.RegisterUnresolvedUsage(event, raw)
+}
+
 func TestUsageJournalQuarantineSkipsAlreadyQuarantinedLines(t *testing.T) {
 	journalPath := filepath.Join(t.TempDir(), "usage-journal.jsonl")
 	mustWriteFile(t, journalPath, "")
 	line := `{"timestamp":"nope","record_id":"also-nope"}`
-	journal := &UsageJournal{path: journalPath}
+	journal := &UsageJournal{path: journalPath, primary: withEvidenceStore(t, noopUsageRecorder{})}
 
 	journal.mu.Lock()
 	err := journal.quarantineLocked([]string{line})

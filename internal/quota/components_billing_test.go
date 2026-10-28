@@ -143,6 +143,10 @@ func (r *bundleFaultRecorder) RecordExists(event usage.Event) (bool, error) {
 	return r.store.RecordExists(event)
 }
 
+func (r *bundleFaultRecorder) RegisterUnresolvedUsage(event usage.Event, original []byte) error {
+	return r.store.RegisterUnresolvedUsage(event, original)
+}
+
 func TestBundleJournalFailureReplayDrainAndRetryDoNotDoubleCharge(t *testing.T) {
 	for _, scenario := range []struct{ async, uncertain bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
 		t.Run(fmt.Sprintf("async_%t_uncertain_%t", scenario.async, scenario.uncertain), func(t *testing.T) {
@@ -234,6 +238,54 @@ func TestBundleJournalFailureReplayDrainAndRetryDoNotDoubleCharge(t *testing.T) 
 				t.Fatalf("recovered bundle rows=%d err=%v", len(rows), err)
 			}
 		})
+	}
+}
+
+func TestExpiredActiveJournalFailureDoesNotBlockCurrentCalibration(t *testing.T) {
+	m := bundleManager(t, 1)
+	current := quotaBundle()
+	current.Components = nil
+	if err := m.RecordUsage(m.usageStore, current); err != nil {
+		t.Fatal(err)
+	}
+	if got := bundleUsed(m); got != 2 {
+		t.Fatalf("current fixture usage=%v", got)
+	}
+	primary := &bundleFaultRecorder{store: m.usageStore}
+	primary.fail.Store(true)
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	journal, err := nosql.NewUsageJournal(primary, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	m.usageJournal = journal
+	event := quotaBundle()
+	event.Timestamp = time.Now().UTC().AddDate(0, -2, -7)
+	if err := journal.Record(event); err != nil {
+		t.Fatalf("queue historical event: %v", err)
+	}
+	m.Evaluate("alice")
+	if status := m.Status("alice"); status.CalibrationError != "" || bundleUsed(m) != 2 {
+		t.Fatalf("old pending event blocked or changed current calibration: %+v", status)
+	}
+	if data, err := os.ReadFile(path); err != nil || bytes.Count(data, []byte{'\n'}) != 1 {
+		t.Fatalf("failed historical event not retained: %q, %v", data, err)
+	}
+	if err := journal.DrainClient("alice"); err == nil {
+		t.Fatal("full-history drain skipped failed old event")
+	}
+	primary.fail.Store(false)
+	if _, err := journal.Replay(); err != nil {
+		t.Fatal(err)
+	}
+	m.Evaluate("alice")
+	if status := m.Status("alice"); status.CalibrationError != "" || bundleUsed(m) != 2 {
+		t.Fatalf("historical event changed current spend after recovery: %+v", status)
+	}
+	rows, err := m.usageStore.List(usage.Filter{ClientName: "alice"})
+	if err != nil || len(rows) != 4 {
+		t.Fatalf("replay lost or duplicated old bundle: rows=%v err=%v", rows, err)
 	}
 }
 

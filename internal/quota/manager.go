@@ -517,15 +517,20 @@ func (m *Manager) evaluate(clientName string, retry bool) {
 			return
 		}
 	}
-	// Journal writes already count in memory even when the primary DB write
-	// failed. Never replace those counters until their durable queue is drained.
+	now := time.Now().UTC()
+	_, earliest, err := quotaPeriodStarts(now)
+	if err != nil {
+		m.calibrationFailed(clientName, err)
+		return
+	}
+	// Journal writes already count in memory. Never replace counters until
+	// queued writes are drained and the entire accounting window is complete.
 	if m.usageJournal != nil {
-		if err := m.usageJournal.DrainClient(clientName); err != nil {
+		if err := m.usageJournal.DrainClientRange(clientName, earliest, now); err != nil {
 			m.calibrationFailed(clientName, err)
 			return
 		}
 	}
-
 	// Fetch client config.
 	qc, err := m.findQuotaConfig(clientName)
 	if err != nil {
@@ -543,8 +548,6 @@ func (m *Manager) evaluate(clientName string, retry bool) {
 		m.mu.Unlock()
 		return
 	}
-
-	now := time.Now().UTC()
 
 	// Build rate resolver (cached when available).
 	resolver, err := m.getResolver()
@@ -594,17 +597,9 @@ func (m *Manager) evaluate(clientName string, retry bool) {
 // per eligible dimension. The ISO week may begin before the month's first day.
 func calibratedCounters(client string, qc quotaConfig, now time.Time, read func(usage.Filter) ([]nosql.CostUnit, error)) (*clientCounters, error) {
 	cc := newClientCounters(qc, now)
-	starts := make(map[string]time.Time, 3)
-	var earliest time.Time
-	for _, dim := range []string{DimensionDaily, DimensionWeekly, DimensionMonthly} {
-		from, _, err := PeriodRange(dim, now)
-		if err != nil {
-			return nil, err
-		}
-		starts[dim] = from
-		if earliest.IsZero() || from.Before(earliest) {
-			earliest = from
-		}
+	starts, earliest, err := quotaPeriodStarts(now)
+	if err != nil {
+		return nil, err
 	}
 	cells, err := read(usage.Filter{From: &earliest, To: &now, ClientName: client})
 	if err != nil {
@@ -626,6 +621,22 @@ func calibratedCounters(client string, qc quotaConfig, now time.Time, read func(
 		}
 	}
 	return cc, nil
+}
+
+func quotaPeriodStarts(now time.Time) (map[string]time.Time, time.Time, error) {
+	starts := make(map[string]time.Time, 3)
+	var earliest time.Time
+	for _, dim := range []string{DimensionDaily, DimensionWeekly, DimensionMonthly} {
+		from, _, err := PeriodRange(dim, now)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		starts[dim] = from
+		if earliest.IsZero() || from.Before(earliest) {
+			earliest = from
+		}
+	}
+	return starts, earliest, nil
 }
 
 func (m *Manager) calibrationFailed(clientName string, err error) {

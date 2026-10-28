@@ -63,8 +63,8 @@ func explicitPlainEvent(id string, at time.Time) usage.Event {
 
 // TestReceiptWatermarkToleratesCorruptLegacyLedger models an upgraded v1.0.1
 // database whose readers silently skipped an undecodable cell and a malformed
-// key. The upgrade must keep every explicit write path working, scan once, and
-// still reject unverifiable identities before the affected hours.
+// key. An unknown hour cannot establish any safe boundary, but a known raw
+// identity remains idempotent and the scan still runs only once.
 func TestReceiptWatermarkToleratesCorruptLegacyLedger(t *testing.T) {
 	logs := captureDefaultLog(t)
 	dir := t.TempDir()
@@ -74,54 +74,53 @@ func TestReceiptWatermarkToleratesCorruptLegacyLedger(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
+	store := NewUsageStore(db)
+	now := time.Date(2026, 10, 21, 9, 30, 0, 0, time.UTC)
+	known := explicitPlainEvent("33333333-3333-4333-8333-333333333331", now)
+	if err := store.Record(known); err != nil {
+		t.Fatal(err)
+	}
 	const corruptBody = "{not json"
 	putAggRaw(t, db, "2025-01-01T00|claude|c|m|t", []byte(corruptBody))
 	putAggRaw(t, db, "2025-02-03T04|claude|c", []byte(`{"record_count":1}`))
 	putAggRaw(t, db, "not-an-hour|claude|c|m|t", []byte(`{"record_count":1}`))
 	putQuotaAggRaw(t, db, "2025-03-01T07|c|t|m", []byte(corruptBody))
-
-	store := NewUsageStore(db)
-	now := time.Date(2026, 10, 21, 9, 30, 0, 0, time.UTC)
-	ids := []string{
-		"33333333-3333-4333-8333-333333333331",
-		"33333333-3333-4333-8333-333333333332",
-		"33333333-3333-4333-8333-333333333333",
-		"33333333-3333-4333-8333-333333333334",
+	resetReceiptTracking(t, db)
+	store = NewUsageStore(db)
+	if added, err := store.RecordOnce(known); err != nil || added {
+		t.Fatalf("known raw retry: added=%v err=%v", added, err)
 	}
-	if err := store.Record(explicitPlainEvent(ids[0], now)); err != nil {
-		t.Fatalf("explicit Record blocked by corrupt legacy ledger: %v", err)
-	}
-	if err := store.RecordBatch([]usage.Event{explicitPlainEvent(ids[1], now.Add(time.Second))}); err != nil {
-		t.Fatalf("RecordBatch blocked by corrupt legacy ledger: %v", err)
+	unknown := explicitPlainEvent("33333333-3333-4333-8333-333333333332", now.Add(time.Second))
+	if err := store.RecordBatch([]usage.Event{unknown}); !errors.Is(err, ErrUsageIdentityUnverified) {
+		t.Fatalf("RecordBatch admitted an unknown identity: %v", err)
 	}
 
 	journalPath := filepath.Join(dir, "usage.db.usage-journal.jsonl")
-	pending := explicitPlainEvent(ids[2], now.Add(2*time.Second))
+	pending := explicitPlainEvent("33333333-3333-4333-8333-333333333333", now.Add(2*time.Second))
 	mustWriteFile(t, journalPath, journalLine(t, pending)+"\n")
 	journal, err := NewUsageJournal(store, journalPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered, err := journal.Replay(); err != nil || len(recovered) != 1 {
-		t.Fatalf("Replay blocked by corrupt legacy ledger: recovered=%v err=%v", recovered, err)
+	if recovered, err := journal.Replay(); err != nil || len(recovered) != 0 {
+		t.Fatalf("Replay committed an unknown identity: recovered=%v err=%v", recovered, err)
 	}
-	mustWriteFile(t, journalPath, journalLine(t, explicitPlainEvent(ids[3], now.Add(3*time.Second)))+"\n")
-	if err := journal.DrainClient(pending.ClientName); err != nil {
-		t.Fatalf("DrainClient blocked by corrupt legacy ledger: %v", err)
+	if rejected := readRejectedSidecar(t, journalPath); len(rejected) != 1 || rejected[0].Reason != usageRejectIdentityUnverified {
+		t.Fatalf("unknown identity not retained for review: %+v", rejected)
 	}
 	if _, err := store.PruneEventsBefore(now.Add(-24*time.Hour), 100); err != nil {
 		t.Fatalf("PruneEventsBefore blocked by corrupt legacy ledger: %v", err)
 	}
 	for i := 0; i < 5; i++ {
-		if exists, err := store.RecordExists(explicitPlainEvent(ids[0], now)); err != nil || !exists {
+		if exists, err := store.RecordExists(known); err != nil || !exists {
 			t.Fatalf("RecordExists: exists=%v err=%v", exists, err)
 		}
 	}
 	if got := store.receiptScans.Load(); got != 1 {
 		t.Fatalf("watermark scans=%d, want exactly 1 for all explicit writes", got)
 	}
-	if raw := rawUsageRowCount(t, db); raw != 4 {
-		t.Fatalf("raw rows=%d, want 4", raw)
+	if raw := rawUsageRowCount(t, db); raw != 1 {
+		t.Fatalf("raw rows=%d, want only the known row", raw)
 	}
 
 	// Hours touched by corrupt evidence become untrusted; the newest one wins.
@@ -133,8 +132,8 @@ func TestReceiptWatermarkToleratesCorruptLegacyLedger(t *testing.T) {
 		t.Fatalf("identity inside a corrupt hour: added=%v err=%v, want ErrUsageIdentityUnverified", added, err)
 	}
 	after := explicitPlainEvent("44444444-4444-4444-8444-444444444442", time.Date(2025, 3, 1, 8, 0, 0, 0, time.UTC))
-	if added, err := store.RecordOnce(after); err != nil || !added {
-		t.Fatalf("identity at the watermark: added=%v err=%v", added, err)
+	if added, err := store.RecordOnce(after); added || !errors.Is(err, ErrUsageIdentityUnverified) {
+		t.Fatalf("unknown hour must block even at the watermark: added=%v err=%v", added, err)
 	}
 
 	output := logs.String()

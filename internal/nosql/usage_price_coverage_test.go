@@ -216,6 +216,12 @@ func TestStableAggregateCoverageMetadata(t *testing.T) {
 func TestMixedLegacyAndNewCellIsNotAssumedCovered(t *testing.T) {
 	day := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
 	db := testDB(t)
+	store := NewUsageStore(db)
+	// Establish identity admission before injecting a legacy cell: this test
+	// exercises mixed price coverage, not migration of unverified identities.
+	if err := store.EnsureUsageReceipts(); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(AggCell{Requests: 1, InputTokens: 1_000_000})
 		if err != nil {
@@ -225,7 +231,6 @@ func TestMixedLegacyAndNewCellIsNotAssumedCovered(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	store := NewUsageStore(db)
 	if err := store.Record(usage.Event{Timestamp: day.Add(time.Minute), ClientName: "alice", Target: "upstream", Model: "root", InputTokens: 1_000_000, StatusCode: 200}); err != nil {
 		t.Fatal(err)
 	}
@@ -253,8 +258,14 @@ func TestStablePriceCoverageSurvivesClearedRawHistory(t *testing.T) {
 	db := testDB(t)
 	store := NewUsageStore(db)
 	recordIterationPricingFixture(t, store, day)
-	if err := db.Update(func(tx *bolt.Tx) error {
-		return tx.DeleteBucket([]byte(BucketUsageEvents))
+	if n, err := store.PruneEventsBefore(day.Add(time.Hour), 100); err != nil || n != 3 {
+		t.Fatalf("prune root and supplementary records: count=%d err=%v", n, err)
+	}
+	if err := db.View(func(tx *bolt.Tx) error {
+		if key, _ := tx.Bucket([]byte(BucketUsageEvents)).Cursor().First(); key != nil {
+			t.Error("retention left raw usage behind")
+		}
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
