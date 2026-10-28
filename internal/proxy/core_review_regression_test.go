@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -183,20 +185,23 @@ func TestCoreReviewAdmissionBindsPoolsAtInitialStartup(t *testing.T) {
 	if callback == nil {
 		t.Fatal("initial startup did not wire live key-pool changes")
 	}
-	notified := make(chan struct{}, 1)
+	applied := make(chan int, 8)
 	pool.setOnKeyChange(func(active, total int) {
 		callback(active, total)
-		select {
-		case notified <- struct{}{}:
-		default:
-		}
+		applied <- active
 	})
 	pool.blockKey(0)
 	pool.blockKey(1)
-	select {
-	case <-notified:
-	case <-time.After(time.Second):
-		t.Fatal("startup key change did not notify admission")
+	// Notifications apply in read order; wait until the final state (no active
+	// key) has been applied instead of trusting the first one.
+	deadline := time.After(time.Second)
+	for done := false; !done; {
+		select {
+		case active := <-applied:
+			done = active == 0
+		case <-deadline:
+			t.Fatal("startup key change did not notify admission with active=0")
+		}
 	}
 	// Callbacks read the latest snapshot, so both keys must be unavailable now.
 	acquired := 0
@@ -309,5 +314,52 @@ func TestCoreReviewAdmissionIgnoresRetiredPoolCallbacks(t *testing.T) {
 	}
 	if acquired < 2 {
 		t.Fatalf("retired pool poisoned current admission capacity: %d", acquired)
+	}
+}
+
+// Notifications must be applied in the order their state was read, so the last
+// callback always carries the latest key-pool state.
+func TestKeyPoolNotificationsApplyInReadOrder(t *testing.T) {
+	pool := newTestKeyPool([]string{"fixture-a", "fixture-b"})
+	var mu sync.Mutex
+	var seen []int
+	first := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	pool.setOnKeyChange(func(active, total int) {
+		if calls.Add(1) == 1 {
+			close(first)
+			<-release // hold the first notification (read active=1) mid-callback
+		}
+		mu.Lock()
+		seen = append(seen, active)
+		mu.Unlock()
+	})
+	pool.blockKey(0)
+	select {
+	case <-first:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first notification never started")
+	}
+	pool.blockKey(1)                   // second notification reads active=0
+	time.Sleep(100 * time.Millisecond) // let it run, or queue behind the first
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(seen)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected 2 notifications, got %v", seen)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if last := seen[len(seen)-1]; last != 0 {
+		t.Fatalf("last applied notification must carry final state active=0, applied order=%v", seen)
 	}
 }

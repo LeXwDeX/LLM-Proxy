@@ -80,6 +80,10 @@ type keyPool struct {
 	// after a change, so connection reuse can drop sockets opened with them.
 	// Called like onKeyChange: outside mu, from the change goroutine.
 	onKeysUnavailable func(keys []string)
+	// notifyMu serializes snapshot+callbacks in asyncNotifyKeyChange so they
+	// apply in read order and the last one carries the latest state.
+	// Lock order: notifyMu before mu; never taken while holding mu.
+	notifyMu sync.Mutex
 }
 
 func newKeyPool(targetName string, keys []string, resetTimeStr string, logger *slog.Logger) *keyPool {
@@ -1536,6 +1540,8 @@ func (p *keyPool) asyncNotifyKeyChange() {
 	if p == nil {
 		return
 	}
+	p.notifyMu.Lock()
+	defer p.notifyMu.Unlock()
 	p.mu.Lock()
 	fn, unavailable := p.onKeyChange, p.onKeysUnavailable
 	var a, t int
