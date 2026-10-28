@@ -571,7 +571,7 @@ test("target health sorts unknown states last and degrades single and zero key t
   h.setAggregate({totals: {}, by_client: [], by_model: []});
   await h.module.loadOverview();
   const names = [...h.get("targetHealthBody").innerHTML.matchAll(/data-target-name="([^"]+)"/g)].map(m => m[1]);
-  assert.deepEqual(names, ["muted", "half", "offline", "keyed", "partial", "normal", "single", "zero", "unknown"]);
+  assert.deepEqual(names, ["muted", "half", "keyed", "partial", "normal", "single", "zero", "unknown", "offline"]);
   assert.match(h.get("targetHealthBody").innerHTML, /data-target-key-issue="true"[^>]*data-target-name="keyed"|data-target-name="keyed"[^>]*data-target-key-issue="true"/);
   assert.match(h.get("targetHealthBody").innerHTML, /data-target-key-issue="unknown"[^>]*data-target-name="partial"|data-target-name="partial"[^>]*data-target-key-issue="unknown"/);
   assert.match(h.get("targetHealthBody").innerHTML, /data-target-phase="muted"/);
@@ -583,6 +583,8 @@ test("target health sorts unknown states last and degrades single and zero key t
   assert.equal(h.get("chainTargets").textContent, "3 / 9");
   assert.equal(h.get("targetHealthCount").textContent, "9 个目标");
   assert.match(h.get("targetHealthStatus").textContent, /需要关注/);
+  // paused (offline) targets are intentionally idle: sorted last, not counted as needing attention
+  assert.match(h.get("targetHealthStatus").textContent, /^4 个目标需要关注/);
   assert.match(h.get("targetHealthStatus").textContent, /状态未知/);
   assert.doesNotMatch(h.get("targetHealth").innerHTML, /secret\.example/);
 });
