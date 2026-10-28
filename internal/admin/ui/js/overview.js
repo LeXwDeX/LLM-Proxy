@@ -141,11 +141,12 @@ AdminApp.register("overview", function (app) {
     var phase = targetPhase(target);
     if (phase === "muted") return 0;
     if (phase === "half-open") return 1;
-    if (phase === "offline") return 2;
     if (phase === "ready") {
       var issue = keyIssue(target);
       return issue === "true" ? 3 : issue === "unknown" ? 4 : 5;
     }
+    // Paused (offline) targets are intentional, so they sort after everything else and are not "attention".
+    if (phase === "offline") return 7;
     return 6;
   }
   function rangeOption(key) {
