@@ -26,7 +26,7 @@ type keyRuntime struct {
 	cooldownEnd          time.Time     // 冷却结束时间
 	blocked              bool          // 手动屏蔽（永久，直到手动解除）
 	tokenSamples         []tokenSample // 滑动窗口内的 token 用量样本
-	lastError            string        // 最近一次触发耗尽的上游错误响应体（截断），用于诊断
+	lastError            string        // 最近一次上游错误的受控提示，不含响应体
 	lastErrorAt          time.Time     // 最近一次错误时间
 	consecutiveRateLimit int           // 连续 429 限流次数（指数退避冷却依据，成功时清零）
 	consecutiveFails     int           // 连续失败次数（HTTP 429 或 GLM 1302，WP-3：RETRY≥2 降级依据，成功时清零）
@@ -479,7 +479,7 @@ func (p *keyPool) markExhaustedWithCooldown(index int, errorCode string, cooldow
 	go p.asyncNotifyKeyChange()
 }
 
-// markExhaustedWithError 标记 key 耗尽，并记录触发该耗尽的上游错误响应体（截断），用于诊断。
+// markExhaustedWithError 标记 key 耗尽，并记录不含响应体的诊断提示。
 func (p *keyPool) markExhaustedWithError(index int, errorCode, errBody string) {
 	if p == nil || index < 0 || index >= len(p.entries) {
 		return
@@ -545,14 +545,21 @@ func (p *keyPool) markExhaustedWithError(index int, errorCode, errBody string) {
 	go p.asyncNotifyKeyChange()
 }
 
-// truncateErrBody 截断上游错误响应体，避免日志/状态膨胀。
+// truncateErrBody never exposes an upstream body in logs or status snapshots.
 func truncateErrBody(s string) string {
-	const maxLen = 512
-	s = strings.TrimSpace(s)
-	if len(s) > maxLen {
-		return s[:maxLen] + "...(truncated)"
+	if strings.TrimSpace(s) == "" {
+		return ""
 	}
-	return s
+	return "upstream error (details withheld)"
+}
+
+func diagnosticGLMCode(code string) string {
+	switch code {
+	case "", "1302", "1303", "1305", "1308", "1310", "1113", "1309":
+		return code
+	default:
+		return "unknown"
+	}
 }
 
 // markRateLimited 标记指定 key 为限流状态（指数退避冷却）。
@@ -626,7 +633,7 @@ func (p *keyPool) markRateLimitedWithBody(index int, body []byte) {
 		"target", p.targetName,
 		"key_index", index,
 		"key", maskKey,
-		"code", code,
+		"code", diagnosticGLMCode(code),
 		"cooldown_end", p.entries[index].cooldownEnd,
 	)
 	// Notify admission manager of active key change
@@ -898,7 +905,7 @@ type KeyStatus struct {
 	ExhaustedAt   time.Time `json:"exhausted_at,omitempty"`
 	CooldownEnd   time.Time `json:"cooldown_end,omitempty"`
 	Blocked       bool      `json:"blocked"`
-	LastError     string    `json:"last_error,omitempty"`    // 最近一次触发耗尽的上游错误响应体（截断）
+	LastError     string    `json:"last_error,omitempty"`    // 最近一次上游错误的受控提示
 	LastErrorAt   time.Time `json:"last_error_at,omitempty"` // 最近一次错误时间
 	Status        string    `json:"status"`                  // 已屏蔽 / 额度超限 / 限流中 / 使用中 / 等待中 / 可用(待激活) / 失效(待请求验证) 等
 }
@@ -946,7 +953,7 @@ func (p *keyPool) status() []KeyStatus {
 			ks.CooldownEnd = e.cooldownEnd
 		}
 		if e.lastError != "" {
-			ks.LastError = e.lastError
+			ks.LastError = truncateErrBody(e.lastError)
 			ks.LastErrorAt = e.lastErrorAt
 		}
 

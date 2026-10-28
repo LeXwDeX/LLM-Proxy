@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
+	"github.com/LeXwDeX/LLM-Proxy/internal/errorlog"
 	appmiddleware "github.com/LeXwDeX/LLM-Proxy/internal/middleware"
 	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"github.com/LeXwDeX/LLM-Proxy/internal/requeststats"
@@ -54,9 +57,11 @@ type Service struct {
 	requestStatsRecordFailures atomic.Int64
 	requestStatsLog            failureLogLimiter
 
-	mu            sync.RWMutex
-	targetsByName map[string]*targetState
-	targetOrder   []*targetState
+	mu                      sync.RWMutex
+	targetsByName           map[string]*targetState
+	targetOrder             []*targetState
+	targetRevision          uint64
+	targetRevisionExhausted bool
 
 	affinity *affinityMap
 
@@ -336,9 +341,20 @@ func (s *Service) UpdateTargets(targets []config.Target) error {
 	return nil
 }
 
+func (s *Service) advanceTargetRevisionLocked() {
+	if !s.targetRevisionExhausted {
+		s.targetRevision++
+		if s.targetRevision == 0 {
+			// Zero stays unavailable after overflow so an old revision cannot recur.
+			s.targetRevisionExhausted = true
+		}
+	}
+}
+
 // replaceTargetsLocked publishes new configuration while keeping the actual
 // occupancy of each surviving target. The caller holds s.mu for writing.
 func (s *Service) replaceTargetsLocked(parsed map[string]*targetState, order []*targetState) {
+	s.advanceTargetRevisionLocked()
 	previous := s.targetsByName
 	if s.responsesWS != nil {
 		s.responsesWS.invalidate(false)
@@ -391,6 +407,21 @@ func (s *Service) replaceTargetsLocked(parsed map[string]*targetState, order []*
 
 // ApplyConfig updates runtime settings based on a full configuration snapshot.
 func (s *Service) ApplyConfig(cfg *config.Config) error {
+	return s.applyConfig(cfg, 0)
+}
+
+// ErrTargetSnapshotChanged means the target configuration changed since it was read.
+var ErrTargetSnapshotChanged = errors.New("target snapshot changed")
+
+// ApplyConfigIfTargetRevision applies cfg only if the observed runtime revision remains current.
+func (s *Service) ApplyConfigIfTargetRevision(cfg *config.Config, revision uint64) error {
+	if revision == 0 {
+		return ErrTargetSnapshotChanged
+	}
+	return s.applyConfig(cfg, revision)
+}
+
+func (s *Service) applyConfig(cfg *config.Config, revision uint64) error {
 	if cfg == nil {
 		return errors.New("proxy: config must not be nil")
 	}
@@ -410,6 +441,10 @@ func (s *Service) ApplyConfig(cfg *config.Config) error {
 	timeout := time.Duration(cfg.Server.RequestTimeoutSeconds) * time.Second
 
 	s.mu.Lock()
+	if revision != 0 && revision != s.targetRevision {
+		s.mu.Unlock()
+		return ErrTargetSnapshotChanged
+	}
 	s.replaceTargetsLocked(parsed, order)
 	s.mu.Unlock()
 
@@ -524,7 +559,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Error("failed to read request body",
 			"request_id", appmiddleware.RequestIDFromContext(r.Context()),
-			"error", err,
+			"error", errorlog.ErrorCategory(err),
 		)
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		requestOutcomeRecorded = true
@@ -703,7 +738,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			s.logger.Error("target selection failed",
 				"request_id", appmiddleware.RequestIDFromContext(r.Context()),
-				"error", err,
+				"error", errorlog.ErrorCategory(err),
 			)
 			http.Error(w, "failed to select target", http.StatusServiceUnavailable)
 			s.metrics.totalFailures.Add(1)
@@ -785,7 +820,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("multipart→JSON conversion failed, forwarding original",
 					"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 					"target", target.Name,
-					"error", convErr,
+					"error", errorlog.ErrorCategory(convErr),
 				)
 			}
 		}
@@ -1317,14 +1352,14 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.logger.Error("forward request failed",
 					"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 					"target", target.Name,
-					"error", fe.err,
+					"error", errorlog.ErrorCategory(fe.err),
 					"status", status,
 				)
 			} else {
 				s.logger.Error("forward request failed",
 					"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 					"target", target.Name,
-					"error", fErr,
+					"error", errorlog.ErrorCategory(fErr),
 					"status", status,
 				)
 			}
@@ -1672,37 +1707,118 @@ func (s *Service) KeyPoolStatus(targetName string) []KeyStatus {
 	return state.keyPool.status()
 }
 
-// BlockKey manually blocks a specific key in the target's key pool.
-func (s *Service) BlockKey(targetName string, index int) error {
+// TargetKeySnapshot compares stored slots with the current runtime under the
+// service lock. An index is nil when the slot has no runtime key-pool entry.
+func (s *Service) TargetKeySnapshot(target config.Target) (uint64, []KeyStatus, []*int, bool) {
+	name := strings.ToLower(strings.TrimSpace(target.Name))
+	expected, _, err := buildTargetStates([]config.Target{target})
+	if err != nil || expected[name] == nil {
+		return 0, nil, nil, false
+	}
 	s.mu.RLock()
-	state, ok := s.targetsByName[strings.ToLower(targetName)]
-	s.mu.RUnlock()
-	if !ok || state == nil || state.keyPool == nil {
+	defer s.mu.RUnlock()
+	state := s.targetsByName[name]
+	keys := mergeTargetKeys(target)
+	if state == nil || !slices.Equal(keys, state.target.APIKeys) {
+		return 0, nil, nil, false
+	}
+	// Pool pause is materialized into runtime and need not equal target.Paused.
+	expectedTarget := *expected[name].target
+	runtimeTarget := *state.target
+	expectedTarget.Paused = runtimeTarget.Paused
+	// Persistence omits empty top-level collections; nested JSON values retain their shape.
+	if len(expectedTarget.ModelMappings) == 0 {
+		expectedTarget.ModelMappings = nil
+	}
+	if len(runtimeTarget.ModelMappings) == 0 {
+		runtimeTarget.ModelMappings = nil
+	}
+	if len(expectedTarget.CustomHeaders) == 0 {
+		expectedTarget.CustomHeaders = nil
+	}
+	if len(runtimeTarget.CustomHeaders) == 0 {
+		runtimeTarget.CustomHeaders = nil
+	}
+	if len(expectedTarget.CustomBody) == 0 {
+		expectedTarget.CustomBody = nil
+	}
+	if len(runtimeTarget.CustomBody) == 0 {
+		runtimeTarget.CustomBody = nil
+	}
+	expectedBody, expectedErr := json.Marshal(expectedTarget.CustomBody)
+	runtimeBody, runtimeErr := json.Marshal(runtimeTarget.CustomBody)
+	expectedTarget.CustomBody, runtimeTarget.CustomBody = nil, nil
+	if expectedErr != nil || runtimeErr != nil || !bytes.Equal(expectedBody, runtimeBody) || !reflect.DeepEqual(&expectedTarget, &runtimeTarget) {
+		return 0, nil, nil, false
+	}
+	indices := make([]*int, 1+len(target.APIKeys))
+	if state.keyPool == nil {
+		return s.targetRevision, nil, indices, true
+	}
+	if len(state.keyPool.entries) != len(keys) {
+		return 0, nil, nil, false
+	}
+	byKey := make(map[string]int, len(keys))
+	for i, key := range keys {
+		if state.keyPool.entries[i].key != key {
+			return 0, nil, nil, false
+		}
+		byKey[key] = i
+	}
+	for i, key := range append([]string{target.APIKey}, target.APIKeys...) {
+		if index, ok := byKey[strings.TrimSpace(key)]; ok {
+			index := index
+			indices[i] = &index
+		}
+	}
+	return s.targetRevision, state.keyPool.status(), indices, true
+}
+
+// SetKeyBlockedIfTargetRevision binds an indexed operation to the observed
+// runtime revision and performs it before that revision can be replaced.
+func (s *Service) SetKeyBlockedIfTargetRevision(targetName string, index int, blocked bool, revision uint64) error {
+	if revision == 0 {
+		return ErrTargetSnapshotChanged
+	}
+	return s.setKeyBlocked(targetName, index, blocked, revision)
+}
+
+func (s *Service) setKeyBlocked(targetName string, index int, blocked bool, revision uint64) error {
+	s.mu.Lock()
+	if revision != 0 && revision != s.targetRevision {
+		s.mu.Unlock()
+		return ErrTargetSnapshotChanged
+	}
+	state := s.targetsByName[strings.ToLower(targetName)]
+	if state == nil || state.keyPool == nil {
+		s.mu.Unlock()
 		return fmt.Errorf("target %q not found or has no key pool", targetName)
 	}
 	if index < 0 || index >= len(state.keyPool.entries) {
+		s.mu.Unlock()
 		return fmt.Errorf("key index %d out of range", index)
 	}
-	state.keyPool.blockKey(index)
-	if s.responsesWS != nil {
+	if blocked {
+		state.keyPool.blockKey(index)
+	} else {
+		state.keyPool.unblockKey(index)
+	}
+	s.advanceTargetRevisionLocked()
+	s.mu.Unlock()
+	if blocked && s.responsesWS != nil {
 		s.responsesWS.invalidate(false)
 	}
 	return nil
 }
 
+// BlockKey manually blocks a specific key in the target's key pool.
+func (s *Service) BlockKey(targetName string, index int) error {
+	return s.setKeyBlocked(targetName, index, true, 0)
+}
+
 // UnblockKey manually unblocks a specific key in the target's key pool.
 func (s *Service) UnblockKey(targetName string, index int) error {
-	s.mu.RLock()
-	state, ok := s.targetsByName[strings.ToLower(targetName)]
-	s.mu.RUnlock()
-	if !ok || state == nil || state.keyPool == nil {
-		return fmt.Errorf("target %q not found or has no key pool", targetName)
-	}
-	if index < 0 || index >= len(state.keyPool.entries) {
-		return fmt.Errorf("key index %d out of range", index)
-	}
-	state.keyPool.unblockKey(index)
-	return nil
+	return s.setKeyBlocked(targetName, index, false, 0)
 }
 
 // WakeUpKeys triggers the wake-up model for a target's key pool.

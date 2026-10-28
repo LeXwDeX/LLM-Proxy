@@ -20,6 +20,8 @@ AdminApp.register("quota", function (app) {
   );
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var applyReadonlyMode = app.bind("users", "applyReadonlyMode");
+  var loadTargets = app.bind("targets", "loadTargets");
+  var awaitSchedulingRefresh = app.bind("targets", "awaitSchedulingRefresh");
   function modelGroupModels(group) {
     var targets = (state.targets || []).map(function (t) {
       return String(t.name || "").toLowerCase();
@@ -176,7 +178,7 @@ AdminApp.register("quota", function (app) {
     var groups = status.groups || {};
     var names = Object.keys(groups).sort();
     var html =
-      "<div class='quota-detail-note'>人员行的各周期进度是各独立限额组的合计，不是共享额度池；每个模型组的上限分别生效，任一组不限时合计显示不限。扣费系数只用于消耗折算，不乘入可用上限；但扣费系数为 0 时该组不限。下次重置时间按模型组和周期分别列出。</div>";
+      "<div class='quota-detail-note'>人员行的各周期进度是各独立限额组的合计，不是共享额度池；每个模型组的上限分别生效，任一组不限时合计显示不限。基数是配置值，已绑定职级时基数为 0 表示该周期上限不限；未绑定职级的请求被拒绝，可用上限以额度状态为准。扣费系数只用于消耗折算，不乘入可用上限；但扣费系数为 0 时该组不限。下次重置时间按模型组和周期分别列出。</div>";
     if (status.calibration_error) {
       html += "<div class='quota-detail-group'><h4>计费校准不可用</h4><div>" +
         esc(status.calibration_error) +
@@ -270,11 +272,7 @@ AdminApp.register("quota", function (app) {
   }
   async function loadQuotaEditorData() {
     var requests = [];
-    requests.push(
-      api("/admin/data/targets").then(function (data) {
-        state.targets = Array.isArray(data.targets) ? data.targets : [];
-      }),
-    );
+    requests.push(loadTargets(true));
     if (!state.catalogAllCache)
       requests.push(
         api("/admin/data/catalog").then(function (data) {
@@ -282,8 +280,14 @@ AdminApp.register("quota", function (app) {
         }),
       );
     await Promise.all(requests);
+    await awaitSchedulingRefresh();
   }
+  var quotaLoadVersion = 0;
+  var dictLoadVersion = 0;
+  var modelGroupNeedsRefresh = Object.create(null);
   async function loadQuotaManagement() {
+    var version = ++quotaLoadVersion;
+    ++dictLoadVersion;
     try {
       var usagePromise = api(
         "/admin/data/usage/aggregate?group_by=day&from=" +
@@ -309,8 +313,17 @@ AdminApp.register("quota", function (app) {
         loadQuotaEditorData(),
         usagePromise,
       ]);
+      if (version !== quotaLoadVersion) return;
+      if (Object.keys(modelGroupNeedsRefresh).length &&
+          (!results[1] || !Object.prototype.hasOwnProperty.call(results[1], "model_groups") ||
+            (results[1].model_groups != null &&
+              (!Array.isArray(results[1].model_groups) || !results[1].model_groups.every(function (group) {
+                return group && typeof group.name === "string" && !!group.name;
+              }))))) throw new Error("模型组列表格式无效");
+      ++dictLoadVersion;
       state.quotaSummary = results[0].clients || [];
       state.modelGroups = results[1].model_groups || [];
+      modelGroupNeedsRefresh = Object.create(null);
       state.modelGroupsLoaded = true;
       refreshUsageModelGroupFilter();
       state.jobLevels = Array.isArray(results[2].job_levels)
@@ -326,6 +339,7 @@ AdminApp.register("quota", function (app) {
       });
       state.dictsLoaded = true;
     } catch (e) {
+      if (version !== quotaLoadVersion) return;
       document.getElementById("quotaSummaryBody").innerHTML =
         "<tr class='empty-row'><td colspan='" +
         (quotaDimensions.length + 7) +
@@ -384,6 +398,7 @@ AdminApp.register("quota", function (app) {
             return (
               "<tr><td><strong>" +
               esc(modelGroupLabel(group.name)) +
+              (modelGroupNeedsRefresh[group.name] ? "（已过期，请刷新）" : "") +
               "</strong></td><td>" +
               modelGroupModels(group) +
               "</td><td>× " +
@@ -392,7 +407,8 @@ AdminApp.register("quota", function (app) {
               quotaDimensions
                 .map(function (dim) {
                   return (
-                    esc(dim.label) + " " + fmtMoney(group[dim.base_field] || 0)
+                    esc(dim.label) + " " + fmtMoney(group[dim.base_field] || 0) +
+                    (Number(group[dim.base_field] || 0) === 0 ? "（已绑定职级时该周期上限不限）" : "")
                   );
                 })
                 .join("<br>") +
@@ -415,10 +431,15 @@ AdminApp.register("quota", function (app) {
   }
   async function loadDictOptions() {
     if (state.dictsLoaded) return;
+    var version = dictLoadVersion;
     var results = await Promise.all([
       api("/admin/data/job-levels"),
       api("/admin/data/project-groups"),
     ]);
+    if (version !== dictLoadVersion) {
+      if (!state.dictsLoaded) return loadDictOptions();
+      return;
+    }
     state.jobLevels = Array.isArray(results[0].job_levels)
       ? results[0].job_levels
       : [];
@@ -746,9 +767,49 @@ AdminApp.register("quota", function (app) {
       });
     return result;
   }
+  var modelGroupOpenVersion = 0;
+  var modelGroupDraftRevision = 0;
+  var modelGroupSaving = false;
+  var modelGroupCreatedDraft = false;
+  var modelGroupSavingName = "";
+  var modelGroupSavingOriginalName = "";
+  var modelGroupVersions = Object.create(null);
+  var editingModelGroupVersion = 0;
+  ["input", "change"].forEach(function (eventName) {
+    document.getElementById("modelGroupModal").addEventListener(eventName, function () { modelGroupDraftRevision++; });
+  });
+  document.getElementById("modelGroupModal").addEventListener("click", function (event) {
+    var button = event.target.closest("button");
+    if (modelGroupSaving && button && button.id !== "saveModelGroupBtn") modelGroupDraftRevision++;
+  });
   async function openModelGroupModal(group) {
     if (isReadonlyMode()) return;
-    await loadQuotaEditorData();
+    if (group && modelGroupNeedsRefresh[group.name]) {
+      toast("模型组已保存但列表尚未刷新，请刷新后重新编辑。", "error");
+      return;
+    }
+    if (group && modelGroupSaving && (modelGroupSavingName === group.name || modelGroupSavingOriginalName === group.name)) {
+      toast("该模型组正在保存，请等待完成后重新打开。", "error");
+      return;
+    }
+    var groupVersion = group ? (modelGroupVersions[group.name] || 0) : 0;
+    var version = ++modelGroupOpenVersion;
+    try {
+      await loadQuotaEditorData();
+    } catch (e) {
+      if (version !== modelGroupOpenVersion) return;
+      toast("加载模型组编辑数据失败: " + e.message, "error");
+      return;
+    }
+    if (version !== modelGroupOpenVersion) return;
+    if (group && (modelGroupNeedsRefresh[group.name] || (modelGroupSaving &&
+        (modelGroupSavingName === group.name || modelGroupSavingOriginalName === group.name)) ||
+        (modelGroupVersions[group.name] || 0) !== groupVersion)) {
+      toast("模型组正在保存或已更新，请重新打开确认。", "error");
+      return;
+    }
+    modelGroupCreatedDraft = false;
+    editingModelGroupVersion = groupVersion;
     state.editingModelGroup = group || null;
     document.getElementById("modelGroupModalTitle").textContent = group
       ? "编辑模型组"
@@ -840,6 +901,23 @@ AdminApp.register("quota", function (app) {
     .getElementById("saveModelGroupBtn")
     .addEventListener("click", async function () {
       if (isReadonlyMode()) return;
+      if (modelGroupSaving) {
+        toast("模型组正在保存，请稍候。", "error");
+        return;
+      }
+      if (modelGroupCreatedDraft) {
+        toast("模型组已创建，请复制未保存的修改并重新打开编辑。", "error");
+        return;
+      }
+      if (state.editingModelGroup && modelGroupNeedsRefresh[state.editingModelGroup.name] &&
+          !document.getElementById("modelGroupModal").classList.contains("open")) {
+        toast("模型组已保存但列表尚未刷新，请刷新后重新编辑。", "error");
+        return;
+      }
+      if (state.editingModelGroup && editingModelGroupVersion !== (modelGroupVersions[state.editingModelGroup.name] || 0)) {
+        toast("模型组已更新，请保留草稿并重新打开确认。", "error");
+        return;
+      }
       var name = document.getElementById("modelGroupName").value.trim(),
         coefficient = parseFloat(
           document.getElementById("modelGroupCoefficient").value,
@@ -867,19 +945,44 @@ AdminApp.register("quota", function (app) {
         toast("模型组额度基数必须是 ≥0 的数字", "error");
         return;
       }
+      var saveVersion = modelGroupOpenVersion;
+      var saveRevision = modelGroupDraftRevision;
+      var current = state.editingModelGroup;
+      modelGroupSaving = true;
+      modelGroupSavingName = name;
+      modelGroupSavingOriginalName = current ? current.name : "";
       try {
-        var current = state.editingModelGroup;
         await api(
           current
             ? "/admin/data/model-groups/" + encodeURIComponent(current.name)
             : "/admin/data/model-groups",
           { method: current ? "PUT" : "POST", body: payload },
         );
-        closeModal("modelGroupModal");
+        ++quotaLoadVersion;
+        if (current) modelGroupNeedsRefresh[current.name] = true;
+        modelGroupNeedsRefresh[name] = true;
+        if (current && current.name !== name) modelGroupVersions[current.name] = (modelGroupVersions[current.name] || 0) + 1;
+        modelGroupVersions[name] = (modelGroupVersions[name] || 0) + 1;
+        if (current && saveVersion === modelGroupOpenVersion) {
+          state.editingModelGroup = Object.assign({}, current, {name: name});
+          editingModelGroupVersion = modelGroupVersions[name];
+        }
+        renderModelGroups();
         toast("模型组已保存", "success");
+        if (saveVersion === modelGroupOpenVersion && saveRevision === modelGroupDraftRevision) {
+          closeModal("modelGroupModal");
+        } else if (saveVersion === modelGroupOpenVersion) {
+          if (!current) modelGroupCreatedDraft = true;
+          toast(current ? "请求时的内容已保存，后续修改尚未保存。" :
+            "模型组已创建，请复制未保存的修改并重新打开编辑。", "error");
+        }
         await loadQuotaManagement();
       } catch (e) {
         toast("保存失败: " + e.message, "error");
+      } finally {
+        modelGroupSaving = false;
+        modelGroupSavingName = "";
+        modelGroupSavingOriginalName = "";
       }
     });
   function quotaRowStatus(item) {
@@ -1844,7 +1947,7 @@ AdminApp.register("quota", function (app) {
             "</label><input class='form-control readonly-disable' id='" +
             esc(spec[1] + "-" + dim.key) +
             "' type='number' min='0' step='0.01' placeholder='" +
-            (spec[1] === "jobLevel" ? "留空 = 1" : "留空 = 0") +
+            (spec[1] === "jobLevel" ? "留空 = 1" : "留空 = 0（已绑定职级时该周期上限不限）") +
             "'></div>"
           );
         })

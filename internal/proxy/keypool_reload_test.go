@@ -92,7 +92,11 @@ func TestKeyPoolReloadLateFeedback(t *testing.T) {
 				close(release)
 				awaitReload(t, done)
 				got := reloadKey(current, 2)
-				if !got.status.Exhausted || got.status.ExhaustReason != tc.reason || got.status.LastError != tc.body || got.status.ExhaustedAt.IsZero() || !got.status.CooldownEnd.After(time.Now()) {
+				wantError := ""
+				if tc.body != "" {
+					wantError = "upstream error (details withheld)"
+				}
+				if !got.status.Exhausted || got.status.ExhaustReason != tc.reason || got.status.LastError != wantError || got.status.ExhaustedAt.IsZero() || !got.status.CooldownEnd.After(time.Now()) {
 					t.Fatalf("late feedback lost on retained key at new index: %+v", got)
 				}
 				if tc.body != "" && got.status.LastErrorAt.IsZero() {

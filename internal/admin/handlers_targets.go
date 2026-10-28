@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,8 +31,12 @@ func targetNameParam(r *http.Request) (string, error) {
 }
 
 func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
+	session, ok := SessionFromContext(r.Context())
+	admin := ok && session != nil && session.Role == RoleAdmin
+	h.configMu.Lock()
 	cfg, err := h.currentConfig()
 	if err != nil {
+		h.configMu.Unlock()
 		h.writeInternalError(w, "failed to load config", err)
 		return
 	}
@@ -76,17 +83,43 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 			"pool":                            t.Pool,
 			"max_concurrency":                 t.MaxConcurrency,
 		}
-		// 附加 key 池运行时状态
-		if statuses := h.proxyService.KeyPoolStatus(t.Name); statuses != nil {
+		if !admin {
+			// Paths and custom field names may also contain credentials.
+			m["endpoint"] = readonlyTargetEndpoint(t.Endpoint)
+			m["openai_prefix"] = ""
+			m["anthropic_prefix"] = ""
+			m["custom_headers"] = nil
+			m["custom_body"] = nil
+		}
+		// Only publish a precondition when stored and runtime identity agree.
+		token, _, statuses, indices := h.targetKeySnapshot(t)
+		if token != "" {
+			m["key_snapshot"] = token
+			m["key_runtime_indices"] = indices
+		} else {
+			m["key_snapshot"] = nil
+			m["key_runtime_indices"] = nil
+			statuses = h.proxyService.KeyPoolStatus(t.Name)
+		}
+		if statuses != nil {
 			m["key_statuses"] = statuses
 		}
 		targets[i] = m
 	}
+	h.configMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"targets": targets,
 		"count":   len(targets),
 	})
+}
+
+func readonlyTargetEndpoint(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Opaque != "" {
+		return ""
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
 }
 
 func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +184,7 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiKey := strings.TrimSpace(body.APIKey)
-	if apiKey == "" && !body.AllowBearer {
+	if !targetHasKey(apiKey, body.APIKeys) && !body.AllowBearer {
 		writeJSON(w, http.StatusBadRequest, errorResponse("api_key must not be empty when allow_bearer_passthrough is false"))
 		return
 	}
@@ -332,10 +365,20 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	condition := r.Header.Values(targetKeySnapshotHeader)
+	var revision uint64
 	found := false
 	for i := range cfg.Targets {
 		if strings.EqualFold(cfg.Targets[i].Name, name) {
 			t := &cfg.Targets[i]
+			if len(condition) > 0 {
+				var token string
+				token, revision, _, _ = h.targetKeySnapshot(*t)
+				if len(condition) != 1 || token == "" || !hmac.Equal([]byte(token), []byte(condition[0])) {
+					writeJSON(w, http.StatusConflict, errorResponse("target key snapshot changed; refresh targets"))
+					return
+				}
+			}
 			existingKeys := existingTargetKeys(*t)
 			if body.EndpointType != "" {
 				epType := config.NormalizeEndpointType(body.EndpointType)
@@ -349,7 +392,7 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 				t.Endpoint = strings.TrimSpace(body.Endpoint)
 			}
 			if body.APIKey != nil {
-				resolved, err := resolveSubmittedTargetKey(*body.APIKey, existingKeys)
+				resolved, err := resolveSubmittedTargetKey(*body.APIKey, existingKeys, len(condition) > 0)
 				if err != nil {
 					writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
 					return
@@ -375,12 +418,12 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 			if body.APIKeys != nil {
 				resolvedKeys := make([]string, 0, len(*body.APIKeys))
 				for _, k := range *body.APIKeys {
-					resolved, err := resolveSubmittedTargetKey(k, existingKeys)
+					resolved, err := resolveSubmittedTargetKey(k, existingKeys, len(condition) > 0)
 					if err != nil {
 						writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
 						return
 					}
-					if resolved != "" {
+					if resolved != "" || (len(condition) > 0 && strings.HasPrefix(strings.TrimSpace(k), existingTargetKeyRefPrefix)) {
 						resolvedKeys = append(resolvedKeys, resolved)
 					}
 				}
@@ -442,8 +485,7 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 				t.MaxConcurrency = mc
 			}
 
-			// Validate: api_key must be non-empty when allow_bearer is false.
-			if t.APIKey == "" && !t.AllowBearer {
+			if !targetHasKey(t.APIKey, t.APIKeys) && !t.AllowBearer {
 				writeJSON(w, http.StatusBadRequest, errorResponse("api_key must not be empty when allow_bearer_passthrough is false"))
 				return
 			}
@@ -453,11 +495,19 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !found {
+		if len(condition) > 0 {
+			writeJSON(w, http.StatusConflict, errorResponse("target key snapshot changed; refresh targets"))
+			return
+		}
 		writeJSON(w, http.StatusNotFound, errorResponse(fmt.Sprintf("target %q not found", name)))
 		return
 	}
 
-	if err := h.applyConfigRuntime(cfg); err != nil {
+	if err := h.applyConfigRuntimeIfTargetRevision(cfg, revision); err != nil {
+		if errors.Is(err, proxy.ErrTargetSnapshotChanged) {
+			writeJSON(w, http.StatusConflict, errorResponse("target key snapshot changed; refresh targets"))
+			return
+		}
 		h.writeInternalError(w, "failed to apply config", err)
 		return
 	}
@@ -483,6 +533,37 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 }
 
 const existingTargetKeyRefPrefix = "__existing_key_index__:"
+const targetKeySnapshotHeader = "X-Target-Key-Snapshot"
+
+func targetHasKey(primary string, extra []string) bool {
+	if strings.TrimSpace(primary) != "" {
+		return true
+	}
+	for _, key := range extra {
+		if strings.TrimSpace(key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) targetKeySnapshot(target config.Target) (string, uint64, []proxy.KeyStatus, []*int) {
+	if !h.keySnapshotSecretReady {
+		return "", 0, nil, nil
+	}
+	revision, statuses, indices, ok := h.proxyService.TargetKeySnapshot(target)
+	if !ok || revision == 0 {
+		return "", 0, nil, nil
+	}
+	mac := hmac.New(sha256.New, h.keySnapshotSecret[:])
+	mac.Write([]byte("admin/target-key-snapshot/v1\x00"))
+	_ = json.NewEncoder(mac).Encode(struct {
+		Name     string   `json:"name"`
+		Keys     []string `json:"keys"`
+		Revision uint64   `json:"revision"`
+	}{strings.ToLower(strings.TrimSpace(target.Name)), existingTargetKeys(target), revision})
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), revision, statuses, indices
+}
 
 func existingTargetKeys(t config.Target) []string {
 	keys := make([]string, 0, 1+len(t.APIKeys))
@@ -491,7 +572,7 @@ func existingTargetKeys(t config.Target) []string {
 	return keys
 }
 
-func resolveSubmittedTargetKey(submitted string, existing []string) (string, error) {
+func resolveSubmittedTargetKey(submitted string, existing []string, allowEmptyRef bool) (string, error) {
 	trimmed := strings.TrimSpace(submitted)
 	if trimmed == "" {
 		return "", nil
@@ -499,7 +580,7 @@ func resolveSubmittedTargetKey(submitted string, existing []string) (string, err
 	if strings.HasPrefix(trimmed, existingTargetKeyRefPrefix) {
 		rawIndex := strings.TrimPrefix(trimmed, existingTargetKeyRefPrefix)
 		idx, err := strconv.Atoi(rawIndex)
-		if err != nil || idx < 0 || idx >= len(existing) || existing[idx] == "" {
+		if err != nil || idx < 0 || idx >= len(existing) || (!allowEmptyRef && existing[idx] == "") {
 			return "", fmt.Errorf("invalid existing key reference")
 		}
 		return existing[idx], nil
@@ -668,28 +749,16 @@ func (h *Handler) handleSetTargetPaused(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *Handler) handleBlockTargetKey(w http.ResponseWriter, r *http.Request) {
-	name, nameErr := targetNameParam(r)
-	indexStr := chi.URLParam(r, "index")
-	if nameErr != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse(nameErr.Error()))
-		return
-	}
-	index, err := strconv.Atoi(indexStr)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse("invalid key index"))
-		return
-	}
-
-	if err := h.proxyService.BlockKey(name, index); err != nil {
-		writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
-		return
-	}
-
-	h.recordAudit(r, "block_target_key", name, "success", fmt.Sprintf("key_index=%d", index))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	h.handleSetTargetKeyBlocked(w, r, true)
 }
 
 func (h *Handler) handleUnblockTargetKey(w http.ResponseWriter, r *http.Request) {
+	h.handleSetTargetKeyBlocked(w, r, false)
+}
+
+func (h *Handler) handleSetTargetKeyBlocked(w http.ResponseWriter, r *http.Request, blocked bool) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
 	name, nameErr := targetNameParam(r)
 	indexStr := chi.URLParam(r, "index")
 	if nameErr != nil {
@@ -702,13 +771,63 @@ func (h *Handler) handleUnblockTargetKey(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := h.proxyService.UnblockKey(name, index); err != nil {
+	condition := r.Header.Values(targetKeySnapshotHeader)
+	var target config.Target
+	var revision uint64
+	if len(condition) > 0 {
+		cfg, loadErr := h.currentConfig()
+		if loadErr != nil {
+			h.writeInternalError(w, "failed to load config", loadErr)
+			return
+		}
+		var token string
+		for _, candidate := range cfg.Targets {
+			if strings.EqualFold(candidate.Name, name) {
+				target = candidate
+				token, revision, _, _ = h.targetKeySnapshot(candidate)
+				break
+			}
+		}
+		if len(condition) != 1 || token == "" || !hmac.Equal([]byte(token), []byte(condition[0])) {
+			writeJSON(w, http.StatusConflict, errorResponse("target key snapshot changed; refresh targets"))
+			return
+		}
+		err = h.proxyService.SetKeyBlockedIfTargetRevision(name, index, blocked, revision)
+	} else if blocked {
+		err = h.proxyService.BlockKey(name, index)
+	} else {
+		err = h.proxyService.UnblockKey(name, index)
+	}
+	if errors.Is(err, proxy.ErrTargetSnapshotChanged) {
+		writeJSON(w, http.StatusConflict, errorResponse("target key snapshot changed; refresh targets"))
+		return
+	}
+	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
 		return
 	}
 
-	h.recordAudit(r, "unblock_target_key", name, "success", fmt.Sprintf("key_index=%d", index))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	action := "unblock_target_key"
+	if blocked {
+		action = "block_target_key"
+	}
+	h.recordAudit(r, action, name, "success", fmt.Sprintf("key_index=%d", index))
+	response := map[string]any{"ok": true}
+	if len(condition) > 0 {
+		response["key_snapshot"] = nil
+		if revision != ^uint64(0) {
+			token, nextRevision, _, _ := h.targetKeySnapshot(target)
+			// A later generation cannot be paired with the submitted draft's slots.
+			if token != "" && nextRevision == revision+1 {
+				// The runtime can also change while the opaque token is being signed.
+				checkedRevision, _, _, ok := h.proxyService.TargetKeySnapshot(target)
+				if ok && checkedRevision == nextRevision {
+					response["key_snapshot"] = token
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) handleWakeUpTargetKeys(w http.ResponseWriter, r *http.Request) {

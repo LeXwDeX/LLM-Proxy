@@ -8,7 +8,7 @@ import (
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	status := h.proxyService.TargetStatuses(now)
+	status := h.targetStatusesForSession(r, now)
 	response := struct {
 		Status    string               `json:"status"`
 		CheckedAt time.Time            `json:"checked_at"`
@@ -32,6 +32,17 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) targetStatusesForSession(r *http.Request, now time.Time) []proxy.TargetStatus {
+	statuses := h.proxyService.TargetStatuses(now)
+	session, ok := SessionFromContext(r.Context())
+	if !ok || session == nil || session.Role != RoleAdmin {
+		for i := range statuses {
+			statuses[i].Endpoint = readonlyTargetEndpoint(statuses[i].Endpoint)
+		}
+	}
+	return statuses
 }
 
 func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +147,7 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
-	health := h.proxyService.TargetStatuses(now)
+	health := h.targetStatusesForSession(r, now)
 	metrics := h.proxyService.MetricsSnapshot()
 
 	clients, err := h.clientStore.List()

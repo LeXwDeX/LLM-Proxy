@@ -165,8 +165,8 @@ func readErrorLogEntries(t *testing.T, path string) []errorlog.Entry {
 	return entries
 }
 
-// 4xx/5xx error logs keep the same excerpt and captured size with trace off.
-func TestUpstreamErrorLogBodyUnchangedWithoutTrace(t *testing.T) {
+// 4xx/5xx error logs retain captured size, not response content, with trace off.
+func TestUpstreamErrorLogBodyRedactedWithoutTrace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "upstream-error.log")
 	errorlog.Init(path)
 	t.Cleanup(func() { _ = errorlog.Close() })
@@ -189,11 +189,11 @@ func TestUpstreamErrorLogBodyUnchangedWithoutTrace(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("error log entries = %d", len(entries))
 	}
-	if entries[0].UpstreamStatus != 404 || entries[0].RespExcerpt != small || entries[0].RespBytes != len(small) {
+	if entries[0].UpstreamStatus != 404 || entries[0].RespExcerpt != "[redacted]" || entries[0].RespBytes != len(small) {
 		t.Fatalf("4xx entry = %+v", entries[0])
 	}
-	if entries[1].UpstreamStatus != 502 || entries[1].RespExcerpt != large[:1024] || entries[1].RespBytes != 2<<20 {
-		t.Fatalf("5xx entry status=%d bytes=%d excerpt-prefix-ok=%v", entries[1].UpstreamStatus, entries[1].RespBytes, entries[1].RespExcerpt == large[:1024])
+	if entries[1].UpstreamStatus != 502 || entries[1].RespExcerpt != "[redacted]" || entries[1].RespBytes != 2<<20 {
+		t.Fatalf("5xx entry status=%d bytes=%d excerpt=%q", entries[1].UpstreamStatus, entries[1].RespBytes, entries[1].RespExcerpt)
 	}
 }
 

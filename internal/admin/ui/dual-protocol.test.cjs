@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { createHarness, schemaFixture } = require("../../../scripts/testing/admin_ui_test.cjs");
+const { createHarness, schemaFixture, withKeySnapshot, simulateTargetUpdate } = require("../../../scripts/testing/admin_ui_test.cjs");
 
 function fixture() {
   const schema = schemaFixture();
@@ -9,7 +9,7 @@ function fixture() {
   return schema;
 }
 async function setup(schema = fixture()) {
-  const harness = createHarness({ schema });
+  const harness = createHarness({ schema, routes: { "/admin/data/targets": { targets: [] } } });
   const app = await harness.run();
   return { harness, app, el: id => harness.ids.get(id) };
 }
@@ -47,11 +47,17 @@ test("dual controls use capabilities, schema defaults, and preserve edits across
 });
 test("saving a non-dual type keeps nonempty saved dual values", async () => {
   const { app, harness, el } = await setup();
-  await app.modules.targets.openTargetModal({ name: "saved", endpoint_type: "provider-new", endpoint: "https://fixture.invalid", usage_adapter: "standard", openai_prefix: "/openai", anthropic_prefix: "/anthropic", supports_responses: true });
+  const saved = { name: "saved", endpoint_type: "provider-new", endpoint: "https://fixture.invalid", usage_adapter: "standard", openai_prefix: "/openai", anthropic_prefix: "/anthropic", supports_responses: true };
+  await app.modules.targets.openTargetModal(withKeySnapshot(saved, "dual-snapshot-1"));
   el("tgtType").value = "provider-other";
   app.modules.targets.updateTargetFormVisibility();
+  simulateTargetUpdate(harness, withKeySnapshot(saved, "dual-snapshot-1"), withKeySnapshot({ ...saved, endpoint_type: "provider-other" }, "dual-snapshot-2"));
   await el("saveTargetBtn").listeners.click[0]();
-  const body = JSON.parse(harness.requests.findLast(r => r.options?.method === "PUT").options.body);
+  const write = harness.requests.findLast(r => r.options?.method === "PUT");
+  const body = JSON.parse(write.options.body);
+  assert.equal(write.options.headers["X-Target-Key-Snapshot"], "dual-snapshot-1");
+  assert.equal(body.api_key, "__existing_key_index__:0");
+  assert.equal(app.state.targets[0].key_snapshot, "dual-snapshot-2");
   assert.equal(body.openai_prefix, "/openai");
   assert.equal(body.anthropic_prefix, "/anthropic");
   assert.equal(body.supports_responses, true);
@@ -59,7 +65,8 @@ test("saving a non-dual type keeps nonempty saved dual values", async () => {
 test("create and update submit all dual fields, including clear values and hidden retained values", async () => {
   const { app, harness, el } = await setup();
   for (const editing of [false, true]) {
-    await app.modules.targets.openTargetModal(editing ? { name: "saved", endpoint_type: "provider-new", endpoint: "https://fixture.invalid", usage_adapter: "standard", openai_prefix: "/before", anthropic_prefix: "/before", supports_responses: true } : null);
+    const saved = { name: "saved", endpoint_type: "provider-new", endpoint: "https://fixture.invalid", usage_adapter: "standard", openai_prefix: "/before", anthropic_prefix: "/before", supports_responses: true };
+    await app.modules.targets.openTargetModal(editing ? withKeySnapshot(saved, "dual-clear-snapshot-1") : null);
     el("tgtName").value = "saved";
     el("tgtEndpoint").value = "https://fixture.invalid";
     el("tgtUsageAdapter").value = "standard";
@@ -69,10 +76,16 @@ test("create and update submit all dual fields, including clear values and hidde
     if (editing) {
       el("tgtType").value = "provider-other";
       app.modules.targets.updateTargetFormVisibility();
+      simulateTargetUpdate(harness, withKeySnapshot(saved, "dual-clear-snapshot-1"), withKeySnapshot({ ...saved, endpoint_type: "provider-other", openai_prefix: "", anthropic_prefix: "", supports_responses: false }, "dual-clear-snapshot-2"));
     }
     await el("saveTargetBtn").listeners.click[0]();
     const request = harness.requests.findLast(r => r.options?.method === (editing ? "PUT" : "POST"));
     const body = JSON.parse(request.options.body);
+    if (editing) {
+      assert.equal(request.options.headers["X-Target-Key-Snapshot"], "dual-clear-snapshot-1");
+      assert.equal(body.api_key, "__existing_key_index__:0");
+      assert.equal(app.state.targets[0].key_snapshot, "dual-clear-snapshot-2");
+    }
     assert.equal(body.openai_prefix, editing ? "" : "/openai");
     assert.equal(body.anthropic_prefix, editing ? "" : "/anthropic");
     assert.equal(body.supports_responses, !editing);

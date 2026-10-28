@@ -35,7 +35,7 @@ test("usage loading defaults to visible model group order, then total tokens des
     { model: "missing-group", output_tokens: 50 },
   ];
   app.state.modelGroupsLoaded = true;
-  h.context.fetch = async () => ({ok:true,status:200,text:async()=>JSON.stringify({by_model_group_model:rows})});
+  h.context.fetch = async () => response(aggregate({by_model_group_model:rows}));
   await app.modules.usage.loadUsage();
   const html = h.document.getElementById("usageByModelBody").innerHTML;
   const names = [...html.matchAll(/<td>(small|middle|large|company|missing-group)<\/td>/g)].map(m=>m[1]);
@@ -504,4 +504,383 @@ test("a stale aggregate response cannot overwrite a newer filter selection", asy
   const body = h.document.getElementById("usageByClientBody").innerHTML;
   assert.match(body, /new-client/);
   assert.doesNotMatch(body, /old-client/);
+});
+
+function usageLoadStatus(h) {
+  const container = h.document.querySelector(".time-range-bar").children
+    .find(child => child.getAttribute("data-usage-status") === "true");
+  assert.ok(container, "usage must have a persistent, visible load status");
+  const message = container.children.find(child => child.getAttribute("role") === "status");
+  const retry = container.children.find(child => child.tagName === "BUTTON");
+  assert.ok(message, "load status must be announced");
+  assert.ok(retry, "the failure state must offer a retry button");
+  return {container, message, retry};
+}
+
+test("first usage failure replaces loading placeholders and retry recovers without fabricated values", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  for (const id of ["usageByModelGroupBody", "usageByClientBody", "usageByModelBody", "dailyChart"]) {
+    h.document.getElementById(id).innerHTML = "加载中..."; // HTML's initial placeholders
+  }
+  h.context.fetch = async () => ({ok: false, status: 503, text: async () => '{"error":"离线"}'});
+  await app.modules.usage.loadUsage();
+
+  for (const id of ["usageByModelGroupBody", "usageByClientBody", "usageByModelBody", "dailyChart"]) {
+    const html = h.document.getElementById(id).innerHTML;
+    assert.match(html, /加载失败/, `${id} must not keep loading`);
+    assert.doesNotMatch(html, /加载中|暂无统计数据|当前时间段无数据/);
+  }
+  const {container, message, retry} = usageLoadStatus(h);
+  assert.equal(container.hidden, false);
+  assert.match(message.textContent, /加载失败/);
+  assert.match(message.textContent, /无.*数据/);
+  assert.equal(retry.hidden, false);
+  for (const id of ["usReqs", "usInput", "usOutput", "usCached", "usCacheWrite", "usTotal"]) {
+    assert.equal(h.document.getElementById(id).textContent, "不可用");
+  }
+  assert.match(h.document.getElementById("usCost").innerHTML, /不可用/);
+  assert.doesNotMatch(h.document.getElementById("usCost").innerHTML, /\$0\.00/);
+  click(h.document.getElementById("usageChartMetricCost"));
+  assert.match(h.document.getElementById("dailyChart").innerHTML, /加载失败/, "metric changes must not turn failure into an empty result");
+
+  h.context.fetch = async () => response(aggregate({totals: {requests: 9, estimated_cost: 1.25}}));
+  click(retry);
+  await settle();
+  assert.equal(container.hidden, true);
+  assert.equal(h.document.getElementById("usReqs").textContent, "9");
+  assert.match(h.document.getElementById("usCost").innerHTML, /\$1\.25/);
+  assert.match(h.document.getElementById("usageByClientBody").innerHTML, /当前时间段无数据/);
+});
+
+test("failed filtered refresh marks only the real last snapshot stale and identifies its range and filters", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  app.state.modelGroups = [{name: "组-旧"}, {name: "组-新"}];
+  const originalQuery = h.document.querySelectorAll;
+  let selectedGroups = [{checked: true, value: "组-旧"}];
+  h.document.querySelectorAll = selector => selector.startsWith("#usageModelGroupFilterMenu ")
+    ? selectedGroups : originalQuery(selector);
+  const urls = [];
+  h.document.getElementById("usageClientFilter").value = "旧客户端";
+  h.context.fetch = async url => {
+    urls.push(url);
+    return response(aggregate({totals: {requests: 3, estimated_cost: 2.75},
+      by_client: [{key: "旧客户端", estimated_cost: 2.75}]}));
+  };
+  await app.modules.usage.loadUsage();
+  const query = new URLSearchParams(urls[0].split("?")[1]);
+  const oldBody = h.document.getElementById("usageByClientBody").innerHTML;
+  const oldCost = h.document.getElementById("usCost").innerHTML;
+  const {container, message, retry} = usageLoadStatus(h);
+  assert.equal(container.hidden, true);
+
+  let finish;
+  h.document.getElementById("usageClientFilter").value = "新客户端";
+  selectedGroups = [{checked: true, value: "组-新"}];
+  h.context.fetch = () => new Promise(resolve => { finish = resolve; });
+  const refreshing = app.modules.usage.loadUsage();
+  await settle();
+  assert.equal(container.hidden, false, "old data is marked while the new request is pending");
+  assert.equal(retry.hidden, true);
+  assert.equal(retry.style.display, "none", "button CSS must not override the hidden state");
+  assert.match(h.document.getElementById("usageSummaryCards").getAttribute("aria-label"), /过期/);
+  assert.match(message.textContent, /过期|上次/);
+  for (const expected of [query.get("from"), query.get("to"), "旧客户端", "组-旧"]) {
+    assert.ok(message.textContent.includes(expected), `last snapshot must identify ${expected}`);
+  }
+  finish({ok: false, status: 503, text: async () => '{"error":"离线"}'});
+  await refreshing;
+  assert.match(message.textContent, /加载失败/);
+  assert.match(message.textContent, /过期/);
+  assert.equal(retry.hidden, false);
+  assert.equal(h.document.getElementById("usageByClientBody").innerHTML, oldBody);
+  assert.equal(h.document.getElementById("usCost").innerHTML, oldCost);
+
+  h.context.fetch = async url => {
+    urls.push(url);
+    return response(aggregate({totals: {requests: 5, estimated_cost: 4},
+      by_client: [{key: "新客户端", estimated_cost: 4}]}));
+  };
+  click(retry);
+  await settle();
+  assert.equal(container.hidden, true, "only a successful current request clears stale status");
+  assert.equal(h.document.getElementById("usageSummaryCards").getAttribute("aria-label"), "当前筛选汇总");
+  assert.match(h.document.getElementById("usageByClientBody").innerHTML, /新客户端/);
+  assert.doesNotMatch(h.document.getElementById("usageByClientBody").innerHTML, /旧客户端/);
+  assert.match(h.document.getElementById("usCost").innerHTML, /\$4\.00/);
+  const retried = new URLSearchParams(urls.at(-1).split("?")[1]);
+  assert.equal(retried.get("client_name"), "新客户端");
+  assert.equal(retried.get("model_group"), "组-新");
+});
+
+test("late success and late failure cannot replace the latest load status", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  const pending = [];
+  h.context.fetch = url => new Promise(resolve => pending.push({url, resolve}));
+  const client = h.document.getElementById("usageClientFilter");
+  client.value = "old";
+  const old = app.modules.usage.loadUsage();
+  await settle();
+  client.value = "new";
+  const latest = app.modules.usage.loadUsage();
+  await settle();
+  pending[1].resolve({ok: false, status: 503, text: async () => '{"error":"new failed"}'});
+  await latest;
+  const {container, message} = usageLoadStatus(h);
+  assert.equal(container.hidden, false);
+  assert.match(message.textContent, /加载失败/);
+  pending[0].resolve(response(aggregate({totals: {requests: 42, estimated_cost: 3}})));
+  await old;
+  assert.match(message.textContent, /加载失败/);
+  assert.equal(h.document.getElementById("usReqs").textContent, "不可用");
+
+  pending.length = 0;
+  client.value = "old";
+  const failingOld = app.modules.usage.loadUsage();
+  await settle();
+  client.value = "new";
+  const successfulNew = app.modules.usage.loadUsage();
+  await settle();
+  pending[1].resolve(response(aggregate({totals: {requests: 7, estimated_cost: 0}})));
+  await successfulNew;
+  pending[0].resolve({ok: false, status: 503, text: async () => '{"error":"old failed"}'});
+  await failingOld;
+  assert.equal(container.hidden, true);
+  assert.equal(h.document.getElementById("usReqs").textContent, "7");
+  assert.match(h.document.getElementById("usCost").innerHTML, /\$0\.00/);
+});
+
+test("choosing a custom range invalidates the previous in-flight selection before apply", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  let finish;
+  h.context.fetch = () => new Promise(resolve => { finish = resolve; });
+  const old = app.modules.usage.loadUsage();
+  await settle();
+  click(h.document.querySelectorAll(".time-range-btn").find(button => button.dataset.range === "custom"));
+  finish(response(aggregate({totals: {requests: 42, estimated_cost: 3}})));
+  await old;
+  assert.notEqual(h.document.getElementById("usReqs").textContent, "42");
+  assert.doesNotMatch(h.document.getElementById("usCost").innerHTML, /\$3\.00/);
+  const {container, message} = usageLoadStatus(h);
+  assert.equal(container.hidden, false);
+  assert.match(message.textContent, /自定义|未应用/);
+});
+
+test("invalid aggregate responses are failures, not empty or zero-cost snapshots", async () => {
+  for (const invalid of [null, [], {raw: "not json"}, {}, aggregate({totals: null}), aggregate({by_client: {}}), aggregate({buckets: [null]})]) {
+    const h = createHarness();
+    const app = await h.run();
+    app.state.modelGroupsLoaded = true;
+    h.context.fetch = async () => response(invalid);
+    await app.modules.usage.loadUsage();
+    assert.match(h.document.getElementById("usageByClientBody").innerHTML, /加载失败/);
+    const {container, message} = usageLoadStatus(h);
+    assert.equal(container.hidden, false);
+    assert.match(message.textContent, /加载失败/);
+    assert.match(h.document.getElementById("usCost").innerHTML, /不可用/);
+    assert.doesNotMatch(h.document.getElementById("usCost").innerHTML, /\$0\.00/);
+  }
+});
+
+test("aggregate missing a required dimension fails on the first load", async () => {
+  for (const key of ["totals", "buckets", "by_client", "by_model"]) {
+    const h = createHarness();
+    const app = await h.run();
+    app.state.modelGroupsLoaded = true;
+    const invalid = aggregate({totals: {requests: 7, estimated_cost: 2}});
+    delete invalid[key];
+    h.context.fetch = async () => response(invalid);
+    await app.modules.usage.loadUsage();
+    const {container, message, retry} = usageLoadStatus(h);
+    assert.equal(container.hidden, false, `missing ${key}`);
+    assert.match(message.textContent, /加载失败/);
+    assert.equal(retry.hidden, false);
+    assert.match(h.document.getElementById("usageByClientBody").innerHTML, /加载失败/);
+    assert.equal(h.document.getElementById("usReqs").textContent, "不可用");
+  }
+});
+
+test("incomplete aggregate refresh retains the previous snapshot as stale", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  h.context.fetch = async () => response(aggregate({
+    totals: {requests: 3, estimated_cost: 5},
+    by_client: [{key: "previous", estimated_cost: 5}],
+  }));
+  await app.modules.usage.loadUsage();
+  const body = h.document.getElementById("usageByClientBody").innerHTML;
+  h.context.fetch = async () => response({totals: {requests: 99, estimated_cost: 99}});
+  await app.modules.usage.loadUsage();
+  const {container, message, retry} = usageLoadStatus(h);
+  assert.equal(container.hidden, false);
+  assert.match(message.textContent, /加载失败.*过期/);
+  assert.equal(retry.hidden, false);
+  assert.equal(h.document.getElementById("usageByClientBody").innerHTML, body);
+  assert.equal(h.document.getElementById("usReqs").textContent, "3");
+});
+
+test("aggregate accepts null required slices and omitted optional dimensions", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  h.context.fetch = async () => response({
+    totals: {requests: 0, estimated_cost: 0}, buckets: null, by_client: null, by_model: null,
+  });
+  await app.modules.usage.loadUsage();
+  assert.equal(usageLoadStatus(h).container.hidden, true);
+  assert.equal(h.document.getElementById("usReqs").textContent, "0");
+  assert.match(h.document.getElementById("usageByClientBody").innerHTML, /当前时间段无数据/);
+});
+
+test("model group load failure is visible and retry fetches groups before the aggregate", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = false;
+  app.state.modelGroupsPromise = null;
+  const calls = [];
+  let failGroups = true;
+  h.context.fetch = async url => {
+    calls.push(url);
+    if (url === "/admin/data/model-groups") {
+      if (failGroups) return {ok: false, status: 503, text: async () => '{"error":"groups offline"}'};
+      return response({model_groups: []});
+    }
+    return response(aggregate({totals: {requests: 2, estimated_cost: 3}}));
+  };
+  await app.modules.usage.loadUsage();
+  const {container, message, retry} = usageLoadStatus(h);
+  assert.equal(container.hidden, false);
+  assert.match(message.textContent, /加载失败/);
+  assert.deepEqual(calls, ["/admin/data/model-groups"]);
+  assert.match(h.document.getElementById("usageByClientBody").innerHTML, /加载失败/);
+  failGroups = false;
+  click(retry);
+  await settle();
+  assert.equal(container.hidden, true);
+  assert.equal(calls[1], "/admin/data/model-groups");
+  assert.match(calls[2], /^\/admin\/data\/usage\/aggregate/);
+  assert.equal(h.document.getElementById("usReqs").textContent, "2");
+});
+
+test("a late usage model-group response cannot overwrite a completed quota refresh", async t => {
+  for (const oldFails of [false, true]) {
+    await t.test(oldFails ? "old failure" : "old success", async () => {
+      const h = createHarness({routes: {"/admin/data/targets": {targets: []}}});
+      const app = await h.run();
+      app.state.modelGroupsLoaded = false;
+      const base = h.context.fetch;
+      let finishOld;
+      let first = true;
+      h.context.fetch = (url, options) => {
+        if (url === "/admin/data/model-groups" && first) {
+          first = false;
+          return new Promise(resolve => { finishOld = resolve; });
+        }
+        if (String(url).includes("/admin/data/usage/aggregate")) return Promise.resolve(response(aggregate()));
+        return base(url, options);
+      };
+      const old = app.modules.usage.loadUsage();
+      await settle();
+      h.setRoute("/admin/data/model-groups", {model_groups: [{name: "new-group"}]});
+      await app.modules.quota.loadQuotaManagement();
+      assert.equal(app.state.modelGroups[0].name, "new-group");
+      finishOld(oldFails ? {ok: false, status: 503, text: async () => '{"error":"offline"}'}
+        : response({model_groups: [{name: "old-group"}]}));
+      await old;
+      assert.equal(app.state.modelGroups[0].name, "new-group");
+      const labels = h.document.getElementById("usageModelGroupFilterMenu").children
+        .map(child => child.children[1].textContent);
+      assert.ok(labels.includes("new-group"));
+      assert.ok(!labels.includes("old-group"));
+      assert.equal(usageLoadStatus(h).container.hidden, true);
+    });
+  }
+});
+
+test("a failed quota refresh does not discard a pending usage model-group load", async () => {
+  const h = createHarness({routes: {"/admin/data/targets": {targets: []}}});
+  const app = await h.run();
+  app.state.modelGroupsLoaded = false;
+  const base = h.context.fetch;
+  let finishOld;
+  let first = true;
+  h.context.fetch = (url, options) => {
+    if (url === "/admin/data/model-groups" && first) {
+      first = false;
+      return new Promise(resolve => { finishOld = resolve; });
+    }
+    if (String(url).includes("/admin/data/usage/aggregate")) return Promise.resolve(response(aggregate()));
+    return base(url, options);
+  };
+  const old = app.modules.usage.loadUsage();
+  await settle();
+  h.setRouteFailure("/admin/data/quota/summary", true);
+  await app.modules.quota.loadQuotaManagement();
+  finishOld(response({model_groups: [{name: "usage-group"}]}));
+  await old;
+  assert.equal(app.state.modelGroups[0].name, "usage-group");
+  assert.equal(usageLoadStatus(h).container.hidden, true);
+});
+
+test("render failure after a successful load restores all of the earlier snapshot", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  h.context.fetch = async () => response(aggregate({
+    totals: {requests: 3, estimated_cost: 5},
+    by_client: [{key: "previous", estimated_cost: 5}],
+    by_target_model: [{model_group: "previous-group", target: "t", model: "m", estimated_cost: 5}],
+    buckets: [{bucket_start: "2026-10-25T01:00:00Z", input_tokens: 2}],
+  }));
+  await app.modules.usage.loadUsage();
+  const before = Object.fromEntries(["usCost", "usageByClientBody", "usageByModelGroupBody", "dailyChart"]
+    .map(id => [id, h.document.getElementById(id).innerHTML]));
+  h.context.fetch = async () => response(aggregate({
+    totals: {requests: 99, estimated_cost: 99},
+    by_client: [{key: "new", estimated_cost: 99}],
+    by_target_model: [{model_group: {toString: null, valueOf: null}, target: "t", model: "m"}],
+  }));
+  await app.modules.usage.loadUsage();
+  const {container, message} = usageLoadStatus(h);
+  assert.equal(container.hidden, false);
+  assert.match(message.textContent, /加载失败.*过期/);
+  assert.equal(h.document.getElementById("usReqs").textContent, "3");
+  for (const [id, html] of Object.entries(before)) {
+    assert.equal(h.document.getElementById(id).innerHTML, html, `${id} must restore the last real data`);
+  }
+});
+
+test("invalid custom apply invalidates an earlier pending custom request", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  h.context.fetch = async () => response(aggregate({totals: {requests: 4, estimated_cost: 1}}));
+  await app.modules.usage.loadUsage();
+  click(h.document.querySelectorAll(".time-range-btn").find(button => button.dataset.range === "custom"));
+  const from = h.document.getElementById("usageFrom");
+  const to = h.document.getElementById("usageTo");
+  from.value = "2026-10-20T00:00";
+  to.value = "2026-10-21T00:00";
+  let finish;
+  h.context.fetch = () => new Promise(resolve => { finish = resolve; });
+  const pending = app.modules.usage.loadUsage();
+  await settle();
+  from.value = "2026-10-22T00:00";
+  await app.modules.usage.loadUsage();
+  finish(response(aggregate({totals: {requests: 99, estimated_cost: 99}})));
+  await pending;
+  const {container, message, retry} = usageLoadStatus(h);
+  assert.equal(container.hidden, false);
+  assert.match(message.textContent, /自定义时间无效.*过期/);
+  assert.equal(retry.hidden, true);
+  assert.equal(h.document.getElementById("usReqs").textContent, "4");
+  assert.match(h.document.getElementById("usCost").innerHTML, /\$1\.00/);
 });

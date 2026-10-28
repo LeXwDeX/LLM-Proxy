@@ -110,12 +110,21 @@ func (h *Handler) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) applyConfigRuntime(cfg *config.Config) error {
+	return h.applyConfigRuntimeIfTargetRevision(cfg, 0)
+}
+
+func (h *Handler) applyConfigRuntimeIfTargetRevision(cfg *config.Config, revision uint64) error {
 	clients, err := h.clientStore.List()
 	if err != nil {
 		return fmt.Errorf("load clients: %w", err)
 	}
 
-	if err := h.proxyService.ApplyConfig(cfg); err != nil {
+	if revision != 0 {
+		err = h.proxyService.ApplyConfigIfTargetRevision(cfg, revision)
+	} else {
+		err = h.proxyService.ApplyConfig(cfg)
+	}
+	if err != nil {
 		return fmt.Errorf("apply proxy config: %w", err)
 	}
 

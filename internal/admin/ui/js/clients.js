@@ -16,16 +16,32 @@ AdminApp.register("clients", function (app) {
   var epShortLabel = app.bind("schema", "epShortLabel");
   var poolMemberCount = app.bind("pools", "poolMemberCount");
   var poolDisplayName = app.bind("pools", "poolDisplayName");
+  var loadTargets = app.bind("targets", "loadTargets");
+  var awaitSchedulingRefresh = app.bind("targets", "awaitSchedulingRefresh");
+  var targetPoolsAvailable = app.bind("targets", "targetPoolsAvailable");
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var loadQuotaEditorData = app.bind("quota", "loadQuotaEditorData");
   var loadDictOptions = app.bind("quota", "loadDictOptions");
   var dictEmptyLabel = app.bind("quota", "dictEmptyLabel");
   var dictOptionsHTML = app.bind("quota", "dictOptionsHTML");
+  var clientLoadVersion = 0;
+  var clientOpenVersion = 0;
+  var clientDraftRevision = 0;
+  var clientSaveInFlight = false;
+  var clientCreatedDraftNeedsReopen = false;
+  var clientSavingName = "";
+  var clientVersions = Object.create(null);
+  var editingClientVersion = 0;
+  ["input", "change"].forEach(function (eventName) {
+    document.getElementById("clientModal").addEventListener(eventName, function () { clientDraftRevision++; });
+  });
+  document.getElementById("clientModal").addEventListener("click", function (event) {
+    if (event.target.dataset.target || event.target.dataset.pool) clientDraftRevision++;
+  });
   /* ===== Clients ===== */
   async function loadClients() {
+    var version = ++clientLoadVersion;
     try {
-      // 条件性 fetch 按 key 绑定结果，避免位置下标错位
-      // （曾因 results[2] 恰好是池响应而把 state.targets 清空）。
       var jobs = [
         api("/admin/data/clients").then(function (r) {
           return { key: "clients", data: r };
@@ -42,29 +58,14 @@ AdminApp.register("clients", function (app) {
           return { key: "agg", data: r };
         }),
       ];
-      if (!state.targets || !state.targets.length) {
-        jobs.push(
-          api("/admin/data/targets").then(function (r) {
-            return { key: "targets", data: r };
-          }),
-        );
-      }
-      // 池 chips 依赖池数据，缺失时一并拉取。
-      if (!state.pools || !state.pools.length) {
-        jobs.push(
-          api("/admin/data/pools")
-            .catch(function () {
-              return { pools: [] };
-            })
-            .then(function (r) {
-              return { key: "pools", data: r };
-            }),
-        );
+      if (!state.targets || !state.targets.length || !state.pools || !state.pools.length) {
+        jobs.push(loadTargets(true));
       }
       var results = await Promise.all(jobs);
+      if (version !== clientLoadVersion) return;
       var byKey = {};
       results.forEach(function (x) {
-        byKey[x.key] = x.data;
+        if (x && x.key) byKey[x.key] = x.data;
       });
       state.clients = Array.isArray(byKey.clients.clients)
         ? byKey.clients.clients
@@ -75,14 +76,9 @@ AdminApp.register("clients", function (app) {
       byClient.forEach(function (item) {
         state.clientUsage[item.key] = item;
       });
-      if (byKey.targets && Array.isArray(byKey.targets.targets)) {
-        state.targets = byKey.targets.targets;
-      }
-      if (byKey.pools && Array.isArray(byKey.pools.pools)) {
-        state.pools = byKey.pools.pools;
-      }
       renderClients();
     } catch (e) {
+      if (version !== clientLoadVersion) return;
       toast("加载客户端失败: " + e.message, "error");
     }
   }
@@ -123,7 +119,7 @@ AdminApp.register("clients", function (app) {
               "<div class='client-target-line client-target-pool'>" +
                 c.allowed_pools
                   .map(function (pn) {
-                    return "<span class='client-target-pool-tag'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='3' y='4' width='18' height='7' rx='2'></rect><rect x='3' y='13' width='18' height='7' rx='2'></rect><path d='M7 7.5h.01M7 16.5h.01'></path></svg> " + esc(poolDisplayName(pn)) + "</span>";
+                    return "<span class='client-target-pool-tag'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='3' y='4' width='18' height='7' rx='2'></rect><rect x='3' y='13' width='18' height='7' rx='2'></rect><path d='M7 7.5h.01M7 16.5h.01'></path></svg> " + esc(poolDisplayName(pn)) + (targetPoolsAvailable() ? "" : "（部署池信息不可用）") + "</span>";
                   })
                   .join("") +
                 "</div>",
@@ -133,7 +129,7 @@ AdminApp.register("clients", function (app) {
         } else {
           targets = "全部目标";
         }
-        var usage = state.clientUsage[c.name] || {};
+        var usage = (state.clientUsage && state.clientUsage[c.name]) || {};
         var tok = totalTok(usage);
         var cost = Number(usage.estimated_cost || 0);
         // 额度 v2：客户端额度入口 = 职级绑定（上限由策略基数 × 职级系数
@@ -208,8 +204,32 @@ AdminApp.register("clients", function (app) {
       toast("只读用户无法执行此操作", "error");
       return;
     }
-    await loadQuotaEditorData();
-    await loadDictOptions();
+    if (c && clientSaveInFlight && clientSavingName === c.name) {
+      toast("该客户端正在保存，请等待完成后重新打开。", "error");
+      return;
+    }
+    var clientVersion = c ? (clientVersions[c.name] || 0) : 0;
+    var version = ++clientOpenVersion;
+    try {
+      await loadQuotaEditorData();
+      await loadDictOptions();
+      await awaitSchedulingRefresh();
+    } catch (e) {
+      if (version !== clientOpenVersion) return;
+      toast("加载客户端编辑数据失败: " + e.message, "error");
+      return;
+    }
+    if (version !== clientOpenVersion) return;
+    if (c && clientSaveInFlight && clientSavingName === c.name) {
+      toast("该客户端正在保存，请等待完成后重新打开。", "error");
+      return;
+    }
+    if (c && (clientVersions[c.name] || 0) !== clientVersion) {
+      toast("客户端已更新，请重新打开以确认最新授权。", "error");
+      return;
+    }
+    clientCreatedDraftNeedsReopen = false;
+    editingClientVersion = clientVersion;
     state.editingClient = c || null;
     document.getElementById("clientModalTitle").textContent = c
       ? "编辑客户端"
@@ -243,36 +263,7 @@ AdminApp.register("clients", function (app) {
       return;
     }
     try {
-      var jobs = [];
-      if (needTargets) {
-        jobs.push(
-          api("/admin/data/targets").then(function (r) {
-            return { key: "targets", data: r };
-          }),
-        );
-      }
-      if (needPools) {
-        jobs.push(
-          api("/admin/data/pools")
-            .catch(function () {
-              return { pools: [] };
-            })
-            .then(function (r) {
-              return { key: "pools", data: r };
-            }),
-        );
-      }
-      var results = await Promise.all(jobs);
-      var byKey = {};
-      results.forEach(function (x) {
-        byKey[x.key] = x.data;
-      });
-      if (byKey.targets && Array.isArray(byKey.targets.targets)) {
-        state.targets = byKey.targets.targets;
-      }
-      if (byKey.pools && Array.isArray(byKey.pools.pools)) {
-        state.pools = byKey.pools.pools;
-      }
+      await loadTargets(true);
       var targetTags = document.getElementById("clientTargetTags");
       if (
         !targetTags.querySelector("span[data-target]") &&
@@ -282,18 +273,6 @@ AdminApp.register("clients", function (app) {
         renderClientTargetTags(
           state.editingClient && state.editingClient.allowed_targets
             ? state.editingClient.allowed_targets
-            : [],
-        );
-      }
-      var poolTags = document.getElementById("clientPoolTags");
-      if (
-        !poolTags.querySelector("span[data-pool]") &&
-        state.pools &&
-        state.pools.length
-      ) {
-        renderClientPoolTags(
-          state.editingClient && state.editingClient.allowed_pools
-            ? state.editingClient.allowed_pools
             : [],
         );
       }
@@ -364,6 +343,7 @@ AdminApp.register("clients", function (app) {
     var container = document.getElementById("clientPoolTags");
     container.innerHTML = "";
     var selectedSet = Object.create(null);
+    var available = targetPoolsAvailable();
     (selected || []).forEach(function (p) {
       selectedSet[String(p).toLowerCase()] = true;
     });
@@ -374,18 +354,19 @@ AdminApp.register("clients", function (app) {
       if (!pools.some(function (pool) {
         return pool.name.toLowerCase() === name.toLowerCase();
       }))
-        pools.push({ name: name, missing: true });
+        pools.push({ name: name, missing: available, unknown: !available });
     });
     if (!pools.length) {
       container.innerHTML =
-        "<span style='color:var(--text-muted);font-size:12px;'>暂无部署池，请先在「部署池」页创建</span>";
+        available ? "<span style='color:var(--text-muted);font-size:12px;'>暂无部署池，请先在「部署池」页创建</span>" :
+          "<span role='status'>部署池列表不可用，请刷新后重试。</span>";
       return;
     }
     pools.forEach(function (p) {
       var tag = document.createElement("span");
       var isSelected = !!selectedSet[String(p.name).toLowerCase()];
       tag.textContent = poolDisplayName(p) +
-        (p.missing ? "（部署池已删除）" : "（" + poolMemberCount(p.name) + "）");
+        (!available ? "（部署池信息不可用）" : p.missing ? "（部署池已删除）" : "（" + poolMemberCount(p.name) + "）");
       tag.title = p.missing
         ? "保留已有授权，点击可移除"
         : p.description ? p.description : "部署池 " + poolDisplayName(p);
@@ -408,6 +389,10 @@ AdminApp.register("clients", function (app) {
     });
     return result;
   }
+  function onSchedulingRefresh() {
+    if (!document.getElementById("clientModal").classList.contains("open")) return;
+    renderClientPoolTags(getSelectedClientPools());
+  }
 
   // ensureClientPickerData：对话框打开时目标/池列表数据缺失则后台补拉。
   // 仅在容器尚无可选标签（用户未开始选择）时重渲染，避免覆盖已选项。
@@ -425,7 +410,19 @@ AdminApp.register("clients", function (app) {
     .getElementById("saveClientBtn")
     .addEventListener("click", async function () {
       if (isReadonlyMode()) return;
+      if (clientSaveInFlight) {
+        toast("客户端正在保存，请稍候。", "error");
+        return;
+      }
+      if (clientCreatedDraftNeedsReopen) {
+        toast("客户端已创建。请先复制未保存的修改，再重新打开客户端编辑。", "error");
+        return;
+      }
       var name = document.getElementById("clientName").value.trim();
+      if (state.editingClient && editingClientVersion !== (clientVersions[state.editingClient.name] || 0)) {
+        toast("客户端已更新，请保留草稿并重新打开以确认最新授权。", "error");
+        return;
+      }
       var key = document.getElementById("clientAccessKey").value.trim();
       var ipAddress = document.getElementById("clientIPAddress").value.trim();
       var targets = getSelectedClientTargets();
@@ -445,6 +442,11 @@ AdminApp.register("clients", function (app) {
           .getElementById("clientProjectGroup")
           .value.trim(),
       };
+      var saveVersion = clientOpenVersion;
+      var saveRevision = clientDraftRevision;
+      var wasEditing = !!state.editingClient;
+      clientSaveInFlight = true;
+      clientSavingName = name;
       // B3 按渠道分层限额：收集非空行（池名必填）
       try {
         if (state.editingClient) {
@@ -457,10 +459,26 @@ AdminApp.register("clients", function (app) {
           await api("/admin/data/clients", { method: "POST", body: payload });
           toast("客户端已创建", "success");
         }
-        closeModal("clientModal");
+        ++clientLoadVersion;
+        clientVersions[name] = (clientVersions[name] || 0) + 1;
+        if (saveVersion === clientOpenVersion && wasEditing) editingClientVersion = clientVersions[name];
+        var savedIndex = state.clients.findIndex(function (client) { return client.name === name; });
+        if (savedIndex >= 0) state.clients[savedIndex] = Object.assign({}, state.clients[savedIndex], payload);
+        else state.clients.push(payload);
+        renderClients();
+        if (saveVersion === clientOpenVersion && saveRevision === clientDraftRevision) {
+          closeModal("clientModal");
+        } else if (saveVersion === clientOpenVersion) {
+          if (!wasEditing) clientCreatedDraftNeedsReopen = true;
+          toast(wasEditing ? "请求时的内容已保存，后续修改尚未保存。" :
+            "客户端已创建，后续修改未保存。请复制草稿并重新打开客户端编辑。", "error");
+        }
         await loadClients();
       } catch (e) {
         toast("保存失败: " + e.message, "error");
+      } finally {
+        clientSaveInFlight = false;
+        clientSavingName = "";
       }
     });
 
@@ -474,5 +492,6 @@ AdminApp.register("clients", function (app) {
     getSelectedClientTargets: getSelectedClientTargets,
     renderClientPoolTags: renderClientPoolTags,
     getSelectedClientPools: getSelectedClientPools,
+    onSchedulingRefresh: onSchedulingRefresh,
   };
 });

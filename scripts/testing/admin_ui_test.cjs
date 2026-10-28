@@ -109,8 +109,11 @@ class Element {
     return this.attrs[name] ?? null;
   }
   querySelectorAll(selector) {
+    const dataSelector = selector.match(/^([a-z][\w-]*)?\[data-([\w-]+)\]$/i);
     return this.children.flatMap((child) => [child, ...child.querySelectorAll("*")])
       .filter((child) => selector === "*" ||
+        (dataSelector && (!dataSelector[1] || child.tagName === dataSelector[1].toUpperCase()) &&
+          Object.prototype.hasOwnProperty.call(child.dataset, dataSelector[2].replace(/-([a-z])/g, (_, c) => c.toUpperCase()))) ||
         (selector.startsWith(".") ? (child.className || child.attrs.class || "").split(/\s+/).includes(selector.slice(1))
           : child.tagName === selector.toUpperCase()));
   }
@@ -125,6 +128,30 @@ class Element {
 }
 function option(value, label = value) {
   return { value, label };
+}
+function withKeySnapshot(target, snapshot) {
+  assert.ok(typeof snapshot === "string" && snapshot, "success fixtures need an explicit snapshot");
+  return {
+    ...target,
+    has_api_key: true,
+    api_key: "fixt...0001",
+    api_keys: [],
+    key_snapshot: snapshot,
+    key_runtime_indices: [0],
+    key_statuses: [{ index: 0, key_mask: "fixt...0001", status: "等待中", blocked: false, exhausted: false }],
+  };
+}
+function simulateTargetUpdate(harness, current, successor) {
+  const fetch = harness.context.fetch;
+  harness.context.fetch = async (url, options) => {
+    if (url !== "/admin/data/targets/" + encodeURIComponent(current.name) || options?.method !== "PUT")
+      return fetch(url, options);
+    assert.equal(options.headers["X-Target-Key-Snapshot"], current.key_snapshot);
+    harness.context.fetch = fetch;
+    const response = await fetch(url, options);
+    if (response.ok) harness.setRoute("/admin/data/targets", { targets: [successor] });
+    return response;
+  };
 }
 function schemaFixture() {
   return {
@@ -402,7 +429,7 @@ function createHarness({
 }
 async function main() {
   assert.equal(scripts.length, 14, "all feature scripts are loaded explicitly");
-  const harness = createHarness();
+  const harness = createHarness({ routes: { "/admin/data/targets": { targets: [] } } });
   const app = await harness.run();
   assert.equal(app.state.ready, true, "schema success enables startup");
   assert.ok(harness.requests.some(item => item.url === "/admin/api/activity"), "homepage loads live activity");
@@ -531,13 +558,20 @@ async function main() {
   const created = harness.requests.find((r) => r.url === "/admin/data/targets" && r.options?.method === "POST");
   assert.equal(JSON.parse(created.options.body).usage_adapter, "standard");
   for (const value of ["standard", "glm", "deepseek", "qwen", "kimi"]) {
-    await app.modules.targets.openTargetModal({ name: "edit-target", endpoint: "https://fixture.example",
-      endpoint_type: "provider-new", usage_adapter: value });
+    const target = { name: "edit-target", endpoint: "https://fixture.example",
+      endpoint_type: "provider-new", usage_adapter: value };
+    const snapshot = `adapter-${value}-snapshot`;
+    const saved = withKeySnapshot(target, snapshot);
+    await app.modules.targets.openTargetModal(saved);
     assert.equal(harness.ids.get("tgtUsageAdapter").value, value, "editing preserves adapter");
     harness.requests.length = 0;
+    simulateTargetUpdate(harness, saved, withKeySnapshot(target, `${snapshot}-next`));
     await harness.ids.get("saveTargetBtn").listeners.click[0]();
     const updated = harness.requests.find((r) => r.options?.method === "PUT");
     assert.equal(JSON.parse(updated.options.body).usage_adapter, value);
+    assert.equal(updated.options.headers["X-Target-Key-Snapshot"], snapshot);
+    assert.equal(JSON.parse(updated.options.body).api_key, "__existing_key_index__:0");
+    assert.equal(app.state.targets[0].key_snapshot, `${snapshot}-next`);
   }
   app.modules.targets.updateTargetFormVisibility();
   for (const id of [
@@ -586,14 +620,16 @@ async function main() {
     /getElementById\("tgtPreferWS"\)\.checked = t \? !!t\.prefer_websocket : false/,
     "editing a target shows its stored preference",
   );
-  app.state.editingTarget = { name: "ws-target" };
-  harness.ids.get("tgtName").value = "ws-target";
-  harness.ids.get("tgtEndpoint").value = "https://ws.example";
-  harness.ids.get("tgtPreferWS").checked = true;
-  harness.ids.get("tgtUsageAdapter").value = "standard";
   for (const [type, want] of [["provider-new", true], ["provider-other", false]]) {
+    const target = { name: "ws-target", endpoint: "https://ws.example",
+      endpoint_type: "provider-new", usage_adapter: "standard" };
+    const snapshot = `ws-${type}-snapshot`;
+    const saved = withKeySnapshot(target, snapshot);
+    await app.modules.targets.openTargetModal(saved);
+    harness.ids.get("tgtPreferWS").checked = true;
     harness.ids.get("tgtType").value = type;
     harness.requests.length = 0;
+    simulateTargetUpdate(harness, saved, withKeySnapshot({ ...target, endpoint_type: type }, `${snapshot}-next`));
     await harness.ids.get("saveTargetBtn").listeners.click[0]();
     const write = harness.requests.find(
       (request) =>
@@ -601,7 +637,9 @@ async function main() {
         request.url === "/admin/data/targets/ws-target",
     );
     assert.ok(write, "target update was sent");
+    assert.equal(write.options.headers["X-Target-Key-Snapshot"], snapshot);
     assert.equal(JSON.parse(write.options.body).prefer_websocket, want, `prefer_websocket for ${type}`);
+    assert.equal(app.state.targets[0].key_snapshot, `${snapshot}-next`);
   }
   app.state.targets = [];
   app.state.modelGroups = [
@@ -1378,7 +1416,7 @@ async function main() {
     base_field: "yearly_usd",
     job_coefficient_field: "coefficient_yearly",
   });
-  const extended = createHarness({ schema: extendedSchema });
+  const extended = createHarness({ schema: extendedSchema, routes: { "/admin/data/targets": { targets: [] } } });
   const extendedApp = await extended.run();
   assert.ok(extended.ids.get("jobLevel-yearly"));
   assert.ok(extended.ids.get("modelGroup-yearly"));
@@ -1521,4 +1559,4 @@ if (require.main === module)
     console.error(error);
     process.exitCode = 1;
   });
-module.exports = { createHarness, schemaFixture };
+module.exports = { createHarness, schemaFixture, withKeySnapshot, simulateTargetUpdate };

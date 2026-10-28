@@ -1335,14 +1335,14 @@ func TestExhaustReasonAt(t *testing.T) {
 	}
 }
 
-// TestMarkExhaustedWithError 验证 fix-D：记录截断的上游错误 body 并经 status() 暴露。
+// TestMarkExhaustedWithError verifies safe diagnostics without storing the body.
 func TestMarkExhaustedWithError(t *testing.T) {
 	pool := newTestKeyPool([]string{"key-0", "key-1"})
 	body := `{"code":"invalid_api_key","message":"Incorrect API key provided"}`
 	pool.markExhaustedWithError(0, "invalid_token", body)
 
 	st := pool.status()
-	if st[0].LastError != body {
+	if st[0].LastError != "upstream error (details withheld)" {
 		t.Errorf("LastError not recorded: got %q", st[0].LastError)
 	}
 	if st[0].LastErrorAt.IsZero() {
@@ -1352,13 +1352,13 @@ func TestMarkExhaustedWithError(t *testing.T) {
 		t.Error("untouched key should have empty LastError")
 	}
 
-	// 超长 body 截断
+	// A longer body has the same safe marker, not a truncated prefix.
 	pool2 := newTestKeyPool([]string{"key-0"})
 	long := strings.Repeat("x", 1000)
 	pool2.markExhaustedWithError(0, "billing_error", long)
 	got := pool2.status()[0].LastError
-	if len(got) >= 1000 || !strings.HasSuffix(got, "...(truncated)") {
-		t.Errorf("long body should be truncated, len=%d", len(got))
+	if got != "upstream error (details withheld)" {
+		t.Errorf("long body should be withheld, got %q", got)
 	}
 }
 

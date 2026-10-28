@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"crypto/rand"
 	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
 	"github.com/LeXwDeX/LLM-Proxy/internal/catalog"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
@@ -44,7 +45,9 @@ type Handler struct {
 
 	// configMu serializes all config-snapshot mutations (target CRUD + reload)
 	// so concurrent admin writes can't Replace with stale snapshots (lost update).
-	configMu sync.Mutex
+	configMu               sync.Mutex
+	keySnapshotSecret      [32]byte
+	keySnapshotSecretReady bool
 }
 
 // NewHandler constructs an HTTP router exposing admin endpoints.
@@ -85,6 +88,11 @@ func NewHandler(
 		costCache:            costCache,
 		sessionManager:       sessionMgr,
 		logger:               logger,
+	}
+	if _, err := rand.Read(h.keySnapshotSecret[:]); err == nil {
+		h.keySnapshotSecretReady = true
+	} else if logger != nil {
+		logger.Error("unable to initialize target key snapshots")
 	}
 
 	h.router = h.routes()

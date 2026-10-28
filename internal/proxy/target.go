@@ -762,7 +762,7 @@ func buildTargetStates(targets []config.Target, logger ...*slog.Logger) (map[str
 		}
 		endpoint, err := url.Parse(strings.TrimSpace(t.Endpoint))
 		if err != nil {
-			return nil, nil, fmt.Errorf("proxy: invalid endpoint for target %q: %w", t.Name, err)
+			return nil, nil, fmt.Errorf("proxy: invalid endpoint for target %q: invalid URL syntax", t.Name)
 		}
 		if endpoint.Scheme == "" || endpoint.Host == "" {
 			return nil, nil, fmt.Errorf("proxy: invalid endpoint for target %q: missing scheme or host", t.Name)
@@ -772,22 +772,9 @@ func buildTargetStates(targets []config.Target, logger ...*slog.Logger) (map[str
 
 		// 合并 api_key + api_keys 为有序池（去重，api_key 排第一）
 		primaryKey := strings.TrimSpace(t.APIKey)
-		var mergedKeys []string
-		seen := make(map[string]struct{})
-		if primaryKey != "" {
-			mergedKeys = append(mergedKeys, primaryKey)
-			seen[primaryKey] = struct{}{}
-		}
-		for _, k := range t.APIKeys {
-			k = strings.TrimSpace(k)
-			if k == "" {
-				continue
-			}
-			if _, dup := seen[k]; dup {
-				continue
-			}
-			mergedKeys = append(mergedKeys, k)
-			seen[k] = struct{}{}
+		mergedKeys := mergeTargetKeys(t)
+		if primaryKey == "" && len(mergedKeys) == 1 {
+			primaryKey = mergedKeys[0]
 		}
 
 		info := &Target{
@@ -833,6 +820,22 @@ func buildTargetStates(targets []config.Target, logger ...*slog.Logger) (map[str
 	}
 
 	return parsed, order, nil
+}
+
+func mergeTargetKeys(t config.Target) []string {
+	var keys []string
+	seen := make(map[string]struct{})
+	for _, raw := range append([]string{t.APIKey}, t.APIKeys...) {
+		key := strings.TrimSpace(raw)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; !exists {
+			keys = append(keys, key)
+			seen[key] = struct{}{}
+		}
+	}
+	return keys
 }
 
 func normalizePrefix(prefix string) string {

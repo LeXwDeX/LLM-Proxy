@@ -11,6 +11,12 @@ AdminApp.register("pools", function (app) {
   var showConfirm = app.bind("core", "showConfirm");
   var schemaLabel = app.bind("schema", "schemaLabel");
   var fetchSchedulingRuntime = app.bind("targets", "fetchSchedulingRuntime");
+  var beginSchedulingRefresh = app.bind("targets", "beginSchedulingRefresh");
+  var schedulingRefreshCurrent = app.bind("targets", "schedulingRefreshCurrent");
+  var publishSchedulingRefresh = app.bind("targets", "publishSchedulingRefresh");
+  var failSchedulingRefresh = app.bind("targets", "failSchedulingRefresh");
+  var validPoolRoster = app.bind("targets", "validPoolRoster");
+  var targetPoolsAvailable = app.bind("targets", "targetPoolsAvailable");
   /* ===== Pools ===== */
   function poolDisplayName(pool) {
     if (typeof pool === "string") {
@@ -93,20 +99,22 @@ AdminApp.register("pools", function (app) {
       .join(" ");
   }
   async function loadPools() {
+    var sequence = beginSchedulingRefresh();
     try {
       // 成员 chips 按 targets 汇总；每次刷新都重新拉取，失败时整体报错，
       // 不能把未知成员关系渲染成"无成员"。
       var results = await Promise.all([
         api("/admin/data/pools"),
-        fetchSchedulingRuntime(),
+        fetchSchedulingRuntime(true),
         api("/admin/data/targets"),
       ]);
-      state.pools = Array.isArray(results[0].pools) ? results[0].pools : [];
-      if (Array.isArray(results[2].targets)) {
-        state.targets = results[2].targets;
+      if (!schedulingRefreshCurrent(sequence)) return;
+      if (!validPoolRoster(results[0])) {
+        throw new Error("部署池响应格式无效");
       }
-      renderPools();
+      publishSchedulingRefresh(sequence, results[2], results[1], results[0]);
     } catch (e) {
+      if (!failSchedulingRefresh(sequence, e)) return;
       // Stale rows must not read as the current roster.
       renderPoolsLoadError(e.message);
       toast("加载部署池失败: " + e.message, "error");
@@ -117,6 +125,10 @@ AdminApp.register("pools", function (app) {
       "<tr class='empty-row'><td colspan='5'>加载失败: " +
       esc(message) +
       "。请点击「刷新」重试。</td></tr>";
+  }
+  function onSchedulingRefresh() {
+    if (targetPoolsAvailable()) renderPools();
+    else renderPoolsLoadError("部署池数据不可用");
   }
   function renderPools() {
     var tb = document.getElementById("poolsTableBody");
@@ -305,6 +317,7 @@ AdminApp.register("pools", function (app) {
     poolMemberChips: poolMemberChips,
     loadPools: loadPools,
     renderPools: renderPools,
+    onSchedulingRefresh: onSchedulingRefresh,
     openPoolModal: openPoolModal,
   };
 });

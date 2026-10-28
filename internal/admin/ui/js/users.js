@@ -7,7 +7,6 @@ AdminApp.register("users", function (app) {
   var fmtTime = app.bind("core", "fmtTime");
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
-  var isTransientError = app.bind("core", "isTransientError");
   var openModal = app.bind("core", "openModal");
   var closeModal = app.bind("core", "closeModal");
   var showConfirm = app.bind("core", "showConfirm");
@@ -25,32 +24,27 @@ AdminApp.register("users", function (app) {
       });
   }
   async function loadUserInfo() {
-    try {
-      var data = await api("/admin/api/me");
-      if (data && data.username) {
-        state.currentUser = data.username;
-        var badgeName = document.getElementById("userBadgeName");
-        if (badgeName) badgeName.textContent = data.username;
-        if (data.role === "readonly") {
-          document.body.classList.add("readonly-mode");
-          applyReadonlyMode(document);
-          var badge = document.getElementById("readonlyBadge");
-          if (badge) badge.style.display = "";
-        }
-        // 用户管理为 admin-only：入口默认隐藏，仅 admin 会话显示
-        // （后端 /admin/data/users 对 readonly 仍返回 403，双防线）
-        if (data.role === "admin") {
-          var usersNav = document.getElementById("nav-users");
-          if (usersNav) usersNav.style.display = "";
-          var systemSection = document.getElementById("nav-section-system");
-          if (systemSection) systemSection.style.display = "";
-        }
-      }
-    } catch (e) {
-      // Timeouts and network failures surface so bootstrap can retry them;
-      // other failures keep the historical "no session info" behavior.
-      if (isTransientError(e)) throw e;
+    var data = await api("/admin/api/me");
+    if (!data || typeof data.username !== "string" || !data.username.trim() ||
+        (data.authenticated !== undefined && data.authenticated !== true) ||
+        (data.role !== "admin" && data.role !== "readonly")) {
+      throw new Error("当前会话角色不可用，请重试");
     }
+    state.currentUser = data.username;
+    var badgeName = document.getElementById("userBadgeName");
+    if (badgeName) badgeName.textContent = data.username;
+    if (data.role === "readonly") {
+      var badge = document.getElementById("readonlyBadge");
+      if (badge) badge.style.display = "";
+    }
+    // User management remains admin-only; the server enforces this independently.
+    if (data.role === "admin") {
+      var usersNav = document.getElementById("nav-users");
+      if (usersNav) usersNav.style.display = "";
+      var systemSection = document.getElementById("nav-section-system");
+      if (systemSection) systemSection.style.display = "";
+    }
+    return data.role;
   }
 
   /* ===== Change Password ===== */

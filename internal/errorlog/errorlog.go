@@ -17,9 +17,13 @@
 package errorlog
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -53,14 +57,48 @@ type Entry struct {
 	ClientIP        string `json:"client_ip,omitempty"`         //
 	Target          string `json:"target,omitempty"`            // config.json 中的 target name
 	EndpointType    string `json:"endpoint_type,omitempty"`     //
-	UpstreamURL     string `json:"upstream_url,omitempty"`      // 不含 query
-	UpstreamFullURL string `json:"upstream_full_url,omitempty"` // 完整 URL（含 query），用于核验 buildURL 输出
+	UpstreamURL     string `json:"upstream_url,omitempty"`      // 仅 scheme 和 host
+	UpstreamFullURL string `json:"upstream_full_url,omitempty"` // 仅 scheme 和 host
 	UpstreamStatus  int    `json:"upstream_status,omitempty"`   // net error 时为 0
 	DurationMS      int64  `json:"duration_ms,omitempty"`       //
 	ReqBytes        int    `json:"req_bytes,omitempty"`         //
 	RespBytes       int    `json:"resp_bytes,omitempty"`        //
-	RespExcerpt     string `json:"resp_excerpt,omitempty"`      // 上游响应 body 前 1024 字节
-	Error           string `json:"error,omitempty"`             // net error 必填
+	RespExcerpt     string `json:"resp_excerpt,omitempty"`      // 有正文时为固定提示，不含正文
+	Error           string `json:"error,omitempty"`             // 受控错误类别
+}
+
+// ErrorCategory classifies errors without exposing their message or URL.
+func ErrorCategory(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "unexpected_eof"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dns_error"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return "timeout"
+		}
+		return "network_error"
+	}
+	return "error"
+}
+
+func safeURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Opaque != "" {
+		return ""
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
 }
 
 // 模块级单例。Init 失败后 logger 仍为 noop，Write 安全可调。
@@ -135,9 +173,15 @@ func Write(entry Entry) {
 	entry.TS = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	entry.Level = "error"
 
-	// 截断 resp_excerpt 至 1024 字节（按字节，避免 multi-byte rune 切坏导致 json 编码失败由 json 包内部处理）
-	if len(entry.RespExcerpt) > 1024 {
-		entry.RespExcerpt = entry.RespExcerpt[:1024]
+	entry.UpstreamURL = safeURL(entry.UpstreamURL)
+	entry.UpstreamFullURL = safeURL(entry.UpstreamFullURL)
+	if entry.RespExcerpt != "" {
+		entry.RespExcerpt = "[redacted]"
+	}
+	switch entry.Error {
+	case "", "error", "context_canceled", "deadline_exceeded", "unexpected_eof", "dns_error", "timeout", "network_error", "panic":
+	default:
+		entry.Error = "error"
 	}
 
 	line, err := json.Marshal(entry)

@@ -1,26 +1,34 @@
 "use strict";
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { createHarness, schemaFixture } = require("../../../scripts/testing/admin_ui_test.cjs");
+const { createHarness, schemaFixture, withKeySnapshot, simulateTargetUpdate } = require("../../../scripts/testing/admin_ui_test.cjs");
 test("stream usage switch uses schema capability and round-trips true/false", async () => {
   const schema = schemaFixture();
   schema.defaults.request_stream_usage_if_missing = false;
   schema.stream_usage_request_schema = "fixture-chat";
   schema.request_schemas.push({value:"fixture-chat",label:"Fixture Chat"});
   schema.endpoint_types[0].request_schemas.push("fixture-chat");
-  const harness = createHarness({ schema }); const app = await harness.run(); const el = id => harness.ids.get(id);
+  const harness = createHarness({ schema, routes: {"/admin/data/targets": {targets: []}} }); const app = await harness.run(); const el = id => harness.ids.get(id);
   await app.modules.targets.openTargetModal(null);
   assert.equal(el("tgtStreamUsageGroup").style.display, "");
   assert.equal(el("tgtRequestStreamUsage").checked, false);
   for (const editing of [false,true]) {
-    await app.modules.targets.openTargetModal(editing ? {name:"saved",endpoint_type:schema.endpoint_types[0].code,endpoint:"https://fixture.invalid",usage_adapter:"standard",request_stream_usage_if_missing:true} : null);
+    const saved = {name:"saved",endpoint_type:schema.endpoint_types[0].code,endpoint:"https://fixture.invalid",usage_adapter:"standard",request_stream_usage_if_missing:true};
+    await app.modules.targets.openTargetModal(editing ? withKeySnapshot(saved, "stream-snapshot-1") : null);
     if(editing) assert.equal(el("tgtRequestStreamUsage").checked,true);
     el("tgtName").value="saved";el("tgtEndpoint").value="https://fixture.invalid";el("tgtUsageAdapter").value="standard";
     el("tgtRequestStreamUsage").checked=!editing;
     el("tgtType").value=schema.endpoint_types[1].code;app.modules.targets.updateTargetFormVisibility();
     assert.equal(el("tgtStreamUsageGroup").style.display,"none");
+    if(editing) simulateTargetUpdate(harness, withKeySnapshot(saved, "stream-snapshot-1"), withKeySnapshot({...saved,endpoint_type:schema.endpoint_types[1].code,request_stream_usage_if_missing:false}, "stream-snapshot-2"));
     await el("saveTargetBtn").listeners.click[0]();
-    assert.equal(JSON.parse(harness.requests.findLast(r=>r.options?.method===(editing?"PUT":"POST")).options.body).request_stream_usage_if_missing,!editing);
+    const write = harness.requests.findLast(r=>r.options?.method===(editing?"PUT":"POST"));
+    assert.equal(JSON.parse(write.options.body).request_stream_usage_if_missing,!editing);
+    if(editing) {
+      assert.equal(write.options.headers["X-Target-Key-Snapshot"], "stream-snapshot-1");
+      assert.equal(JSON.parse(write.options.body).api_key, "__existing_key_index__:0");
+      assert.equal(app.state.targets[0].key_snapshot, "stream-snapshot-2");
+    }
   }
 });
 test("missing stream usage schema disables editing", async()=>{

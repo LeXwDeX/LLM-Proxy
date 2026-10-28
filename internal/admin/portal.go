@@ -4,8 +4,11 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
+	"unicode"
 
 	"log/slog"
 
@@ -148,11 +151,13 @@ func (p *Portal) recordAudit(r *http.Request, actor, action, result, detail stri
 
 func sanitizeNext(next string) string {
 	next = strings.TrimSpace(next)
-	if next == "" {
-		return "/admin"
-	}
-	if strings.HasPrefix(next, "/admin") {
-		return next
+	u, err := url.Parse(next)
+	if err == nil && u.Scheme == "" && u.Host == "" && strings.HasPrefix(u.Path, "/") &&
+		!strings.ContainsRune(u.Path, '\\') && strings.IndexFunc(u.Path, unicode.IsControl) < 0 {
+		cleaned := path.Clean(u.Path)
+		if cleaned == "/admin" || strings.HasPrefix(cleaned, "/admin/") {
+			return next
+		}
 	}
 	return "/admin"
 }

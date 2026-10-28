@@ -3,7 +3,6 @@ package middleware
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -57,7 +56,7 @@ func Recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
 						panic(rec)
 					}
 					logger.Error("panic recovered",
-						"panic", rec,
+						"panic", "panic",
 						"request_id", RequestIDFromContext(r.Context()),
 						"method", r.Method,
 						"path", r.URL.Path,
@@ -69,7 +68,7 @@ func Recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
 						Method:   r.Method,
 						Path:     r.URL.Path,
 						ClientIP: remoteIP(r),
-						Error:    fmt.Sprintf("%v", rec),
+						Error:    "panic",
 					})
 					// m1：仅当响应头尚未发出才写 500。若已部分写出（如 SSE 流中途
 					// panic），再写会触发 superfluous WriteHeader 并把错误文本混入流尾。
@@ -200,32 +199,9 @@ func isPrivateOrLoopback(host string) bool {
 	return ip.IsLoopback() || ip.IsPrivate()
 }
 
-// sensitiveQueryKeys are query parameter names whose values are credentials and
-// must be redacted before logging the request URI.
-var sensitiveQueryKeys = map[string]struct{}{
-	"key": {}, "api-key": {}, "api_key": {}, "apikey": {},
-	"access_token": {}, "token": {}, "x-goog-api-key": {}, "authorization": {},
-}
-
-// sanitizedURI returns the request path with sensitive query values redacted.
-// Auth accepts credentials via ?key=/?api-key= (Gemini SDK default), so logging
-// the raw RequestURI would leak the client access_key into access.log/stdout.
+// Query values can contain credentials or user data under any parameter name.
 func sanitizedURI(r *http.Request) string {
-	if r.URL.RawQuery == "" {
-		return r.URL.Path
-	}
-	q := r.URL.Query()
-	changed := false
-	for k := range q {
-		if _, ok := sensitiveQueryKeys[strings.ToLower(k)]; ok {
-			q.Set(k, "REDACTED")
-			changed = true
-		}
-	}
-	if !changed {
-		return r.URL.RequestURI()
-	}
-	return r.URL.Path + "?" + q.Encode()
+	return r.URL.Path
 }
 
 // panicSafeWriter tracks whether any part of the response was written, so
@@ -263,4 +239,3 @@ func (w *panicSafeWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 func (w *panicSafeWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
-
