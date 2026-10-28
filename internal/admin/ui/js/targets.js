@@ -161,7 +161,7 @@ AdminApp.register("targets", function (app) {
     { key: "healthy", label: "正常" },
     { key: "paused", label: "已暂停" },
   ];
-  var targetHealthRanks = { attention: 0, paused: 1, healthy: 2 };
+  var targetHealthRanks = { attention: 0, healthy: 1, paused: 2 };
   // keypool.status keeps exhausted=true after an expired cooldown; only the
   // 可用(待激活) display label means the key can be retried without an issue.
   // 失效(待请求验证), blocked keys and active cooldowns still need attention.

@@ -1333,7 +1333,9 @@
     .target-detail-models .target-model-list { grid-auto-flow:row; grid-template-rows:none; grid-auto-columns:auto; justify-items:start; gap:6px; }
     .target-detail-models .target-model-badge { white-space:normal; overflow:visible; overflow-wrap:anywhere; text-overflow:clip; max-width:100%; }
     .target-toggle { display:inline-flex; align-items:center; gap:6px; border:0; background:none; padding:4px 0; color:var(--text); white-space:nowrap; cursor:pointer; }
-    .targets-table { table-layout:fixed; min-width:1360px; }
+    /* Fixed layout gives the unclassed model-list column only the leftover width;
+       the minimum covers every bounded column so that column never collapses. */
+    .targets-table { table-layout:fixed; --targets-model-min:240px; min-width:1360px; min-width:calc(212px + clamp(220px, 16vw, 320px) + clamp(180px, 13vw, 240px) + 120px + 120px + 260px + var(--targets-model-min) + 128px); }
     .targets-table th, .targets-table td { padding:12px 16px; }
     .targets-table tbody tr:not(.empty-row) { height:88px; }
     .target-cell-content { max-height:74px; overflow:auto; }

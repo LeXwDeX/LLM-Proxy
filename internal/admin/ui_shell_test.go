@@ -168,6 +168,48 @@ func TestUITargetsTableBoundsNameAndKeyColumns(t *testing.T) {
 	}
 }
 
+// With table-layout:fixed the unclassed model-list column only receives what
+// the bounded columns leave over. Near a 1600px viewport they fill the
+// container, the model list collapses to its padding and the barely
+// overflowing table gives the scrollbar nothing to reveal. The table minimum
+// must therefore cover every bounded column plus a model-list minimum.
+func TestUITargetsTableReservesModelListMinimum(t *testing.T) {
+	lastWidth := regexp.MustCompile(`(?:^|[;{\s])width:\s*([^;]+);`)
+	table := uiCSSBlock(t, ".targets-table")
+	calc := regexp.MustCompile(`min-width:\s*calc\(([^;]+)\);`).FindStringSubmatch(table)
+	if calc == nil {
+		t.Fatalf(".targets-table 须用 calc() 声明覆盖全部列的 min-width: %s", table)
+	}
+	// One term per column in colgroup order; the model list sits before actions.
+	var want []string
+	for _, col := range []string{"status", "name", "keys", "type", "pool", "scheduling", "", "actions"} {
+		if col == "" {
+			want = append(want, "var(--targets-model-min)")
+			continue
+		}
+		block := uiCSSBlock(t, ".targets-table .col-"+col)
+		widths := lastWidth.FindAllStringSubmatch(block, -1)
+		if len(widths) == 0 {
+			t.Fatalf("col-%s 缺少宽度: %s", col, block)
+		}
+		want = append(want, strings.TrimSpace(widths[len(widths)-1][1]))
+	}
+	var got []string
+	for _, term := range strings.Split(calc[1], " + ") {
+		got = append(got, strings.TrimSpace(term))
+	}
+	if strings.Join(got, " | ") != strings.Join(want, " | ") {
+		t.Errorf("min-width 须按列顺序逐项覆盖实际宽度:\n got  %s\n want %s", strings.Join(got, " | "), strings.Join(want, " | "))
+	}
+	model := regexp.MustCompile(`--targets-model-min:\s*(\d+)px;`).FindStringSubmatch(table)
+	if model == nil {
+		t.Fatalf("min-width 须为模型列表列保留 --targets-model-min: %s", table)
+	}
+	if px, _ := strconv.Atoi(model[1]); px < 200 {
+		t.Errorf("模型列表最小宽度应 ≥200px，实际 %dpx", px)
+	}
+}
+
 // The login portal is a standalone page; it inlines the same stack and rendering.
 func TestLoginPageUsesSharedFontStack(t *testing.T) {
 	portal, _ := newPortalTestFixture(t)
