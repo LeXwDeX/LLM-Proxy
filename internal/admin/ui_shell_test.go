@@ -168,6 +168,38 @@ func TestUITargetsTableBoundsNameAndKeyColumns(t *testing.T) {
 	}
 }
 
+// With table-layout:fixed the unclassed model-list column only receives what
+// the bounded columns leave over. Near a 1600px viewport they fill the
+// container, the model list collapses to its padding and the barely
+// overflowing table gives the scrollbar nothing to reveal. The table minimum
+// must therefore cover every bounded column plus a model-list minimum.
+func TestUITargetsTableReservesModelListMinimum(t *testing.T) {
+	lastWidth := regexp.MustCompile(`width:\s*([^;]+);`)
+	table := uiCSSBlock(t, ".targets-table")
+	calc := regexp.MustCompile(`min-width:\s*calc\(([^;]+)\);`).FindStringSubmatch(table)
+	if calc == nil {
+		t.Fatalf(".targets-table 须用 calc() 声明覆盖全部列的 min-width: %s", table)
+	}
+	terms := calc[1]
+	for _, col := range []string{"status", "name", "keys", "type", "pool", "scheduling", "actions"} {
+		block := uiCSSBlock(t, ".targets-table .col-"+col)
+		widths := lastWidth.FindAllStringSubmatch(block, -1)
+		if len(widths) == 0 {
+			t.Fatalf("col-%s 缺少宽度: %s", col, block)
+		}
+		if width := strings.TrimSpace(widths[len(widths)-1][1]); !strings.Contains(terms, width) {
+			t.Errorf("min-width 未包含 col-%s 的实际宽度 %s: %s", col, width, terms)
+		}
+	}
+	model := regexp.MustCompile(`--targets-model-min:\s*(\d+)px;`).FindStringSubmatch(table)
+	if model == nil || !strings.Contains(terms, "var(--targets-model-min)") {
+		t.Fatalf("min-width 须为模型列表列保留 --targets-model-min: %s", table)
+	}
+	if px, _ := strconv.Atoi(model[1]); px < 200 {
+		t.Errorf("模型列表最小宽度应 ≥200px，实际 %dpx", px)
+	}
+}
+
 // The login portal is a standalone page; it inlines the same stack and rendering.
 func TestLoginPageUsesSharedFontStack(t *testing.T) {
 	portal, _ := newPortalTestFixture(t)

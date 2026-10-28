@@ -745,6 +745,10 @@ async function main() {
     sortedBody.indexOf("attention-target") < sortedBody.indexOf("healthy-target"),
     "targets needing attention sort before healthy targets",
   );
+  assert.ok(
+    sortedBody.indexOf("healthy-target") < sortedBody.indexOf("paused-target"),
+    "paused targets sort after healthy targets, at the end of the list",
+  );
   const pausedTargetRow = sortedBody
     .split("</tr>")
     .find((row) => row.includes("paused-target"));
