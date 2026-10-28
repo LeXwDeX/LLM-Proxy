@@ -148,6 +148,10 @@ func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
 // can retry the events individually. Identical replays are idempotent by
 // the stable Timestamp and RecordID pair, exactly like Record.
 func (s *UsageStore) RecordBatch(events []usage.Event) error {
+	return s.recordBatchContext(context.Background(), events)
+}
+
+func (s *UsageStore) recordBatchContext(ctx context.Context, events []usage.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -238,8 +242,9 @@ func (s *UsageStore) RecordBatch(events []usage.Event) error {
 			return nil
 		}
 		fresh := make([]bool, len(bundles))
+		memo := make(freshScopeMemo)
 		for i, bundle := range bundles {
-			fresh[i] = freshScopeProven(tx, bundle.rows) || continuationScopeProven(tx, bundle.rows)
+			fresh[i] = memo.proven(ctx, tx, bundle.rows)
 		}
 		for i, bundle := range bundles {
 			added, err := recordUsageBundleTx(tx, bundle.rows, bundle.keys, migrationErr)
