@@ -82,7 +82,8 @@ type keyPool struct {
 	onKeysUnavailable func(keys []string)
 	// notifyMu serializes snapshot+callbacks in asyncNotifyKeyChange so they
 	// apply in read order and the last one carries the latest state.
-	// Lock order: notifyMu before mu; never taken while holding mu.
+	// Lock order: notifyMu before mu; never taken while holding mu. Callbacks
+	// must not call asyncNotifyKeyChange synchronously on the same pool.
 	notifyMu sync.Mutex
 }
 
