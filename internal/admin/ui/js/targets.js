@@ -21,47 +21,135 @@ AdminApp.register("targets", function (app) {
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var loadCatalog = app.bind("catalog", "loadCatalog");
   var catalogFilterModels = app.bind("catalog", "catalogFilterModels");
-  async function loadTargets() {
+  var targetsLoadSequence = 0;
+  var targetsLoaded = false;
+  var targetsLoadFailed = false;
+  var targetPoolsSnapshot = null;
+  var targetPoolOptionsSnapshot = null;
+  function targetPoolsAvailable() { return targetPoolsSnapshot !== null; }
+  var schedulingRefresh = null;
+  function beginSchedulingRefresh() {
+    if (schedulingRefresh) schedulingRefresh.finish({ superseded: true });
+    var refresh = {};
+    refresh.promise = new Promise(function (resolve) { refresh.finish = resolve; });
+    schedulingRefresh = refresh;
+    return ++targetsLoadSequence;
+  }
+  function schedulingRefreshCurrent(sequence) { return sequence === targetsLoadSequence; }
+  async function awaitSchedulingRefresh() {
+    while (true) {
+      var refresh = schedulingRefresh;
+      var result = await refresh.promise;
+      if (refresh !== schedulingRefresh || result.superseded) continue;
+      if (result.error) throw result.error;
+      if (result.runtimeOnly) return loadTargets(true);
+      return state.targets;
+    }
+  }
+  function validTargets(result) {
+    return result && Array.isArray(result.targets) && result.targets.every(function (t) {
+      return t && typeof t === "object" && typeof t.name === "string" && !!t.name &&
+        (t.model_mappings == null || (Array.isArray(t.model_mappings) &&
+          t.model_mappings.every(function (m) { return m && typeof m === "object"; })));
+    });
+  }
+  function validPoolRoster(result) {
+    return !!result && Array.isArray(result.pools) && result.pools.every(function (pool) {
+      return pool && typeof pool === "object" && !Array.isArray(pool) &&
+        typeof pool.name === "string" && !!pool.name.trim() &&
+        (pool.paused === undefined || typeof pool.paused === "boolean") &&
+        (pool.display_name === undefined || typeof pool.display_name === "string") &&
+        (pool.description === undefined || typeof pool.description === "string");
+    });
+  }
+  function publishSchedulingRefresh(sequence, targets, runtime, pools) {
+    if (!schedulingRefreshCurrent(sequence)) return null;
+    if (!validTargets(targets)) throw new Error("目标列表格式无效");
+    state.targets = targets.targets;
+    state.runtime = runtime;
+    targetPoolsSnapshot = validPoolRoster(pools) ? pools.pools : null;
+    if (targetPoolsSnapshot) state.pools = targetPoolsSnapshot;
+    updateTargetPoolAvailability();
+    if (document.getElementById("targetModal").classList.contains("open")) renderKeyList();
+    targetsLoaded = true;
+    targetsLoadFailed = false;
+    if (state.editingTarget && !editingKeyBusy) {
+      var editing = state.targets.find(function (t) { return t.name === state.editingTarget.name; });
+      if (!editing || editing.key_snapshot !== editingKeySnapshot || !sameKeyIndices(editing)) {
+        editingKeyNeedsReview = true;
+        renderKeyList();
+      } else if (!editingKeyNeedsReview) {
+        updateEditingKeyStatuses(editing);
+        renderKeyList();
+      }
+    }
+    renderTargets();
+    if (app.modules.clients) app.modules.clients.onSchedulingRefresh();
+    if (app.modules.pools) app.modules.pools.onSchedulingRefresh();
+    schedulingRefresh.finish({});
+    return state.targets;
+  }
+  function failSchedulingRefresh(sequence, error) {
+    if (!schedulingRefreshCurrent(sequence)) return false;
+    targetsLoadFailed = true;
+    targetPoolsSnapshot = null;
+    updateTargetPoolAvailability();
+    if (document.getElementById("targetModal").classList.contains("open")) renderKeyList();
+    renderTargets();
+    if (app.modules.clients) app.modules.clients.onSchedulingRefresh();
+    if (app.modules.pools) app.modules.pools.onSchedulingRefresh();
+    schedulingRefresh.finish({ error: error || new Error("目标列表加载失败") });
+    return true;
+  }
+  async function loadTargets(propagateError) {
+    var sequence = beginSchedulingRefresh();
     try {
       // Pool pause lives on the roster, and another admin session may resume it
       // between refreshes. Reload it every time; a failed fetch keeps the last
       // known roster instead of turning cached pause into an authoritative fact.
       var fetches = [
         api("/admin/data/targets"),
-        fetchSchedulingRuntime(),
+        fetchSchedulingRuntime(true),
         api("/admin/data/pools").catch(function () {
           return null;
         }),
       ];
       var results = await Promise.all(fetches);
-      state.targets = Array.isArray(results[0].targets)
-        ? results[0].targets
-        : [];
-      if (results[2] && Array.isArray(results[2].pools)) {
-        state.pools = results[2].pools;
-      }
-      renderTargets();
+      var targets = publishSchedulingRefresh(sequence, results[0], results[1], results[2]);
+      if (targets === null && propagateError === true) return awaitSchedulingRefresh();
+      return targets;
     } catch (e) {
+      if (!failSchedulingRefresh(sequence, e)) {
+        if (propagateError === true) return awaitSchedulingRefresh();
+        return null;
+      }
+      if (propagateError === true) throw e;
       toast("加载目标失败: " + e.message, "error");
+      return null;
     }
   }
   // fetchSchedulingRuntime：拉取 /admin/metrics 的 targets_runtime 调度观测快照
   // （S5）。失败时清空快照，避免把过期运行态当成当前健康状态。
-  async function fetchSchedulingRuntime() {
+  async function fetchSchedulingRuntime(captureOnly) {
+    var sequence = captureOnly ? null : beginSchedulingRefresh();
+    var map = null;
     try {
       var m = await api("/admin/metrics");
-      var map = {};
+      map = {};
       if (Array.isArray(m.targets_runtime)) {
         m.targets_runtime.forEach(function (rt) {
           map[String(rt.name || "").toLowerCase()] = rt;
         });
       }
-      state.runtime = map;
     } catch (e) {
       // Stale snapshots would misreport health; metrics stay best-effort.
-      state.runtime = null;
+      map = null;
     }
-    return null;
+    if (!captureOnly && schedulingRefreshCurrent(sequence)) {
+      state.runtime = map;
+      schedulingRefresh.finish({ runtimeOnly: true });
+    }
+    return map;
   }
   /* ===== Target health summaries and detail drawer ===== */
   var targetFilter = "all";
@@ -93,7 +181,9 @@ AdminApp.register("targets", function (app) {
     );
   }
   function targetKeyCounts(t) {
-    var statuses = t && Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    var statuses = t && Array.isArray(t.key_statuses)
+      ? t.key_statuses.filter(function (s) { return !!s && typeof s === "object"; })
+      : [];
     var extraKeys = t && Array.isArray(t.api_keys) ? t.api_keys.length : 0;
     return {
       total: (t && t.has_api_key ? 1 : 0) + extraKeys,
@@ -105,6 +195,27 @@ AdminApp.register("targets", function (app) {
       }).length,
       recoverable: statuses.filter(keyStatusRecoverablePending).length,
     };
+  }
+  function targetKeyStatusComplete(t) {
+    var counts = targetKeyCounts(t);
+    if (counts.total <= 1) return true;
+    if (usableKeySnapshot(t) && t.key_runtime_indices.every(function (i) { return i === null; })) return true;
+    if (hasUnmappedNonemptyKey(t)) return false;
+    var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    var indices = usableKeySnapshot(t) ? t.key_runtime_indices : null;
+    var expected = indices
+      ? indices.filter(function (i) { return Number.isInteger(i) && i >= 0; })
+      : [];
+    expected = expected.filter(function (i, n) { return expected.indexOf(i) === n; });
+    if (!expected.length) {
+      expected = Array.from({ length: counts.total }, function (_, i) { return i; });
+    }
+    return expected.every(function (index) {
+      return statuses.some(function (s) {
+        return s && s.index === index && typeof s.blocked === "boolean" &&
+          typeof s.exhausted === "boolean" && typeof s.status === "string" && !!s.status;
+      });
+    });
   }
   function targetRuntimeFor(t) {
     return state.runtime
@@ -126,8 +237,8 @@ AdminApp.register("targets", function (app) {
   // runtime snapshot is missing or also reports a pause.
   function targetPoolPaused(t) {
     var poolName = String((t && t.pool) || "").toLowerCase();
-    if (!poolName) return false;
-    return (state.pools || []).some(function (p) {
+    if (!poolName || !targetPoolsSnapshot) return false;
+    return targetPoolsSnapshot.some(function (p) {
       return (
         String((p && p.name) || "").toLowerCase() === poolName && !!p.paused
       );
@@ -137,6 +248,12 @@ AdminApp.register("targets", function (app) {
     var keys = targetKeyCounts(t);
     var rt = targetRuntimeFor(t);
     var phase = rt && rt.phase ? String(rt.phase) : "";
+    if (targetsLoadFailed) {
+      return {
+        key: "attention", label: "需要关注", tone: "warn",
+        reason: "目标或部署池数据更新失败；显示上次数据",
+      };
+    }
     if (t && t.paused) {
       return {
         key: "paused",
@@ -202,6 +319,12 @@ AdminApp.register("targets", function (app) {
         reason: issues.join("，"),
       };
     }
+    if (!targetKeyStatusComplete(t)) {
+      return {
+        key: "attention", label: "需要关注", tone: "warn",
+        reason: "多密钥运行状态明细不完整",
+      };
+    }
     if (phase && phase !== "ready") {
       return {
         key: "attention",
@@ -252,6 +375,10 @@ AdminApp.register("targets", function (app) {
       });
   }
   function renderTargetStatusFilters() {
+    if (targetsLoadFailed && !targetsLoaded) {
+      document.getElementById("targetStatusFilters").innerHTML = "<span role='status'>目标状态不可用</span>";
+      return;
+    }
     var counts = targetHealthCounts();
     document.getElementById("targetStatusFilters").innerHTML = targetFilterSpecs
       .map(function (spec) {
@@ -319,7 +446,9 @@ AdminApp.register("targets", function (app) {
     if (counts.blocked) parts.push("屏蔽 " + counts.blocked);
     if (counts.exhausted) parts.push("不可用 " + counts.exhausted);
     if (counts.recoverable) parts.push("可用(待激活) " + counts.recoverable);
-    if (!counts.blocked && !counts.exhausted) {
+    if (!targetKeyStatusComplete(t)) {
+      parts.push("运行态明细不完整");
+    } else if (!counts.blocked && !counts.exhausted) {
       parts.push(counts.recoverable ? "无阻塞异常" : "未报告异常");
     }
     return parts.join("；");
@@ -365,8 +494,9 @@ AdminApp.register("targets", function (app) {
         detailRow(
           "Endpoint",
           t.endpoint
-            ? "<span class='target-detail-mono'>" + esc(t.endpoint) + "</span>"
-            : "未配置",
+            ? "<span class='target-detail-mono'>" + esc(t.endpoint) + "</span>" +
+              (isReadonlyMode() ? "（仅显示协议和主机）" : "")
+            : isReadonlyMode() ? "不可查看" : "未配置",
         ),
         detailRow(
           "部署池",
@@ -398,7 +528,9 @@ AdminApp.register("targets", function (app) {
     return String(value);
   }
   function renderTargetKeys(t) {
-    var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    var statuses = Array.isArray(t.key_statuses)
+      ? t.key_statuses.filter(function (s) { return !!s && typeof s === "object"; })
+      : [];
     var counts = targetKeyCounts(t);
     if (!statuses.length) {
       return (
@@ -440,7 +572,9 @@ AdminApp.register("targets", function (app) {
           );
         })
         .join("") +
-      "</div><p class='target-detail-note'>仅显示密钥掩码和运行状态；不显示明文密钥，也不推导每个 Key 的请求数。</p>"
+      "</div>" +
+      (!targetKeyStatusComplete(t) ? "<p class='target-detail-note'>密钥运行态明细不完整。</p>" : "") +
+      "<p class='target-detail-note'>仅显示密钥掩码和运行状态；不显示明文密钥，也不推导每个 Key 的请求数。</p>"
     );
   }
   function renderTargetModels(t) {
@@ -514,18 +648,20 @@ AdminApp.register("targets", function (app) {
         detailRow("Anthropic 路径前缀", raw(t.anthropic_prefix)),
         detailRow(
           "自定义请求头",
-          headerNames.length
+          isReadonlyMode() ? "不可查看" : headerNames.length
             ? esc(headerNames.join("、")) + "<span class='target-detail-key-meta'>（仅字段名）</span>"
             : "未配置",
         ),
         detailRow(
           "自定义请求体",
-          bodyNames.length
+          isReadonlyMode() ? "不可查看" : bodyNames.length
             ? esc(bodyNames.join("、")) + "<span class='target-detail-key-meta'>（仅字段名）</span>"
             : "未配置",
         ),
       ]) +
-      "<p class='target-detail-note'>高级设置是当前保存值的只读视图；修改请使用「编辑目标」。自定义请求头与请求体只显示字段名，不显示值。</p>"
+      (isReadonlyMode()
+        ? "<p class='target-detail-note'>只读用户不可查看自定义请求头与请求体。</p>"
+        : "<p class='target-detail-note'>高级设置是当前保存值的只读视图；修改请使用「编辑目标」。自定义请求头与请求体只显示字段名，不显示值。</p>")
     );
   }
   function setTargetDetailTab(tab) {
@@ -594,71 +730,124 @@ AdminApp.register("targets", function (app) {
     }
     renderTargetDetail(t);
   }
-  // refreshEditingTarget：block/unblock 等改变了 key 运行时状态后，
-  // 从后端重新拉取最新数据，同步更新列表 + 编辑模态框内的 key 卡片。
-  // 不手动改本地状态（之前手动改 key_statuses 的方式会在 key_statuses
-  // 缺失/字段不一致时导致"刷新才生效"和"要点两次"的问题）。
+  /* ===== Key Card List (target modal) ===== */
+  var tgtKeyList = [];
+  var editingKeySnapshot = null;
+  var editingKeyIndices = null;
+  var editingKeyNeedsReview = false;
+  var editingKeyStatusStale = false;
+  var editingKeyBusy = false;
+  var editingKeyReloading = false;
+  var editingKeySaving = false;
+  var editingKeySession = 0;
+  var editingDraftRevision = 0;
+  var createdDraftNeedsReopen = false;
+  ["input", "change"].forEach(function (eventName) {
+    document.getElementById("targetModal").addEventListener(eventName, function () { editingDraftRevision++; });
+  });
+  document.getElementById("targetModal").addEventListener("click", function (event) {
+    var button = event.target.closest("button");
+    if (editingKeySaving && button && button.id !== "saveTargetBtn") editingDraftRevision++;
+  });
+
+  function hasUnmappedNonemptyKey(t) {
+    if (!t || !Array.isArray(t.api_keys) || !Array.isArray(t.key_runtime_indices)) return false;
+    return t.key_runtime_indices.some(function (index, slot) {
+      var mask = slot === 0 ? t.api_key : t.api_keys[slot - 1];
+      // Empty slots and short keys both mask as ****; whitespace-only keys are absent at runtime.
+      return index === null && typeof mask === "string" && mask !== "****" && !!mask.replace("...", "").trim();
+    });
+  }
+  function usableKeySnapshot(t) {
+    if (
+      !t || typeof t.key_snapshot !== "string" || !t.key_snapshot ||
+      typeof t.has_api_key !== "boolean" || typeof t.api_key !== "string" ||
+      t.has_api_key !== !!t.api_key || !Array.isArray(t.api_keys) ||
+      !t.api_keys.every(function (k) { return typeof k === "string"; }) ||
+      !Array.isArray(t.key_runtime_indices) ||
+      t.key_runtime_indices.length !== t.api_keys.length + 1 ||
+      (!t.has_api_key && t.key_runtime_indices[0] !== null) ||
+      (hasUnmappedNonemptyKey(t) &&
+        !(t.key_runtime_indices.every(function (i) { return i === null; }) &&
+          (t.key_statuses == null || (Array.isArray(t.key_statuses) && !t.key_statuses.length))))
+    ) return false;
+    var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    return t.key_runtime_indices.every(function (i) {
+      return i === null || (Number.isInteger(i) && i >= 0 && statuses.some(function (s) {
+        return s && s.index === i && typeof s.blocked === "boolean" &&
+          typeof s.exhausted === "boolean" && typeof s.status === "string" && !!s.status;
+      }));
+    });
+  }
+  function keyListFromSnapshot(t) {
+    var keys = Array.isArray(t.api_keys) ? t.api_keys : [];
+    var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    var indices = Array.isArray(t.key_runtime_indices) ? t.key_runtime_indices : [];
+    var list = [];
+    function add(value, slot) {
+      var runtimeIndex = indices[slot];
+      var status = Number.isInteger(runtimeIndex)
+        ? statuses.find(function (s) { return s && s.index === runtimeIndex; }) || null
+        : null;
+      list.push({
+        value: value, ref: "__existing_key_index__:" + slot,
+        runtimeIndex: runtimeIndex, status: status,
+      });
+    }
+    if (t.has_api_key || keys.length) add(t.api_key || "", 0);
+    keys.forEach(function (key, i) { add(key, i + 1); });
+    return list;
+  }
+  function sameKeyIndices(t) {
+    return usableKeySnapshot(t) && editingKeyIndices &&
+      t.key_runtime_indices.length === editingKeyIndices.length &&
+      t.key_runtime_indices.every(function (index, i) { return index === editingKeyIndices[i]; });
+  }
+  function updateEditingKeyStatuses(t) {
+    var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    tgtKeyList.forEach(function (item) {
+      if (item.ref) item.status = Number.isInteger(item.runtimeIndex)
+        ? statuses.find(function (s) { return s && s.index === item.runtimeIndex; }) || null : null;
+    });
+    editingKeyStatusStale = false;
+  }
   async function refreshEditingTarget() {
-    // 先保存用户在本次编辑中新增但尚未保存的 key（无 ref 字段），
-    // 避免从后端重建 tgtKeyList 时丢失。
-    var newKeys = tgtKeyList
-      .filter(function (item) {
-        return !item.ref;
-      })
-      .map(function (item) {
-        return { value: item.value, status: null };
-      });
-    await loadTargets();
-    if (state.editingTarget) {
-      var fresh = state.targets.find(function (x) {
-        return x.name === state.editingTarget.name;
-      });
-      if (fresh) {
-        state.editingTarget = fresh;
-        // 重建 tgtKeyList（与 openTargetModal 逻辑一致）
-        var keyStatuses = Array.isArray(fresh.key_statuses)
-          ? fresh.key_statuses
-          : [];
-        tgtKeyList = [];
-        if (fresh.api_key) {
-          var ks0 =
-            keyStatuses.find(function (s) {
-              return s.index === 0;
-            }) || null;
-          tgtKeyList.push({
-            value: fresh.api_key,
-            ref: "__existing_key_index__:0",
-            status: ks0,
-          });
-        }
-        if (Array.isArray(fresh.api_keys)) {
-          fresh.api_keys.forEach(function (k, i) {
-            if (!k) return;
-            if (fresh.api_key && k === fresh.api_key) return;
-            var ksIdx =
-              keyStatuses.find(function (s) {
-                return s.index === i + 1;
-              }) || null;
-            tgtKeyList.push({
-              value: k,
-              ref: "__existing_key_index__:" + (i + 1),
-              status: ksIdx,
-            });
-          });
-        }
-        // 追加用户新增但尚未保存的 key
-        newKeys.forEach(function (nk) {
-          var exists = tgtKeyList.some(function (item) {
-            return item.value === nk.value;
-          });
-          if (!exists) tgtKeyList.push(nk);
-        });
-        renderKeyList();
+    var session = editingKeySession;
+    var name = state.editingTarget && state.editingTarget.name;
+    var targets = await loadTargets();
+    if (session !== editingKeySession || !state.editingTarget || state.editingTarget.name !== name) return;
+    if (!targets) {
+      editingKeyStatusStale = true;
+    } else {
+      var fresh = targets.find(function (t) { return t.name === name; });
+      if (!fresh || fresh.key_snapshot !== editingKeySnapshot || !sameKeyIndices(fresh)) {
+        editingKeyNeedsReview = true;
+      } else if (!editingKeyNeedsReview) {
+        updateEditingKeyStatuses(fresh);
       }
     }
+    renderKeyList();
   }
-  /* ===== Key Card List (target modal) ===== */
-  var tgtKeyList = []; // [{value: "sk-xxx", ref: "__existing_key_index__:0", status: {index, key_mask, status, blocked, exhausted, exhaust_reason, cooldown_end}}]
+
+  async function reloadEditingKeys(session, name) {
+    var targets = await loadTargets();
+    if (session !== editingKeySession || !state.editingTarget || state.editingTarget.name !== name) return;
+    var fresh = targets && targets.find(function (t) { return t.name === name; });
+    if (!usableKeySnapshot(fresh)) {
+      editingKeyNeedsReview = true;
+      renderKeyList();
+      toast("密钥快照不可用，请刷新后重新确认", "error");
+      return;
+    }
+    var additions = tgtKeyList.filter(function (item) { return !item.ref; });
+    tgtKeyList = keyListFromSnapshot(fresh).concat(additions);
+    state.editingTarget = fresh;
+    editingKeySnapshot = fresh.key_snapshot;
+    editingKeyIndices = fresh.key_runtime_indices.slice();
+    editingKeyNeedsReview = false;
+    editingKeyStatusStale = false;
+    renderKeyList();
+  }
 
   function keyStatusColor(s) {
     switch (s) {
@@ -698,16 +887,34 @@ AdminApp.register("targets", function (app) {
 
   function renderKeyList() {
     var container = document.getElementById("keyCardList");
-    if (!tgtKeyList.length) {
+    var notice = "";
+    if (editingKeySaving && !state.editingTarget) {
+      notice = "<p role='status'>目标创建中，暂不能修改密钥。</p>";
+    }
+    if (createdDraftNeedsReopen) {
+      notice = "<p role='alert'>目标已创建，后续修改未保存。请复制草稿并重新打开目标编辑。</p>";
+    }
+    if (state.editingTarget && editingKeyNeedsReview) {
+      notice = "<p role='alert'>密钥快照已变化或不可用，草稿仍保留。请重新载入并确认；已移除的已保存密钥需要重新选择，新增密钥及其他表单草稿会保留。保存前请核对其他草稿，它们可能覆盖其他人更新的配置。 " +
+        "<button type='button' class='btn btn-sm readonly-hide' data-reload-key-draft='1'" + (editingKeyBusy ? " disabled" : "") + ">" +
+        (editingKeyReloading ? "正在载入…" : "重新载入密钥并确认") + "</button></p>";
+    } else if (state.editingTarget && editingKeyStatusStale) {
+      notice = "<p role='status'>密钥状态刷新失败，卡片显示上次状态；请刷新后查看。</p>";
+    }
+    if (!targetPoolsSnapshot || targetPoolOptionsSnapshot !== targetPoolsSnapshot) {
+      notice += "<p role='status'>部署池数据不可用或选项可能过期，当前选择已保留；请重新打开编辑查看最新选项。</p>";
+    }
+    if (!tgtKeyList.length && !notice) {
       container.style.display = "none";
       container.innerHTML = "";
       return;
     }
     container.style.display = "block";
     var isEditing = !!state.editingTarget;
-    container.innerHTML = tgtKeyList
+    container.innerHTML = notice + tgtKeyList
       .map(function (item, i) {
-        var mask = item.status ? item.status.key_mask : maskKey(item.value);
+        var mask = item.status && item.status.key_mask ? item.status.key_mask : item.ref
+          ? (item.value || "空主密钥槽位") : item.value.length <= 8 ? "****" : maskKey(item.value);
         var statusBadge = "";
         if (item.status) {
           statusBadge =
@@ -718,7 +925,8 @@ AdminApp.register("targets", function (app) {
             "</span>";
         }
         var actions = "";
-        if (isEditing && item.status) {
+        if (isEditing && item.status && typeof item.status.blocked === "boolean" &&
+            typeof item.status.exhausted === "boolean" && !editingKeyNeedsReview && !editingKeyStatusStale && !editingKeyBusy) {
           var idx = item.status.index;
           if (item.status.blocked || item.status.exhausted) {
             actions =
@@ -735,7 +943,8 @@ AdminApp.register("targets", function (app) {
         var removeBtn =
           "<button class='btn btn-sm readonly-hide' data-remove-key-idx='" +
           i +
-          "' title='移除' aria-label='移除' style='padding:2px 8px;font-size:11px;color:var(--danger);'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M6 6l12 12M18 6L6 18'></path></svg></button>";
+          "'" + ((editingKeyReloading && item.ref) || (editingKeySaving && !isEditing) || createdDraftNeedsReopen ? " disabled" : "") +
+          " title='移除' aria-label='移除' style='padding:2px 8px;font-size:11px;color:var(--danger);'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M6 6l12 12M18 6L6 18'></path></svg></button>";
         var cooldownInfo = "";
         var itemCooldownEnd = keyCooldownEnd(item.status);
         if (item.status && item.status.exhausted && itemCooldownEnd) {
@@ -768,6 +977,10 @@ AdminApp.register("targets", function (app) {
 
   function addKeyToList() {
     var input = document.getElementById("tgtNewKeyInput");
+    if ((editingKeySaving && !state.editingTarget) || createdDraftNeedsReopen) {
+      toast(createdDraftNeedsReopen ? "目标已创建，请重新打开目标后再添加密钥。" : "创建请求进行中，请等待后再添加密钥。", "error");
+      return;
+    }
     var val = input.value.trim();
     if (!val) return;
     // dedup
@@ -778,12 +991,17 @@ AdminApp.register("targets", function (app) {
       }
     }
     tgtKeyList.push({ value: val, status: null });
+    editingDraftRevision++;
     input.value = "";
     renderKeyList();
   }
 
   function removeKeyFromList(idx) {
+    if ((editingKeySaving && !state.editingTarget) || createdDraftNeedsReopen) return;
+    if (!Number.isInteger(idx) || idx < 0 || idx >= tgtKeyList.length ||
+        (editingKeyReloading && tgtKeyList[idx].ref)) return;
     tgtKeyList.splice(idx, 1);
+    editingDraftRevision++;
     renderKeyList();
   }
 
@@ -801,55 +1019,75 @@ AdminApp.register("targets", function (app) {
   document
     .getElementById("keyCardList")
     .addEventListener("click", function (e) {
-      var t = e.target;
+      var t = e.target.closest ? e.target.closest("button") || e.target : e.target;
       if (t.dataset.removeKeyIdx !== undefined) {
         removeKeyFromList(parseInt(t.dataset.removeKeyIdx, 10));
       }
-      if (t.dataset.blockKeyIdx !== undefined && state.editingTarget) {
-        var idx = parseInt(t.dataset.blockKeyIdx, 10);
-        var name = state.editingTarget.name;
+      if (t.dataset.reloadKeyDraft !== undefined && state.editingTarget && !editingKeyBusy) {
+        var reloadSession = editingKeySession;
+        var reloadName = state.editingTarget.name;
         showConfirm(
-          "确认屏蔽此 Key？屏蔽后该 Key 将不参与转发，直到手动解除。",
+          "重新载入已保存的密钥会重置本次密钥移除选择，请重新选择需要移除的密钥。新增密钥和其他表单草稿会保留，保存前请核对，以免覆盖其他人更新的配置。继续吗？",
           async function () {
-            try {
-              await api(
-                "/admin/data/targets/" +
-                  encodeURIComponent(name) +
-                  "/keys/" +
-                  idx +
-                  "/block",
-                { method: "PUT" },
-              );
-              toast("已屏蔽 Key", "success");
-              await refreshEditingTarget();
-            } catch (err) {
-              toast("操作失败: " + err.message, "error");
+            if (reloadSession === editingKeySession && !editingKeyBusy) {
+              editingKeyBusy = true;
+              editingKeyReloading = true;
+              renderKeyList();
+              try {
+                await reloadEditingKeys(reloadSession, reloadName);
+              } finally {
+                if (reloadSession === editingKeySession) {
+                  editingKeyBusy = false;
+                  editingKeyReloading = false;
+                  renderKeyList();
+                }
+              }
             }
           },
         );
       }
-      if (t.dataset.unblockKeyIdx !== undefined && state.editingTarget) {
-        var idx2 = parseInt(t.dataset.unblockKeyIdx, 10);
-        var name2 = state.editingTarget.name;
-        showConfirm(
-          "确认解除屏蔽此 Key？解除后该 Key 将重新参与转发。",
-          async function () {
-            try {
-              await api(
-                "/admin/data/targets/" +
-                  encodeURIComponent(name2) +
-                  "/keys/" +
-                  idx2 +
-                  "/unblock",
-                { method: "PUT" },
-              );
-              toast("已解除屏蔽", "success");
-              await refreshEditingTarget();
-            } catch (err) {
-              toast("操作失败: " + err.message, "error");
+      var block = t.dataset.blockKeyIdx !== undefined;
+      if ((block || t.dataset.unblockKeyIdx !== undefined) && state.editingTarget &&
+          !editingKeyNeedsReview && !editingKeyStatusStale && !editingKeyBusy && editingKeySnapshot) {
+        var idx = parseInt(block ? t.dataset.blockKeyIdx : t.dataset.unblockKeyIdx, 10);
+        var name = state.editingTarget.name;
+        var session = editingKeySession;
+        var snapshot = editingKeySnapshot;
+        showConfirm(block ? "确认屏蔽此 Key？屏蔽后该 Key 将不参与转发，直到手动解除。" : "确认解除屏蔽此 Key？解除后该 Key 将重新参与转发。", async function () {
+          if (session !== editingKeySession || editingKeyBusy || editingKeyNeedsReview || editingKeyStatusStale ||
+              snapshot !== editingKeySnapshot || !tgtKeyList.some(function (item) { return item.status && item.runtimeIndex === idx; })) return;
+          var targetsBeforeOperation = state.targets;
+          editingKeyBusy = true;
+          renderKeyList();
+          try {
+            var result = await api("/admin/data/targets/" + encodeURIComponent(name) + "/keys/" + idx + (block ? "/block" : "/unblock"),
+              { method: "PUT", headers: { "X-Target-Key-Snapshot": snapshot } });
+            if (session !== editingKeySession) return;
+            if (result && typeof result.key_snapshot === "string" && result.key_snapshot && result.key_snapshot !== snapshot) {
+              editingKeySnapshot = result.key_snapshot;
+            } else {
+              editingKeyNeedsReview = true;
             }
-          },
-        );
+            editingKeyStatusStale = true;
+            toast(block ? "已屏蔽 Key" : "已解除屏蔽", "success");
+            await refreshEditingTarget();
+          } catch (err) {
+            if (session !== editingKeySession) return;
+            editingKeyNeedsReview = true;
+            toast("操作失败，密钥草稿已保留，请重新确认", "error");
+          } finally {
+            if (session === editingKeySession) {
+              if (state.targets !== targetsBeforeOperation) {
+                var latest = state.targets.find(function (item) { return item.name === name; });
+                if (!latest || latest.key_snapshot !== editingKeySnapshot || !sameKeyIndices(latest)) {
+                  editingKeyNeedsReview = true;
+                }
+              }
+              editingKeyBusy = false;
+              renderKeyList();
+            }
+          }
+        });
       }
     });
 
@@ -858,19 +1096,28 @@ AdminApp.register("targets", function (app) {
     renderTargetStatusFilters();
     var tb = document.getElementById("targetsTableBody");
     var targets = filteredTargets();
+    if (targetsLoadFailed && !targetsLoaded) {
+      tb.innerHTML = "<tr class='empty-row'><td colspan='8' role='alert'>加载目标失败，请点击「刷新」重试。</td></tr>";
+      return;
+    }
+    var staleNotice = targetsLoadFailed
+      ? "<tr><td colspan='8' role='status'>更新失败，显示上次加载的数据；请点击「刷新」重试。</td></tr>" : "";
+    if (!targetPoolsSnapshot) {
+      staleNotice += "<tr><td colspan='8' role='status'>部署池数据不可用，池名称及表单选项可能是上次数据；请刷新重试。</td></tr>";
+    }
     if (!state.targets.length) {
       tb.innerHTML =
-        "<tr class='empty-row'><td colspan='8'>暂无目标配置</td></tr>";
+        staleNotice + "<tr class='empty-row'><td colspan='8'>暂无目标配置</td></tr>";
       refreshOpenTargetDetail();
       return;
     }
     if (!targets.length) {
       tb.innerHTML =
-        "<tr class='empty-row'><td colspan='8'>当前筛选无目标</td></tr>";
+        staleNotice + "<tr class='empty-row'><td colspan='8'>当前筛选无目标</td></tr>";
       refreshOpenTargetDetail();
       return;
     }
-    tb.innerHTML = targets
+    tb.innerHTML = staleNotice + targets
       .map(function (t) {
         var health = targetHealth(t);
         var poolCell = t.pool
@@ -914,34 +1161,35 @@ AdminApp.register("targets", function (app) {
           " keys</span>";
         var keyPoolInfo = "";
         if (Array.isArray(t.key_statuses) && t.key_statuses.length > 0) {
-          var blockedCount = t.key_statuses.filter(function (s) {
+          var keyStatuses = t.key_statuses.filter(function (s) { return !!s && typeof s === "object"; });
+          var blockedCount = keyStatuses.filter(function (s) {
             return s.blocked;
           }).length;
-          var quotaSubCount = t.key_statuses.filter(function (s) {
+          var quotaSubCount = keyStatuses.filter(function (s) {
             return (
               keyStatusNeedsAttention(s) &&
               s.exhaust_reason === "quota_exceeded_subscription"
             );
           }).length;
-          var quotaAPICount = t.key_statuses.filter(function (s) {
+          var quotaAPICount = keyStatuses.filter(function (s) {
             return (
               keyStatusNeedsAttention(s) &&
               s.exhaust_reason === "quota_exceeded_api"
             );
           }).length;
-          var quotaCount = t.key_statuses.filter(function (s) {
+          var quotaCount = keyStatuses.filter(function (s) {
             return (
               keyStatusNeedsAttention(s) &&
               s.exhaust_reason === "quota_exceeded"
             );
           }).length;
-          var rateCount = t.key_statuses.filter(function (s) {
+          var rateCount = keyStatuses.filter(function (s) {
             return (
               keyStatusNeedsAttention(s) && s.exhaust_reason === "rate_limited"
             );
           }).length;
           // GLM 限流细分：额度类（5h/周月/未知）与速率类（QPS），与前端 keyStatusColor 文案一一对应
-          var glmQuotaCount = t.key_statuses.filter(function (s) {
+          var glmQuotaCount = keyStatuses.filter(function (s) {
             return (
               keyStatusNeedsAttention(s) &&
               !s.blocked &&
@@ -950,7 +1198,7 @@ AdminApp.register("targets", function (app) {
                 s.exhaust_reason === "glm_rate_limit_unknown")
             );
           }).length;
-          var glmRateCount = t.key_statuses.filter(function (s) {
+          var glmRateCount = keyStatuses.filter(function (s) {
             return (
               keyStatusNeedsAttention(s) &&
               s.exhaust_reason === "glm_rate_limit_qps"
@@ -958,7 +1206,7 @@ AdminApp.register("targets", function (app) {
           }).length;
           // 其他失效原因：invalid_token / billing_error / account_disabled 等（5 分钟冷却自动恢复）
           // 排除所有已命名类（含 glm_ 前缀），避免 GLM reason 被误算进"失效"
-          var otherExhaustedCount = t.key_statuses.filter(function (s) {
+          var otherExhaustedCount = keyStatuses.filter(function (s) {
             if (!keyStatusNeedsAttention(s) || s.blocked) return false;
             var r = s.exhaust_reason;
             if (
@@ -1117,7 +1365,8 @@ AdminApp.register("targets", function (app) {
           "<span class='target-endpoint-text' title='" +
           esc(t.endpoint || "") +
           "'>" +
-          esc(t.endpoint || "未配置 Endpoint") +
+          esc(t.endpoint ? t.endpoint + (isReadonlyMode() ? "（仅显示协议和主机）" : "") :
+            isReadonlyMode() ? "Endpoint 不可查看" : "未配置 Endpoint") +
           "</span></td>" +
           "<td><div class='target-cell-content'>" +
           keyStatus +
@@ -1377,6 +1626,7 @@ AdminApp.register("targets", function (app) {
           if (existingInputs[i].value.trim() === modelName) return;
         }
         addModelMappingRow(modelName, "", !!state.editingTarget);
+        editingDraftRevision++;
       });
       container.appendChild(tag);
     });
@@ -1630,6 +1880,7 @@ AdminApp.register("targets", function (app) {
       toast("只读用户无法执行此操作", "error");
       return;
     }
+    var session = ++editingKeySession;
     // 保证模型目录缓存可用，供模型行的 datalist 软建议；失败不阻塞弹窗
     if (!state.catalogAllCache) {
       try {
@@ -1641,7 +1892,19 @@ AdminApp.register("targets", function (app) {
         /* 软建议数据缺失可容忍 */
       }
     }
+    if (session !== editingKeySession) return;
+    createdDraftNeedsReopen = false;
+    document.getElementById("tgtNewKeyInput").disabled = false;
+    document.getElementById("addKeyBtn").disabled = false;
     state.editingTarget = t || null;
+    editingDraftRevision = 0;
+    editingKeyBusy = false;
+    editingKeyReloading = false;
+    editingKeySaving = false;
+    editingKeySnapshot = usableKeySnapshot(t) ? t.key_snapshot : null;
+    editingKeyIndices = usableKeySnapshot(t) ? t.key_runtime_indices.slice() : null;
+    editingKeyNeedsReview = !!t && (!editingKeySnapshot || targetsLoadFailed);
+    editingKeyStatusStale = false;
     document.getElementById("targetModalTitle").textContent = t
       ? "编辑目标"
       : "新增目标";
@@ -1718,50 +1981,32 @@ AdminApp.register("targets", function (app) {
       });
     }
     if (bodyContainer.children.length === 0) addCustomBodyRow("", "");
-    // API Keys：构建卡片列表（合并 api_key + api_keys + key_statuses）
-    tgtKeyList = [];
-    var keyStatuses = t && Array.isArray(t.key_statuses) ? t.key_statuses : [];
-    if (t && t.api_key) {
-      var ks0 =
-        keyStatuses.find(function (s) {
-          return s.index === 0;
-        }) || null;
-      tgtKeyList.push({
-        value: t.api_key,
-        ref: "__existing_key_index__:0",
-        status: ks0,
-      });
-    }
-    if (t && Array.isArray(t.api_keys)) {
-      t.api_keys.forEach(function (k, i) {
-        if (!k) return;
-        // dedup against api_key
-        if (t.api_key && k === t.api_key) return;
-        var ksIdx =
-          keyStatuses.find(function (s) {
-            return s.index === i + 1;
-          }) || null;
-        tgtKeyList.push({
-          value: k,
-          ref: "__existing_key_index__:" + (i + 1),
-          status: ksIdx,
-        });
-      });
-    }
+    // Config slot references must stay paired with the snapshot that issued them.
+    tgtKeyList = t ? keyListFromSnapshot(t) : [];
     renderKeyList();
     document.getElementById("tgtNewKeyInput").value = "";
     document.getElementById("tgtKeyResetTime").value =
       t && t.key_reset_time ? t.key_reset_time : "";
     renderTargetPoolOptions(t && t.pool ? t.pool : "");
+    renderKeyList();
     updateTargetFormVisibility();
     openModal("targetModal");
   }
   // renderTargetPoolOptions 重建目标表单的池下拉（数据来自 /admin/data/pools）。
+  function updateTargetPoolAvailability() {
+    var sel = document.getElementById("tgtPool");
+    var label = targetPoolsSnapshot && targetPoolOptionsSnapshot === targetPoolsSnapshot
+      ? "部署池" : "部署池数据不可用或选项可能过期，请重新打开编辑查看";
+    sel.setAttribute("aria-label", label);
+    sel.setAttribute("title", label);
+  }
   function renderTargetPoolOptions(selected) {
     var sel = document.getElementById("tgtPool");
+    targetPoolOptionsSnapshot = targetPoolsSnapshot;
+    updateTargetPoolAvailability();
     var val = selected || "";
     sel.innerHTML = "<option value=''>不属于任何池</option>";
-    (state.pools || [])
+    (targetPoolsSnapshot || state.pools || [])
       .slice()
       .sort(function (a, b) {
         return String(a.name || "").localeCompare(String(b.name || ""));
@@ -1776,7 +2021,7 @@ AdminApp.register("targets", function (app) {
             : "");
         sel.appendChild(opt);
       });
-    var known = (state.pools || []).some(function (p) {
+    var known = (targetPoolsSnapshot || state.pools || []).some(function (p) {
       return String(p.name || "") === val;
     });
     if (val && !known) {
@@ -1938,6 +2183,10 @@ AdminApp.register("targets", function (app) {
         toast("请填写 Endpoint URL", "error");
         return;
       }
+      if (!state.editingTarget && document.getElementById("tgtNewKeyInput").value.trim()) {
+        toast("请先添加输入的密钥，再保存目标。", "error");
+        return;
+      }
       if (
         !usageAdapter ||
         !state.schema.usage_adapters.some(function (option) {
@@ -1950,8 +2199,28 @@ AdminApp.register("targets", function (app) {
       }
       setUsageAdapterError("");
 
+      if (createdDraftNeedsReopen) {
+        toast("目标已创建。请先复制未保存的修改，再重新打开目标编辑。", "error");
+        return;
+      }
+      if (editingKeyBusy || (state.editingTarget && (editingKeyNeedsReview || !editingKeySnapshot))) {
+        toast("密钥快照不可用或操作正在进行，请重新确认后保存", "error");
+        return;
+      }
+
+      var saveSession = editingKeySession;
+      var saveRevision = editingDraftRevision;
+      var wasEditing = !!state.editingTarget;
+      editingKeyBusy = true;
+      editingKeySaving = true;
+      if (!wasEditing) {
+        document.getElementById("tgtNewKeyInput").disabled = true;
+        document.getElementById("addKeyBtn").disabled = true;
+        renderKeyList();
+      }
       try {
         if (state.editingTarget) {
+          renderKeyList();
           var updateBody = {
             endpoint_type: epType,
             endpoint: endpoint,
@@ -1976,9 +2245,9 @@ AdminApp.register("targets", function (app) {
           };
           await api("/admin/data/targets/" + encodeURIComponent(name), {
             method: "PUT",
+            headers: { "X-Target-Key-Snapshot": editingKeySnapshot },
             body: updateBody,
           });
-          toast("目标已更新", "success");
         } else {
           await api("/admin/data/targets", {
             method: "POST",
@@ -2006,17 +2275,62 @@ AdminApp.register("targets", function (app) {
               pool: pool,
             },
           });
-          toast("目标已创建", "success");
         }
+        if (saveSession !== editingKeySession) {
+          await loadTargets();
+          return;
+        }
+        if (!wasEditing) {
+          document.getElementById("tgtNewKeyInput").disabled = false;
+          document.getElementById("addKeyBtn").disabled = false;
+        }
+        if (saveRevision !== editingDraftRevision) {
+          editingKeyBusy = false;
+          editingKeySaving = false;
+          if (wasEditing) editingKeyNeedsReview = true;
+          else {
+            createdDraftNeedsReopen = true;
+            document.getElementById("tgtNewKeyInput").disabled = true;
+            document.getElementById("addKeyBtn").disabled = true;
+          }
+          renderKeyList();
+          toast(wasEditing ? "请求时的内容已保存，后续修改未保存；请重新确认密钥" :
+            "目标已创建，后续修改未保存。请复制草稿并重新打开目标编辑。", "error");
+          await loadTargets();
+          return;
+        }
+        toast(wasEditing ? "目标已更新" : "目标已创建", "success");
+        state.editingTarget = null;
+        editingKeySession++;
+        editingKeyBusy = false;
+        editingKeySaving = false;
         closeModal("targetModal");
         await loadTargets();
       } catch (e) {
+        if (saveSession !== editingKeySession) return;
+        if (!wasEditing) {
+          document.getElementById("tgtNewKeyInput").disabled = false;
+          document.getElementById("addKeyBtn").disabled = false;
+        }
+        editingKeyBusy = false;
+        editingKeySaving = false;
+        if (state.editingTarget) {
+          editingKeyNeedsReview = true;
+        }
+        renderKeyList();
         toast("保存失败: " + e.message, "error");
       }
     });
 
   return {
     loadTargets: loadTargets,
+    beginSchedulingRefresh: beginSchedulingRefresh,
+    schedulingRefreshCurrent: schedulingRefreshCurrent,
+    awaitSchedulingRefresh: awaitSchedulingRefresh,
+    targetPoolsAvailable: targetPoolsAvailable,
+    validPoolRoster: validPoolRoster,
+    publishSchedulingRefresh: publishSchedulingRefresh,
+    failSchedulingRefresh: failSchedulingRefresh,
     fetchSchedulingRuntime: fetchSchedulingRuntime,
     targetHealth: targetHealth,
     targetHealthCounts: targetHealthCounts,

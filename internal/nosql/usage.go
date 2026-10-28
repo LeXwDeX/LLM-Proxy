@@ -69,18 +69,16 @@ func (s *UsageStore) Record(event usage.Event) error {
 // RecordOnce reports the insertion outcome from the same transaction that
 // writes the entire bundle, so callers can suppress duplicate live charges.
 func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
-	explicit := strings.TrimSpace(event.RecordID) != ""
 	if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
-		return false, withUsageKind(ErrUsageBundleInvalid, err)
+		return false, s.preserveInvalidUsage(event, withUsageKind(ErrUsageBundleInvalid, err))
 	}
 	rows, keys, err := normalizeUsageBundle(event)
 	if err != nil {
-		return false, err
+		return false, s.preserveInvalidUsage(event, err)
 	}
-	if explicit {
-		if err := s.EnsureUsageReceipts(); err != nil {
-			return false, err
-		}
+	migrationErr := s.EnsureUsageReceipts()
+	if s == nil || s.db == nil {
+		return false, migrationErr
 	}
 	// P8：用 db.Batch 而非 db.Update —— bbolt 写事务全库串行且每次 commit 触发
 	// fsync，高并发下每请求一次同步 Update 会在全部成功请求上形成吞吐天花板。
@@ -90,13 +88,58 @@ func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
 	// 安全性：合并事务失败时整体回滚后逐个重试，身份判定基于已提交状态，
 	// 不会双计。
 	added := false
+	var rejection error
 	err = s.db.Batch(func(tx *bolt.Tx) error {
 		// bbolt may retry this callback after a different batch member fails.
 		added = false
+		rejection = nil
+		fresh := freshScopeProven(tx, rows) || continuationScopeProven(tx, rows)
 		var err error
-		added, err = recordUsageBundleTx(tx, rows, keys, explicit)
+		added, err = recordUsageBundleTx(tx, rows, keys, migrationErr)
+		if errors.Is(err, ErrUsageIdentityUnverified) || errors.Is(err, ErrUsageBundlePartial) {
+			original, encodeErr := json.Marshal(event)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if saveErr := putUnresolvedUsage(tx, rows[0], original); saveErr != nil {
+				return saveErr
+			}
+			rejection = err
+			return nil
+		}
+		if err == nil {
+			if !added && tx.Bucket([]byte(BucketUsageEvents)).Get([]byte(keys[0])) != nil && !usageAccountingProven(tx, rows, keys) {
+				original, encodeErr := json.Marshal(event)
+				if encodeErr != nil {
+					return encodeErr
+				}
+				if saveErr := putUnresolvedUsage(tx, rows[0], original); saveErr != nil {
+					return saveErr
+				}
+				if knownUnverifiedLiveAccounting(tx, rows, keys) {
+					rejection = fmt.Errorf("%w: committed identity has unverified quota accounting", ErrUsageHistoryIncomplete)
+				}
+				return nil
+			}
+			if added && fresh {
+				if err := writeFreshAttestation(tx, rows[0], keys[0]); err != nil {
+					return err
+				}
+			}
+			return resolveUnresolvedUsage(tx, rows[0])
+		}
 		return err
 	})
+	if err == nil && rejection != nil {
+		return false, rejection
+	}
+	if err != nil {
+		original, encodeErr := json.Marshal(event)
+		if encodeErr == nil {
+			encodeErr = s.RegisterUnresolvedUsage(rows[0], original)
+		}
+		return false, errors.Join(err, encodeErr)
+	}
 	return added && err == nil, err
 }
 
@@ -111,35 +154,142 @@ func (s *UsageStore) RecordBatch(events []usage.Event) error {
 	type normalizedBundle struct {
 		rows     []usage.Event
 		keys     []string
-		explicit bool
+		original usage.Event
 	}
 	var bundles []normalizedBundle
-	needWatermark := false
+	var invalid error
 	for _, event := range events {
-		explicit := strings.TrimSpace(event.RecordID) != ""
 		if err := usage.ValidateExplicitRecordIdentity(event); err != nil {
-			return withUsageKind(ErrUsageBundleInvalid, err)
+			if invalid == nil {
+				invalid = withUsageKind(ErrUsageBundleInvalid, err)
+			}
+			bundles = append(bundles, normalizedBundle{original: event})
+			continue
 		}
 		rows, keys, err := normalizeUsageBundle(event)
 		if err != nil {
-			return err
+			if invalid == nil {
+				invalid = err
+			}
+			bundles = append(bundles, normalizedBundle{original: event})
+			continue
 		}
-		bundles = append(bundles, normalizedBundle{rows: rows, keys: keys, explicit: explicit})
-		needWatermark = needWatermark || explicit
+		bundles = append(bundles, normalizedBundle{rows: rows, keys: keys, original: event})
 	}
-	if needWatermark {
-		if err := s.EnsureUsageReceipts(); err != nil {
-			return err
+	migrationErr := s.EnsureUsageReceipts()
+	if s == nil || s.db == nil {
+		return migrationErr
+	}
+	var rejection error
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		committedRows := make([]bool, len(bundles))
+		inspectionErrors := make([]error, len(bundles))
+		type seenIdentity struct{ digest, bundle string }
+		seen := make(map[string]seenIdentity)
+		rejection = invalid
+		for i, bundle := range bundles {
+			if len(bundle.rows) == 0 {
+				continue
+			}
+			committed, inspectErr := inspectUsageBundleTx(tx, bundle.rows, bundle.keys, migrationErr)
+			committedRows[i], inspectionErrors[i] = committed, inspectErr
+			if committed && knownUnverifiedLiveAccounting(tx, bundle.rows, bundle.keys) && rejection == nil {
+				rejection = fmt.Errorf("%w: committed identity has unverified quota accounting", ErrUsageHistoryIncomplete)
+			}
+			if inspectErr != nil && rejection == nil {
+				rejection = inspectErr
+			}
+			bundleDigest, err := usage.RetryEquivalentDigest(bundle.rows[0])
+			if err != nil {
+				return err
+			}
+			for n, key := range bundle.keys {
+				digest, err := usage.RetryEquivalentDigest(bundle.rows[n])
+				if err != nil {
+					return err
+				}
+				if prior, ok := seen[key]; ok && (prior.digest != digest || prior.bundle != bundleDigest) && rejection == nil {
+					rejection = withUsageKind(ErrUsageBundleInvalid, ErrUsageBundlePartial)
+				}
+				seen[key] = seenIdentity{digest: digest, bundle: bundleDigest}
+			}
 		}
-	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, bundle := range bundles {
-			if _, err := recordUsageBundleTx(tx, bundle.rows, bundle.keys, bundle.explicit); err != nil {
+		if rejection != nil {
+			for i, bundle := range bundles {
+				proven := false
+				if len(bundle.rows) > 0 && (committedRows[i] || errors.Is(inspectionErrors[i], ErrUsageRecordConflict)) {
+					proven = usageAccountingProven(tx, bundle.rows, bundle.keys)
+					if committedRows[i] && proven {
+						continue
+					}
+				}
+				original, err := json.Marshal(bundle.original)
+				if err != nil {
+					return err
+				}
+				candidate := bundle.original
+				if len(bundle.rows) > 0 {
+					candidate = bundle.rows[0]
+				}
+				if err := putUnresolvedEvidence(tx, unresolvedUsage{Event: candidate, Original: original, Resolved: proven}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		fresh := make([]bool, len(bundles))
+		for i, bundle := range bundles {
+			fresh[i] = freshScopeProven(tx, bundle.rows) || continuationScopeProven(tx, bundle.rows)
+		}
+		for i, bundle := range bundles {
+			added, err := recordUsageBundleTx(tx, bundle.rows, bundle.keys, migrationErr)
+			if err != nil {
+				return err
+			}
+			if added && fresh[i] {
+				if err := writeFreshAttestation(tx, bundle.rows[0], bundle.keys[0]); err != nil {
+					return err
+				}
+			}
+			if !added && tx.Bucket([]byte(BucketUsageEvents)).Get([]byte(bundle.keys[0])) != nil && !usageAccountingProven(tx, bundle.rows, bundle.keys) {
+				original, err := json.Marshal(bundle.original)
+				if err != nil {
+					return err
+				}
+				if err := putUnresolvedUsage(tx, bundle.rows[0], original); err != nil {
+					return err
+				}
+			}
+			if err := resolveUnresolvedUsage(tx, bundle.rows[0]); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		saveErr := s.db.Update(func(tx *bolt.Tx) error {
+			for _, bundle := range bundles {
+				candidate := bundle.original
+				if len(bundle.rows) > 0 {
+					committed, inspectErr := inspectUsageBundleTx(tx, bundle.rows, bundle.keys, migrationErr)
+					if (committed || errors.Is(inspectErr, ErrUsageRecordConflict)) && usageAccountingProven(tx, bundle.rows, bundle.keys) {
+						continue
+					}
+					candidate = bundle.rows[0]
+				}
+				original, err := json.Marshal(bundle.original)
+				if err != nil {
+					return err
+				}
+				if err := putUnresolvedUsage(tx, candidate, original); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		return errors.Join(err, saveErr)
+	}
+	return rejection
 }
 
 // normalizeUsageBundle keeps root metadata intact and expands every additional
@@ -192,8 +342,8 @@ func (s *UsageStore) RecordExists(event usage.Event) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := s.EnsureUsageReceipts(); err != nil {
-		return false, err
+	if s == nil || s.db == nil {
+		return false, fmt.Errorf("usage receipts: store is not initialized")
 	}
 	exists := false
 	err = s.db.View(func(tx *bolt.Tx) error {
@@ -211,7 +361,7 @@ func (s *UsageStore) RecordExists(event usage.Event) (bool, error) {
 			}
 			state, _, _, err := lookupUsageIdentity(tx, []byte(keys[i]), []byte(digest))
 			if err != nil {
-				return err
+				return classifyUsageConflict(tx, rows, keys, err)
 			}
 			if state != identityNew {
 				committed++
@@ -222,28 +372,13 @@ func (s *UsageStore) RecordExists(event usage.Event) (bool, error) {
 			return nil
 		}
 		if committed > 0 {
-			return withUsageKind(ErrUsageBundleInvalid, fmt.Errorf("usage bundle is partially committed and cannot be proven complete"))
+			return withUsageKind(ErrUsageBundleInvalid, ErrUsageBundlePartial)
 		}
-		meta := tx.Bucket([]byte(BucketMeta))
-		if meta == nil {
-			return errors.New("usage receipts: meta bucket missing")
+		now := time.Now()
+		if s.now != nil {
+			now = s.now()
 		}
-		if meta.Get([]byte(usageReceiptsWatermarkDoneKey)) == nil {
-			return errors.New("usage receipts: legacy watermark was not established")
-		}
-		watermark, err := decodeUsageReceiptWatermark(meta.Get([]byte(usageReceiptsWatermarkKey)))
-		if err != nil {
-			return err
-		}
-		if watermark.IsZero() {
-			return nil
-		}
-		for _, row := range rows {
-			if row.Timestamp.Before(watermark) {
-				return fmt.Errorf("%w: record %q before %s", ErrUsageIdentityUnverified, row.RecordID, watermark.Format(time.RFC3339Nano))
-			}
-		}
-		return nil
+		return checkUsageIdentityAdmissionAt(tx, rows, &now)
 	})
 	return exists, err
 }
@@ -402,6 +537,15 @@ func (s *UsageStore) Aggregate(filter usage.Filter, groupBy string, costs usage.
 	byModel := map[string]*usage.DimensionTotals{}
 
 	err := s.db.View(func(tx *bolt.Tx) error {
+		if err := checkUnresolvedUsageInScope(tx, clientKey, from, to, modelKey, nil); err != nil {
+			return err
+		}
+		if err := checkDirectQuotaEvidence(tx, filter, from, to, nil, nil); err != nil {
+			return err
+		}
+		if err := checkMissingFreshRoots(tx, filter, from, to); err != nil {
+			return err
+		}
 		return aggIter(tx, from, to, func(hour time.Time, et, client, model, target string, cell AggCell) error {
 			// Apply dimension filters.
 			if clientKey != "" && client != clientKey {
@@ -553,6 +697,13 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 		deleted := 0
 		quarantined := 0
 		err := s.db.Update(func(tx *bolt.Tx) error {
+			if _, err := rollupProofSource(tx); err != nil {
+				return err
+			}
+			progress, err := loadIndexProgressState(tx, false)
+			if err != nil {
+				return err
+			}
 			b := tx.Bucket([]byte(BucketUsageEvents))
 			if b == nil {
 				return nil
@@ -566,15 +717,33 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 				}
 				keys = append(keys, append([]byte(nil), k...))
 			}
+			proofCache := make(map[string]bool)
+			refs := &indexRawReferences{tx: tx}
 			for _, k := range keys {
 				data := b.Get(k)
 				var event usage.Event
-				if json.Unmarshal(data, &event) != nil {
+				decodeErr := json.Unmarshal(data, &event)
+				if decodeErr == nil && progress != nil {
+					_, _, invalid, _, err := indexProofForRaw(context.Background(), tx, refs, progress, k, data, event)
+					if err != nil {
+						return err
+					}
+					if invalid {
+						return fmt.Errorf("%w: invalid client index proof during retention", ErrUsageHistoryIncomplete)
+					}
+				}
+				if decodeErr != nil {
 					if err := quarantineUsageEvent(tx, k, data); err != nil {
+						return err
+					}
+					if err := preserveUnprovenPrune(tx, event, k); err != nil {
 						return err
 					}
 					quarantined++
 				} else {
+					if err := capturePruneRollupProof(tx, event, k, proofCache); err != nil {
+						return err
+					}
 					if err := removeClientEventIndex(tx, k, data); err != nil {
 						return err
 					}
@@ -583,6 +752,9 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 						return err
 					}
 					if err := writeUsageReceipt(tx, k, digest); err != nil {
+						return err
+					}
+					if err := writeReceiptOwner(tx, k, digest, event, data); err != nil {
 						return err
 					}
 				}

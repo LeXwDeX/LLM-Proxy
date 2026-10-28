@@ -181,7 +181,10 @@ func isSuccessStatus(code int) bool {
 // bumpAgg performs read-modify-write accumulation for one event in the agg bucket.
 // MUST be called inside a write transaction.
 func bumpAgg(tx *bolt.Tx, evt usage.Event) error {
-	b := tx.Bucket([]byte(BucketUsageAggHourly))
+	return bumpAggBucket(tx.Bucket([]byte(BucketUsageAggHourly)), evt)
+}
+
+func bumpAggBucket(b *bolt.Bucket, evt usage.Event) error {
 	if b == nil {
 		return fmt.Errorf("agg bucket missing")
 	}
@@ -195,31 +198,7 @@ func bumpAgg(tx *bolt.Tx, evt usage.Event) error {
 			return fmt.Errorf("decode agg cell: %w", err)
 		}
 	}
-	cell.RecordCount = cell.recordCount() + 1
-	cell.addPriceCoverage(evt)
-	cell.Requests += usage.RequestWeight(evt)
-	cell.addNonBillable(evt)
-	if isSuccessStatus(evt.StatusCode) {
-		cell.Success += usage.RequestWeight(evt)
-	}
-	cell.InputTokens += evt.InputTokens
-	cell.OutputTokens += evt.OutputTokens
-	cell.CachedTokens += evt.CachedTokens
-	if evt.UsageStatus == usage.UsageStatusIncomplete || evt.UsageStatus == usage.UsageStatusConflict {
-		cell.IncompleteUsageCount++
-	}
-	if evt.CostIncomplete {
-		cell.IncompleteCostCount++
-	}
-	cell.CacheCreationTokens += evt.CacheCreationTokens
-	cell.ExplicitCacheReadTokens += evt.ExplicitCacheReadTokens
-	cell.ReasoningTokens += evt.ReasoningTokens
-	cell.CacheCreation5mTokens += evt.CacheCreation5mTokens
-	cell.CacheCreation1hTokens += evt.CacheCreation1hTokens
-	cell.ToolUsePromptTokens += evt.ToolUsePromptTokens
-	cell.ImageInputTokens += evt.ImageInputTokens
-	cell.CachedImageInputTokens += evt.CachedImageInputTokens
-	cell.ImageOutputTokens += evt.ImageOutputTokens
+	accumulateAggCell(&cell, evt)
 
 	data, err := json.Marshal(cell)
 	if err != nil {
@@ -299,7 +278,10 @@ func quotaAggKey(t time.Time, client, target, model string) []byte {
 }
 
 func bumpQuotaAgg(tx *bolt.Tx, evt usage.Event) error {
-	b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
+	return bumpQuotaAggBucket(tx.Bucket([]byte(BucketQuotaUsageAggHourly)), evt)
+}
+
+func bumpQuotaAggBucket(b *bolt.Bucket, evt usage.Event) error {
 	if b == nil {
 		return fmt.Errorf("quota agg bucket missing")
 	}
@@ -310,6 +292,15 @@ func bumpQuotaAgg(tx *bolt.Tx, evt usage.Event) error {
 			return fmt.Errorf("decode quota agg cell %q: %w", key, err)
 		}
 	}
+	accumulateAggCell(&cell, evt)
+	data, err := json.Marshal(cell)
+	if err != nil {
+		return err
+	}
+	return b.Put(key, data)
+}
+
+func accumulateAggCell(cell *AggCell, evt usage.Event) {
 	cell.RecordCount = cell.recordCount() + 1
 	cell.addPriceCoverage(evt)
 	cell.Requests += usage.RequestWeight(evt)
@@ -335,11 +326,6 @@ func bumpQuotaAgg(tx *bolt.Tx, evt usage.Event) error {
 	cell.ImageInputTokens += evt.ImageInputTokens
 	cell.CachedImageInputTokens += evt.CachedImageInputTokens
 	cell.ImageOutputTokens += evt.ImageOutputTokens
-	data, err := json.Marshal(cell)
-	if err != nil {
-		return err
-	}
-	return b.Put(key, data)
 }
 
 // SumQuotaByClientRange returns usage grouped by actual target and upstream model.
@@ -350,68 +336,75 @@ func (s *UsageStore) SumQuotaByClientRange(client string, from, to time.Time) (m
 		return result, nil
 	}
 	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
-		if b == nil {
-			return nil
+		if err := checkUnresolvedUsage(tx, client, from, to); err != nil {
+			return err
 		}
-		c := b.Cursor()
-		end := toHour + "}"
-		for k, v := c.Seek([]byte(fromHour)); k != nil && string(k) <= end; k, v = c.Next() {
-			p := strings.SplitN(string(k), "|", 4)
-			if len(p) != 4 || p[1] != quotaKeyEncode(strings.TrimSpace(client)) {
-				continue
+		filter := usage.Filter{ClientName: client}
+		if err := checkDirectQuotaEvidence(tx, filter, from, to, nil, nil); err != nil {
+			return err
+		}
+		if err := checkMissingFreshRoots(tx, filter, from, to); err != nil {
+			return err
+		}
+		b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
+		if b != nil {
+			c := b.Cursor()
+			end := toHour + "}"
+			for k, v := c.Seek([]byte(fromHour)); k != nil && string(k) <= end; k, v = c.Next() {
+				p := strings.SplitN(string(k), "|", 4)
+				if len(p) != 4 || p[1] != quotaKeyEncode(strings.TrimSpace(client)) {
+					continue
+				}
+				var cell AggCell
+				if json.Unmarshal(v, &cell) != nil {
+					return fmt.Errorf("%w: invalid quota aggregation", ErrUsageHistoryIncomplete)
+				}
+				t := result[p[2]+":"+p[3]]
+				t.InputTokens += cell.InputTokens
+				t.OutputTokens += cell.OutputTokens
+				t.CachedTokens += cell.CachedTokens
+				t.CacheCreationTokens += cell.CacheCreationTokens
+				t.ExplicitCacheReadTokens += cell.ExplicitCacheReadTokens
+				t.ReasoningTokens += cell.ReasoningTokens
+				t.CacheCreation5mTokens += cell.CacheCreation5mTokens
+				t.CacheCreation1hTokens += cell.CacheCreation1hTokens
+				t.ToolUsePromptTokens += cell.ToolUsePromptTokens
+				t.ImageInputTokens += cell.ImageInputTokens
+				t.CachedImageInputTokens += cell.CachedImageInputTokens
+				t.ImageOutputTokens += cell.ImageOutputTokens
+				result[p[2]+":"+p[3]] = t
 			}
-			var cell AggCell
-			if json.Unmarshal(v, &cell) != nil {
-				continue
+		}
+		if len(result) == 0 {
+			legacy, err := sumByClientRangeTx(tx, strings.TrimSpace(client), from, to)
+			if err != nil {
+				return err
 			}
-			t := result[p[2]+":"+p[3]]
-			t.InputTokens += cell.InputTokens
-			t.OutputTokens += cell.OutputTokens
-			t.CachedTokens += cell.CachedTokens
-			t.CacheCreationTokens += cell.CacheCreationTokens
-			t.ExplicitCacheReadTokens += cell.ExplicitCacheReadTokens
-			t.ReasoningTokens += cell.ReasoningTokens
-			t.CacheCreation5mTokens += cell.CacheCreation5mTokens
-			t.CacheCreation1hTokens += cell.CacheCreation1hTokens
-			t.ToolUsePromptTokens += cell.ToolUsePromptTokens
-			t.ImageInputTokens += cell.ImageInputTokens
-			t.CachedImageInputTokens += cell.CachedImageInputTokens
-			t.ImageOutputTokens += cell.ImageOutputTokens
-			result[p[2]+":"+p[3]] = t
+			for key, totals := range legacy {
+				_, model := splitLegacyQuotaKey(key)
+				groupKey := ":" + quotaKeyEncode(model)
+				t := result[groupKey]
+				t.InputTokens += totals.InputTokens
+				t.OutputTokens += totals.OutputTokens
+				t.CachedTokens += totals.CachedTokens
+				t.CacheCreationTokens += totals.CacheCreationTokens
+				t.ExplicitCacheReadTokens += totals.ExplicitCacheReadTokens
+				t.ReasoningTokens += totals.ReasoningTokens
+				t.CacheCreation5mTokens += totals.CacheCreation5mTokens
+				t.CacheCreation1hTokens += totals.CacheCreation1hTokens
+				t.ToolUsePromptTokens += totals.ToolUsePromptTokens
+				t.ImageInputTokens += totals.ImageInputTokens
+				t.CachedImageInputTokens += totals.CachedImageInputTokens
+				t.ImageOutputTokens += totals.ImageOutputTokens
+				result[groupKey] = t
+			}
 		}
 		return nil
 	})
-	if err != nil || len(result) != 0 {
-		return result, err
-	}
-
-	// Databases created before the target-aware aggregation was introduced may
-	// have an empty quota bucket until startup backfill runs. Preserve their
-	// personal-quota accounting by treating legacy cells as an unknown target.
-	legacy, err := s.SumByClientRange(client, from, to)
 	if err != nil {
-		return result, err
+		return nil, err
 	}
-	for key, totals := range legacy {
-		_, model := splitLegacyQuotaKey(key)
-		groupKey := ":" + quotaKeyEncode(model)
-		t := result[groupKey]
-		t.InputTokens += totals.InputTokens
-		t.OutputTokens += totals.OutputTokens
-		t.CachedTokens += totals.CachedTokens
-		t.CacheCreationTokens += totals.CacheCreationTokens
-		t.ExplicitCacheReadTokens += totals.ExplicitCacheReadTokens
-		t.ReasoningTokens += totals.ReasoningTokens
-		t.CacheCreation5mTokens += totals.CacheCreation5mTokens
-		t.CacheCreation1hTokens += totals.CacheCreation1hTokens
-		t.ToolUsePromptTokens += totals.ToolUsePromptTokens
-		t.ImageInputTokens += totals.ImageInputTokens
-		t.CachedImageInputTokens += totals.CachedImageInputTokens
-		t.ImageOutputTokens += totals.ImageOutputTokens
-		result[groupKey] = t
-	}
-	return result, err
+	return result, nil
 }
 
 func splitLegacyQuotaKey(key string) (string, string) {
@@ -597,6 +590,9 @@ func scanUsageEventBatches(db *bolt.DB, fn func([]usage.Event) error) error {
 				if err := json.Unmarshal(v, &evt); err != nil {
 					continue
 				}
+				if _, ambiguous := backfillRawScope(v); ambiguous {
+					continue
+				}
 				batch = append(batch, evt)
 			}
 			exhausted = k == nil
@@ -624,6 +620,10 @@ func scanUsageEventBatches(db *bolt.DB, fn func([]usage.Event) error) error {
 // However, to avoid double-counting (an event written AFTER backfill marks the cell
 // but BEFORE we commit), backfill happens BEFORE the proxy starts accepting traffic.
 func BackfillUsageAgg(db *bolt.DB) error {
+	return backfillUsageAgg(db, nil)
+}
+
+func backfillUsageAgg(db *bolt.DB, afterBatch func(int64) error) error {
 	// Already done?
 	var done bool
 	err := db.View(func(tx *bolt.Tx) error {
@@ -643,17 +643,13 @@ func BackfillUsageAgg(db *bolt.DB) error {
 		return nil
 	}
 
-	// P11 幂等保障：完成标记与数据写入非原子（分批多事务 flush 后才写 meta）。
-	// 若上次进程在 flush 完成后、标记落盘前崩溃，重启会全量重跑，而 bumpAgg
-	// 是累加语义 → 历史小时格全部翻倍。因此重建前先清空 agg bucket：重跑即
-	// 从零重建，天然幂等。backfill 在代理接流前执行，清空无并发风险。
+	// Keep the original source intact until the complete staged rebuild commits.
+	var revision uint64
+	var sourceDigest [32]byte
+	var token string
 	err = db.Update(func(tx *bolt.Tx) error {
-		if tx.Bucket([]byte(BucketUsageAggHourly)) != nil {
-			if err := tx.DeleteBucket([]byte(BucketUsageAggHourly)); err != nil {
-				return err
-			}
-		}
-		_, err := tx.CreateBucketIfNotExists([]byte(BucketUsageAggHourly))
+		var err error
+		revision, sourceDigest, token, err = prepareUsageBackfill(tx, BucketUsageAggHourly)
 		return err
 	})
 	if err != nil {
@@ -665,8 +661,12 @@ func BackfillUsageAgg(db *bolt.DB) error {
 	var processed int64
 	err = scanUsageEventBatches(db, func(batch []usage.Event) error {
 		err := db.Update(func(tx *bolt.Tx) error {
+			stage, err := backfillStage(tx, BucketUsageAggHourly, token)
+			if err != nil {
+				return err
+			}
 			for _, evt := range batch {
-				if err := bumpAgg(tx, evt); err != nil {
+				if err := bumpAggBucket(stage, evt); err != nil {
 					return err
 				}
 			}
@@ -676,20 +676,17 @@ func BackfillUsageAgg(db *bolt.DB) error {
 			return err
 		}
 		processed += int64(len(batch))
+		if afterBatch != nil {
+			return afterBatch(processed)
+		}
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("backfill agg batches: %w", err)
 	}
 
-	// Mark done.
 	err = db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(BucketMeta))
-		marker, _ := json.Marshal(map[string]any{
-			"built_at":  time.Now().UTC().Format(time.RFC3339),
-			"processed": processed,
-		})
-		return b.Put([]byte(usageAggBuiltMetaKey), marker)
+		return finishUsageBackfill(tx, BucketUsageAggHourly, usageAggBuiltMetaKey, token, revision, sourceDigest, processed)
 	})
 	if err != nil {
 		return fmt.Errorf("write agg meta: %w", err)
@@ -700,6 +697,10 @@ func BackfillUsageAgg(db *bolt.DB) error {
 
 // BackfillQuotaUsageAgg rebuilds the target-aware quota aggregation once.
 func BackfillQuotaUsageAgg(db *bolt.DB) error {
+	return backfillQuotaUsageAgg(db, nil)
+}
+
+func backfillQuotaUsageAgg(db *bolt.DB, afterBatch func(int64) error) error {
 	var done bool
 	err := db.View(func(tx *bolt.Tx) error {
 		if b := tx.Bucket([]byte(BucketMeta)); b != nil {
@@ -714,15 +715,12 @@ func BackfillQuotaUsageAgg(db *bolt.DB) error {
 		return nil
 	}
 
-	// A retry after a partial run must rebuild from zero because batches and
-	// the completion marker are committed in separate transactions.
+	var revision uint64
+	var sourceDigest [32]byte
+	var token string
 	if err := db.Update(func(tx *bolt.Tx) error {
-		if tx.Bucket([]byte(BucketQuotaUsageAggHourly)) != nil {
-			if err := tx.DeleteBucket([]byte(BucketQuotaUsageAggHourly)); err != nil {
-				return err
-			}
-		}
-		_, err := tx.CreateBucketIfNotExists([]byte(BucketQuotaUsageAggHourly))
+		var err error
+		revision, sourceDigest, token, err = prepareUsageBackfill(tx, BucketQuotaUsageAggHourly)
 		return err
 	}); err != nil {
 		return fmt.Errorf("reset quota agg bucket before backfill: %w", err)
@@ -731,8 +729,12 @@ func BackfillQuotaUsageAgg(db *bolt.DB) error {
 	var processed int64
 	err = scanUsageEventBatches(db, func(batch []usage.Event) error {
 		if err := db.Update(func(tx *bolt.Tx) error {
+			stage, err := backfillStage(tx, BucketQuotaUsageAggHourly, token)
+			if err != nil {
+				return err
+			}
 			for _, evt := range batch {
-				if err := bumpQuotaAgg(tx, evt); err != nil {
+				if err := bumpQuotaAggBucket(stage, evt); err != nil {
 					return err
 				}
 			}
@@ -741,6 +743,9 @@ func BackfillQuotaUsageAgg(db *bolt.DB) error {
 			return err
 		}
 		processed += int64(len(batch))
+		if afterBatch != nil {
+			return afterBatch(processed)
+		}
 		return nil
 	})
 	if err != nil {
@@ -748,18 +753,7 @@ func BackfillQuotaUsageAgg(db *bolt.DB) error {
 	}
 
 	return db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(BucketMeta))
-		if b == nil {
-			return fmt.Errorf("meta bucket missing")
-		}
-		marker, err := json.Marshal(map[string]any{
-			"built_at":  time.Now().UTC().Format(time.RFC3339),
-			"processed": processed,
-		})
-		if err != nil {
-			return err
-		}
-		return b.Put([]byte(quotaUsageAggBuiltMetaKey), marker)
+		return finishUsageBackfill(tx, BucketQuotaUsageAggHourly, quotaUsageAggBuiltMetaKey, token, revision, sourceDigest, processed)
 	})
 }
 
@@ -887,6 +881,15 @@ func (s *UsageStore) SumTargetModelRange(filter usage.Filter) ([]TargetModelCell
 		return result, nil
 	}
 	err := s.db.View(func(tx *bolt.Tx) error {
+		if err := checkUnresolvedUsageInScope(tx, filter.ClientName, from, to, filter.Model, nil); err != nil {
+			return err
+		}
+		if err := checkDirectQuotaEvidence(tx, filter, from, to, nil, nil); err != nil {
+			return err
+		}
+		if err := checkMissingFreshRoots(tx, filter, from, to); err != nil {
+			return err
+		}
 		b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
 		if b == nil {
 			return nil
@@ -911,7 +914,10 @@ func (s *UsageStore) SumTargetModelRange(filter usage.Filter) ([]TargetModelCell
 		}
 		return nil
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // AggregateModelGroups resolves target ownership at query time and aggregates
@@ -1201,30 +1207,44 @@ func (s *UsageStore) SumByClientRange(client string, from, to time.Time) (map[st
 	}
 
 	err := s.db.View(func(tx *bolt.Tx) error {
-		return aggIter(tx, from, to, func(_ time.Time, et, kClient, model, _ string, cell AggCell) error {
-			if kClient != client {
-				return nil
-			}
-			groupKey := et + ":" + model
-			totals := result[groupKey]
-			totals.InputTokens += cell.InputTokens
-			totals.OutputTokens += cell.OutputTokens
-			totals.CachedTokens += cell.CachedTokens
-			totals.CacheCreationTokens += cell.CacheCreationTokens
-			totals.ExplicitCacheReadTokens += cell.ExplicitCacheReadTokens
-			totals.ReasoningTokens += cell.ReasoningTokens
-			totals.CacheCreation5mTokens += cell.CacheCreation5mTokens
-			totals.CacheCreation1hTokens += cell.CacheCreation1hTokens
-			totals.ToolUsePromptTokens += cell.ToolUsePromptTokens
-			totals.ImageInputTokens += cell.ImageInputTokens
-			totals.CachedImageInputTokens += cell.CachedImageInputTokens
-			totals.ImageOutputTokens += cell.ImageOutputTokens
-			result[groupKey] = totals
-			return nil
-		})
+		var err error
+		result, err = sumByClientRangeTx(tx, client, from, to)
+		return err
 	})
 	if err != nil {
 		return map[string]UsageTotals{}, err
+	}
+	return result, nil
+}
+
+func sumByClientRangeTx(tx *bolt.Tx, client string, from, to time.Time) (map[string]UsageTotals, error) {
+	result := make(map[string]UsageTotals)
+	if err := checkUnresolvedUsage(tx, client, from, to); err != nil {
+		return nil, err
+	}
+	err := aggIter(tx, from, to, func(_ time.Time, et, kClient, model, _ string, cell AggCell) error {
+		if kClient != client {
+			return nil
+		}
+		groupKey := et + ":" + model
+		totals := result[groupKey]
+		totals.InputTokens += cell.InputTokens
+		totals.OutputTokens += cell.OutputTokens
+		totals.CachedTokens += cell.CachedTokens
+		totals.CacheCreationTokens += cell.CacheCreationTokens
+		totals.ExplicitCacheReadTokens += cell.ExplicitCacheReadTokens
+		totals.ReasoningTokens += cell.ReasoningTokens
+		totals.CacheCreation5mTokens += cell.CacheCreation5mTokens
+		totals.CacheCreation1hTokens += cell.CacheCreation1hTokens
+		totals.ToolUsePromptTokens += cell.ToolUsePromptTokens
+		totals.ImageInputTokens += cell.ImageInputTokens
+		totals.CachedImageInputTokens += cell.CachedImageInputTokens
+		totals.ImageOutputTokens += cell.ImageOutputTokens
+		result[groupKey] = totals
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -1243,6 +1263,9 @@ func (s *UsageStore) SumByClientHourlyTargets(client string, from, to time.Time)
 	}
 
 	err := s.db.View(func(tx *bolt.Tx) error {
+		if err := checkUnresolvedUsage(tx, client, from, to); err != nil {
+			return err
+		}
 		return aggIter(tx, from, to, func(hour time.Time, et, kClient, model, target string, cell AggCell) error {
 			if kClient != client {
 				return nil
@@ -1292,6 +1315,9 @@ func (s *UsageStore) SumByClientTargetRange(client string, from, to time.Time) (
 	}
 
 	err := s.db.View(func(tx *bolt.Tx) error {
+		if err := checkUnresolvedUsage(tx, client, from, to); err != nil {
+			return err
+		}
 		return aggIter(tx, from, to, func(_ time.Time, et, kClient, model, target string, cell AggCell) error {
 			if kClient != client {
 				return nil

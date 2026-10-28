@@ -1,24 +1,40 @@
-## 说明 / Summary
+## 原因
 
-<!-- 改了什么、为什么。What changed and why. -->
+<!-- 说明为什么需要此变更。 -->
 
-关联 Issue / Linked issues: Closes #
+## 变更
 
-## TDD 证据 / TDD evidence
+<!-- 说明改了什么，以及变更范围。 -->
+
+<!-- 另起一行填写关联 Issue；需要自动关闭时，将 Closes 和实际 Issue 编号写在同一行。 -->
+
+## 证据
+
+### TDD 证据
 
 <!--
-行为变更：列出先失败的测试（命令与失败输出摘要），以及修复后同一测试通过。
+行为变更：列出先失败的测试（命令与失败输出摘要），以及修复后同一测试通过的证据。
 保持行为不变的重构或仅文档改动：写明不适用的原因。
-Behavior change: the test that failed first (command and failure excerpt) and the same test passing after the fix.
-Behavior-preserving refactor or docs-only change: say why this does not apply.
 -->
 
-- 先失败 / Failing first:
-- 修复后通过 / Passing after fix:
+- 先失败：
+- 修复后通过：
 
-## 已跑门禁 / Gates run
+### 未验证范围
 
-<!-- 勾选本地实际执行过的检查；未执行的不要勾选。Tick only what you actually ran locally. -->
+<!-- 说明没有运行或无法在本地验证的部分，例如真实上游和部署环境。 -->
+
+### 影响
+
+- 计费或额度：否
+- 协议、路径或用量解析：否
+- 兼容性（API、配置、存储格式）：否
+
+<!-- 如有影响，说明影响面、迁移与验证方式。 -->
+
+## 检查清单
+
+<!-- 只勾选本地实际执行过的检查。 -->
 
 - [ ] `make test`
 - [ ] `go vet ./...` + `go vet -tags=e2e ./test/e2e/`
@@ -27,17 +43,6 @@ Behavior-preserving refactor or docs-only change: say why this does not apply.
 - [ ] `make e2e`
 - [ ] `make integration`
 - [ ] `node scripts/testing/admin_ui_test.cjs`
-- [ ] Python 脚本单测 / Python script tests
+- [ ] `(cd internal/admin/ui && node --test)`
+- [ ] Python 脚本单测
 - [ ] `git diff --check`
-
-## 未验证范围 / Not verified
-
-<!-- 没有运行或无法在本地验证的部分（如真实上游、部署环境）。Anything not run or not verifiable locally (e.g. real upstreams, deployments). -->
-
-## 影响 / Impact
-
-- 计费或额度 / Billing or quota: 否 / No
-- 协议、路径或用量解析 / Protocols, paths or usage parsing: 否 / No
-- 兼容性（API、配置、存储格式）/ Compatibility (API, config, storage format): 否 / No
-
-<!-- 如有影响，说明影响面、迁移与验证方式。If any is affected, describe the scope, migration and verification. -->

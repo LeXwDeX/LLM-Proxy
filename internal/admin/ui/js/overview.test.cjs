@@ -79,7 +79,7 @@ function rangeButton(key) {
 function harness({sortButtons = [], infoButtons = [], rangeButtons = [], barButtons = [], storage} = {}) {
   const elements = new Map(); const get = id => { if (!elements.has(id)) elements.set(id, new Element(id === "activityClientsBody" ? "tbody" : "div")); return elements.get(id); };
   const doc = {getElementById: get, querySelectorAll: selector => selector === "[data-activity-sort]" ? sortButtons : selector === "[data-activity-info]" ? infoButtons : selector === "[data-overview-range]" ? rangeButtons : selector === "[data-overview-bar]" ? barButtons : [], documentElement: {clientWidth: 390, clientHeight: 844}, createElement: tag => new Element(tag), listeners: {}, hidden: false, activeElement: null, addEventListener(name, fn) { this.listeners[name] = fn; }};
-  let module; let answer = activity(); let overview = {}; let metrics = {}; let aggregate = aggregateResult(); let aggregateHandler; let handler; const calls = []; const timers = new Map(); let nextTimer = 0; let now = Date.now();
+  let module; let answer = activity(); let overview = {}; let metrics = {}; let aggregate = aggregateResult(); let aggregateHandler; let handler; const calls = []; const timers = new Map(); let nextTimer = 0; let now = Date.parse("2026-10-14T03:00:35Z");
   class TestDate extends Date { static now() { return now; } }
   async function advance(ms) {
     for (let i = 0; i < 12; i++) await Promise.resolve();
@@ -128,6 +128,113 @@ test("activity failures retain data and timestamp; first failure stays unavailab
   assert.match(h.get("activityStatus").textContent, /更新失败.*上次/);
   const empty = harness(); empty.setHandler(() => Promise.reject(Error("offline"))); await empty.module.loadOverview();
   assert.equal(empty.get("activityActiveRequests").textContent, "不可用");
+});
+test("live summary retains stale activity through failures, older or unchanged samples, and recovers only with a fresh sample", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  const time = h.get("activityUpdatedAt").textContent;
+  let result = Promise.reject(new Error("offline"));
+  h.setHandler(url => {
+    if (url.endsWith("activity")) return result;
+    if (url.endsWith("overview")) return Promise.resolve(opsOverview(zeroRequestCounters));
+    if (url.endsWith("/admin/metrics")) return Promise.resolve(completeMetrics());
+    return Promise.resolve(aggregateResult());
+  });
+  await h.module.loadOverview(true);
+  assert.equal(h.get("activityUpdatedAt").textContent, time);
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.match(h.get("chainStatus").textContent, /实时活动.*更新失败.*上次/);
+
+  result = Promise.resolve(activity({generated_at: "2026-10-14T03:00:29Z"}));
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.match(h.get("chainStatus").textContent, /实时活动.*采样.*上次/);
+  assert.equal(h.get("activityUpdatedAt").textContent, time);
+
+  result = Promise.resolve(activity());
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "partial", "the retained sample is not a new sample");
+
+  result = Promise.resolve(activity({generated_at: "2026-10-14T03:00:31Z", runtime: {...activity().runtime, active_clients: 5}}));
+  await h.module.loadOverview(true);
+  assert.match(h.get("chainClients").textContent, /活跃 5/);
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  assert.equal(h.get("chainStatus").textContent, "实时状态已加载");
+
+  h.setNow("2026-10-14T03:01:00Z");
+  result = Promise.resolve(activity({generated_at: "2026-10-14T03:00:40Z"}));
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "partial", "a newer response can still be stale");
+  assert.match(h.get("chainStatus").textContent, /实时活动.*延迟/);
+  result = Promise.resolve(activity({generated_at: "2026-10-14T03:00:59Z"}));
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+});
+test("an older activity response alone marks a previously ready live summary stale", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  h.setActivity(activity({generated_at: "2026-10-14T03:00:29Z"}));
+  await h.module.loadOverview();
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.match(h.get("chainStatus").textContent, /实时活动.*采样.*上次/);
+});
+test("first activity failure remains visible in the live summary until a fresh retry", async () => {
+  const h = harness(); let failed = true;
+  h.setHandler(url => {
+    if (url.endsWith("activity")) return failed ? Promise.reject(new Error("offline")) : Promise.resolve(activity());
+    if (url.endsWith("overview")) return Promise.resolve(opsOverview(zeroRequestCounters));
+    if (url.endsWith("/admin/metrics")) return Promise.resolve(completeMetrics());
+    return Promise.resolve(aggregateResult());
+  });
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.match(h.get("chainStatus").textContent, /实时活动.*不可用/);
+  assert.equal(h.get("activityActiveRequests").textContent, "不可用");
+  failed = false;
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+});
+test("returning to an old activity snapshot marks the live summary stale before pending requests finish", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  h.setMetrics(completeMetrics());
+  h.module.startOverviewAutoRefresh();
+  await h.module.loadOverview();
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  h.doc.hidden = true; h.doc.listeners.visibilitychange();
+  h.setNow("2026-10-14T04:00:00Z");
+  h.setHandler(() => new Promise(() => {}));
+  h.doc.hidden = false; h.doc.listeners.visibilitychange();
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.match(h.get("chainStatus").textContent, /实时活动.*延迟/);
+  assert.match(h.get("activityStatus").textContent, /数据更新延迟/);
+  assert.equal(h.get("activityActiveRequests").textContent, "2");
+  h.module.stopOverviewAutoRefresh();
+});
+test("an in-flight refresh cannot leave an expired sample ready, and a fresh sample resets the deadline", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview(true);
+  await h.advance(5000);
+  h.setActivity(activity({generated_at: "2026-10-14T03:00:40Z"}));
+  await h.module.loadOverview();
+  await h.advance(5001);
+  assert.equal(h.get("chainSummary").dataset.state, "ready", "the previous sample's deadline is cancelled");
+  h.setHandler(url => url.endsWith("activity") ? new Promise(() => {}) : Promise.resolve({}));
+  const pending = h.module.loadOverview();
+  await h.advance(10000);
+  assert.equal(h.get("chainSummary").dataset.state, "partial", "a hanging request cannot keep stale data ready");
+  assert.match(h.get("chainStatus").textContent, /实时活动.*延迟/);
+  h.module.stopOverviewAutoRefresh();
+  await pending;
+  assert.equal(h.timers.size, 0);
 });
 test("client selection changes both charts only; rows, search, and bucket focus survive refresh", async () => {
   const h = harness(); await h.module.loadOverview();
@@ -264,7 +371,9 @@ test("every overview chart draws bars and token charts stack output on input", a
 
 
 test("hung activity expires, preserves its last sample and recovers without overlapping polls", async () => {
-  const h = harness(); await h.module.loadOverview(); const timestamp = h.get("activityUpdatedAt").textContent;
+  const h = harness(); h.setOverview(opsOverview(zeroRequestCounters)); h.setMetrics(completeMetrics());
+  await h.module.loadOverview(); const timestamp = h.get("activityUpdatedAt").textContent;
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
   h.setHandler(url => url.endsWith("activity") ? new Promise(() => {}) : Promise.resolve({}));
   h.module.startOverviewAutoRefresh(); const hung = h.module.loadOverview();
   const request = h.calls.filter(c => c.url.endsWith("activity")).at(-1);
@@ -275,10 +384,13 @@ test("hung activity expires, preserves its last sample and recovers without over
   assert.equal(request.opts.signal.aborted, true); assert.equal(h.get("refreshOverviewBtn").disabled, false);
   assert.equal(h.get("page-overview").attrs["aria-busy"], "false");
   assert.equal(h.get("activityUpdatedAt").textContent, timestamp); assert.equal(h.get("activityTotalTokens").textContent, "42");
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.match(h.get("chainStatus").textContent, /实时活动.*超时/);
   assert.match(h.get("activityStatus").textContent, /超时.*上次/); await hung;
-  h.setHandler(() => Promise.resolve(activity({runtime: {...activity().runtime, active_requests: 7}})));
+  h.setHandler(() => Promise.resolve(activity({generated_at: "2026-10-14T03:00:51Z", runtime: {...activity().runtime, active_requests: 7}})));
   await h.advance(5000);
   assert.equal(h.get("activityActiveRequests").textContent, "7"); assert.equal(h.get("refreshOverviewBtn").disabled, false);
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
   assert.equal(h.calls.filter(c => c.url.endsWith("activity")).length, 3);
   assert.notEqual(h.get("activityStatus").dataset.state, "error"); h.module.stopOverviewAutoRefresh();
 });
@@ -287,9 +399,10 @@ test("manual refresh works after timeout; cancelling hidden requests reports no 
   h.setHandler(url => url.endsWith("activity") ? new Promise(() => {}) : Promise.resolve({}));
   const hung = h.module.loadOverview(); await h.advance(12000);
   assert.equal(h.get("refreshOverviewBtn").disabled, false); await hung;
-  h.setHandler(() => Promise.resolve(activity()));
+  h.setHandler(() => Promise.resolve(activity({generated_at: "2026-10-14T03:00:46Z"})));
   await h.get("refreshOverviewBtn").fire("click"); await h.module.loadOverview();
   assert.notEqual(h.get("activityStatus").dataset.state, "error");
+  assert.equal(h.get("activityUpdatedAt").attrs.datetime, "2026-10-14T03:00:46Z");
   h.setHandler(() => new Promise(() => {})); const cancelled = h.module.loadOverview(true);
   h.doc.hidden = true; h.doc.listeners.visibilitychange(); await h.advance(12000); await cancelled;
   assert.notEqual(h.get("activityStatus").dataset.state, "error"); assert.equal(h.timers.size, 0);
@@ -346,7 +459,7 @@ test("a transport response arriving after timeout cannot overwrite the recovered
   const h = harness(); await h.module.loadOverview(); let resolve;
   h.setHandler(url => url.endsWith("activity") ? new Promise(r => resolve = r) : Promise.resolve({}));
   const hung = h.module.loadOverview(); await h.advance(12000); await hung;
-  h.setHandler(() => Promise.resolve(activity({runtime: {...activity().runtime, active_requests: 7}})));
+  h.setHandler(() => Promise.resolve(activity({generated_at: "2026-10-14T03:00:46Z", runtime: {...activity().runtime, active_requests: 7}})));
   await h.module.loadOverview(); resolve(activity());
   for (let i = 0; i < 12; i++) await Promise.resolve();
   assert.equal(h.get("activityActiveRequests").textContent, "7");
@@ -599,6 +712,210 @@ test("live status cards summarize available values and mark missing sources", as
   h.setMetrics(null);
   await h.module.loadOverview(true);
   assert.match(h.get("chainStatus").textContent, /部分实时状态不可用/);
+});
+
+function opsOverview(requests) {
+  return {
+    client_count: 1,
+    targets: [{Name: "healthy", Phase: "ready", TotalKeys: 1, ActiveKeys: 1, RateLimitedKeys: 0}],
+    recent_audit: [],
+    ...(requests === undefined ? {} : {requests}),
+  };
+}
+const zeroRequestCounters = {usage_record_failures: 0, usage_client_gone_no_usage: 0, usage_upstream_interrupted_no_usage: 0, request_stats_record_failures: 0};
+
+test("live status ops notice lists only non-zero backlog, budget and process-lifetime counters", async () => {
+  const h = harness();
+  h.setOverview(opsOverview({usage_record_failures: 2, usage_client_gone_no_usage: 3, usage_upstream_interrupted_no_usage: 4, request_stats_record_failures: 5}));
+  h.setMetrics(completeMetrics({
+    persistence: {usage_async_pending: 7, usage_async_deferred: 8, request_stats_dropped: 9},
+    observation_budget: {observation_budget_exhausted: {br: 1, zstd: 2}},
+  }));
+  await h.module.loadOverview();
+  const notice = h.get("chainOpsNotice");
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent, [
+    "用量写入积压 7 条",
+    "自启动累计 8 条用量因写入队列满转入后台重放",
+    "自启动累计 9 条请求完成统计因队列满丢弃",
+    "压缩响应观察预算拒绝（自启动累计 3 次；br 1 / zstd 2）",
+    "自启动累计 2 次用量写入失败",
+    "自启动累计 3 次客户端断开且未取得用量",
+    "自启动累计 4 次上游中断且未取得用量",
+    "自启动累计 5 次请求完成统计写入失败",
+  ].join(" · "));
+  assert.doesNotMatch(notice.textContent, /%|成功率|区间/, "process-lifetime counters are not a rate or a range figure");
+  // The notice never changes the live status line contract.
+  assert.equal(h.get("chainSummary").dataset.state, "ready");
+  assert.equal(h.get("chainStatus").textContent, "实时状态已加载");
+
+  // Only the non-zero items are listed.
+  h.setOverview(opsOverview({...zeroRequestCounters, usage_client_gone_no_usage: 6}));
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: 0, usage_async_deferred: 1, request_stats_dropped: 0}}));
+  await h.module.loadOverview(true);
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent, "自启动累计 1 条用量因写入队列满转入后台重放 · 自启动累计 6 次客户端断开且未取得用量");
+});
+
+test("individual compression rejection counters are labelled as cumulative since startup", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  for (const budget of [{br: 3, zstd: 0}, {br: 0, zstd: 5}, {br: 4}, {zstd: 6}]) {
+    h.setMetrics(completeMetrics({observation_budget: {observation_budget_exhausted: budget}}));
+    await h.module.loadOverview(true);
+    const notice = h.get("chainOpsNotice").textContent;
+    assert.match(notice, /压缩响应观察预算拒绝/);
+    assert.match(notice, /自启动累计/);
+    if (!("br" in budget) || !("zstd" in budget)) {
+      assert.match(notice, /总数不完整/);
+      assert.doesNotMatch(notice, /自启动累计 \d+ 次/);
+      if (!("br" in budget)) assert.doesNotMatch(notice, /br 0/);
+      if (!("zstd" in budget)) assert.doesNotMatch(notice, /zstd 0/);
+    } else assert.match(notice, new RegExp("自启动累计 " + (budget.br + budget.zstd) + " 次"));
+  }
+});
+
+test("unchanged ops notice does not rewrite its live-region text", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: 2, usage_async_deferred: 0, request_stats_dropped: 0}}));
+  await h.module.loadOverview(true);
+  const notice = h.get("chainOpsNotice");
+  let value = notice.textContent, writes = 0;
+  Object.defineProperty(notice, "textContent", {get() { return value; }, set(next) { writes++; value = next; }});
+  await h.module.loadOverview(true);
+  assert.equal(writes, 0, "unchanged data does not mutate the status text");
+  assert.equal(notice.hidden, false);
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: 3, usage_async_deferred: 0, request_stats_dropped: 0}}));
+  await h.module.loadOverview(true);
+  assert.equal(writes, 1, "a changed notice is still exposed");
+  assert.match(value, /积压 3 条/);
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview(true);
+  assert.equal(writes, 2);
+  assert.equal(value, "");
+  assert.equal(notice.hidden, true);
+});
+
+test("unchanged activity and live-summary statuses do not rewrite their live-region text", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview(true);
+  const statuses = [h.get("activityStatus"), h.get("chainStatus")];
+  const values = statuses.map(node => node.textContent), writes = [0, 0];
+  statuses.forEach((node, i) => Object.defineProperty(node, "textContent", {get() { return values[i]; }, set(next) { writes[i]++; values[i] = next; }}));
+  await h.module.loadOverview(true);
+  assert.deepEqual(writes, [0, 0], "unchanged data does not mutate either status");
+  const next = activity({generated_at: "2026-10-14T03:00:31Z"});
+  next.runtime.complete = true;
+  next.series = next.series.map(bucket => ({...bucket, partial: false}));
+  h.setActivity(next);
+  await h.module.loadOverview();
+  assert.deepEqual(writes, [1, 0]);
+  h.setHandler(url => url.endsWith("activity") ? Promise.reject(new Error("offline")) : Promise.resolve({}));
+  await h.module.loadOverview();
+  assert.deepEqual(writes, [2, 1], "a failure updates each changed status once");
+  assert.match(values[1], /实时活动.*更新失败/);
+  const old = activity({generated_at: "2026-10-14T03:00:29Z"});
+  h.setHandler(() => Promise.resolve(old));
+  await h.module.loadOverview();
+  assert.deepEqual(writes, [3, 2]);
+  await h.module.loadOverview();
+  assert.deepEqual(writes, [3, 2], "repeated older samples leave the same status text alone");
+});
+
+test("compression budget notice never fabricates an absent counter or a partial total", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  for (const [budget, known, missing, value] of [
+    [{br: 3}, "br", "zstd", 3],
+    [{zstd: 4}, "zstd", "br", 4],
+    [{br: 5, zstd: "invalid"}, "br", "zstd", 5],
+    [{br: null, zstd: 6}, "zstd", "br", 6],
+    [{br: 7, zstd: -1}, "br", "zstd", 7],
+    [{br: Infinity, zstd: 8}, "zstd", "br", 8],
+  ]) {
+    h.setMetrics(completeMetrics({observation_budget: {observation_budget_exhausted: budget}}));
+    await h.module.loadOverview(true);
+    const notice = h.get("chainOpsNotice");
+    assert.equal(notice.hidden, false);
+    assert.match(notice.textContent, new RegExp(known + " " + value));
+    assert.doesNotMatch(notice.textContent, new RegExp(missing + " 0"));
+    assert.doesNotMatch(notice.textContent, /自启动累计 \d+ 次/, "a known component is not the full total");
+    assert.equal(h.get("chainSummary").dataset.state, "partial");
+  }
+  h.setMetrics(completeMetrics({observation_budget: {observation_budget_exhausted: {br: 0}}}));
+  await h.module.loadOverview(true);
+  assert.equal(h.get("chainOpsNotice").hidden, true, "a zero component and unknown other component do not make a positive notice");
+});
+
+test("live status ops notice is hidden when every counter is zero", async () => {
+  const h = harness();
+  h.setOverview(opsOverview(zeroRequestCounters));
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview();
+  const notice = h.get("chainOpsNotice");
+  assert.equal(notice.hidden, true);
+  assert.equal(notice.textContent, "");
+  assert.equal(h.get("chainStatus").textContent, "实时状态已加载");
+
+  // A notice shown earlier disappears once the counters drain back to zero.
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: 4, usage_async_deferred: 0, request_stats_dropped: 0}}));
+  await h.module.loadOverview(true);
+  assert.equal(notice.hidden, false);
+  h.setMetrics(completeMetrics());
+  await h.module.loadOverview(true);
+  assert.equal(notice.hidden, true);
+  assert.equal(notice.textContent, "");
+});
+
+test("live status ops notice stays hidden without data and never fabricates zeros or errors", async () => {
+  const h = harness();
+  h.setOverview(opsOverview());
+  h.setMetrics(null);
+  await h.module.loadOverview();
+  const notice = h.get("chainOpsNotice");
+  assert.equal(notice.hidden, true);
+  assert.equal(notice.textContent, "");
+  assert.equal(h.get("chainSummary").dataset.state, "partial");
+  assert.equal(h.get("chainStatus").textContent, "部分实时状态不可用");
+
+  // Missing or malformed fields are skipped; the remaining valid ones still show.
+  h.setOverview(opsOverview({usage_record_failures: "3", usage_client_gone_no_usage: -1, request_stats_record_failures: 2}));
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: "5"}, observation_budget: {}}));
+  await h.module.loadOverview(true);
+  assert.equal(notice.hidden, false);
+  assert.equal(notice.textContent, "自启动累计 2 次请求完成统计写入失败");
+  assert.equal(h.get("chainStatus").textContent, "部分实时状态不可用");
+
+  // Metrics and history both unavailable: hidden, with the existing error line unchanged.
+  const empty = harness();
+  empty.setHandler(url => {
+    if (url.endsWith("overview")) return Promise.reject(new Error("offline"));
+    if (url.endsWith("activity")) return Promise.reject(new Error("offline"));
+    if (url.endsWith("/admin/metrics")) return Promise.reject(new Error("offline"));
+    return Promise.resolve({totals: {}});
+  });
+  await empty.module.loadOverview(true);
+  assert.equal(empty.get("chainOpsNotice").hidden, true);
+  assert.equal(empty.get("chainOpsNotice").textContent, "");
+  assert.equal(empty.get("chainSummary").dataset.state, "error");
+  assert.match(empty.get("chainStatus").textContent, /更新失败|不可用/);
+});
+
+test("live status ops notice is plain text and its element is a hidden status line", async () => {
+  const h = harness();
+  h.setOverview(opsOverview({...zeroRequestCounters, usage_record_failures: 1}));
+  h.setMetrics(completeMetrics({persistence: {usage_async_pending: '<img src=x onerror="1">', usage_async_deferred: 0, request_stats_dropped: 0}}));
+  await h.module.loadOverview();
+  const notice = h.get("chainOpsNotice");
+  assert.equal(notice.innerHTML, "", "rendered with textContent, never innerHTML");
+  assert.equal(notice.textContent, "自启动累计 1 次用量写入失败");
+  assert.doesNotMatch(notice.textContent, /</);
+  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+  const section = html.slice(html.indexOf('id="chainSummary"'), html.indexOf("</section>", html.indexOf('id="chainSummary"')));
+  assert.match(section, /id="chainStatus"[^>]*>[^<]*<\/p>\s*<p class="overview-status overview-ops-notice" id="chainOpsNotice" role="status" hidden><\/p>/);
 });
 
 test("activity polling refreshes the live status cards without another overview request", async () => {

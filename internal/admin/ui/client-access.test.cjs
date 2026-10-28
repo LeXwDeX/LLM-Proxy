@@ -20,9 +20,9 @@ function render(clients) {
   const document = {getElementById: () => tbody};
   const state = {clients, clientUsage: {}};
   const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-  const fn = new Function('document', 'state', 'esc', 'maskKey', 'totalTok', 'fmtNum', 'fmtMoney', 'poolDisplayName',
+  const fn = new Function('document', 'state', 'esc', 'maskKey', 'totalTok', 'fmtNum', 'fmtMoney', 'poolDisplayName', 'targetPoolsAvailable',
     source.slice(start, end) + '\nreturn renderClients;');
-  fn(document, state, esc, () => '***', () => 0, () => '0', () => '$0', name => name)();
+  fn(document, state, esc, () => '***', () => 0, () => '0', () => '$0', name => name, () => true)();
   return tbody.innerHTML;
 }
 

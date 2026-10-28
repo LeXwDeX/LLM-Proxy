@@ -3,8 +3,9 @@ const assert = require("node:assert/strict");
 const { createHarness } = require("../../../scripts/testing/admin_ui_test.cjs");
 
 async function main() {
-  const harness = createHarness();
+  const harness = createHarness({ routes: { "/admin/data/targets": { targets: [] }, "/admin/data/pools": { pools: [] } } });
   const app = await harness.run();
+  await app.modules.targets.loadTargets();
   // Model-specific billing must remain model-specific after a mapping is removed.
   app.state.targets = [{ name: "current", model_mappings: [{ upstream: "AvailableModel" }] }];
   const options = app.modules.quota.quotaModelOptions("current", "RemovedModel");

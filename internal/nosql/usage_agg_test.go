@@ -2,6 +2,7 @@ package nosql
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -282,11 +283,23 @@ func TestQuotaUsageAggBackfillSkipsInvalidEvents(t *testing.T) {
 		t.Fatalf("quota backfill: %v", err)
 	}
 	got, err := store.SumQuotaByClientRange("alice", now, now)
-	if err != nil {
-		t.Fatalf("sum quota usage: %v", err)
+	if len(got) != 0 || !errors.Is(err, ErrUsageHistoryIncomplete) || !errors.Is(err, ErrUsageAggregateSourceMissing) {
+		t.Fatalf("unknown raw owner must block activation, got %+v: %v", got, err)
 	}
-	if got["target:model"].InputTokens != 11 {
-		t.Errorf("invalid event blocked valid event: got %+v", got)
+	if err := db.View(func(tx *bolt.Tx) error {
+		var cell AggCell
+		if err := json.Unmarshal(tx.Bucket([]byte(BucketQuotaUsageAggHourly)).Get(quotaAggKey(now, "alice", "target", "model")), &cell); err != nil {
+			return err
+		}
+		if cell.InputTokens != 11 {
+			t.Errorf("valid raw event was not rebuilt: %+v", cell)
+		}
+		if got := tx.Bucket([]byte(BucketUsageEvents)).Get([]byte("2026-04-05T11:00:00Z_invalid")); string(got) != "not-json" {
+			t.Error("invalid raw event was not preserved")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

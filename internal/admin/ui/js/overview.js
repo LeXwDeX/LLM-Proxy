@@ -21,6 +21,7 @@ AdminApp.register("overview", function (app) {
   var generation = 0;
   var aggregateGeneration = 0;
   var timer = null;
+  var activityFreshnessTimer = null;
   var activityFlight = null;
   var historyFlight = null;
   var metricsFlight = null;
@@ -35,6 +36,7 @@ AdminApp.register("overview", function (app) {
   var historySnapshot = null;
   var metricsSnapshot = null;
   var aggregateSnapshot = null;
+  var activityError = "";
   var historyError = "";
   var aggregateError = "";
   var aggregateLoading = false;
@@ -312,6 +314,8 @@ AdminApp.register("overview", function (app) {
     aggregateGeneration++;
     if (timer !== null) clearTimeout(timer);
     timer = null;
+    if (activityFreshnessTimer !== null) clearTimeout(activityFreshnessTimer);
+    activityFreshnessTimer = null;
     if (activityController) activityController.abort();
     if (historyController) { historyController.abort(); historyFetchedAt = 0; }
     if (metricsController) metricsController.abort();
@@ -331,9 +335,10 @@ AdminApp.register("overview", function (app) {
   function reportActivityStatus(error) {
     var status = el("activityStatus");
     if (error) {
-      status.textContent = error.name === "TimeoutError"
+      var errorMessage = error.name === "TimeoutError"
         ? (snapshot ? "更新超时，显示上次数据；可点击刷新重试。" : "实时活动加载超时，请点击刷新重试。")
         : (snapshot ? "更新失败，显示上次数据；可点击刷新重试。" : "实时活动暂不可用，请点击刷新重试。");
+      if (status.textContent !== errorMessage) status.textContent = errorMessage;
       status.dataset.state = "error";
       return;
     }
@@ -342,8 +347,23 @@ AdminApp.register("overview", function (app) {
     if (!snapshot.runtime.complete) warnings.push("采样不足");
     if (snapshot.series.some(function (bucket) { return bucket.partial; })) warnings.push("部分时间桶不足10秒");
     if (snapshot.totals.incomplete_usage_count > 0) warnings.push(number(snapshot.totals.incomplete_usage_count) + " 条用量不完整");
-    status.textContent = warnings.length ? warnings.join(" · ") : (snapshot.runtime.active_requests === 0 && snapshot.totals.total_tokens === 0 ? "当前无在途请求，近5分钟暂无已记录用量。" : "");
+    var message = warnings.length ? warnings.join(" · ") : (snapshot.runtime.active_requests === 0 && snapshot.totals.total_tokens === 0 ? "当前无在途请求，近5分钟暂无已记录用量。" : "");
+    if (status.textContent !== message) status.textContent = message;
     status.dataset.state = warnings.length ? "partial" : "ready";
+  }
+  function scheduleActivityFreshness() {
+    if (activityFreshnessTimer !== null) clearTimeout(activityFreshnessTimer);
+    activityFreshnessTimer = null;
+    if (!snapshot || !visible()) return;
+    var delay = Date.parse(snapshot.generated_at) + 15001 - Date.now();
+    if (delay <= 0) return;
+    activityFreshnessTimer = setTimeout(function () {
+      activityFreshnessTimer = null;
+      if (!snapshot || !visible()) return;
+      if (!activityError) reportActivityStatus();
+      renderChain();
+      scheduleActivityFreshness();
+    }, Math.min(delay, 2147483647));
   }
   function syncRangeButtons() {
     rangeButtons.forEach(function (button) {
@@ -656,6 +676,53 @@ AdminApp.register("overview", function (app) {
   function metricsUsable() {
     return isObject(metricsSnapshot);
   }
+  // Ops signals that used to live in the removed attention panel. Only non-zero,
+  // well-formed counters are listed; missing data yields no item (never a fake 0).
+  function opsNoticeItems(metrics, ov) {
+    var items = [];
+    var persistence = metrics && isObject(metrics.persistence) ? metrics.persistence : null;
+    if (persistence) {
+      [
+        ["usage_async_pending", "用量写入积压 ", " 条"],
+        ["usage_async_deferred", "自启动累计 ", " 条用量因写入队列满转入后台重放"],
+        ["request_stats_dropped", "自启动累计 ", " 条请求完成统计因队列满丢弃"],
+      ].forEach(function (entry) {
+        var count = persistence[entry[0]];
+        if (counter(count) && count > 0) items.push(entry[1] + fmtNum(count) + entry[2]);
+      });
+    }
+    var budget = metrics && isObject(metrics.observation_budget) ? metrics.observation_budget.observation_budget_exhausted : null;
+    if (isObject(budget)) {
+      var br = counter(budget.br) ? budget.br : null;
+      var zstd = counter(budget.zstd) ? budget.zstd : null;
+      if ((br || 0) + (zstd || 0) > 0) {
+        if (br !== null && zstd !== null) items.push("压缩响应观察预算拒绝（自启动累计 " + fmtNum(br + zstd) + " 次；br " + fmtNum(br) + " / zstd " + fmtNum(zstd) + "）");
+        else items.push("压缩响应观察预算拒绝（自启动累计；br " + (br === null ? "不可用" : fmtNum(br)) + " / zstd " + (zstd === null ? "不可用" : fmtNum(zstd)) + "；总数不完整）");
+      }
+    }
+    // Process-lifetime request persistence counters: never present them as a
+    // success rate or as a selected-range figure.
+    var requests = ov && isObject(ov.requests) ? ov.requests : null;
+    if (requests) {
+      [
+        ["usage_record_failures", "用量写入失败"],
+        ["usage_client_gone_no_usage", "客户端断开且未取得用量"],
+        ["usage_upstream_interrupted_no_usage", "上游中断且未取得用量"],
+        ["request_stats_record_failures", "请求完成统计写入失败"],
+      ].forEach(function (entry) {
+        var count = requests[entry[0]];
+        if (counter(count) && count > 0) items.push("自启动累计 " + fmtNum(count) + " 次" + entry[1]);
+      });
+    }
+    return items;
+  }
+  function renderOpsNotice(metrics, ov) {
+    var notice = el("chainOpsNotice");
+    var items = opsNoticeItems(metrics, ov);
+    var message = items.join(" · ");
+    if (notice.textContent !== message) notice.textContent = message;
+    if (notice.hidden !== !items.length) notice.hidden = !items.length;
+  }
   function renderChain() {
     var ov = historySnapshot;
     var targets = ov && Array.isArray(ov.targets) ? ov.targets : null;
@@ -672,6 +739,7 @@ AdminApp.register("overview", function (app) {
       proxyParts.push("运行指标不可用");
     }
     text("chainProxy", proxyParts.join(" · "));
+    renderOpsNotice(metrics, ov);
     if (targets) {
       if (!targets.length) {
         text("chainTargets", "暂无目标");
@@ -732,19 +800,27 @@ AdminApp.register("overview", function (app) {
     var available = [!!targets, !!snapshot, metricsComplete(), clientCount !== null, keysAvailable].filter(Boolean).length;
     var chain = el("chainSummary");
     var status = el("chainStatus");
+    var statusText;
     if (historyError) {
       chain.dataset.state = historySnapshot ? "partial" : "error";
-      status.textContent = historySnapshot ? "实时状态" + historyStaleText() : "实时状态" + historyStaleText() + "，目标与客户端数据不可用";
+      statusText = historySnapshot ? "实时状态" + historyStaleText() : "实时状态" + historyStaleText() + "，目标与客户端数据不可用";
     } else if (available === 5) {
       chain.dataset.state = "ready";
-      status.textContent = "实时状态已加载";
+      statusText = "实时状态已加载";
     } else if (available === 0) {
       chain.dataset.state = "error";
-      status.textContent = "实时状态暂不可用";
+      statusText = "实时状态暂不可用";
     } else {
       chain.dataset.state = "partial";
-      status.textContent = "部分实时状态不可用";
+      statusText = "部分实时状态不可用";
     }
+    var activityStale = activityError || (snapshot && Date.now() - Date.parse(snapshot.generated_at) > 15000 ? "实时活动数据更新延迟，显示上次采样。" : "");
+    if (activityStale) {
+      if (chain.dataset.state === "ready") statusText = "部分实时状态已过期";
+      if (chain.dataset.state !== "error") chain.dataset.state = "partial";
+      statusText += "；" + activityStale;
+    }
+    if (status.textContent !== statusText) status.textContent = statusText;
   }
   function renderRecentChanges() {
     var body = el("recentChangesBody");
@@ -778,6 +854,7 @@ AdminApp.register("overview", function (app) {
   }
   function renderSnapshot(data) {
     snapshot = data;
+    activityError = "";
     text("activityActiveRequests", number(data.runtime.active_requests));
     text("activityActiveClients", number(data.runtime.active_clients));
     text("activityWebsocketSessions", number(data.runtime.websocket_sessions));
@@ -790,6 +867,7 @@ AdminApp.register("overview", function (app) {
     renderClients();
     renderCharts();
     renderChain();
+    scheduleActivityFreshness();
   }
   function validSnapshot(data) {
     function timestamp(value) { return typeof value === "string" && Number.isFinite(Date.parse(value)); }
@@ -821,6 +899,11 @@ AdminApp.register("overview", function (app) {
   function loadActivity() {
     if (!visible()) return Promise.resolve();
     if (activityFlight) return activityFlight;
+    if (snapshot) {
+      if (!activityError) reportActivityStatus();
+      renderChain();
+      scheduleActivityFreshness();
+    }
     var epoch = generation;
     var controller = new AbortController();
     activityController = controller;
@@ -833,9 +916,14 @@ AdminApp.register("overview", function (app) {
         if (epoch !== generation || controller.signal.aborted || !visible()) return;
         if (!validSnapshot(data)) throw new Error("实时活动数据格式无效");
         // A response from an older sample must never rewind the displayed window.
-        if (snapshot && data.runtime.since === snapshot.runtime.since && compareTime(data.generated_at, snapshot.generated_at) < 0) {
-          text("activityStatus", "采样时间未更新，显示上次数据。请稍后刷新。");
-          el("activityStatus").dataset.state = "partial";
+        var sampleOrder = snapshot && data.runtime.since === snapshot.runtime.since ? compareTime(data.generated_at, snapshot.generated_at) : 1;
+        if (sampleOrder < 0 || (sampleOrder === 0 && activityError)) {
+          var status = el("activityStatus");
+          var message = "采样时间未更新，显示上次数据。请稍后刷新。";
+          if (status.textContent !== message) status.textContent = message;
+          status.dataset.state = "partial";
+          activityError = "实时活动" + message;
+          renderChain();
           return;
         }
         renderSnapshot(data);
@@ -851,6 +939,7 @@ AdminApp.register("overview", function (app) {
           el("activityClientsBody").appendChild(emptyRow);
         }
         reportActivityStatus(error);
+        activityError = (snapshot ? "实时活动" : "") + el("activityStatus").textContent;
         renderChain();
       } finally {
         if (epoch === generation) {

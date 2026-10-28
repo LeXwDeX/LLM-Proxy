@@ -53,7 +53,7 @@ func TestInitWritesNDJSON(t *testing.T) {
 	}
 }
 
-func TestRespExcerptTruncatedTo1024(t *testing.T) {
+func TestRespExcerptDoesNotStoreResponseBody(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "trunc.log")
 	Init(path)
@@ -68,8 +68,8 @@ func TestRespExcerptTruncatedTo1024(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(got.RespExcerpt) != 1024 {
-		t.Errorf("excerpt len = %d, want 1024", len(got.RespExcerpt))
+	if got.RespExcerpt != "[redacted]" {
+		t.Errorf("excerpt = %q, want controlled placeholder", got.RespExcerpt)
 	}
 }
 

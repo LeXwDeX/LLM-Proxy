@@ -236,12 +236,12 @@ func TestPendingJournalCalibrationPreservesChargeUntilReplay(t *testing.T) {
 	m.Evaluate("alice")
 	var primaryUnavailable atomic.Bool
 	primaryUnavailable.Store(true)
-	journal, err := nosql.NewUsageJournal(auditRecorderFunc(func(event usage.Event) error {
+	journal, err := nosql.NewUsageJournal(accountingRetryRecorder{store: m.usageStore, auditRecorderFunc: func(event usage.Event) error {
 		if primaryUnavailable.Load() {
 			return errors.New("temporary primary write failure")
 		}
 		return m.usageStore.Record(event)
-	}), filepath.Join(t.TempDir(), "usage.jsonl"), nil)
+	}}, filepath.Join(t.TempDir(), "usage.jsonl"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

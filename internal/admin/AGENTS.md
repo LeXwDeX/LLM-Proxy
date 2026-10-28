@@ -37,7 +37,7 @@
 
 - 改动后必须全绿：`go test ./internal/admin/ -count=1`。
 - 涉及会话/守卫的改动，重点核对 `handler_test.go` 中 readonly 角色被写接口拒绝的用例。
-- UI 为内嵌页面，改动后运行 `node scripts/testing/admin_ui_test.cjs`，并在本机独立实例（例如 `make ui-sim`）验证登录、页面加载和受影响交互，不能只凭编译通过验收。真实浏览器脚本 `scripts/testing/admin_ui_browser_test.cjs` 依赖本机已安装的 Playwright/Chromium，不在 CI 中运行；`go test ./internal/admin/` 在有 Node 时调用 Node 行为门禁及部分 `*.test.cjs` 单元用例，全部单元用例可用 `node --test internal/admin/ui/` 运行。
+- UI 为内嵌页面，改动后运行 `node scripts/testing/admin_ui_test.cjs`，并在本机独立实例（例如 `make ui-sim`）验证登录、页面加载和受影响交互，不能只凭编译通过验收。真实浏览器脚本 `scripts/testing/admin_ui_browser_test.cjs` 依赖本机已安装的 Playwright/Chromium，不在 CI 中运行；`go test ./internal/admin/` 在有 Node 时调用 Node 行为门禁及部分 `*.test.cjs` 单元用例，CI 还会递归运行 UI 子树中的 Node 单元测试，可从项目根目录用 `(cd internal/admin/ui && node --test)` 运行同一范围。
 - **模块初始化约定**：模块经 `AdminApp.register(name, factory)` 声明，按名称初始化；跨模块调用使用明确导出与 `app.bind`，不依赖工厂数组位置或其他模块私有变量。`core.js` 末尾残留的 `window.*` 导出仅为兼容，新代码不得依赖；新增全局桥接仅限 HTML 事件属性（当前只有 `closeTraceDetail`）。
 - **启动顺序**：`core.js` 提供基础操作，`schema.js` 加载并验证元数据，`bootstrap.js` 最后执行。Schema 成功后才初始化功能模块并设置 ready；失败提供重试，编辑不得提前启用。新增模块加入 HTML 脚本清单，`ui_embed.go` 自动 embed；`ui_modules_test.go` 与 Node 行为门禁检查清单、依赖和初始化。
 

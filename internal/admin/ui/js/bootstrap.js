@@ -28,6 +28,14 @@
   }
   function boot() {
     if (inFlight) return inFlight;
+    app.state.ready = false;
+    document.body.classList.add("readonly-mode");
+    var layout = document.querySelector(".layout");
+    if (layout) layout.inert = true;
+    ["nav-users", "nav-section-system", "readonlyBadge"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el && el.style.display === "") el.style.display = "none";
+    });
     inFlight = (async function () {
       var status = document.getElementById("adminBootStatus");
       var message = document.getElementById("adminBootMessage");
@@ -43,10 +51,11 @@
           return app.modules.schema.loadSchema();
         }, onRetry);
         app.initialize();
-        // The session role (readonly mode) is applied before the page is ready.
+        var role;
         await withRetry(async function () {
-          await app.modules.users.loadUserInfo();
+          role = await app.modules.users.loadUserInfo();
         }, onRetry);
+        if (role === "readonly") app.modules.users.applyReadonlyMode(document);
         try {
           await withRetry(function () {
             return app.modules.audit_trace.checkTraceEnabled();
@@ -55,6 +64,8 @@
           // Trace is optional: an unreachable probe leaves its page hidden.
         }
         app.state.ready = true;
+        if (role === "admin") document.body.classList.remove("readonly-mode");
+        if (layout) layout.inert = false;
         status.hidden = true;
         app.modules.navigation.loadPageData("overview");
         app.modules.overview.startOverviewAutoRefresh();

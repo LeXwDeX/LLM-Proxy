@@ -453,7 +453,7 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 			logFields = append(logFields, "status", resp.StatusCode)
 		}
 		if err != nil {
-			logFields = append(logFields, "error", err.Error())
+			logFields = append(logFields, "error", errorlog.ErrorCategory(err))
 		}
 		s.logger.Warn("upstream request trace", logFields...)
 	} else if totalDuration > 5*time.Second {
@@ -707,7 +707,7 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 				"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 				"target", target.Name,
 				"key_index", keyIndex,
-				"code", code,
+				"code", diagnosticGLMCode(code),
 				"reason", reason,
 				"cooldown_end", cooldownEnd,
 			)
@@ -1046,7 +1046,7 @@ func (s *Service) writeResponse(
 		s.logger.Warn("stream copy failed",
 			"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 			"target", targetName(target),
-			"error", err,
+			"error", errorlog.ErrorCategory(err),
 		)
 	}
 
@@ -1139,29 +1139,11 @@ func (s *Service) observeResponsesKeyFailure(state *targetState, target *Target,
 }
 
 // writeUpstreamErrorLog 在 writeResponse 写完响应体后落一条 NDJSON 错误日志。
-// resp_excerpt 取 capture（已限 2MB）的前 1024 字节。
+// Body bytes are counted for diagnostics but never stored in default logs.
 func writeUpstreamErrorLog(r *http.Request, target *Target, resp *http.Response, body []byte, startedAt time.Time) {
 	kind := errorlog.KindUpstream4xx
 	if resp.StatusCode >= 500 {
 		kind = errorlog.KindUpstream5xx
-	}
-
-	excerpt := body
-	if len(excerpt) > 1024 {
-		excerpt = excerpt[:1024]
-	}
-
-	// 如果响应体是 gzip 压缩的，解压后再取 excerpt（避免日志中出现乱码）
-	if strings.EqualFold(responseContentEncoding(resp.Header), "gzip") {
-		if gr, err := gzip.NewReader(bytes.NewReader(body)); err == nil {
-			if decompressed, err := io.ReadAll(io.LimitReader(gr, 2048)); err == nil {
-				excerpt = decompressed
-				if len(excerpt) > 1024 {
-					excerpt = excerpt[:1024]
-				}
-			}
-			gr.Close()
-		}
 	}
 
 	entry := errorlog.Entry{
@@ -1174,7 +1156,9 @@ func writeUpstreamErrorLog(r *http.Request, target *Target, resp *http.Response,
 		DurationMS:     time.Since(startedAt).Milliseconds(),
 		ReqBytes:       int(r.ContentLength),
 		RespBytes:      len(body),
-		RespExcerpt:    string(excerpt),
+	}
+	if len(body) > 0 {
+		entry.RespExcerpt = "[redacted]"
 	}
 	if target != nil {
 		entry.Target = target.Name
@@ -1183,7 +1167,7 @@ func writeUpstreamErrorLog(r *http.Request, target *Target, resp *http.Response,
 			entry.UpstreamURL = stripURLQuery(target.Endpoint.String())
 		}
 	}
-	// 完整 URL（含 query）从实际发出的请求取，便于核验 buildURL 输出（如 azure api-version）。
+	// The errorlog sink removes userinfo and query from the actual request URL.
 	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
 		entry.UpstreamFullURL = resp.Request.URL.String()
 	}
@@ -1531,7 +1515,7 @@ func (s *Service) handleForwardError(r *http.Request, state *targetState, err er
 	s.logger.Warn("forward request failed",
 		"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 		"target", state.Target().Name,
-		"error", err,
+		"error", errorlog.ErrorCategory(err),
 		"status", status,
 		"consecutive_failures", stats.ConsecutiveFailure,
 		"total_failures", stats.TotalFailure,
@@ -1562,7 +1546,7 @@ func writeForwardErrorLog(r *http.Request, state *targetState, fe *forwardAttemp
 		entry.DurationMS = time.Since(fe.startedAt).Milliseconds()
 	}
 	if fe.err != nil {
-		entry.Error = fe.err.Error()
+		entry.Error = errorlog.ErrorCategory(fe.err)
 	}
 	if target != nil {
 		entry.Target = target.Name

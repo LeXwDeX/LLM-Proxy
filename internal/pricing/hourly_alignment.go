@@ -36,6 +36,32 @@ func (r *Resolver) RequiresEventTimestampsFor(target, model string) bool {
 	return false
 }
 
+// RequiresEventTimestampsForModel checks every target binding for the model.
+func (r *Resolver) RequiresEventTimestampsForModel(model string) bool {
+	if r == nil {
+		return false
+	}
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" || strings.Contains(model, keySeparator) {
+		return r.RequiresEventTimestamps()
+	}
+	for key, templates := range r.index {
+		_, indexedModel, ok := strings.Cut(key, keySeparator)
+		if !ok || strings.Contains(indexedModel, keySeparator) {
+			return true
+		}
+		if indexedModel != model {
+			continue
+		}
+		for _, template := range templates {
+			if templateRequiresEventTimestamps(template) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func templateRequiresEventTimestamps(template PricingTemplate) bool {
 	if len(template.Conditions) > 0 {
 		return true

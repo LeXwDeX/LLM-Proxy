@@ -159,7 +159,7 @@ func TestResponsesWSKeyFailureUsesHealthyKeyOnNextRequest(t *testing.T) {
 				if !first.exhausted || first.exhaustReason != wantReason || !first.cooldownEnd.After(time.Now()) || second.exhausted || state.IsMuted(time.Now()) {
 					t.Fatalf("incorrect key feedback: exhausted=%v reason=%s healthy_exhausted=%v muted=%v", first.exhausted, first.exhaustReason, second.exhausted, state.IsMuted(time.Now()))
 				}
-				if tc.name == "quota429" && (!first.cooldownEnd.Equal(permanentCooldownEnd) || !strings.Contains(first.lastError, "organization_spend_limit_exceeded")) {
+				if tc.name == "quota429" && (!first.cooldownEnd.Equal(permanentCooldownEnd) || first.lastError != "upstream error (details withheld)") {
 					t.Fatalf("quota key received transient rate-limit cooling: end=%s error=%s", first.cooldownEnd, first.lastError)
 				}
 				w = wsTestRequest(t, s, "client", "/v1/responses", `{"model":"openai-test","input":"next"}`)

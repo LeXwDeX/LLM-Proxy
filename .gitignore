@@ -72,6 +72,7 @@ WINDSURF.md
 .codex/
 .codex_plan/
 .qoder/
+.serena/
 
 # One-time migration scripts (not part of the project)
 migrate-to-bbolt.sh

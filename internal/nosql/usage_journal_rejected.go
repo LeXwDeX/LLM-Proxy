@@ -83,7 +83,6 @@ func (j *UsageJournal) rejectLocked(entries []rejectedUsageLine) error {
 		// Never glue a new entry onto a torn tail from a failed append.
 		out = append(out, '\n')
 	}
-	appended := 0
 	for _, entry := range entries {
 		digest := rejectedLineDigest(entry.Line)
 		if _, dup := seen[digest]; dup {
@@ -95,10 +94,6 @@ func (j *UsageJournal) rejectLocked(entries []rejectedUsageLine) error {
 		}
 		out = append(append(out, data...), '\n')
 		seen[digest] = struct{}{}
-		appended++
-	}
-	if appended == 0 {
-		return nil
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -108,16 +103,18 @@ func (j *UsageJournal) rejectLocked(entries []rejectedUsageLine) error {
 	if err := file.Chmod(0o600); err != nil {
 		return err
 	}
-	if _, err := file.Write(out); err != nil {
-		return err
+	if len(out) > 0 {
+		if _, err := file.Write(out); err != nil {
+			return err
+		}
 	}
-	if err := file.Sync(); err != nil {
+	if err := j.syncJournalFile(file); err != nil {
 		return err
 	}
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return syncDirectory(filepath.Dir(j.path))
+	return j.syncJournalDirectory(filepath.Dir(j.path))
 }
 
 // errorLogger never drops a rejection report when no logger was configured.

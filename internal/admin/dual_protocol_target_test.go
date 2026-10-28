@@ -19,7 +19,14 @@ func assertDualTargetReadback(t *testing.T, h http.Handler, stores testStores, o
 		t.Fatalf("persisted fields: %+v", stored)
 	}
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/data/targets", nil))
+	sessions := NewSessionManager(config.AdminSessionConfig{Secret: "dual-test-secret", CookieName: "dual-session", TTLSeconds: 3600}, nil)
+	_, cookie, err := sessions.CreateSession("admin", RoleAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/data/targets", nil)
+	req.AddCookie(cookie)
+	sessions.Middleware(h).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
 	}

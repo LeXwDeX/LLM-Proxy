@@ -27,6 +27,32 @@ AdminApp.register("usage", function (app) {
   var usageChartBuckets = [];
   var usageChartGroupBy = "day";
   var usageLoadVersion = 0;
+  var usageSnapshot = null;
+  var usageStatus = document.createElement("div");
+  var usageStatusText = document.createElement("span");
+  var usageRetry = document.createElement("button");
+  usageStatus.setAttribute("data-usage-status", "true");
+  usageStatus.style.flexBasis = "100%";
+  usageStatus.style.minWidth = "0";
+  usageStatus.style.order = "-1";
+  usageStatus.style.padding = "8px 14px";
+  usageStatus.style.borderRadius = "6px";
+  usageStatus.style.background = "var(--warn-soft)";
+  usageStatus.style.color = "var(--warn)";
+  usageStatus.style.overflowWrap = "anywhere";
+  usageStatus.hidden = true;
+  usageStatusText.setAttribute("role", "status");
+  usageStatusText.setAttribute("aria-live", "polite");
+  usageRetry.type = "button";
+  usageRetry.className = "btn btn-sm";
+  usageRetry.textContent = "重试";
+  usageRetry.style.marginLeft = "8px";
+  usageRetry.addEventListener("click", function () {
+    loadUsage();
+  });
+  usageStatus.appendChild(usageStatusText);
+  usageStatus.appendChild(usageRetry);
+  document.querySelector(".time-range-bar").appendChild(usageStatus);
   var usageDenominator = { total: null, usageIncomplete: false, costIncomplete: false };
   var usageTokenFields = [
     "input_tokens",
@@ -83,6 +109,8 @@ AdminApp.register("usage", function (app) {
       btn.classList.add("active");
       activeRange = btn.dataset.range;
       if (activeRange === "custom") {
+        ++usageLoadVersion;
+        showUsageStatus("请设置并应用自定义时间", false);
         document.getElementById("customRangeInputs").style.display = "flex";
         var fromInput = document.getElementById("usageFrom");
         var toInput = document.getElementById("usageTo");
@@ -187,12 +215,17 @@ AdminApp.register("usage", function (app) {
     if (state.modelGroupsPromise) return state.modelGroupsPromise;
     state.modelGroupsPromise = api("/admin/data/model-groups")
       .then(function (data) {
+        if (state.modelGroupsLoaded) return state.modelGroups;
         state.modelGroups = Array.isArray(data.model_groups)
           ? data.model_groups
           : [];
         state.modelGroupsLoaded = true;
         refreshUsageModelGroupFilter();
         return state.modelGroups;
+      })
+      .catch(function (error) {
+        if (state.modelGroupsLoaded) return state.modelGroups;
+        throw error;
       })
       .finally(function () {
         state.modelGroupsPromise = null;
@@ -278,15 +311,18 @@ AdminApp.register("usage", function (app) {
     });
 
   async function loadUsage() {
+    var version = ++usageLoadVersion;
     var range;
     if (activeRange === "custom") {
       try {
         range = { from: inputToISO("usageFrom"), to: inputToISO("usageTo") };
       } catch (e) {
+        showUsageStatus("自定义时间无效", false);
         toast(e.message, "error");
         return;
       }
       if (Date.parse(range.from) > Date.parse(range.to)) {
+        showUsageStatus("自定义时间无效", false);
         toast("开始时间不能晚于结束时间", "error");
         return;
       }
@@ -296,14 +332,16 @@ AdminApp.register("usage", function (app) {
     state.usageRange = range;
     var clientFilter = document.getElementById("usageClientFilter").value;
     var modelGroupFilter = usageModelGroupValues();
-    var version = ++usageLoadVersion;
+    var rangeName = activeRange;
+    var rendering = false;
+    showUsageStatus("正在加载统计", false);
     try {
       await ensureModelGroupsLoaded();
       if (version !== usageLoadVersion) return;
       var qs = new URLSearchParams({ from: range.from, to: range.to });
       if (clientFilter) qs.set("client_name", clientFilter);
       appendUsageModelGroups(qs, modelGroupFilter);
-      var groupBy = usageGroupBy(activeRange, range);
+      var groupBy = usageGroupBy(rangeName, range);
       var mainAgg = await api(
         "/admin/data/usage/aggregate?group_by=" +
           groupBy +
@@ -312,14 +350,94 @@ AdminApp.register("usage", function (app) {
         { timeoutMs: 60000 }, // wide ranges scan many usage events
       );
       if (version !== usageLoadVersion) return;
-      mainAgg = mainAgg && typeof mainAgg === "object" ? mainAgg : {};
-      var responseGroupBy =
-        mainAgg.group_by === "hour" || mainAgg.group_by === "day"
-          ? mainAgg.group_by
-          : groupBy;
-      var totals = mainAgg.totals && typeof mainAgg.totals === "object"
-        ? mainAgg.totals
-        : {};
+      if (!validUsageAggregate(mainAgg)) throw new Error("统计响应格式无效");
+      var snapshot = {
+        range: range,
+        client: clientFilter,
+        groups: modelGroupFilter,
+        groupBy: groupBy,
+        data: mainAgg,
+      };
+      rendering = true;
+      renderUsageAggregate(snapshot, true);
+      usageSnapshot = snapshot;
+      usageStatus.hidden = true;
+      document
+        .getElementById("usageSummaryCards")
+        .setAttribute("aria-label", "当前筛选汇总");
+    } catch (e) {
+      if (version !== usageLoadVersion) return;
+      if (rendering && usageSnapshot) {
+        try {
+          renderUsageAggregate(usageSnapshot, false);
+        } catch (restoreError) {
+          usageSnapshot = null;
+        }
+      }
+      showUsageStatus("统计加载失败", true);
+      toast("加载统计失败: " + e.message, "error");
+    }
+  }
+
+  function showUsageStatus(message, canRetry) {
+    var summary = document.getElementById("usageSummaryCards");
+    if (usageSnapshot) {
+      var snapshot = usageSnapshot;
+      message +=
+        "；当前显示上次过期数据（UTC " + snapshot.range.from + " 至 " +
+        snapshot.range.to + "；客户端：" + (snapshot.client || "全部") +
+        "；模型组：" + (snapshot.groups.join("、") || "全部") + "）。";
+      summary.setAttribute("aria-label", "上次查询汇总（过期）");
+    } else {
+      message += "；暂无可显示数据。";
+      summary.setAttribute("aria-label", "统计不可用");
+      renderUsageSummary({});
+      [["usageByModelGroupBody", 8], ["usageByClientBody", 8], ["usageByModelBody", 9]].forEach(function (item) {
+        document.getElementById(item[0]).innerHTML =
+          "<tr class='empty-row'><td colspan='" + item[1] + "'>" + esc(message) + "</td></tr>";
+      });
+      document.getElementById("dailyChart").innerHTML =
+        "<div style='color:var(--text-muted);padding:32px;text-align:center;width:100%;'>" +
+        esc(message) + "</div>";
+    }
+    usageStatusText.textContent = message;
+    usageRetry.hidden = !canRetry;
+    usageRetry.style.display = canRetry ? "" : "none";
+    usageStatus.hidden = false;
+  }
+
+  function validUsageAggregate(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+    var arrays = ["buckets", "by_client", "by_model", "by_model_group_model", "by_target_model"];
+    if (
+      !["totals", "buckets", "by_client", "by_model"].every(function (key) {
+        return Object.prototype.hasOwnProperty.call(data, key);
+      })
+    ) return false;
+    if (
+      data.totals == null ||
+      typeof data.totals !== "object" || Array.isArray(data.totals)
+    ) return false;
+    return arrays.every(function (key) {
+      return data[key] == null ||
+        (Array.isArray(data[key]) && data[key].every(function (row) {
+          return row && typeof row === "object" && !Array.isArray(row);
+        }));
+    });
+  }
+
+  function renderUsageAggregate(snapshot, updateFilters) {
+    var mainAgg = snapshot.data;
+    var clientFilter = snapshot.client;
+    var modelGroupFilter = snapshot.groups;
+    var responseGroupBy =
+      mainAgg.group_by === "hour" || mainAgg.group_by === "day"
+        ? mainAgg.group_by
+        : snapshot.groupBy;
+    var totals = mainAgg.totals && typeof mainAgg.totals === "object"
+      ? mainAgg.totals
+      : {};
+    if (updateFilters) {
       refreshUsageModelGroupFilter();
 
       /* Update client filter dropdown with clients that have data in this range */
@@ -329,36 +447,33 @@ AdminApp.register("usage", function (app) {
         });
         populateUsageClientFilter(activeNames);
       }
-
-      usageDenominator = usageCostDenominator(totals);
-      renderUsageSummary(totals);
-
-      usageTableMap.usageByClientBody.rows = mainAgg.by_client || [];
-      var modelRows = Array.isArray(mainAgg.by_model_group_model)
-        ? mainAgg.by_model_group_model
-        : [];
-      var modelRequestSource = "by_model_group_model";
-      if (!modelRows.length) {
-        modelRows = Array.isArray(mainAgg.by_model) ? mainAgg.by_model : [];
-        modelRequestSource = "by_model";
-      }
-      if (!modelRows.length) modelRequestSource = "none";
-      usageTableMap.usageByModelBody.rows = modelRows;
-      setUsageModelRequestHeader(
-        modelRequestSource,
-        modelGroupFilter.length > 0,
-      );
-      usageTables.forEach(renderAggregateTable);
-      state.usageModelGroupRows = mainAgg.by_target_model || [];
-      renderUsageModelGroups(state.usageModelGroupRows, usageDenominator);
-      usageChartBuckets = mainAgg.buckets || [];
-      usageChartGroupBy = responseGroupBy;
-      setUsageChartNote(responseGroupBy);
-      renderDailyChart(usageChartBuckets, responseGroupBy);
-    } catch (e) {
-      if (version === usageLoadVersion)
-        toast("加载统计失败: " + e.message, "error");
     }
+
+    usageDenominator = usageCostDenominator(totals);
+    renderUsageSummary(totals);
+
+    usageTableMap.usageByClientBody.rows = mainAgg.by_client || [];
+    var modelRows = Array.isArray(mainAgg.by_model_group_model)
+      ? mainAgg.by_model_group_model
+      : [];
+    var modelRequestSource = "by_model_group_model";
+    if (!modelRows.length) {
+      modelRows = Array.isArray(mainAgg.by_model) ? mainAgg.by_model : [];
+      modelRequestSource = "by_model";
+    }
+    if (!modelRows.length) modelRequestSource = "none";
+    usageTableMap.usageByModelBody.rows = modelRows;
+    setUsageModelRequestHeader(
+      modelRequestSource,
+      modelGroupFilter.length > 0,
+    );
+    usageTables.forEach(renderAggregateTable);
+    state.usageModelGroupRows = mainAgg.by_target_model || [];
+    renderUsageModelGroups(state.usageModelGroupRows, usageDenominator);
+    usageChartBuckets = mainAgg.buckets || [];
+    usageChartGroupBy = responseGroupBy;
+    setUsageChartNote(responseGroupBy);
+    renderDailyChart(usageChartBuckets, responseGroupBy);
   }
 
   var usageTables = [
@@ -804,8 +919,8 @@ AdminApp.register("usage", function (app) {
     if (!note) return;
     note.textContent =
       groupBy === "hour"
-        ? "跟随上方时间范围和筛选 · 按 UTC 小时聚合；开始与结束时间所在整点小时均整桶计入（含边界小时），因此边界桶可能包含范围外记录。今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。"
-        : "跟随上方时间范围和筛选 · 所选范围内的小时用量按 UTC 自然日分组；开始与结束边界所在整点小时整桶计入，不扩展到完整起止 UTC 日。今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。";
+        ? "按查询时的时间范围和筛选 · 按 UTC 小时聚合；开始与结束时间所在整点小时均整桶计入（含边界小时），因此边界桶可能包含范围外记录。今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。"
+        : "按查询时的时间范围和筛选 · 所选范围内的小时用量按 UTC 自然日分组；开始与结束边界所在整点小时整桶计入，不扩展到完整起止 UTC 日。今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。";
   }
   function usageChartLabel(start, groupBy) {
     var text = String(start || "");
@@ -831,7 +946,7 @@ AdminApp.register("usage", function (app) {
       button.setAttribute("aria-pressed", String(active));
       button.classList.toggle("active", active);
     });
-    renderDailyChart(usageChartBuckets, usageChartGroupBy);
+    if (usageSnapshot) renderDailyChart(usageChartBuckets, usageChartGroupBy);
   }
   function renderDailyChart(buckets, groupBy) {
     var chart = document.getElementById("dailyChart");
@@ -1012,7 +1127,7 @@ AdminApp.register("usage", function (app) {
             t.sort.key = key;
             t.sort.dir = ["key", "model_group", "model"].indexOf(key) >= 0 ? 1 : -1;
           }
-          renderAggregateTable(t);
+          if (usageSnapshot) renderAggregateTable(t);
           updateUsageSortArrows();
         });
       });
@@ -1029,7 +1144,7 @@ AdminApp.register("usage", function (app) {
           usageModelGroupSort.key = key;
           usageModelGroupSort.dir = key === "model_group" ? 1 : -1;
         }
-        renderUsageModelGroups(state.usageModelGroupRows || []);
+        if (usageSnapshot) renderUsageModelGroups(state.usageModelGroupRows || []);
         updateUsageModelGroupSortArrows();
       });
     });

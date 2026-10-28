@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,17 +19,22 @@ import (
 // number of retained event identities (O(N)). A receipt stores only the
 // version and the normalized digest, never the event payload.
 const (
-	BucketUsageReceipts           = "usage_record_receipts_v1"
-	usageReceiptsWatermarkDoneKey = "usage_receipts_watermark_done_v1"
-	usageReceiptsWatermarkKey     = "usage_receipts_legacy_unknown_before_v1"
-	usageReceiptVersion           = 1
+	BucketUsageReceipts              = "usage_record_receipts_v1"
+	usageReceiptsWatermarkDoneKey    = "usage_receipts_watermark_done_v1"
+	usageReceiptsWatermarkDoneV2Key  = "usage_receipts_watermark_done_v2"
+	usageReceiptsWatermarkKey        = "usage_receipts_legacy_unknown_before_v1"
+	usageReceiptsUnknownHourKey      = "usage_receipts_unknown_aggregate_hour_v2"
+	usageReceiptsUntrustedThroughKey = "usage_receipts_untrusted_through_v2"
+	usageReceiptVersion              = 1
 )
 
-// ErrUsageIdentityUnverified reports an explicit identity that predates
-// receipt tracking and has no retained raw record. It cannot be proven either
-// way, so it is never charged automatically; journal recovery moves it to the
-// rejected sidecar for manual review.
+// ErrUsageIdentityUnverified reports an identity whose prior commitment cannot
+// be ruled out from retained raw records, receipts and aggregate evidence. It
+// is never charged automatically; journal recovery moves it to the rejected
+// sidecar for manual review.
 var ErrUsageIdentityUnverified = errors.New("usage identity predates receipt tracking and cannot be verified")
+
+var ErrUsageBundlePartial = errors.New("usage bundle is partially committed")
 
 // ErrUsageRecordConflict reports an explicit identity whose committed raw row
 // or receipt holds a different event digest. Retrying cannot change the
@@ -83,10 +89,10 @@ type usageReceipt struct {
 //
 // The watermark is the end of the newest hour where retained raw records and
 // permanent hourly record counts disagree, or whose aggregate evidence cannot
-// be decoded. An explicit identity in an older hour with neither raw data nor
-// a receipt cannot be proven committed or new, so it is rejected. The result
+// be decoded. An identity in an untrusted range with neither raw data nor a
+// receipt cannot be proven committed or new, so it is rejected. The result
 // is cached per store; a failed attempt is cached too and retried only after
-// an exponential backoff, so explicit writes never rescan the database each.
+// an exponential backoff, so writes do not rescan the database each time.
 func (s *UsageStore) EnsureUsageReceipts() error {
 	if s == nil || s.db == nil {
 		return errors.New("usage receipts: store is not initialized")
@@ -118,16 +124,14 @@ func (s *UsageStore) EnsureUsageReceipts() error {
 	}
 	s.receiptErr = err
 	s.receiptRetryAt = now().Add(s.receiptBackoff)
-	slog.Error("usage receipts: watermark migration failed; explicit writes stay blocked until a retry succeeds",
+	slog.Error("usage receipts: watermark migration failed; unverified writes stay blocked until a retry succeeds",
 		"retry_in", s.receiptBackoff.String(), "error", err)
 	return err
 }
 
 func (s *UsageStore) ensureUsageReceiptsLocked(scanTime time.Time) error {
 	s.receiptScans.Add(1)
-	var watermark time.Time
-	done := false
-	if err := s.db.View(func(tx *bolt.Tx) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket([]byte(BucketUsageReceipts)) == nil {
 			return fmt.Errorf("usage receipts: bucket %q missing", BucketUsageReceipts)
 		}
@@ -135,37 +139,45 @@ func (s *UsageStore) ensureUsageReceiptsLocked(scanTime time.Time) error {
 		if meta == nil {
 			return errors.New("usage receipts: meta bucket missing")
 		}
-		if meta.Get([]byte(usageReceiptsWatermarkDoneKey)) != nil {
-			done = true
-			var err error
-			watermark, err = decodeUsageReceiptWatermark(meta.Get([]byte(usageReceiptsWatermarkKey)))
+		old, err := decodeUsageReceiptWatermark(meta.Get([]byte(usageReceiptsWatermarkKey)))
+		if err != nil {
 			return err
 		}
-		var err error
-		watermark, err = computeUsageReceiptWatermark(tx, scanTime)
-		return err
-	}); err != nil {
-		return err
-	}
-
-	if !done {
-		if err := s.db.Update(func(tx *bolt.Tx) error {
-			meta := tx.Bucket([]byte(BucketMeta))
-			if meta == nil {
-				return errors.New("usage receipts: meta bucket missing")
-			}
-			if meta.Get([]byte(usageReceiptsWatermarkDoneKey)) != nil {
-				return nil
-			}
-			if err := putUsageReceiptWatermark(meta, watermark); err != nil {
+		if meta.Get([]byte(usageReceiptsWatermarkDoneKey)) != nil && meta.Get([]byte(usageReceiptsWatermarkDoneV2Key)) != nil {
+			return nil
+		}
+		watermark, untrustedThrough, unknownHour, err := computeUsageReceiptWatermark(tx, scanTime)
+		if err != nil {
+			return err
+		}
+		if old.After(watermark) {
+			watermark = old
+		}
+		if err := putUsageReceiptWatermark(meta, watermark); err != nil {
+			return err
+		}
+		oldUntrusted, err := decodeUsageReceiptWatermark(meta.Get([]byte(usageReceiptsUntrustedThroughKey)))
+		if err != nil {
+			return err
+		}
+		if oldUntrusted.After(untrustedThrough) {
+			untrustedThrough = oldUntrusted
+		}
+		if !untrustedThrough.IsZero() {
+			if err := meta.Put([]byte(usageReceiptsUntrustedThroughKey), []byte(untrustedThrough.UTC().Format(time.RFC3339Nano))); err != nil {
 				return err
 			}
-			return meta.Put([]byte(usageReceiptsWatermarkDoneKey), []byte("1"))
-		}); err != nil {
+		}
+		if unknownHour {
+			if err := meta.Put([]byte(usageReceiptsUnknownHourKey), []byte("1")); err != nil {
+				return err
+			}
+		}
+		if err := meta.Put([]byte(usageReceiptsWatermarkDoneKey), []byte("1")); err != nil {
 			return err
 		}
-	}
-	return nil
+		return meta.Put([]byte(usageReceiptsWatermarkDoneV2Key), []byte("1"))
+	})
 }
 
 func putUsageReceiptWatermark(meta *bolt.Bucket, watermark time.Time) error {
@@ -197,38 +209,24 @@ func decodeUsageReceiptWatermark(raw []byte) (time.Time, error) {
 // conservatively untrusted.
 //
 // v1.0.1 readers skipped undecodable cells and malformed keys, so an upgraded
-// ledger may still hold them. Such evidence cannot be counted, and only
-// matters if raw detail in its hour may have been removed by retention.
-// Retention (PruneEventsBefore, the only path that deletes raw rows, in every
-// released version) always deletes a complete key-ordered prefix below its
-// cutoff and quarantines undecodable rows only inside that prefix. So an hour
-// can hold pruned rows only if it is not after the earliest surviving raw row,
-// or not after other cleanup evidence: the newest receipt or quarantined key,
-// or the newest hour whose rollups count rows its raw detail lacks. Corrupt
-// evidence in such an hour marks it untrusted; corrupt evidence in a later
-// hour cannot hide pruned rows and is only logged. Without surviving raw
-// detail every hour may have been pruned. Raw rows outnumbering decodable
-// cells in an hour that holds corrupt evidence are explained by that evidence
-// and are not counted as cleanup evidence. Every decision is logged at ERROR
-// with the bucket and key, never the value.
+// ledger may still hold them. A later insertion of an older raw row means the
+// earliest surviving row cannot prove that a corrupt hour was never pruned.
+// Every recognizable corrupt hour is untrusted. Unattributed keys retain a
+// separate unknown-hour diagnostic. Every decision is logged at ERROR with the
+// bucket and key, never the value.
 //
-// The watermark never passes the start of the scan hour: no identity created
-// after the scan can be rejected by corrupt or future-dated evidence.
-func computeUsageReceiptWatermark(tx *bolt.Tx, scanTime time.Time) (time.Time, error) {
+// The legacy watermark remains capped at the scan hour. Admission also uses
+// the separately persisted uncapped boundary; neither proves completeness.
+func computeUsageReceiptWatermark(tx *bolt.Tx, scanTime time.Time) (time.Time, time.Time, bool, error) {
 	rawLegacy := make(map[string]int64)
 	rawV2 := make(map[string]int64)
 	rawQuota := make(map[string]int64)
-	var earliestRaw time.Time
-	hasRaw := false
 	if raw := tx.Bucket([]byte(BucketUsageEvents)); raw != nil {
 		cursor := raw.Cursor()
 		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
 			var event usage.Event
 			if json.Unmarshal(v, &event) != nil {
 				continue
-			}
-			if hour := event.Timestamp.UTC().Truncate(time.Hour); !hasRaw || hour.Before(earliestRaw) {
-				earliestRaw, hasRaw = hour, true
 			}
 			rawLegacy[string(legacyAggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target))]++
 			rawV2[string(aggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target))]++
@@ -340,66 +338,34 @@ func computeUsageReceiptWatermark(tx *bolt.Tx, scanTime time.Time) (time.Time, e
 	compare(BucketUsageAggHourly, rawLegacy, expectedLegacy)
 	compare(BucketQuotaUsageAggHourly, rawQuota, expectedQuota)
 
-	// Newest hour with cleanup evidence that does not depend on corrupt cells.
-	cleanedThrough := untrusted
-	for _, name := range []string{BucketUsageReceipts, BucketUsageEventsQuarantine} {
-		bucket := tx.Bucket([]byte(name))
-		if bucket == nil {
-			continue
-		}
-		cursor := bucket.Cursor()
-		for k, _ := cursor.Last(); k != nil; k, _ = cursor.Prev() {
-			if hour, ok := rawKeyHour(string(k)); ok {
-				if hour.After(cleanedThrough) {
-					cleanedThrough = hour
-				}
-				break
-			}
-		}
-	}
-
+	unknownHour := false
 	for _, evidence := range corrupt {
 		switch {
 		case !evidence.hourKnown:
+			unknownHour = true
 			slog.Error("usage receipts: aggregate key has no recognizable hour; it cannot be counted or attributed",
 				"bucket", evidence.bucket, "key", evidence.key, "reason", evidence.reason)
-		case !hasRaw || !evidence.hour.After(earliestRaw) || !evidence.hour.After(cleanedThrough):
-			mark(evidence.hour)
-			slog.Error("usage receipts: undecodable aggregate evidence in an hour retention may have cleaned; hour treated as untrusted",
-				"bucket", evidence.bucket, "key", evidence.key, "hour", evidence.hour.Format(hourLayout), "reason", evidence.reason)
 		default:
-			slog.Error("usage receipts: undecodable aggregate evidence after all cleanup evidence; it cannot hide pruned rows, watermark unchanged",
+			mark(evidence.hour)
+			slog.Error("usage receipts: undecodable aggregate evidence; hour treated as untrusted",
 				"bucket", evidence.bucket, "key", evidence.key, "hour", evidence.hour.Format(hourLayout), "reason", evidence.reason)
 		}
 	}
 
 	if untrusted.IsZero() {
-		return time.Time{}, nil
+		return time.Time{}, time.Time{}, unknownHour, nil
 	}
 	next := untrusted.Add(time.Hour)
 	if !next.After(untrusted) {
-		return time.Time{}, fmt.Errorf("usage receipts: legacy watermark overflow")
+		return time.Time{}, time.Time{}, false, fmt.Errorf("usage receipts: legacy watermark overflow")
 	}
+	untrustedThrough := next
 	if limit := scanTime.UTC().Truncate(time.Hour); next.After(limit) {
 		slog.Error("usage receipts: legacy watermark capped at the scan hour; untrusted evidence lies in the current or a future hour",
 			"untrusted_hour", untrusted.Format(hourLayout), "watermark", limit.Format(time.RFC3339))
 		next = limit
 	}
-	return next.UTC(), nil
-}
-
-// rawKeyHour parses the hour of a raw, receipt or quarantine key
-// ("<RFC3339Nano>_<record id>").
-func rawKeyHour(key string) (time.Time, bool) {
-	stamp, _, found := strings.Cut(key, "_")
-	if !found {
-		return time.Time{}, false
-	}
-	at, err := time.Parse(time.RFC3339Nano, stamp)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return at.UTC().Truncate(time.Hour), true
+	return next.UTC(), untrustedThrough.UTC(), unknownHour, nil
 }
 
 // untrustedAggHour recovers the hour a malformed aggregate key claims, so the
@@ -487,16 +453,39 @@ func lookupUsageIdentity(tx *bolt.Tx, key, digest []byte) (receiptState, usage.E
 		return identityNew, usage.Event{}, nil, errors.New("usage events bucket missing")
 	}
 	raw := rawBucket.Get(key)
+	owner, hasOwner, err := readRawOwner(tx, key)
+	if err != nil {
+		return identityNew, usage.Event{}, nil, err
+	}
 	receipt, hasReceipt, err := readUsageReceipt(tx, key)
 	if err != nil {
 		return identityNew, usage.Event{}, nil, err
 	}
 	if raw == nil {
 		if hasReceipt {
+			if hasOwner && owner.Digest != receipt.Digest {
+				return identityNew, usage.Event{}, nil, fmt.Errorf("%w: raw owner and receipt disagree", ErrUsageIdentityUnverified)
+			}
+			if receiptOwner, known := readReceiptOwner(tx, key); hasOwner && known && receiptOwner != owner.Client {
+				return identityNew, usage.Event{}, nil, fmt.Errorf("%w: raw and receipt owners disagree", ErrUsageIdentityUnverified)
+			}
 			if receipt.Digest != string(digest) {
 				return identityNew, usage.Event{}, nil, withUsageKind(ErrUsageRecordConflict, fmt.Errorf("usage record already exists with different event data"))
 			}
 			return identityReceipt, usage.Event{}, nil, nil
+		}
+		if hasOwner {
+			return identityNew, usage.Event{}, nil, fmt.Errorf("%w: %w", ErrUsageIdentityUnverified, errRawOwnerOrphan)
+		}
+		if index := tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil {
+			if err := index.ForEach(func(_, value []byte) error {
+				if bytes.Equal(value, key) {
+					return fmt.Errorf("%w: retained index refers to absent identity", ErrUsageIdentityUnverified)
+				}
+				return nil
+			}); err != nil {
+				return identityNew, usage.Event{}, nil, err
+			}
 		}
 		return identityNew, usage.Event{}, nil, nil
 	}
@@ -508,6 +497,9 @@ func lookupUsageIdentity(tx *bolt.Tx, key, digest []byte) (receiptState, usage.E
 	storedDigest, err := usage.RetryEquivalentDigest(stored)
 	if err != nil {
 		return identityNew, usage.Event{}, nil, err
+	}
+	if hasOwner && (owner.Digest != storedDigest || owner.Client != receiptClientHash(stored.ClientName)) {
+		return identityNew, usage.Event{}, nil, fmt.Errorf("%w: raw owner and event disagree", ErrUsageIdentityUnverified)
 	}
 	if storedDigest != string(digest) {
 		return identityNew, usage.Event{}, nil, withUsageKind(ErrUsageRecordConflict, fmt.Errorf("usage record ID %q already exists with different event data", stored.RecordID))
@@ -521,10 +513,150 @@ func lookupUsageIdentity(tx *bolt.Tx, key, digest []byte) (receiptState, usage.E
 	return identityRaw, stored, append([]byte(nil), raw...), nil
 }
 
+// checkUsageIdentityAdmission applies the same conservative bounds to lookups
+// and writes, after the whole bundle has been checked for committed identities.
+func checkUsageIdentityAdmission(tx *bolt.Tx, rows []usage.Event) error {
+	return checkUsageIdentityAdmissionAt(tx, rows, nil)
+}
+
+// A lookup can evaluate pending migration in its read transaction without
+// publishing a marker. The write path still requires a completed migration.
+func checkUsageIdentityAdmissionAt(tx *bolt.Tx, rows []usage.Event, scanTime *time.Time) error {
+	meta := tx.Bucket([]byte(BucketMeta))
+	if meta == nil {
+		return errors.New("usage receipts: meta bucket missing")
+	}
+	done := meta.Get([]byte(usageReceiptsWatermarkDoneKey)) != nil && meta.Get([]byte(usageReceiptsWatermarkDoneV2Key)) != nil
+	if !done && scanTime == nil {
+		return errors.New("usage receipts: legacy watermark was not established")
+	}
+	if meta.Get([]byte(usageReceiptsUnknownHourKey)) != nil {
+		return fmt.Errorf("%w: aggregate or receipt evidence has an unknown time range", ErrUsageIdentityUnverified)
+	}
+	watermark, err := decodeUsageReceiptWatermark(meta.Get([]byte(usageReceiptsWatermarkKey)))
+	if err != nil {
+		return err
+	}
+	untrusted, err := decodeUsageReceiptWatermark(meta.Get([]byte(usageReceiptsUntrustedThroughKey)))
+	if err != nil {
+		return err
+	}
+	if !done {
+		newWatermark, newUntrusted, unknownHour, err := computeUsageReceiptWatermark(tx, *scanTime)
+		if err != nil {
+			return err
+		}
+		if unknownHour {
+			return fmt.Errorf("%w: aggregate or receipt evidence has an unknown time range", ErrUsageIdentityUnverified)
+		}
+		if newWatermark.After(watermark) {
+			watermark = newWatermark
+		}
+		if newUntrusted.After(untrusted) {
+			untrusted = newUntrusted
+		}
+	}
+	if untrusted.After(watermark) {
+		watermark = untrusted
+	}
+	for _, row := range rows {
+		if !watermark.IsZero() && row.Timestamp.Before(watermark) {
+			return fmt.Errorf("%w: record %q before %s", ErrUsageIdentityUnverified, row.RecordID, watermark.Format(time.RFC3339Nano))
+		}
+	}
+	return nil
+}
+
+// A digest conflict is safe to ignore only when every bundle identity exists.
+func classifyUsageConflict(tx *bolt.Tx, rows []usage.Event, keys []string, conflict error) error {
+	partialOwner := func(err error) bool {
+		if len(rows) <= 1 || !errors.Is(err, errRawOwnerOrphan) {
+			return false
+		}
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		receipts := tx.Bucket([]byte(BucketUsageReceipts))
+		for _, key := range keys {
+			if (raw != nil && raw.Get([]byte(key)) != nil) || (receipts != nil && receipts.Get([]byte(key)) != nil) {
+				return true
+			}
+		}
+		return false
+	}
+	if partialOwner(conflict) {
+		return withUsageKind(ErrUsageBundleInvalid, ErrUsageBundlePartial)
+	}
+	if !errors.Is(conflict, ErrUsageRecordConflict) {
+		return conflict
+	}
+	for i, row := range rows {
+		digest, err := usage.RetryEquivalentDigest(row)
+		if err != nil {
+			return err
+		}
+		state, _, _, err := lookupUsageIdentity(tx, []byte(keys[i]), []byte(digest))
+		if partialOwner(err) {
+			return withUsageKind(ErrUsageBundleInvalid, ErrUsageBundlePartial)
+		}
+		if err != nil && !errors.Is(err, ErrUsageRecordConflict) {
+			return err
+		}
+		if errors.Is(err, ErrUsageRecordConflict) {
+			raw := tx.Bucket([]byte(BucketUsageEvents)).Get([]byte(keys[i]))
+			var stored usage.Event
+			if raw == nil || json.Unmarshal(raw, &stored) != nil || strings.TrimSpace(row.ClientName) == "" || strings.TrimSpace(stored.ClientName) != strings.TrimSpace(row.ClientName) {
+				return fmt.Errorf("%w: conflicting identity has unverified client ownership", ErrUsageIdentityUnverified)
+			}
+			storedDigest, digestErr := usage.RetryEquivalentDigest(stored)
+			if digestErr != nil {
+				return digestErr
+			}
+			if _, _, _, verifyErr := lookupUsageIdentity(tx, []byte(keys[i]), []byte(storedDigest)); verifyErr != nil {
+				return verifyErr
+			}
+		}
+		if err == nil && state == identityNew {
+			return withUsageKind(ErrUsageBundleInvalid, ErrUsageBundlePartial)
+		}
+	}
+	return conflict
+}
+
+// inspectUsageBundleTx makes the batch decision before any ledger row is written.
+func inspectUsageBundleTx(tx *bolt.Tx, rows []usage.Event, keys []string, migrationErr error) (bool, error) {
+	quarantine := tx.Bucket([]byte(BucketUsageEventsQuarantine))
+	committed := 0
+	for i, row := range rows {
+		if quarantine != nil && quarantine.Get([]byte(keys[i])) != nil {
+			return false, ErrUsageClientIndexIncomplete
+		}
+		digest, err := usage.RetryEquivalentDigest(row)
+		if err != nil {
+			return false, err
+		}
+		state, _, _, err := lookupUsageIdentity(tx, []byte(keys[i]), []byte(digest))
+		if err != nil {
+			return false, classifyUsageConflict(tx, rows, keys, err)
+		}
+		if state != identityNew {
+			committed++
+		}
+	}
+	if committed == len(rows) {
+		return true, nil
+	}
+	if committed != 0 {
+		return false, withUsageKind(ErrUsageBundleInvalid, ErrUsageBundlePartial)
+	}
+	if migrationErr != nil {
+		return false, migrationErr
+	}
+	return false, checkUsageIdentityAdmission(tx, rows)
+}
+
 // recordUsageBundleTx commits every expanded row of one request bundle in the
-// caller's write transaction. Any already-committed row suppresses the whole
-// bundle so a pruned record is never resurrected or charged twice.
-func recordUsageBundleTx(tx *bolt.Tx, rows []usage.Event, keys []string, explicit bool) (bool, error) {
+// caller's write transaction. A complete retry is suppressed; a partial bundle
+// is rejected so it cannot be resurrected or charged twice.
+func recordUsageBundleTx(tx *bolt.Tx, rows []usage.Event, keys []string, migrationErr error) (bool, error) {
 	if len(rows) == 0 || len(rows) != len(keys) {
 		return false, errors.New("usage: invalid bundle")
 	}
@@ -546,7 +678,7 @@ func recordUsageBundleTx(tx *bolt.Tx, rows []usage.Event, keys []string, explici
 		}
 		state, stored, raw, err := lookupUsageIdentity(tx, []byte(keys[i]), []byte(digest))
 		if err != nil {
-			return false, err
+			return false, classifyUsageConflict(tx, rows, keys, err)
 		}
 		states[i] = state
 		storedEvents[i] = stored
@@ -566,28 +698,14 @@ func recordUsageBundleTx(tx *bolt.Tx, rows []usage.Event, keys []string, explici
 		return false, nil
 	}
 	if committed > 0 {
-		return false, withUsageKind(ErrUsageBundleInvalid, fmt.Errorf("usage bundle is partially committed and cannot be proven complete"))
+		return false, withUsageKind(ErrUsageBundleInvalid, ErrUsageBundlePartial)
 	}
 
-	if explicit {
-		meta := tx.Bucket([]byte(BucketMeta))
-		if meta == nil {
-			return false, errors.New("usage receipts: meta bucket missing")
-		}
-		if meta.Get([]byte(usageReceiptsWatermarkDoneKey)) == nil {
-			return false, errors.New("usage receipts: legacy watermark was not established")
-		}
-		watermark, err := decodeUsageReceiptWatermark(meta.Get([]byte(usageReceiptsWatermarkKey)))
-		if err != nil {
-			return false, err
-		}
-		if !watermark.IsZero() {
-			for _, row := range rows {
-				if row.Timestamp.Before(watermark) {
-					return false, fmt.Errorf("%w: record %q before %s", ErrUsageIdentityUnverified, row.RecordID, watermark.Format(time.RFC3339Nano))
-				}
-			}
-		}
+	if migrationErr != nil {
+		return false, migrationErr
+	}
+	if err := checkUsageIdentityAdmission(tx, rows); err != nil {
+		return false, err
 	}
 
 	for i := range rows {
@@ -602,6 +720,20 @@ func recordUsageBundleTx(tx *bolt.Tx, rows []usage.Event, keys []string, explici
 // already checked that the identity has neither raw data nor a receipt.
 func writeUsageRowTx(tx *bolt.Tx, event usage.Event, key string) error {
 	b := tx.Bucket([]byte(BucketUsageEvents))
+	usageKey := aggKey(event.Timestamp, event.EndpointType, event.ClientName, event.Model, event.Target)
+	quotaKey := quotaAggKey(event.Timestamp, event.ClientName, event.Target, event.Model)
+	usageProof, usageProven := readRollupProofValue(tx, BucketUsageAggHourly, usageKey)
+	quotaProof, quotaProven := readRollupProofValue(tx, BucketQuotaUsageAggHourly, quotaKey)
+	if !usageProven {
+		if err := invalidateRollupProof(tx, BucketUsageAggHourly, usageKey); err != nil {
+			return err
+		}
+	}
+	if !quotaProven {
+		if err := invalidateRollupProof(tx, BucketQuotaUsageAggHourly, quotaKey); err != nil {
+			return err
+		}
+	}
 	data, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal usage event: %w", err)
@@ -609,11 +741,24 @@ func writeUsageRowTx(tx *bolt.Tx, event usage.Event, key string) error {
 	if err := b.Put([]byte(key), data); err != nil {
 		return err
 	}
+	if err := writeRawOwner(tx, []byte(key), event); err != nil {
+		return err
+	}
 	if err := bumpAgg(tx, event); err != nil {
 		return err
 	}
 	if err := bumpQuotaAgg(tx, event); err != nil {
 		return err
+	}
+	if usageProven {
+		if err := advanceRollupProof(tx, BucketUsageAggHourly, usageKey, usageProof, event, []byte(key)); err != nil {
+			return err
+		}
+	}
+	if quotaProven {
+		if err := advanceRollupProof(tx, BucketQuotaUsageAggHourly, quotaKey, quotaProof, event, []byte(key)); err != nil {
+			return err
+		}
 	}
 	if err := addClientEventIndex(tx, event, []byte(key), data); err != nil {
 		return err

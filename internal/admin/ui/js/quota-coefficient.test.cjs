@@ -285,7 +285,7 @@ test("quota summary discloses estimated cost, incomplete records and missing usa
 });
 
 test("a failed 30-day aggregate load is explicit while quota rows still load", async () => {
-  const harness = createHarness();
+  const harness = createHarness({ routes: { "/admin/data/targets": { targets: [] } } });
   const app = await harness.run();
   const quota = app.modules.quota;
   const baseFetch = harness.context.fetch;

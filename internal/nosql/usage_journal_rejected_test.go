@@ -54,17 +54,19 @@ func clientInputTokens(t *testing.T, store *UsageStore, client string, at time.T
 
 // TestUsageJournalMovesPermanentRejectionsToSidecar covers every row the
 // primary store can never accept. Each one leaves the pending journal for a
-// private sidecar with its original bytes and reason, so the client's
-// calibration drains while committed accounting stays unchanged.
+// private sidecar with its original bytes and reason. Only a verified digest
+// conflict permits calibration; unresolved consumption remains incomplete.
 func TestUsageJournalMovesPermanentRejectionsToSidecar(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		reason string
-		setup  func(t *testing.T, db *bolt.DB, store *UsageStore) usage.Event
+		name       string
+		reason     string
+		unresolved bool
+		setup      func(t *testing.T, db *bolt.DB, store *UsageStore) usage.Event
 	}{
 		{
-			name:   "identity before watermark",
-			reason: "identity_unverified",
+			name:       "identity before watermark",
+			reason:     "identity_unverified",
+			unresolved: true,
 			setup: func(t *testing.T, db *bolt.DB, _ *UsageStore) usage.Event {
 				setReceiptWatermark(t, db, time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
 				return fixedPlainEvent()
@@ -83,8 +85,9 @@ func TestUsageJournalMovesPermanentRejectionsToSidecar(t *testing.T) {
 			},
 		},
 		{
-			name:   "invalid bundle",
-			reason: "invalid_bundle",
+			name:       "invalid bundle",
+			reason:     "invalid_bundle",
+			unresolved: true,
 			setup: func(t *testing.T, _ *bolt.DB, _ *UsageStore) usage.Event {
 				event := fixedIdentityBundle()
 				event.Components = append(event.Components, event.Components[0])
@@ -92,8 +95,9 @@ func TestUsageJournalMovesPermanentRejectionsToSidecar(t *testing.T) {
 			},
 		},
 		{
-			name:   "partially committed bundle",
-			reason: "invalid_bundle",
+			name:       "partially committed bundle",
+			reason:     "invalid_bundle",
+			unresolved: true,
 			setup: func(t *testing.T, db *bolt.DB, store *UsageStore) usage.Event {
 				event := fixedIdentityBundle()
 				if err := store.Record(event); err != nil {
@@ -133,8 +137,10 @@ func TestUsageJournalMovesPermanentRejectionsToSidecar(t *testing.T) {
 				if got := journalContent(t, path); got != "" {
 					t.Fatalf("permanently rejected line stayed pending: %s", got)
 				}
-				if err := journal.DrainClient(event.ClientName); err != nil {
-					t.Fatalf("DrainClient still blocked: %v", err)
+				if err := journal.DrainClient(event.ClientName); tc.unresolved && !errors.Is(err, ErrUsageHistoryIncomplete) {
+					t.Fatalf("DrainClient accepted unresolved usage: %v", err)
+				} else if !tc.unresolved && err != nil {
+					t.Fatalf("DrainClient blocked verified conflict: %v", err)
 				}
 			}
 			rejected := readRejectedSidecar(t, path)
@@ -156,7 +162,11 @@ func TestUsageJournalMovesPermanentRejectionsToSidecar(t *testing.T) {
 			if raw, agg := usageRecordCounts(t, db); raw != rawBefore || agg != aggBefore {
 				t.Fatalf("rejection changed accounting: raw=%d/%d agg=%d/%d", raw, rawBefore, agg, aggBefore)
 			}
-			if got := clientInputTokens(t, store, event.ClientName, event.Timestamp); got != tokensBefore {
+			if tc.unresolved {
+				if _, err := store.SumByClientRange(event.ClientName, event.Timestamp, event.Timestamp); !errors.Is(err, ErrUsageHistoryIncomplete) {
+					t.Fatalf("unresolved usage reported as complete: %v", err)
+				}
+			} else if got := clientInputTokens(t, store, event.ClientName, event.Timestamp); got != tokensBefore {
 				t.Fatalf("rejection changed committed tokens: %d, want %d", got, tokensBefore)
 			}
 			output := logs.String()
@@ -209,11 +219,11 @@ func TestUsageJournalKeepsRejectedLineWhenSidecarFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.journal")
 	line := journalLine(t, event)
 	mustWriteFile(t, path, line+"\n")
-	if err := os.Mkdir(path+".rejected", 0o700); err != nil {
-		t.Fatal(err)
-	}
 	journal, err := NewUsageJournal(store, path, nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".rejected", 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := journal.Replay(); err == nil {
@@ -267,7 +277,7 @@ func TestAsyncJournalConflictMovesToSidecarOnDrain(t *testing.T) {
 }
 
 // TestRejectedSidecarKeepsRawBytesAcrossFailedRewrites: a permanently
-// rejected line with invalid UTF-8 is preserved byte for byte, and while the
+// rejected line with multibyte UTF-8 is preserved byte for byte, and while the
 // journal rewrite keeps failing (here: a read-only directory) every tick
 // re-rejects the same line without growing the sidecar.
 func TestRejectedSidecarKeepsRawBytesAcrossFailedRewrites(t *testing.T) {
@@ -278,9 +288,9 @@ func TestRejectedSidecarKeepsRawBytesAcrossFailedRewrites(t *testing.T) {
 	store := NewUsageStore(testDB(t))
 	event := fixedIdentityBundle()
 	event.Components = append(event.Components, event.Components[0])
-	line := strings.Replace(journalLine(t, event), `"req-fixed"`, "\"req-\xff\xfe-fixed\"", 1)
-	if !strings.Contains(line, "\xff\xfe") {
-		t.Fatal("fixture lacks invalid UTF-8")
+	line := strings.Replace(journalLine(t, event), `"req-fixed"`, "\"req-雪☃-fixed\"", 1)
+	if !strings.Contains(line, "雪☃") {
+		t.Fatal("fixture lacks multibyte UTF-8")
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "usage.journal")

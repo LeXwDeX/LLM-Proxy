@@ -116,7 +116,8 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 ## 开发与测试流程
 
 1. 先查重并明确问题、范围和验收条件，再在隔离分支实施；保留当前工作区的用户改动。
-2. 规格用 GitHub Issue 记录（SpecGit 管理）：每个可独立验证的目标对应一个 Issue，写明 Why / Scope / Approach / Acceptance，进度、阻塞与证据链接也记在 Issue；PR 用 `Closes #N` 或 `Refs #N` 关联。
+2. 规格用 GitHub Issue 记录（SpecGit 管理）：每个可独立验证的目标对应一个 Issue，正文使用“原因 / 范围 / 方案 / 验收”小节，进度、阻塞与证据链接也记在 Issue；PR/MR 正文使用“原因 / 变更 / 证据 / 检查清单”小节，用 `Closes #N` 或 `Refs #N` 关联，关闭引用须独立成行并填写实际编号。
+   Issue 与 PR/MR 的标题和正文使用中文；专有名词、命令、代码、必要类型前缀和关联引用可保留英文。SpecGit 仅机械检查标题含汉字和正文小节结构，不能自动判断自然语言是否全面使用中文，仍须人工核对。
 3. 按 TDD 验证本地行为：行为变更必须先建立能复现问题、且因正确原因失败的用例，再修改实现并确认通过；验证范围覆盖受影响行为及直接消费者。保持行为不变的重构与仅文档改动不需要人为制造失败用例，但要写明已跑的检查。
 4. 运行本地项目门禁；本地可运行的必需门禁不得留给远端 CI 首次发现。本地使用 `go.mod` 声明的 Go 版本，与 CI 一致。
 5. 功能分支以 Pull Request 合入 `dev`，不直接推送 `dev` 或 `main`。PR 按 [`.github/pull_request_template.md`](.github/pull_request_template.md) 填写说明、关联 Issue、TDD 证据（先失败的测试与修复后的通过）、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
@@ -133,7 +134,7 @@ GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推
 | `race` | `go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...` |
 | `e2e` | `make e2e` |
 | `integration` | `make integration` |
-| `admin-ui` | `node scripts/testing/admin_ui_test.cjs` |
+| `admin-ui` | `node scripts/testing/admin_ui_test.cjs`、`(cd internal/admin/ui && node --test)` |
 | `scripts` | 受跟踪的 `scripts/**/test_*.py` 与 `scripts/test_*.py` Python 单测（`python3 -m unittest`） |
 
 `.github/workflows/docker-build.yml` 是可选的手动镜像构建，不属于必需检查；发布默认只附源码包。
@@ -150,6 +151,7 @@ make build                # 先尝试联网更新模型目录，再构建 bin/ll
 make integration          # go test -tags=integration ./test/...
 make e2e                  # 真实代理二进制 + 进程内虚假上游 internal/fakellm，不调用真实模型
 node scripts/testing/admin_ui_test.cjs # 管理前端模块行为门禁
+(cd internal/admin/ui && node --test) # 管理前端子树单元测试
 python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_image_tag
 ```
 

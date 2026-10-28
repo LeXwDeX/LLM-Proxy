@@ -42,6 +42,10 @@ func (r *gatedBatchRecorder) RecordBatch(events []usage.Event) error {
 	return r.store.RecordBatch(events)
 }
 
+func (r *gatedBatchRecorder) RegisterUnresolvedUsage(event usage.Event, original []byte) error {
+	return r.store.RegisterUnresolvedUsage(event, original)
+}
+
 func asyncTestEvent(i int, client string) usage.Event {
 	return usage.Event{
 		Timestamp:    time.Date(2026, 10, 20, 1, 2, 3, i, time.UTC),

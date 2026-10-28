@@ -29,6 +29,7 @@ func (h *Handler) routes() chi.Router {
 		r.Get("/model-costs", h.handleListModelCosts)
 		r.Get("/pricing-templates", h.handleListPricingTemplates)
 		r.Get("/usage/events", h.handleListUsageEvents)
+		r.Get("/usage/unresolved", h.handleListUsageUnresolved)
 		r.Get("/usage/aggregate", h.handleAggregateUsage)
 		r.Get("/usage/summary", h.handleUsageSummary)
 		r.Get("/usage/model-groups", h.handleUsageModelGroups)
@@ -63,6 +64,7 @@ func (h *Handler) routes() chi.Router {
 
 		// === Write routes (blocked for readonly users via ReadonlyGuard) ===
 		guarded := r.With(readonlyGuard)
+		r.With(h.auditReadonlyUsageRecheck, readonlyGuard).Post("/usage/recheck", h.handleUsageRecheck)
 
 		// Client write
 		guarded.Post("/clients", h.handleCreateClient)
