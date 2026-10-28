@@ -222,6 +222,7 @@ go build ./...
 go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
 make integration
 node scripts/testing/admin_ui_test.cjs
+(cd internal/admin/ui && node --test)
 make e2e
 python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_image_tag
 ```
@@ -234,7 +235,7 @@ Upstream API credentials and client access keys are kept only in protected local
 
 ## Contributing
 
-- **Specifications live in Issues.** Each independently verifiable goal gets a GitHub Issue (managed with SpecGit) stating Why / Scope / Approach / Acceptance; progress, blockers and evidence links are kept there. Pull Requests reference it with `Closes #N` or `Refs #N`.
+- **Specifications live in Issues.** Each independently verifiable goal gets a GitHub Issue (managed with SpecGit) with the Chinese sections 原因 / 范围 / 方案 / 验收 (reason / scope / approach / acceptance); progress, blockers and evidence links are kept there. Issue and Pull Request titles and bodies use Chinese, with exceptions for proper names, commands, code, necessary type prefixes and references. Pull Requests reference the Issue with `Closes #N` or `Refs #N`.
 - **Feature branches into `dev`.** Work on a feature branch and open a Pull Request targeting `dev`; do not push directly to `dev` or `main`. Fill in the [PR template](.github/pull_request_template.md): summary and linked Issue, TDD evidence, gates run, unverified scope, and whether billing, protocols or compatibility are affected.
 - **`main` is fast-forward only.** After `dev` passes acceptance, `main` is fast-forwarded to the accepted `dev` commit; nothing is committed or merged on `main` separately.
 - **Tag last.** A version tag and GitHub Release are created only after both staging acceptance and the production smoke test of the same image have passed, never earlier.
@@ -249,7 +250,7 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on pushes to `d
 | `race` | `go test -race -count=1` over `internal/proxy`, `internal/nosql`, `internal/usage`, `internal/quota`, `internal/admin` and `cmd/proxy` |
 | `e2e` | `make e2e` |
 | `integration` | `make integration` |
-| `admin-ui` | `node scripts/testing/admin_ui_test.cjs` |
+| `admin-ui` | `node scripts/testing/admin_ui_test.cjs`, `(cd internal/admin/ui && node --test)` |
 | `scripts` | Python unit tests for the tracked `scripts/**/test_*.py` and `scripts/test_*.py` (`python3 -m unittest`) |
 
 `.github/workflows/docker-build.yml` is an optional, manually run image build and is not a required check; releases attach only the source archives by default.

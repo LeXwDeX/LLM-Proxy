@@ -8,7 +8,11 @@
 node scripts/testing/admin_ui_test.cjs
 ```
 
-仅使用 Node 内置模块，按 `internal/admin/ui/index.html` 中的脚本顺序在 VM 中执行内嵌 JS 模块，检查启动流程、Schema 驱动的控件和跨模块行为。`internal/admin/ui_runtime_test.go` 的 `TestUIRuntimeBehavior` 会调用该脚本，因此 `go test ./internal/admin/` 在本机有 `node` 时一并运行它；没有 `node` 时该用例 SKIP（设置 `LLMS_REQUIRE_NODE_TESTS=1` 则改为失败）。`internal/admin/ui/` 下的 `*.test.cjs` 单元用例基于 `node:test` 并复用本脚本导出的 harness；其中一部分由 `internal/admin` 的 Go 测试调用，全部用例可用 `node --test internal/admin/ui/` 直接运行。
+仅使用 Node 内置模块，按 `internal/admin/ui/index.html` 中的脚本顺序在 VM 中执行内嵌 JS 模块，检查启动流程、Schema 驱动的控件和跨模块行为。`internal/admin/ui_runtime_test.go` 的 `TestUIRuntimeBehavior` 会调用该脚本，因此 `go test ./internal/admin/` 在本机有 `node` 时一并运行它；没有 `node` 时该用例 SKIP（设置 `LLMS_REQUIRE_NODE_TESTS=1` 则改为失败）。`internal/admin/ui/` 下的 `*.test.cjs` 单元用例基于 `node:test` 并复用本脚本导出的 harness；其中一部分由 `internal/admin` 的 Go 测试调用，CI 还会递归运行 UI 子树中的 Node 单元测试。从项目根目录可运行同一范围：
+
+```sh
+(cd internal/admin/ui && node --test)
+```
 
 ## 管理后台网页全流程模拟（admin_ui_sim.cjs / admin_ui_sim_flows.cjs）
 
@@ -35,7 +39,7 @@ node scripts/testing/admin_ui_browser_test.cjs
 node scripts/testing/usage_table_browser_test.cjs
 ```
 
-两者都依赖本机已安装的 `playwright` 包与浏览器，不进入 CI，CI 基线是上面的 Node VM 门禁。
+两者都依赖本机已安装的 `playwright` 包与浏览器，不进入 CI，CI 基线是上面的 Node VM 门禁和 UI 子树单元测试。
 
 - `admin_ui_browser_test.cjs`：用 Playwright/Chromium 访问本地 mock server 上的真实管理页面，复用 `admin_ui_test.cjs` 的 Schema fixture；不使用凭据，也不调用上游模型。可用 `LLMS_UI_SCREENSHOT_DIR` 指定截图目录。
 - `usage_table_browser_test.cjs`：仅加载真实内嵌 HTML/CSS 与消费统计模块的本地 fixture，不启动服务。可用 `LLMS_UI_BROWSER` 选择 `chromium`（默认）或 `webkit`。

@@ -125,6 +125,10 @@ jobs:
       - name: 管理前端模块行为门禁
         run: node scripts/testing/admin_ui_test.cjs
 
+      - name: 管理前端独立单元测试
+        working-directory: internal/admin/ui
+        run: node --test
+
   scripts:
     name: scripts
     runs-on: ubuntu-latest

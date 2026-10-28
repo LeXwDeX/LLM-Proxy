@@ -222,6 +222,7 @@ go build ./...
 go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
 make integration
 node scripts/testing/admin_ui_test.cjs
+(cd internal/admin/ui && node --test)
 make e2e
 python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_image_tag
 ```
@@ -234,7 +235,7 @@ python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_im
 
 ## 贡献流程
 
-- **规格记在 Issue。** 每个可独立验证的目标对应一个 GitHub Issue（由 SpecGit 管理），写明 Why / Scope / Approach / Acceptance；进度、阻塞与证据链接也记在其中。Pull Request 用 `Closes #N` 或 `Refs #N` 关联。
+- **规格记在 Issue。** 每个可独立验证的目标对应一个 GitHub Issue（由 SpecGit 管理），正文使用“原因 / 范围 / 方案 / 验收”小节；进度、阻塞与证据链接也记在其中。Issue 和 Pull Request 的标题与正文使用中文，专有名词、命令、代码、必要类型前缀和关联引用可保留英文。Pull Request 用 `Closes #N` 或 `Refs #N` 关联。
 - **功能分支合入 `dev`。** 在功能分支上开发，以 Pull Request 合入 `dev`；不直接推送 `dev` 或 `main`。按 [PR 模板](.github/pull_request_template.md) 填写说明与关联 Issue、TDD 证据、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
 - **`main` 只做 fast-forward。** `dev` 验收通过后，`main` 以 fast-forward 前进到已验收的 `dev` 提交；不在 `main` 上单独提交或合并。
 - **最后打 tag。** 测试环境全量验收和生产环境同一镜像的发布冒烟都通过后，才打版本 tag、发布 GitHub Release，绝不提前。
@@ -249,7 +250,7 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推送到 `dev`
 | `race` | 对 `internal/proxy`、`internal/nosql`、`internal/usage`、`internal/quota`、`internal/admin` 与 `cmd/proxy` 执行 `go test -race -count=1` |
 | `e2e` | `make e2e` |
 | `integration` | `make integration` |
-| `admin-ui` | `node scripts/testing/admin_ui_test.cjs` |
+| `admin-ui` | `node scripts/testing/admin_ui_test.cjs`、`(cd internal/admin/ui && node --test)` |
 | `scripts` | 受跟踪的 `scripts/**/test_*.py` 与 `scripts/test_*.py` Python 单测（`python3 -m unittest`） |
 
 `.github/workflows/docker-build.yml` 是可选的手动镜像构建，不属于必需检查；发布默认只附源码包。
