@@ -242,7 +242,7 @@ func (s *UsageStore) recordBatchContext(ctx context.Context, events []usage.Even
 			return nil
 		}
 		fresh := make([]bool, len(bundles))
-		memo := make(freshScopeMemo)
+		memo := freshScopeMemo{cells: make(map[string]bool), scopes: make(map[string]continuationProof)}
 		for i, bundle := range bundles {
 			fresh[i] = memo.proven(ctx, tx, bundle.rows)
 		}

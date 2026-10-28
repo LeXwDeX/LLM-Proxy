@@ -106,21 +106,21 @@ func TestBatchProofMemoScopesAndAdmission(t *testing.T) {
 	add("hour", func(e *usage.Event) { e.Timestamp = e.Timestamp.Add(time.Hour) }, true)
 	add("unknown", func(e *usage.Event) { e.ClientName = "unknown" }, false)
 	if err := db.View(func(tx *bolt.Tx) error {
-		memo := make(freshScopeMemo)
+		memo := freshScopeMemo{cells: make(map[string]bool), scopes: make(map[string]continuationProof)}
 		for _, c := range cases {
 			rows, _, err := normalizeUsageBundle(c.event)
 			if err != nil {
 				return err
 			}
 			want := freshScopeProven(tx, rows) || continuationScopeProven(tx, rows)
-			before := len(memo)
+			before := len(memo.cells)
 			if got := memo.proven(context.Background(), tx, rows); got != want || got != c.want {
 				return fmt.Errorf("%s: memo=%t oracle=%t want=%t", c.name, got, want, c.want)
 			}
-			if c.name != "unknown" && len(memo) != before+1 {
+			if c.name != "unknown" && len(memo.cells) != before+1 {
 				return fmt.Errorf("%s scope aliased", c.name)
 			}
-			if got := memo.proven(context.Background(), tx, rows); got != want || len(memo) != before+boolInt(c.name != "unknown") {
+			if got := memo.proven(context.Background(), tx, rows); got != want || len(memo.cells) != before+boolInt(c.name != "unknown") {
 				return fmt.Errorf("%s repeat result=%t", c.name, got)
 			}
 		}
@@ -128,11 +128,11 @@ func TestBatchProofMemoScopesAndAdmission(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		before := len(memo)
+		before := len(memo.cells)
 		reordered := []usage.Event{rows[1], rows[0], rows[1]}
 		want := freshScopeProven(tx, reordered) || continuationScopeProven(tx, reordered)
-		if got := memo.proven(context.Background(), tx, reordered); got != want || len(memo) != before {
-			return fmt.Errorf("reordered/deduplicated rows: memo=%t oracle=%t entries=%d want=%d", got, want, len(memo), before)
+		if got := memo.proven(context.Background(), tx, reordered); got != want || len(memo.cells) != before {
+			return fmt.Errorf("reordered/deduplicated rows: memo=%t oracle=%t entries=%d want=%d", got, want, len(memo.cells), before)
 		}
 		return nil
 	}); err != nil {
@@ -146,7 +146,7 @@ func TestBatchProofMemoScopesAndAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.View(func(tx *bolt.Tx) error {
-		memo := make(freshScopeMemo)
+		memo := freshScopeMemo{cells: make(map[string]bool), scopes: make(map[string]continuationProof)}
 		for _, tc := range []struct {
 			offset time.Duration
 			want   bool
@@ -193,7 +193,7 @@ func TestBatchProofMemoDamagedEvidenceAndNewTransaction(t *testing.T) {
 			check := func(want bool) {
 				t.Helper()
 				if err := db.View(func(tx *bolt.Tx) error {
-					memo := make(freshScopeMemo)
+					memo := freshScopeMemo{cells: make(map[string]bool), scopes: make(map[string]continuationProof)}
 					oracle := freshScopeProven(tx, rows) || continuationScopeProven(tx, rows)
 					for i := 0; i < 2; i++ {
 						if got := memo.proven(context.Background(), tx, rows); got != want || got != oracle {

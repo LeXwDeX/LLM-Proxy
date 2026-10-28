@@ -23,9 +23,21 @@ type freshAttestation struct {
 }
 
 // A memo is valid only in the pre-write phase of one unchanged transaction.
-type freshScopeMemo map[string]bool
+type freshScopeMemo struct {
+	cells  map[string]bool
+	scopes map[string]continuationProof
+}
+
+type continuationCellPair struct{ usage, quota string }
+type continuationProof struct {
+	ok      bool
+	covered map[continuationCellPair]bool
+}
 
 func (memo freshScopeMemo) proven(ctx context.Context, tx *bolt.Tx, rows []usage.Event) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	// Admission includes the exact timestamp, not just the hour in the key.
 	if checkUsageIdentityAdmission(tx, rows) != nil {
 		return false
@@ -62,11 +74,13 @@ func (memo freshScopeMemo) proven(ctx context.Context, tx *bolt.Tx, rows []usage
 		encoded = append(encoded, cell...)
 	}
 	key := string(encoded)
-	if proven, ok := memo[key]; ok {
+	if proven, ok := memo.cells[key]; ok {
 		return proven
 	}
-	proven := freshScopeProvenContext(ctx, tx, rows) || continuationScopeProvenContext(ctx, tx, rows)
-	memo[key] = proven
+	proven := freshScopeProvenContext(ctx, tx, rows) || continuationScopeProvenMemoContext(ctx, tx, rows, memo.scopes)
+	if ctx.Err() == nil {
+		memo.cells[key] = proven
+	}
 	return proven
 }
 
@@ -168,13 +182,17 @@ func continuationScopeProven(tx *bolt.Tx, rows []usage.Event) bool {
 }
 
 func continuationScopeProvenContext(ctx context.Context, tx *bolt.Tx, rows []usage.Event) bool {
+	return continuationScopeProvenMemoContext(ctx, tx, rows, nil)
+}
+
+func continuationScopeProvenMemoContext(ctx context.Context, tx *bolt.Tx, rows []usage.Event, memo map[string]continuationProof) bool {
 	meta := tx.Bucket([]byte(BucketMeta))
 	raw := tx.Bucket([]byte(BucketUsageEvents))
 	if meta == nil || raw == nil || len(rows) == 0 || meta.Get([]byte(usageAccountingProofTrackedKey)) != nil || checkUsageIdentityAdmission(tx, rows) != nil {
 		return false
 	}
-	type cellPair struct{ usage, quota string }
 	scopes := make(map[string]bool)
+	pairs := make(map[string]bool)
 	owners := make(map[string]bool)
 	hours := make(map[time.Time]bool)
 	for _, row := range rows {
@@ -184,17 +202,61 @@ func continuationScopeProvenContext(ctx context.Context, tx *bolt.Tx, rows []usa
 		}
 		hour := row.Timestamp.UTC().Truncate(time.Hour)
 		scopes[client+"\x00"+hour.Format(hourLayout)] = true
+		var pair []byte
+		for _, part := range []string{client, hour.Format(time.RFC3339Nano)} {
+			pair = binary.AppendUvarint(pair, uint64(len(part)))
+			pair = append(pair, part...)
+		}
+		pairs[string(pair)] = true
 		owners[receiptClientHash(client)] = true
 		hours[hour] = true
 	}
-	if !quarantineOutsideProof(tx, owners, hours) {
+	ordered := make([]string, 0, len(pairs))
+	for pair := range pairs {
+		ordered = append(ordered, pair)
+	}
+	sort.Strings(ordered)
+	var encoded []byte
+	for _, pair := range ordered {
+		encoded = binary.AppendUvarint(encoded, uint64(len(pair)))
+		encoded = append(encoded, pair...)
+	}
+	key := string(encoded)
+	proof, ok := memo[key]
+	if !ok {
+		proof = proveContinuationScope(ctx, tx, raw, scopes, owners, hours)
+		if memo != nil && ctx.Err() == nil {
+			memo[key] = proof
+		}
+	}
+	if !proof.ok {
 		return false
+	}
+	for _, row := range rows {
+		pair := continuationCellPair{string(aggKey(row.Timestamp, row.EndpointType, row.ClientName, row.Model, row.Target)), string(quotaAggKey(row.Timestamp, row.ClientName, row.Target, row.Model))}
+		if !proof.covered[pair] && !unoccupiedContinuationCellContext(ctx, tx, row) {
+			return false
+		}
+	}
+	return ctx.Err() == nil
+}
+
+func proveContinuationScope(ctx context.Context, tx *bolt.Tx, raw *bolt.Bucket, scopes map[string]bool, owners map[string]bool, hours map[time.Time]bool) continuationProof {
+	if !quarantineOutsideProof(tx, owners, hours) {
+		return continuationProof{}
 	}
 	if !freshSnapshotsDisjoint(tx, owners, hours) {
-		return false
+		return continuationProof{}
 	}
-	covered := make(map[cellPair]bool)
+	covered := make(map[continuationCellPair]bool)
 	seenRoots := make(map[string]bool)
+	type anchor struct {
+		rows []usage.Event
+		keys []string
+	}
+	var anchors []anchor
+	var allRows []usage.Event
+	var allKeys []string
 	if err := raw.ForEach(func(k, value []byte) error {
 		if err := proofScanStep(ctx, false); err != nil {
 			return err
@@ -255,35 +317,44 @@ func continuationScopeProvenContext(ctx context.Context, tx *bolt.Tx, rows []usa
 		}
 		needsProof := false
 		for _, row := range anchorRows {
-			pair := cellPair{string(aggKey(row.Timestamp, row.EndpointType, row.ClientName, row.Model, row.Target)), string(quotaAggKey(row.Timestamp, row.ClientName, row.Target, row.Model))}
+			pair := continuationCellPair{string(aggKey(row.Timestamp, row.EndpointType, row.ClientName, row.Model, row.Target)), string(quotaAggKey(row.Timestamp, row.ClientName, row.Target, row.Model))}
 			if !covered[pair] {
 				needsProof = true
 				break
 			}
 		}
 		if needsProof {
-			proven, err := usageAccountingProvenContext(ctx, tx, anchorRows, anchorKeys)
-			if err != nil || !proven {
-				return ErrUsageHistoryIncomplete
-			}
+			anchors = append(anchors, anchor{anchorRows, anchorKeys})
+			allRows = append(allRows, anchorRows...)
+			allKeys = append(allKeys, anchorKeys...)
 		}
 		seenRoots[rootKey] = true
 		for _, row := range anchorRows {
-			covered[cellPair{string(aggKey(row.Timestamp, row.EndpointType, row.ClientName, row.Model, row.Target)), string(quotaAggKey(row.Timestamp, row.ClientName, row.Target, row.Model))}] = true
+			covered[continuationCellPair{string(aggKey(row.Timestamp, row.EndpointType, row.ClientName, row.Model, row.Target)), string(quotaAggKey(row.Timestamp, row.ClientName, row.Target, row.Model))}] = true
 		}
 		return nil
 	}); err != nil {
-		return false
+		return continuationProof{}
 	}
 	if len(seenRoots) == 0 {
-		return false
+		return continuationProof{}
 	}
-	for _, row := range rows {
-		if !covered[cellPair{string(aggKey(row.Timestamp, row.EndpointType, row.ClientName, row.Model, row.Target)), string(quotaAggKey(row.Timestamp, row.ClientName, row.Target, row.Model))}] && !unoccupiedContinuationCellContext(ctx, tx, row) {
-			return false
+	proven, err := usageAccountingRawProvenContext(ctx, tx, allRows, allKeys)
+	if err != nil {
+		return continuationProof{}
+	}
+	if !proven {
+		for _, a := range anchors {
+			proven, err = usageAccountingProvenContext(ctx, tx, a.rows, a.keys)
+			if err != nil || !proven {
+				return continuationProof{}
+			}
 		}
 	}
-	return true
+	if ctx.Err() != nil {
+		return continuationProof{}
+	}
+	return continuationProof{ok: true, covered: covered}
 }
 
 func unoccupiedContinuationCell(tx *bolt.Tx, row usage.Event) bool {
