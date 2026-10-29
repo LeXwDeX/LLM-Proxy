@@ -60,6 +60,7 @@ func (h *Handler) routes() chi.Router {
 
 		// Trace store (DEBUG mode)
 		r.Get("/trace", h.handleListTrace)
+		r.Get("/trace/stats", h.handleTraceStats)
 		r.Get("/trace/{request_id}", h.handleGetTrace)
 
 		// === Write routes (blocked for readonly users via ReadonlyGuard) ===

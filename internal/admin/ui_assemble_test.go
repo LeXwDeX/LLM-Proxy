@@ -17,10 +17,11 @@ import (
 // A page split into several files lists them in load order.
 var uiScriptPathMap = map[string][]string{
 	"core": {"core/core"}, "schema": {"core/schema"}, "navigation": {"core/navigation"}, "bootstrap": {"core/bootstrap"},
-	"overview": {"pages/overview/overview"}, "pools": {"pages/pools/pools"},
+	"overview": {"pages/overview/overview_state", "pages/overview/overview_util", "pages/overview/overview_range", "pages/overview/overview_trends", "pages/overview/overview_health", "pages/overview/overview_activity", "pages/overview/overview"},
 	"targets": {"pages/targets/targets", "pages/targets/health", "pages/targets/detail", "pages/targets/key-list",
 		"pages/targets/model-mappings", "pages/targets/edit-modal", "pages/targets/save", "pages/targets/list"},
-	"clients": {"pages/clients/clients"}, "usage": {"pages/usage/usage"},
+	"pools": {"pages/pools/pools"}, "clients": {"pages/clients/clients"},
+	"usage": {"pages/usage/usage_state", "pages/usage/usage_range", "pages/usage/usage_filters", "pages/usage/usage_tables", "pages/usage/usage_chart", "pages/usage/usage"},
 	"pricing": {"pages/pricing/pricing-shared", "pages/pricing/pricing-rates", "pages/pricing/pricing-periods",
 		"pages/pricing/pricing-list", "pages/pricing/pricing-modal", "pages/pricing/pricing"},
 	"audit_trace": {"pages/audit_trace/audit_trace"}, "users": {"pages/users/users"},
@@ -50,8 +51,8 @@ func TestAssembledHTMLMatchesGolden(t *testing.T) {
 		}
 		return strings.Join(tags, "\n  ")
 	})
-	if adminUIHTML != golden {
-		t.Fatalf("assembled HTML differs from golden (len %d vs %d)", len(adminUIHTML), len(golden))
+	if got := adminUIHTML; got != golden {
+		t.Fatalf("assembled HTML differs from golden (len %d vs %d)", len(got), len(golden))
 	}
 }
 

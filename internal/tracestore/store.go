@@ -603,3 +603,45 @@ func (s *Store) Close() error {
 	})
 	return err
 }
+
+// Summary 是 trace 列表使用的精简投影：不含请求/响应体与各类 header，
+// 仅保留表格行所需字段和 body 字节数；详情接口仍返回完整 TraceRecord。
+type Summary struct {
+	TraceID           string    `json:"trace_id"`
+	Timestamp         time.Time `json:"timestamp"`
+	ClientName        string    `json:"client_name"`
+	Method            string    `json:"method"`
+	Path              string    `json:"path"`
+	Target            string    `json:"target"`
+	EndpointType      string    `json:"endpoint_type"`
+	Model             string    `json:"model"`
+	StatusCode        int       `json:"status_code"`
+	DurationMS        int64     `json:"duration_ms"`
+	InputTokens       int64     `json:"input_tokens"`
+	OutputTokens      int64     `json:"output_tokens"`
+	CachedTokens      int64     `json:"cached_tokens"`
+	CacheCreation     int64     `json:"cache_creation_tokens"`
+	RequestBodyBytes  int       `json:"request_body_bytes"`
+	ResponseBodyBytes int       `json:"response_body_bytes"`
+}
+
+// Summary 返回记录的列表投影。
+func (r *TraceRecord) Summary() Summary {
+	return Summary{
+		TraceID: r.TraceID, Timestamp: r.Timestamp, ClientName: r.ClientName, Method: r.Method, Path: r.Path,
+		Target: r.Target, EndpointType: r.EndpointType, Model: r.Model, StatusCode: r.StatusCode, DurationMS: r.DurationMS,
+		InputTokens: r.InputTokens, OutputTokens: r.OutputTokens, CachedTokens: r.CachedTokens, CacheCreation: r.CacheCreationTokens,
+		RequestBodyBytes: len(r.RequestBody), ResponseBodyBytes: len(r.ResponseBody),
+	}
+}
+
+// Summaries 批量投影，保持顺序；空输入返回空切片（JSON 为 []）。
+func Summaries(records []*TraceRecord) []Summary {
+	out := make([]Summary, 0, len(records))
+	for _, r := range records {
+		if r != nil {
+			out = append(out, r.Summary())
+		}
+	}
+	return out
+}

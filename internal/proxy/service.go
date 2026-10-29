@@ -1927,6 +1927,11 @@ func (s *Service) ListTrace(offset, limit int) []*tracestore.TraceRecord {
 	return s.traceStore.List(offset, limit)
 }
 
+// TraceEnabled 报告 trace store 是否在保存记录；不触碰磁盘。
+func (s *Service) TraceEnabled() bool {
+	return s.traceStore.Enabled()
+}
+
 // TraceStats 返回 trace store 的统计信息（DEBUG 模式）。
 func (s *Service) TraceStats() map[string]int64 {
 	if s.traceStore == nil {

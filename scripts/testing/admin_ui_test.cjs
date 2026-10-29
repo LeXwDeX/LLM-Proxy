@@ -490,6 +490,12 @@ async function main() {
     "core",
     "schema",
     "navigation",
+    "overviewState",
+    "overviewUtil",
+    "overviewRange",
+    "overviewTrends",
+    "overviewHealth",
+    "overviewActivity",
     "overview",
     "targets",
     "targetsHealth",
@@ -507,6 +513,11 @@ async function main() {
     "pricingList",
     "pricingModal",
     "pricing",
+    "usageState",
+    "usageRange",
+    "usageFilters",
+    "usageTables",
+    "usageChart",
     "usage",
     "audit_trace",
     "users",
@@ -520,11 +531,7 @@ async function main() {
     "quotaSync",
     "quota",
   ];
-  assert.deepEqual(
-    Object.keys(app.modules),
-    expected,
-    "every registered factory initializes",
-  );
+  assert.deepEqual(Object.keys(app.modules), expected, "every registered factory initializes");
   for (const script of scripts) {
     for (const match of script.source.matchAll(
       /app\.bind\("([^"\n]+)", "([^"\n]+)"\)/g,

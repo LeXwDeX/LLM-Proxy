@@ -630,10 +630,19 @@ func (s *UsageStore) Aggregate(filter usage.Filter, groupBy string, costs usage.
 // Stable prices need only last-hour raw detail. Sub-hour prices share one raw
 // scan across all windows; incomplete/pruned exact-price history is an error.
 func (s *UsageStore) Summary(now time.Time, costs usage.RateResolver) (usage.SummaryResult, error) {
-	return s.summaryRead(now, costs, costReadHooks{})
+	return s.SummaryContext(context.Background(), now, costs)
+}
+
+// SummaryContext is Summary bounded by ctx: a canceled request context stops the scan.
+func (s *UsageStore) SummaryContext(ctx context.Context, now time.Time, costs usage.RateResolver) (usage.SummaryResult, error) {
+	return s.summaryReadContext(ctx, now, costs, costReadHooks{})
 }
 
 func (s *UsageStore) summaryRead(now time.Time, costs usage.RateResolver, hooks costReadHooks) (usage.SummaryResult, error) {
+	return s.summaryReadContext(context.Background(), now, costs, hooks)
+}
+
+func (s *UsageStore) summaryReadContext(ctx context.Context, now time.Time, costs usage.RateResolver, hooks costReadHooks) (usage.SummaryResult, error) {
 	now = now.UTC()
 	result := usage.SummaryResult{GeneratedAt: now}
 
@@ -646,7 +655,7 @@ func (s *UsageStore) summaryRead(now time.Time, costs usage.RateResolver, hooks 
 	last30Start := now.AddDate(0, 0, -30)
 
 	// Raw last-hour detail and exact-price history share one scan and snapshot.
-	data, err := s.readCostUnits(context.Background(), usage.Filter{From: &last30Start, To: &now}, costs, false, &lastHourStart, hooks)
+	data, err := s.readCostUnits(ctx, usage.Filter{From: &last30Start, To: &now}, costs, false, &lastHourStart, hooks)
 	if err != nil {
 		return usage.SummaryResult{}, err
 	}

@@ -16,7 +16,7 @@ AdminApp.register("quotaDrawer", function (app) {
   var jobLevelCoef = app.bind("quotaModel", "jobLevelCoef");
   var quotaNumber = app.bind("quotaModel", "quotaNumber");
   var loadQuotaManagement = app.bind("quotaData", "loadQuotaManagement");
-  var runGuarded = app.bind("quotaModel", "runGuarded");
+  var runGuarded = app.bind("core", "runGuarded");
   var dictOptionsHTML = app.bind("quotaLevels", "dictOptionsHTML");
   var quotaDimensions = app.modules.quotaModel.quotaDimensions;
   /* ===== Quota Edit Drawer ===== */
