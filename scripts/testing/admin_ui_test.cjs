@@ -7,18 +7,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 const root = path.resolve(__dirname, "../..");
 const { assembleAdminHTML } = require("./assemble_admin_html.cjs");
+const { manifest, pageSource } = require("./admin_ui_scripts.cjs");
 const html = assembleAdminHTML();
-const scripts = [
-  ...html.matchAll(
-    /<script\s+src="\/admin\/ui\/js\/([^"?]+\.js)(?:\?[^"]*)?"[^>]*><\/script>/g,
-  ),
-].map((match) => ({
-  name: path.basename(match[1]),
-  source: fs.readFileSync(
-    path.join(root, "internal/admin/ui/js", match[1]),
-    "utf8",
-  ),
-}));
+const scripts = manifest(html).map(({ rel, source }) => ({ name: rel, source }));
 function decode(value) {
   return String(value)
     .replace(/&lt;/g, "<")
@@ -426,7 +417,9 @@ function createHarness({
   };
 }
 async function main() {
-  assert.equal(scripts.length, 14, "all feature scripts are loaded explicitly");
+  assert.ok(scripts.length >= 14, "all feature scripts are loaded explicitly");
+  assert.equal(scripts[0].name, "core/core.js", "core.js loads first");
+  assert.equal(scripts[scripts.length - 1].name, "core/bootstrap.js", "bootstrap.js loads last");
   const harness = createHarness({ routes: { "/admin/data/targets": { targets: [] } } });
   const app = await harness.run();
   assert.equal(app.state.ready, true, "schema success enables startup");
@@ -612,7 +605,7 @@ async function main() {
   harness.ids.get("tgtType").value = "provider-other";
   app.modules.targets.updateTargetFormVisibility();
   assert.equal(harness.ids.get("tgtPreferWSGroup").style.display, "none");
-  const targetsSource = scripts.find((script) => script.name === "targets.js").source;
+  const targetsSource = pageSource("targets");
   assert.match(
     targetsSource,
     /getElementById\("tgtPreferWS"\)\.checked = t \? !!t\.prefer_websocket : false/,

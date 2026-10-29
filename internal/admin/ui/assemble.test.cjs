@@ -42,4 +42,8 @@ test("include errors fail loudly", () => {
   assert.throws(() => assembleAdminHTML(dir), /invalid/);
   write("index.html", "<!-- @include a.html -->\n"); write("a.html", "A");
   assert.throws(() => assembleAdminHTML(dir), /newline/);
+  write("index.html", "<!-- @include a.html -->\n<!-- @include a.html -->\n"); write("a.html", "A\n");
+  assert.throws(() => assembleAdminHTML(dir), /more than once/);
+  write("index.html", "<!-- @include a.html -->\n"); write("a.html", "\uFEFFA\n");
+  assert.throws(() => assembleAdminHTML(dir), /BOM/);
 });

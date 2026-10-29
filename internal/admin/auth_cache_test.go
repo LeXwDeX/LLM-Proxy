@@ -158,10 +158,11 @@ func TestHandleUIVersionsScriptURLsWithFreshNonce(t *testing.T) {
 	}
 	a, b := get(), get()
 	ma, mb := scriptTagRe.FindAllStringSubmatch(a, -1), scriptTagRe.FindAllStringSubmatch(b, -1)
-	if len(ma) != 14 || len(mb) != 14 {
-		t.Fatalf("script tags = %d/%d, want 14", len(ma), len(mb))
+	n := len(adminUIScriptManifest())
+	if n == 0 || len(ma) != n || len(mb) != n {
+		t.Fatalf("script tags = %d/%d, want %d", len(ma), len(mb), n)
 	}
-	if strings.Count(a, "<script src=") != 14 {
+	if strings.Count(a, "<script src=") != n {
 		t.Error("unexpected extra script tags in served HTML")
 	}
 	want := regexp.MustCompile(`^\?v=` + regexp.QuoteMeta(version.Version) + `-[0-9a-f]{16,}$`)

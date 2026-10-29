@@ -2,8 +2,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { assembleAdminHTML } = require('../../../scripts/testing/assemble_admin_html.cjs');
+const { pageSource } = require("../../../scripts/testing/admin_ui_scripts.cjs");
 
-const source = fs.readFileSync(path.join(__dirname, 'js', 'pages', 'clients', 'clients.js'), 'utf8');
+const source = pageSource('clients');
 const start = source.indexOf('  function renderClients() {');
 const end = source.indexOf('\n  }\n', start) + 4;
 assert(start >= 0 && end > start, 'renderClients source should be present');

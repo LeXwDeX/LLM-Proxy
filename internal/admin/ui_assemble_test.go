@@ -57,11 +57,14 @@ func TestAssembleAdminHTMLFailsLoudly(t *testing.T) {
 		t.Fatalf("valid include rejected: %v", err)
 	}
 	cases := map[string]map[string]string{
-		"missing target":   {"index.html": "<!-- @include nope.html -->\n"},
-		"cycle":            {"index.html": "<!-- @include a.html -->\n", "a.html": "<!-- @include b.html -->\n", "b.html": "<!-- @include a.html -->\n"},
-		"inline marker":    {"index.html": "x <!-- @include a.html -->\n", "a.html": "A\n"},
-		"escaping path":    {"index.html": "<!-- @include ../x.html -->\n"},
-		"no final newline": {"index.html": "<!-- @include a.html -->\n", "a.html": "A"},
+		"missing target":    {"index.html": "<!-- @include nope.html -->\n"},
+		"cycle":             {"index.html": "<!-- @include a.html -->\n", "a.html": "<!-- @include b.html -->\n", "b.html": "<!-- @include a.html -->\n"},
+		"inline marker":     {"index.html": "x <!-- @include a.html -->\n", "a.html": "A\n"},
+		"escaping path":     {"index.html": "<!-- @include ../x.html -->\n"},
+		"duplicate include": {"index.html": "<!-- @include a.html -->\n<!-- @include a.html -->\n", "a.html": "A\n"},
+		"bom partial":       {"index.html": "<!-- @include a.html -->\n", "a.html": "\uFEFFA\n"},
+		"bom index":         {"index.html": "\uFEFFx\n"},
+		"no final newline":  {"index.html": "<!-- @include a.html -->\n", "a.html": "A"},
 	}
 	for name, files := range cases {
 		if err := build(files); err == nil {
@@ -171,6 +174,11 @@ func TestHandleUIJSServesNestedPathsOnly(t *testing.T) {
 		"/ui/js/core/core.test.cjs",          // not .js
 		"/ui/js/core/missing.js",
 		"/ui/js/core/",
+		"/ui/js/%2e%2e/index.html",
+		"/ui/js/core/%2e%2e/core/core.js",
+		"/ui/js/%2E%2E%2Fcore/core.js",
+		"/ui/js/core%2Fcore.js",
+		"/ui/js/%2Fcore/core.js",
 	} {
 		if got := status(bad); got != http.StatusNotFound {
 			t.Errorf("%s = %d, want 404", bad, got)

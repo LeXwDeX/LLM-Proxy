@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
 const { assembleAdminHTML } = require("../../../../scripts/testing/assemble_admin_html.cjs");
+const { pageSource } = require("../../../../scripts/testing/admin_ui_scripts.cjs");
 class Element {
   constructor(tag = "div") { this.tagName = tag.toUpperCase(); this.textContent = ""; this.innerHTML = ""; this.children = []; this.listeners = {}; this.attrs = {}; this.dataset = {}; this.hidden = false; this.value = ""; this.style = {}; }
   addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
@@ -98,7 +99,7 @@ function harness({sortButtons = [], infoButtons = [], rangeButtons = [], barButt
   const state = {currentPage: "overview"};
   const context = {document: doc, AbortController, Date: TestDate, Map, setTimeout: (fn, delay) => {timers.set(++nextTimer, {fn, at: now + delay}); return nextTimer;}, clearTimeout: id => timers.delete(id), setInterval: () => 1, clearInterval() {}, AdminApp: {register: (name, factory) => {module = factory({state, bind: (m, n) => core[n]}); }}};
   if (storage !== undefined) context.localStorage = storage;
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "pages", "overview", "overview.js"), "utf8"), context);
+  vm.runInNewContext(pageSource("overview"), context);
   return {module, get, doc, state, calls, timers, advance, setNow: value => now = new Date(value).getTime(), setActivity: a => answer = a, setOverview: o => overview = o, setMetrics: m => metrics = m, setAggregate: a => aggregate = a, setAggregateHandler: h => aggregateHandler = h, setHandler: h => handler = h};
 }
 test("homepage requests real activity, uses provided totals, and has no audit dependency", async () => {
@@ -1644,7 +1645,7 @@ test("table panels keep DOM order equal to visual order and leave no grid holes"
 
 test("overview has no attention panel", () => {
   const html = assembleAdminHTML();
-  const js = fs.readFileSync(path.join(__dirname, "pages", "overview", "overview.js"), "utf8");
+  const js = pageSource("overview");
   assert.doesNotMatch(html, /overviewAttention|overview-list|<h3>需要关注<\/h3>/, "the overview no longer renders a 需要关注 panel");
   assert.doesNotMatch(js, /overviewAttention|renderAttention|attentionItem/, "no attention rendering remains");
 });

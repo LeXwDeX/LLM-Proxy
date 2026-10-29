@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { assembleAdminHTML } = require("./assemble_admin_html.cjs");
+const { pageSource } = require("./admin_ui_scripts.cjs");
 const os = require("node:os");
 const playwright = require("playwright");
 const browserName = process.env.LLMS_UI_BROWSER || "chromium";
@@ -55,7 +56,7 @@ async function main() {
       window.app = {state: {modelGroupsLoaded:true,modelGroups:["API","订阅","自定义模型组"],usageModelGroupExpanded:{},usageModelTargetExpanded:{}}, bind: (module,key) => module === "quota" ? name => name === "company_general" ? "公司通用" : name : core[key]};
       window.AdminApp = {register: (name,factory) => { window.usage = factory(app); }};
     });
-    await page.addScriptTag({ path: path.join(root, "internal/admin/ui/js/pages/usage/usage.js") });
+    await page.addScriptTag({ content: pageSource("usage") });
     await page.evaluate(() => usage.loadUsage());
     assert.deepEqual(await page.evaluate(() => apiCalls.length), 1, "tables and trend share one aggregate request");
     assert.match(await page.evaluate(() => apiCalls[0]), /group_by=hour/, "today follows the hour bucket contract");

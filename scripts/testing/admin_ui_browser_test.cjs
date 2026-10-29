@@ -87,7 +87,7 @@ async function main() {
       res.end(assembleAdminHTML());
       return;
     }
-    if (/^\/admin\/ui\/js\/(?:core|pages\/[a-z_]+)\/[a-z_]+\.js$/.test(endpoint)) {
+    if (/^\/admin\/ui\/js\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*\/[A-Za-z0-9_.-]+\.js$/.test(endpoint) && !endpoint.includes("..")) {
       res.writeHead(200, { "Content-Type": "text/javascript" });
       res.end(
         fs.readFileSync(

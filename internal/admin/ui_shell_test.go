@@ -378,15 +378,18 @@ func TestUIBadgesUseThemeTokens(t *testing.T) {
 		}
 	}
 	hex := regexp.MustCompile(`#[0-9a-fA-F]{3,8}\b`)
-	for _, name := range []string{"pages/targets/targets.js", "pages/pools/pools.js", "pages/quota/quota.js", "core/schema.js"} {
-		if got := hex.FindString(adminUIJSSources()["ui/js/"+name]); got != "" {
+	for name, src := range map[string]string{
+		"targets": adminUIPageScripts(t, "targets"), "pools": adminUIPageScripts(t, "pools"),
+		"quota": adminUIPageScripts(t, "quota"), "core/schema": adminUIScript(t, "core/schema.js"),
+	} {
+		if got := hex.FindString(src); got != "" {
 			t.Errorf("%s 仍含硬编码颜色 %s；动态徽章与状态色必须改用 CSS token", name, got)
 		}
 	}
 }
 
 func TestUIEndpointBadgesUseThemeTokensInDarkMode(t *testing.T) {
-	schema := adminUIJSSources()["ui/js/core/schema.js"]
+	schema := adminUIScript(t, "core/schema.js")
 	styleFn := regexp.MustCompile(`(?s)function epBadgeStyle\(code\) \{.*?\n  \}`).FindString(schema)
 	if styleFn == "" {
 		t.Fatal("schema.js 缺少 epBadgeStyle")
@@ -402,7 +405,7 @@ func TestUIEndpointBadgesUseThemeTokensInDarkMode(t *testing.T) {
 		}
 	}
 
-	catalog := adminUIJSSources()["ui/js/pages/catalog/catalog.js"]
+	catalog := adminUIPageScripts(t, "catalog")
 	badgeFn := regexp.MustCompile(`(?s)function epBadge\(ep\) \{.*?\n    \}`).FindString(catalog)
 	if badgeFn == "" {
 		t.Fatal("catalog.js 缺少 epBadge")
@@ -430,8 +433,8 @@ func TestUIEndpointBadgesUseThemeTokensInDarkMode(t *testing.T) {
 }
 
 func TestUIExpansionButtonsExposeAriaState(t *testing.T) {
-	for _, name := range []string{"pages/quota/quota.js", "pages/usage/usage.js", "pages/pricing/pricing.js"} {
-		src := adminUIJSSources()["ui/js/"+name]
+	for _, name := range []string{"quota", "usage", "pricing"} {
+		src := adminUIPageScripts(t, name)
 		idx := strings.Index(src, "quota-expand-btn")
 		if idx < 0 {
 			t.Fatalf("%s 缺少 quota-expand-btn 生成逻辑", name)
@@ -447,22 +450,22 @@ func TestUIExpansionButtonsExposeAriaState(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"pages/quota/quota.js", "pages/pricing/pricing.js"} {
-		source := adminUIJSSources()["ui/js/"+name]
+	for _, name := range []string{"quota", "pricing"} {
+		source := adminUIPageScripts(t, name)
 		idx := strings.Index(source, "quota-expand-btn")
 		end := strings.Index(source[idx:], "</button>")
 		if !strings.Contains(source[idx:idx+end], "aria-controls='") {
 			t.Errorf("%s 展开按钮缺少 aria-controls", name)
 		}
 	}
-	quotaSrc := adminUIJSSources()["ui/js/pages/quota/quota.js"]
+	quotaSrc := adminUIPageScripts(t, "quota")
 	if !strings.Contains(quotaSrc, "quota-detail-row' id='") || !strings.Contains(quotaSrc, "esc(detailId)") {
 		t.Error("quota 明细行必须用与 aria-controls 相同的 detailId")
 	}
 }
 
 func TestUIThemePreferenceContract(t *testing.T) {
-	core := adminUIJSSources()["ui/js/core/core.js"]
+	core := adminUIScript(t, "core/core.js")
 	for _, want := range []string{"localStorage", `classList.toggle("dark"`, "aria-pressed", "themeToggle"} {
 		if !strings.Contains(core, want) {
 			t.Errorf("core.js 主题逻辑缺少 %q", want)
@@ -507,7 +510,7 @@ func TestUIThemeToggleIconDirection(t *testing.T) {
 }
 
 func TestUIMobileSidebarIsolatesFocusWhenClosed(t *testing.T) {
-	nav := adminUIJSSources()["ui/js/core/navigation.js"]
+	nav := adminUIScript(t, "core/navigation.js")
 	for _, want := range []string{
 		`matchMedia("(max-width: 768px)")`,
 		"sidebar.inert = isolated",
@@ -525,7 +528,7 @@ func TestUIMobileSidebarIsolatesFocusWhenClosed(t *testing.T) {
 }
 
 func TestUIMobileNavFocusAndMenuLabel(t *testing.T) {
-	nav := adminUIJSSources()["ui/js/core/navigation.js"]
+	nav := adminUIScript(t, "core/navigation.js")
 	setOpen := regexp.MustCompile(`(?s)function setSidebarOpen\(open\) \{.*?\n  \}`).FindString(nav)
 	if setOpen == "" {
 		t.Fatal("navigation.js 缺少 setSidebarOpen")

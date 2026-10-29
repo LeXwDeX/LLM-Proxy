@@ -13,6 +13,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { manifest } = require("./admin_ui_scripts.cjs");
 const { startStack, ADMIN_PASSWORD } = require("./admin_ui_sim.cjs");
 
 function loadPlaywright() {
@@ -22,10 +23,7 @@ function loadPlaywright() {
   throw new Error("playwright or playwright-core is not installed (set NODE_PATH)");
 }
 
-const SCRIPTS = ["core/core", "core/schema", "core/navigation", "pages/overview/overview",
-  "pages/targets/targets", "pages/pools/pools", "pages/clients/clients", "pages/pricing/pricing",
-  "pages/usage/usage", "pages/audit_trace/audit_trace", "pages/users/users", "pages/catalog/catalog",
-  "pages/quota/quota", "core/bootstrap"];
+const SCRIPTS = manifest().map((s) => s.rel.replace(/\.js$/, ""));
 const STATE = () => (document.getElementById("adminBootMessage") || {}).textContent +
   " ready=" + (window.AdminApp && window.AdminApp.state && window.AdminApp.state.ready);
 
