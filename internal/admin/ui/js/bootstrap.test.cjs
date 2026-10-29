@@ -9,7 +9,7 @@ const {fakeClock} = require("./fake-clock.cjs");
 const hang = () => new Promise(() => {});
 const SCHEMA = "/admin/data/schema";
 
-function boot({fetch, schema, hash = "", omitScripts, withHistory = false} = {}) {
+function boot({fetch, schema, hash = "", omitScripts, bootFailures, withHistory = false} = {}) {
   const clock = fakeClock();
   const assigned = [];
   const location = {pathname: "/admin", search: "", hash, assign: (url) => assigned.push(url)};
@@ -24,6 +24,7 @@ function boot({fetch, schema, hash = "", omitScripts, withHistory = false} = {})
     schema,
     timers: clock,
     omitScripts,
+    bootFailures,
     history: withHistory ? history : undefined,
     location,
   });
@@ -215,7 +216,18 @@ test("a split page module nobody binds is still required at boot", async () => {
   const {app, clock, ids} = boot({omitScripts: ["pages/targets/save.js"]});
   await clock.advance(100);
   assert.equal(app.state.ready, false);
-  assert.match(ids.get("adminBootMessage").textContent, /targetsSave/);
+  const text = ids.get("adminBootMessage").textContent;
+  assert.match(text, /targetsSave/);
+  assert.match(text, /以下脚本加载失败.*\/admin\/ui\/js\/pages\/targets\/save\.js/);
+  assert.doesNotMatch(text, /pages\/targetsSave\//, "no guessed script path");
+});
+
+test("the banner lists the failed script paths recorded by the shell listener", async () => {
+  const {app, clock, ids} = boot({omitScripts: ["pages/users/users.js"], bootFailures: ["/admin/ui/js/pages/overview/overview_state.js"]});
+  await clock.advance(100);
+  const text = ids.get("adminBootMessage").textContent;
+  assert.match(text, /以下脚本加载失败: .*\/admin\/ui\/js\/pages\/overview\/overview_state\.js/);
+  assert.match(text, /users/);
 });
 
 test("a #page deep link opens that page after boot", async () => {

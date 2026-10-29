@@ -29,21 +29,17 @@
   // Modules bootstrap itself calls; every module bound through app.bind is
   // checked as well (AdminApp.missingModules).
   var BOOT_MODULES = ["core", "schema", "navigation", "users", "overview", "audit_trace"];
-  function scriptFor(name) {
-    return name === "core" || name === "schema" || name === "navigation" || name === "bootstrap"
-      ? "/admin/ui/js/core/" + name + ".js"
-      : "/admin/ui/js/pages/" + name + "/" + name + ".js";
-  }
+  // Failed script paths are recorded by the capture-phase error listener in
+  // index.html (window.__adminBootFailures); a module name alone never maps
+  // reliably to a file, so no path is ever guessed.
   function assertModulesLoaded() {
     var missing = app.missingModules(BOOT_MODULES);
     if (!missing.length) return;
+    var failed = Array.isArray(window.__adminBootFailures) ? window.__adminBootFailures : [];
     var error = new Error(
       "页面资源加载失败，以下模块未加载: " +
-        missing
-          .map(function (name) {
-            return name + "（应由 " + scriptFor(name) + " 定义，可能加载失败或存在语法错误）";
-          })
-          .join("、"),
+        missing.join("、") +
+        (failed.length ? "；以下脚本加载失败: " + failed.join("、") : "（可能脚本加载失败或存在语法错误）"),
     );
     error.bootKind = "modules";
     throw error;
