@@ -16,6 +16,7 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
 	"github.com/LeXwDeX/LLM-Proxy/internal/proxy"
 	"github.com/LeXwDeX/LLM-Proxy/internal/requeststats"
+	bolt "go.etcd.io/bbolt"
 )
 
 // observationDecodeBudgetEnv sizes the shared decode budget (MiB) of
@@ -148,6 +149,25 @@ func startRequestStatsRetention(ctx context.Context, store *nosql.RequestStatsSt
 			if _, err := store.PruneBefore(time.Now().UTC().Add(-requeststats.Retention), 10000); err != nil {
 				logger.Warn("request stats retention prune failed", "error", err)
 			}
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// startMmapHeadroomMonitor warns (once) when the database file approaches the
+// mapping reserved at open, after which growth remaps and can briefly block
+// transactions behind in-flight reports. One stat per hour, off the request path.
+func startMmapHeadroomMonitor(ctx context.Context, db *bolt.DB, logger *slog.Logger) {
+	path := db.Path() // captured now: the handle may be closed while the goroutine winds down
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			nosql.CheckMmapHeadroom(path, logger)
 			select {
 			case <-ticker.C:
 			case <-ctx.Done():

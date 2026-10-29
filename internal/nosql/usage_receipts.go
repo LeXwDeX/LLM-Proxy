@@ -444,6 +444,55 @@ func writeUsageReceipt(tx *bolt.Tx, key []byte, digest string) error {
 	return bucket.Put(key, data)
 }
 
+// clientIndexReferencesKey probes for a canonical index entry that points at
+// the raw key. Index keys are hex(client)|timestamp|rawKey and the timestamp is
+// recoverable from the raw key, so for each client prefix at most one exact key
+// can match; probing it costs O(clients * log n) instead of a scan of every
+// retained event.
+//
+// It is equivalent to a scan of every value only for canonical entries
+// (clientIndexEntryCanonical); entries without a client separator are skipped.
+// Non-canonical entries are the exception set's job: lookupUsageIdentity
+// consults clientIndexExceptionReferences after this probe. A raw key that is
+// itself not canonical cannot be probed and scans.
+func clientIndexReferencesKey(index *bolt.Bucket, key []byte) (bool, error) {
+	stamp, _, found := strings.Cut(string(key), "_")
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	if !found || err != nil || at.UTC().Format(time.RFC3339Nano) != stamp {
+		clientIndexFullScans.Add(1)
+		return clientIndexScanReferencesKey(index, key), nil
+	}
+	suffix := []byte(at.UTC().Format(clientIndexTimeLayout) + "|" + string(key))
+	cursor := index.Cursor()
+	for k, _ := cursor.First(); k != nil; {
+		sep := bytes.IndexByte(k, '|')
+		if sep < 0 {
+			k, _ = cursor.Next()
+			continue
+		}
+		probe := make([]byte, 0, sep+1+len(suffix))
+		probe = append(append(probe, k[:sep+1]...), suffix...)
+		if bytes.Equal(index.Get(probe), key) {
+			return true, nil
+		}
+		// '}' follows '|', so this jumps past every entry of this client.
+		next := append(append([]byte(nil), k[:sep]...), '}')
+		k, _ = cursor.Seek(next)
+	}
+	return false, nil
+}
+
+func clientIndexScanReferencesKey(index *bolt.Bucket, key []byte) bool {
+	referenced := false
+	_ = index.ForEach(func(_, value []byte) error {
+		if bytes.Equal(value, key) {
+			referenced = true
+		}
+		return nil
+	})
+	return referenced
+}
+
 // lookupUsageIdentity verifies one row against raw detail, a receipt, or both.
 // Raw row bytes are returned so a hit can repair the client index with the
 // originally stored bytes instead of a freshly repriced event.
@@ -478,13 +527,21 @@ func lookupUsageIdentity(tx *bolt.Tx, key, digest []byte) (receiptState, usage.E
 			return identityNew, usage.Event{}, nil, fmt.Errorf("%w: %w", ErrUsageIdentityUnverified, errRawOwnerOrphan)
 		}
 		if index := tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil {
-			if err := index.ForEach(func(_, value []byte) error {
-				if bytes.Equal(value, key) {
-					return fmt.Errorf("%w: retained index refers to absent identity", ErrUsageIdentityUnverified)
-				}
-				return nil
-			}); err != nil {
+			referenced, err := clientIndexReferencesKey(index, key)
+			if err != nil {
 				return identityNew, usage.Event{}, nil, err
+			}
+			if !referenced {
+				hit, overflow := clientIndexExceptionReferences(tx, key)
+				if overflow {
+					warnClientIndexScan()
+					clientIndexFullScans.Add(1)
+					hit = clientIndexScanReferencesKey(index, key)
+				}
+				referenced = hit
+			}
+			if referenced {
+				return identityNew, usage.Event{}, nil, fmt.Errorf("%w: retained index refers to absent identity", ErrUsageIdentityUnverified)
 			}
 		}
 		return identityNew, usage.Event{}, nil, nil

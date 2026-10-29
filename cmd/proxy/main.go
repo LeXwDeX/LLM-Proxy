@@ -475,6 +475,7 @@ func run(args []string) int {
 
 	startUsageRetention(stopCtx, usageStore, appLogger)
 	startRequestStatsRetention(stopCtx, requestStatsStore, appLogger)
+	startMmapHeadroomMonitor(stopCtx, db, appLogger)
 
 	serveErr := serveAndDrain(stopCtx, server, shutdownGrace, appLogger, proxyService.DrainResponsesWebsockets)
 	// Shutdown order, the same on both paths: the HTTP server stopped

@@ -1,7 +1,14 @@
 package nosql
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -39,9 +46,128 @@ var allBuckets = []string{
 // write lock and fsyncs, so later callers keep piling into the next batch).
 const dbMaxBatchDelay = 2 * time.Millisecond
 
+const (
+	// mmapGranularity rounds InitialMmapSize up so the value is stable across restarts.
+	mmapGranularity = 64 << 20
+	// mmapFloor64 is the minimum headroom reserved beyond the current file size on
+	// 64-bit platforms. A bbolt remap waits for every in-flight read transaction,
+	// and while it waits all new read and write transactions block; reports hold
+	// read transactions for seconds, so growth beyond the mapping stalled writers
+	// for that long. 32-bit processes have scarce address space and use a smaller
+	// floor.
+	mmapFloor64 = 1 << 30
+	mmapFloor32 = 128 << 20
+	// mmapHeadroomWarnPercent is the database-size share of the reservation above
+	// which CheckMmapHeadroom warns that growth will soon remap again.
+	mmapHeadroomWarnPercent = 80
+)
+
+// initialMmapSize returns bbolt's InitialMmapSize for a database file:
+// size + max(floor, size), rounded up to mmapGranularity. The headroom is at
+// least as large as the file, so the file can double before the next remap, and
+// at least the floor for small files. It only reserves virtual address space: no
+// physical memory is used and the file is not grown (it still extends on
+// demand). Caveat: the reservation counts against RLIMIT_AS (ulimit -v) and
+// container address-space limits and so can squeeze the Go heap; a refused
+// reservation falls back to no reservation (see openBolt).
+func initialMmapSize(fileSize int64) int {
+	floor := int64(mmapFloor64)
+	if strconv.IntSize == 32 {
+		floor = mmapFloor32
+	}
+	if fileSize < 0 {
+		fileSize = 0
+	}
+	headroom := fileSize
+	if headroom < floor {
+		headroom = floor
+	}
+	want := fileSize + headroom
+	if maxInt := int64(^uint(0) >> 1); want > maxInt/2 || want < 0 {
+		// Leave room for bbolt's own rounding.
+		want = maxInt / 2
+	}
+	want = (want + mmapGranularity - 1) / mmapGranularity * mmapGranularity
+	return int(want)
+}
+
+// reservedMmapSize is the InitialMmapSize to request on this platform; zero
+// where reserving is harmful (see mmapReservationSupported).
+func reservedMmapSize(fileSize int64) int {
+	if !mmapReservationSupported {
+		return 0
+	}
+	return initialMmapSize(fileSize)
+}
+
+// boltOpen is replaceable in tests to exercise the mmap fallback.
+var boltOpen = bolt.Open
+
+// mmapReservations records, per database path, the reservation made at open so
+// CheckMmapHeadroom can compare it with the file size later.
+var mmapReservations sync.Map // path -> *mmapReservationState
+
+type mmapReservationState struct {
+	reserved int64
+	warned   atomic.Bool
+}
+
+// openBolt opens the file with a reserved mapping. When the OS refuses the
+// reservation (restricted address space, ulimit -v, containers) it logs a
+// warning and retries without InitialMmapSize, restoring the previous behavior.
+func openBolt(path string) (*bolt.DB, error) {
+	var size int64
+	if fi, err := os.Stat(path); err == nil {
+		size = fi.Size()
+	}
+	opts := &bolt.Options{Timeout: 1 * time.Second, InitialMmapSize: reservedMmapSize(size)}
+	db, err := boltOpen(path, 0o600, opts)
+	if err != nil && opts.InitialMmapSize > 0 && errors.Is(err, syscall.ENOMEM) {
+		slog.Warn("bbolt: reserving initial mmap failed; opening without it (database growth may briefly block while reports run)",
+			"initial_mmap_bytes", opts.InitialMmapSize, "error", err)
+		opts = &bolt.Options{Timeout: 1 * time.Second}
+		db, err = boltOpen(path, 0o600, opts)
+	}
+	if err == nil {
+		mmapReservations.Store(path, &mmapReservationState{reserved: int64(opts.InitialMmapSize)})
+	}
+	return db, err
+}
+
+// CheckMmapHeadroom warns once per database when the file has grown past
+// mmapHeadroomWarnPercent of the mapping reserved at open: beyond it bbolt
+// remaps, which waits for in-flight reports and blocks all transactions
+// meanwhile. A restart re-reserves with fresh headroom. Cheap (one stat), meant
+// for a low-frequency periodic call; it reports whether it warned.
+// It takes the path, not the handle, so a monitor goroutine never touches a
+// closed *bolt.DB.
+func CheckMmapHeadroom(path string, logger *slog.Logger) bool {
+	v, ok := mmapReservations.Load(path)
+	if !ok {
+		return false
+	}
+	st := v.(*mmapReservationState)
+	if st.reserved <= 0 {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size()*100 <= st.reserved*mmapHeadroomWarnPercent {
+		return false
+	}
+	if !st.warned.CompareAndSwap(false, true) {
+		return false
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("bbolt: database is close to its reserved mmap size; further growth will remap and may briefly block while reports run (restart to re-reserve)",
+		"db_bytes", fi.Size(), "reserved_mmap_bytes", st.reserved)
+	return true
+}
+
 // OpenDB opens a bbolt database and creates all required buckets.
 func OpenDB(path string) (*bolt.DB, error) {
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 1 * time.Second})
+	db, err := openBolt(path)
 	if err != nil {
 		return nil, fmt.Errorf("open bolt db: %w", err)
 	}

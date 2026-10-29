@@ -58,7 +58,7 @@ func TestBatchPrewriteProofScanReuse(t *testing.T) {
 			}
 			if n == 1 {
 				baseline = got
-				if got.raw == 0 || got.receipt == 0 {
+				if got.raw == 0 {
 					t.Fatalf("proof instrumentation missed scans: %+v", got)
 				}
 			} else if got != baseline {
