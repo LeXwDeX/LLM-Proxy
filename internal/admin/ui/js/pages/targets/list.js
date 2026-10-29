@@ -478,10 +478,11 @@ AdminApp.register("targetsList", function (app) {
   }
   // A committed write whose follow-up (auth reload) is still pending is not a failure.
   function reportRowSuccess(message, result) {
+    var note = result && result.quota_refresh === "pending" ? "，额度将在后台刷新" : "";
     if (result && typeof result.warning === "string" && result.warning) {
-      toast(message + "，但认证配置刷新待处理（" + result.warning + "），请稍后核对", "warn");
+      toast(message + note + "，但认证配置刷新待处理（" + result.warning + "），请稍后核对", "warn");
     } else {
-      toast(message, "success");
+      toast(message + note, "success");
     }
   }
   // verify describes the expected end state of the action: the success message and a

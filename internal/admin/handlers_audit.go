@@ -41,6 +41,12 @@ func (h *Handler) listAuditEventsFromRequest(r *http.Request) ([]nosql.AuditEven
 }
 
 func (h *Handler) recordAudit(r *http.Request, action, object, result, detail string) {
+	h.recordAuditAt(r, time.Now().UTC(), action, object, result, detail)
+}
+
+// recordAuditAt 以调用方给定的时间戳写入审计。configTxn 在持有 configMu 时取得时间戳，
+// 锁外才写入，使审计顺序与配置提交顺序一致。
+func (h *Handler) recordAuditAt(r *http.Request, at time.Time, action, object, result, detail string) {
 	if h.auditStore == nil {
 		return
 	}
@@ -48,12 +54,16 @@ func (h *Handler) recordAudit(r *http.Request, action, object, result, detail st
 	if session, ok := SessionFromContext(r.Context()); ok && session != nil && strings.TrimSpace(session.Username) != "" {
 		actor = session.Username
 	}
-	_ = h.auditStore.Record(nosql.AuditEvent{
-		Timestamp: time.Now().UTC(),
+	event := nosql.AuditEvent{
+		Timestamp: at,
 		Actor:     actor,
 		Action:    action,
 		Object:    object,
 		Result:    result,
 		Detail:    detail,
-	})
+	}
+	if h.auditWriteHook != nil {
+		h.auditWriteHook(event)
+	}
+	_ = h.auditStore.Record(event)
 }

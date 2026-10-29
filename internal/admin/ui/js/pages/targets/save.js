@@ -208,7 +208,7 @@ AdminApp.register("targetsSave", function (app) {
       if (warning) {
         toast("目标已保存，但认证配置刷新待处理（auth reload pending），请稍后核对", "warn");
       } else {
-        toast(wasEditing ? "目标已更新" : "目标已创建", "success");
+        toast((wasEditing ? "目标已更新" : "目标已创建") + (result && result.quota_refresh === "pending" ? "，额度将在后台刷新" : ""), "success");
       }
       state.editingTarget = null;
       ts.editingKeySession++;

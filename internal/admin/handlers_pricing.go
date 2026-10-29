@@ -6,6 +6,7 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/costutil"
 	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
 	"github.com/LeXwDeX/LLM-Proxy/internal/pricing"
+	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"net/http"
@@ -132,15 +133,13 @@ func (h *Handler) handleUpsertModelCost(w http.ResponseWriter, r *http.Request) 
 	if h.costCache != nil {
 		h.costCache.Invalidate()
 	}
-	if h.quotaManager != nil {
-		h.quotaManager.RefreshAll()
-	}
+	h.scheduleQuotaRefresh(quota.RefreshScope{All: true})
 	h.recordAudit(r, "model_cost_upsert", model, "success", "")
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, h.withQuotaRefresh(map[string]any{
 		"ok":    true,
 		"model": model,
-	})
+	}))
 }
 
 func (h *Handler) handleDeleteModelCost(w http.ResponseWriter, r *http.Request) {
@@ -174,9 +173,7 @@ func (h *Handler) handleDeleteModelCost(w http.ResponseWriter, r *http.Request) 
 	if h.costCache != nil {
 		h.costCache.Invalidate()
 	}
-	if h.quotaManager != nil {
-		h.quotaManager.RefreshAll()
-	}
+	h.scheduleQuotaRefresh(quota.RefreshScope{All: true})
 	h.recordAudit(r, "model_cost_delete", model, "success", "")
 
 	w.WriteHeader(http.StatusNoContent)
@@ -235,7 +232,7 @@ func (h *Handler) handleCreatePricingTemplate(w http.ResponseWriter, r *http.Req
 		return
 	}
 	h.afterPricingTemplateWrite(r, "pricing_template_create", stored.ID)
-	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "template": stored})
+	writeJSON(w, http.StatusCreated, h.withQuotaRefresh(map[string]any{"ok": true, "template": stored}))
 }
 
 func (h *Handler) handleUpdatePricingTemplate(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +273,7 @@ func (h *Handler) handleUpdatePricingTemplate(w http.ResponseWriter, r *http.Req
 		return
 	}
 	h.afterPricingTemplateWrite(r, "pricing_template_update", id)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "template": stored})
+	writeJSON(w, http.StatusOK, h.withQuotaRefresh(map[string]any{"ok": true, "template": stored}))
 }
 
 func (h *Handler) handleDeletePricingTemplate(w http.ResponseWriter, r *http.Request) {
@@ -303,9 +300,7 @@ func (h *Handler) afterPricingTemplateWrite(r *http.Request, action, id string) 
 	if h.costCache != nil {
 		h.costCache.Invalidate()
 	}
-	if h.quotaManager != nil {
-		h.quotaManager.RefreshAll()
-	}
+	h.scheduleQuotaRefresh(quota.RefreshScope{All: true})
 	h.recordAudit(r, action, id, "success", "")
 }
 

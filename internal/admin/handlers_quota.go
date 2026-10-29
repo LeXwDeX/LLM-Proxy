@@ -135,6 +135,7 @@ func (h *Handler) handleSyncQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.quotaManager != nil {
+		h.quotaManager.NoteConfigChange()
 		for _, name := range names {
 			h.quotaManager.Evaluate(name)
 		}
@@ -175,6 +176,7 @@ func (h *Handler) handleUpdateQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.quotaManager != nil {
+		h.quotaManager.NoteConfigChange()
 		h.quotaManager.Evaluate(clientName)
 	}
 	h.recordAudit(r, "quota_update", clientName, "success", "job_level="+strings.TrimSpace(req.JobLevel))

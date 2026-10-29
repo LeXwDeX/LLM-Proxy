@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
+	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"net/http"
 	"strings"
 )
@@ -124,6 +125,8 @@ func (h *Handler) handleCreateJobLevel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.recordAudit(r, "job_level_create", req.Name, "success", "")
+	// 新建职级可能让「绑定了该职级名但此前不存在」的客户端从拒绝变为有额度：推进代次并排期刷新。
+	h.scheduleQuotaRefresh(quota.RefreshScope{JobLevels: []string{req.Name}})
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 }
 
@@ -148,9 +151,7 @@ func (h *Handler) handleUpdateJobLevel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, errorResponse(err.Error()))
 		return
 	}
-	if h.quotaManager != nil {
-		h.quotaManager.RefreshAll()
-	}
+	h.scheduleQuotaRefresh(quota.RefreshScope{JobLevels: []string{name, req.Name}})
 	detail := ""
 	if len(renamedClients) > 0 {
 		detail = "renamed_clients: " + strings.Join(renamedClients, ",")
@@ -159,7 +160,7 @@ func (h *Handler) handleUpdateJobLevel(w http.ResponseWriter, r *http.Request) {
 	if renamedClients == nil {
 		renamedClients = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "renamed_clients": renamedClients})
+	writeJSON(w, http.StatusOK, h.withQuotaRefresh(map[string]any{"status": "ok", "renamed_clients": renamedClients}))
 }
 
 // handleDeleteJobLevel 删除职级。仍被活跃客户端绑定时拒绝并列出客户端名
@@ -177,9 +178,7 @@ func (h *Handler) handleDeleteJobLevel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, errorResponse(err.Error()))
 		return
 	}
-	if h.quotaManager != nil {
-		h.quotaManager.RefreshAll()
-	}
+	h.scheduleQuotaRefresh(quota.RefreshScope{JobLevels: []string{name}})
 	h.recordAudit(r, "job_level_delete", name, "success", "")
 	w.WriteHeader(http.StatusNoContent)
 }

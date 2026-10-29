@@ -2,6 +2,7 @@ package admin
 
 import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/proxy"
+	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"github.com/LeXwDeX/LLM-Proxy/internal/version"
 	"net/http"
 	"time"
@@ -80,6 +81,8 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		Persistence proxy.PersistenceMetrics `json:"persistence"`
 		// Shared decode budget of compressed-response usage observation.
 		ObservationBudget proxy.ObservationBudgetMetrics `json:"observation_budget"`
+		// 额度后台刷新状态：pending 为 true 表示写操作之后的刷新尚未完成。
+		QuotaRefresh *quota.RefreshStatus `json:"quota_refresh,omitempty"`
 	}{
 		GeneratedAt:       now,
 		UptimeSeconds:     uptime.Seconds(),
@@ -88,6 +91,10 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		ResponsesWS:       metrics.ResponsesWS,
 		Persistence:       h.proxyService.PersistenceMetrics(),
 		ObservationBudget: h.proxyService.ObservationBudgetMetrics(),
+	}
+	if h.quotaManager != nil {
+		st := h.quotaManager.RefreshStatus()
+		response.QuotaRefresh = &st
 	}
 	response.Requests.Total = metrics.TotalRequests
 	response.Requests.Success = metrics.TotalSuccess

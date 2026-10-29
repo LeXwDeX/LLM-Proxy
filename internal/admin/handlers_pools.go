@@ -42,8 +42,8 @@ func (h *Handler) handleListPools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleCreatePool(w http.ResponseWriter, r *http.Request) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	var body struct {
 		Name        string `json:"name"`
 		DisplayName string `json:"display_name"`
@@ -103,13 +103,13 @@ func (h *Handler) handleCreatePool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.recordAudit(r, "pool_create", name, "success", "")
+	txn.audit("pool_create", name, "success", "")
 	writeJSON(w, http.StatusCreated, withWarning(map[string]any{"ok": true, "name": name}, warning))
 }
 
 func (h *Handler) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	name, err := poolNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -179,13 +179,13 @@ func (h *Handler) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.recordAudit(r, "pool_update", name, "success", "")
+	txn.audit("pool_update", name, "success", "")
 	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": updatedPool.Name, "paused": updatedPool.Paused}, warning))
 }
 
 func (h *Handler) handleDeletePool(w http.ResponseWriter, r *http.Request) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	name, err := poolNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -238,7 +238,7 @@ func (h *Handler) handleDeletePool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.recordAudit(r, "pool_delete", name, "success", "")
+	txn.audit("pool_delete", name, "success", "")
 	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true}, warning))
 }
 
@@ -251,8 +251,8 @@ func (h *Handler) handleResumePool(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleSetPoolPaused(w http.ResponseWriter, r *http.Request, paused bool) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	name, err := poolNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -296,7 +296,7 @@ func (h *Handler) handleSetPoolPaused(w http.ResponseWriter, r *http.Request, pa
 	if paused {
 		action = "pool_pause"
 	}
-	h.recordAudit(r, action, name, "success", "")
+	txn.audit(action, name, "success", "")
 	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": updatedPool.Name, "paused": paused}, warning))
 }
 

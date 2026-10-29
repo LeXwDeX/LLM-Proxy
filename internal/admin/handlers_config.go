@@ -84,6 +84,8 @@ func (h *Handler) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 	if h.costCache != nil {
 		h.costCache.Invalidate()
 	}
+	h.noteQuotaConfigChange()
+	h.warmCostCache()
 	// m11：同步 admin_session 配置（secret/ttl），否则 reload 返回 ok 但 sessionManager
 	// 仍持旧 secret，运维轮换 secret 后状态不一致。
 	h.sessionManager.UpdateConfig(cfg.AdminSession)
