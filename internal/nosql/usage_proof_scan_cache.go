@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/maphash"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unique"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 	bolt "go.etcd.io/bbolt"
@@ -23,6 +25,16 @@ var proofRawParses atomic.Int64
 // The digest is two independently seeded 64-bit maphashes: per-process random
 // seeds cannot be targeted, and 128 bits make accidental collisions negligible.
 const proofScanCacheMaxEntries = 1 << 19
+
+// proofScanCacheFull warns once that rows beyond the cap are parsed on every
+// proof scan again, which brings back slow usage writes on very large histories.
+var proofScanCacheFull sync.Once
+
+func warnProofScanCacheFull() {
+	proofScanCacheFull.Do(func() {
+		slog.Warn("usage proof scan cache is full; further legacy rows are parsed on every usage write", "max_entries", proofScanCacheMaxEntries)
+	})
+}
 
 type proofRawScope struct {
 	clientName string
@@ -66,6 +78,8 @@ func decodeProofEventCached(data []byte, event *usage.Event) bool {
 	proofScanCache.Lock()
 	if len(proofScanCache.decodeFailed) < proofScanCacheMaxEntries {
 		proofScanCache.decodeFailed[sum] = struct{}{}
+	} else {
+		defer warnProofScanCacheFull()
 	}
 	proofScanCache.Unlock()
 	return false
@@ -82,10 +96,11 @@ func backfillRawScopeCached(data []byte) proofRawScope {
 		return scope
 	}
 	event, ambiguous := backfillRawScope(data)
+	// Few distinct clients and models recur across many rows; intern them.
 	scope = proofRawScope{
-		clientName: event.ClientName,
-		clientHash: receiptClientHashIfNamed(event.ClientName),
-		model:      event.Model,
+		clientName: unique.Make(event.ClientName).Value(),
+		clientHash: unique.Make(receiptClientHashIfNamed(event.ClientName)).Value(),
+		model:      unique.Make(event.Model).Value(),
 		timestamp:  event.Timestamp,
 		ambiguous:  ambiguous,
 		valid:      json.Valid(data),
@@ -93,6 +108,8 @@ func backfillRawScopeCached(data []byte) proofRawScope {
 	proofScanCache.Lock()
 	if len(proofScanCache.scopes) < proofScanCacheMaxEntries {
 		proofScanCache.scopes[sum] = scope
+	} else {
+		defer warnProofScanCacheFull()
 	}
 	proofScanCache.Unlock()
 	return scope
