@@ -3,6 +3,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { coreSource } = require("../../../../scripts/testing/admin_ui_scripts.cjs");
 const path = require("node:path");
 const {fakeClock} = require("./fake-clock.cjs");
 
@@ -33,7 +34,7 @@ function loadCore({fetch, clock, location} = {}) {
     console,
   };
   sandbox.window = sandbox;
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "core.js"), "utf8"), sandbox);
+  vm.runInNewContext(coreSource("core/core.js"), sandbox);
   return sandbox.AdminApp.modules.core;
 }
 

@@ -1,0 +1,29 @@
+  <!-- ===== Pool Modal ===== -->
+  <div class="modal-overlay" id="poolModal" style="z-index:260;">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="poolModalTitle">新增部署池</h3>
+        <button type="button" class="modal-close" data-close="poolModal" aria-label="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="poolName">池名称 <span style="color:var(--bad)">*</span></label>
+          <input class="form-control" id="poolName" placeholder="例如: prod-pool">
+          <small style="color:var(--text-muted)">保留填写的大小写。创建后可调整显示大小写，内部标识和已有成员引用保持不变。</small>
+        </div>
+        <div class="form-group">
+          <label>描述</label>
+          <input class="form-control" id="poolDescription" placeholder="例如: 生产环境部署池">
+        </div>
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:8px;">
+            <input type="checkbox" id="poolPaused"> 暂停池（全部成员节点等效暂停，不参与转发）
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close="poolModal">取消</button>
+        <button class="btn btn-primary readonly-hide" id="savePoolBtn">保存</button>
+      </div>
+    </div>
+  </div>

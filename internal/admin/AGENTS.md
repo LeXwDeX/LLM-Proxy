@@ -13,7 +13,12 @@
 | `session.go` | 会话管理：内存 Session 存储 + HMAC-SHA256 签名 Cookie、角色常量（`RoleAdmin`/`RoleReadonly`）、`Middleware`、`ReadonlyGuard` |
 | `portal.go` | `/login`、`/logout` 登录门户页面与提交处理 |
 | `users.go` | 管理员账号认证与密码哈希（随机盐 + SHA-256） |
-| `ui_embed.go` / `handlers_ui.go` / `ui/` | 内嵌 SPA 资源与受限资源路由；HTML 骨架、样式与按领域拆分的 JS 模块 |
+| `ui_embed.go` / `ui_assemble.go` / `handlers_ui.go` | 内嵌 SPA 资源；包初始化时把 `ui/index.html` 的 include 行展开为完整 HTML（`adminUIHTML`）；受限 JS 路由 `/ui/js/*` |
+| `ui/index.html` | 仅含外壳：head、侧栏/布局、页面与弹层 include 行、toast 容器、启动 watchdog、脚本清单 |
+| `ui/css/admin.css` | 全部样式，由 `index.html` 的 `<style>` 内 include 引入 |
+| `ui/partials/pages/<page>.html` / `ui/partials/modals/<kebab-id>.html` | 每页一个 `div.page`；每个 body 级弹层（`.modal-overlay` / `.quota-drawer-overlay`）一个文件，各含其前导注释行 |
+| `ui/js/core/`、`ui/js/pages/<name>/` | 脚本：`core`、`schema`、`navigation`、`bootstrap` 在 `core/`；功能模块在 `pages/<name>/<name>.js`。`*.test.cjs` 不被 embed |
+| `internal/admin/testdata/index.golden.html` | 拆分前 `index.html` 的快照；`TestAssembledHTMLMatchesGolden` 校验装配结果逐字节一致（仅脚本路径映射除外）。过渡性守卫，布局稳定后可删除 |
 
 ## 🚨 会话与角色守卫（安全边界，禁止绕过）
 
@@ -39,7 +44,18 @@
 - 涉及会话/守卫的改动，重点核对 `handler_test.go` 中 readonly 角色被写接口拒绝的用例。
 - UI 为内嵌页面，改动后运行 `node scripts/testing/admin_ui_test.cjs`，并在本机独立实例（例如 `make ui-sim`）验证登录、页面加载和受影响交互，不能只凭编译通过验收。真实浏览器脚本 `scripts/testing/admin_ui_browser_test.cjs` 依赖本机已安装的 Playwright/Chromium，不在 CI 中运行；`go test ./internal/admin/` 在有 Node 时调用 Node 行为门禁及部分 `*.test.cjs` 单元用例，CI 还会递归运行 UI 子树中的 Node 单元测试，可从项目根目录用 `(cd internal/admin/ui && node --test)` 运行同一范围。
 - **模块初始化约定**：模块经 `AdminApp.register(name, factory)` 声明，按名称初始化；跨模块调用使用明确导出与 `app.bind`，不依赖工厂数组位置或其他模块私有变量。`core.js` 末尾残留的 `window.*` 导出仅为兼容，新代码不得依赖；新增全局桥接仅限 HTML 事件属性（当前只有 `closeTraceDetail`）。
-- **启动顺序**：`core.js` 提供基础操作，`schema.js` 加载并验证元数据，`bootstrap.js` 最后执行。Schema 成功后才初始化功能模块并设置 ready；失败提供重试，编辑不得提前启用。新增模块加入 HTML 脚本清单，`ui_embed.go` 自动 embed；`ui_modules_test.go` 与 Node 行为门禁检查清单、依赖和初始化。
+- **启动顺序**：`core.js` 提供基础操作，`schema.js` 加载并验证元数据，`bootstrap.js` 最后执行。Schema 成功后才初始化功能模块并设置 ready；失败提供重试，编辑不得提前启用。新增模块放入 `ui/js/pages/<name>/<name>.js`（启动期基础设施放 `ui/js/core/`），并在 `ui/index.html` 脚本清单中按顺序加入 `<script src="/admin/ui/js/pages/<name>/<name>.js">`（路径含子目录；`handlers_ui.go` 会为 src 追加版本参数）；`ui_embed.go` 的 embed 模式覆盖 `core/*.js` 与 `pages/*/*.js`，无需修改。`ui_modules_test.go` 与 Node 行为门禁检查清单、依赖和初始化。
+
+## UI 文件布局与 include 机制
+
+- `ui/index.html` 中独占一行的 `<!-- @include 相对路径 -->`（可带缩进，路径相对 `ui/`）整行（含换行）被所引文件内容逐字替换，不重排缩进；被引文件必须以换行结尾，可嵌套。目标缺失、循环引用或残留 `@include` 标记会使包初始化 panic，测试同样覆盖。
+- Go 在 `ui_assemble.go` 装配；Node 测试统一经 `scripts/testing/assemble_admin_html.cjs`（规则一致，`ui/assemble.test.cjs` 与 Go 测试都对照同一份 golden），不得再直接读取 `index.html` 当完整页面。
+- 新增页面：在 `ui/partials/pages/` 新建文件（内含该页的前导注释行与唯一的 `div.page`），在 `index.html` 对应位置加 include 行。新增弹层：在 `ui/partials/modals/` 新建文件（恰好一个 body 级弹层），在 `index.html` 的弹层区加 include 行。`TestModalPartialsHoldExactlyOneOverlay` 与 `TestPagePartialsHoldExactlyOnePage` 强制这两条。
+- 脚本落点：页面脚本放 `ui/js/pages/<name>/*.js`（仅一层目录，由 `ui_embed.go` 的 `pages/*/*.js` 模式 embed；更深层级不会被 embed）；`core/` 同理只含 `*.js`。拆分出的新文件必须按依赖顺序加入 `index.html` 脚本清单：清单中每个标签必须解析到 embed 文件，每个 embed 的 `.js` 恰好被一个标签加载，文件名可含字母、数字、`_`、`-`、`.`（`TestUIModuleManifestMatchesEmbeddedAssets` 强制）。`core/core.js` 必须第一个、`core/bootstrap.js` 最后一个加载。
+- `fake-clock.cjs` 及其他 `*.cjs`（含 `*.test.cjs`、`*.browser.cjs`）不会被 embed，也不属于脚本清单。
+- 针对某页面脚本的检查使用 `adminUIPageScripts(t, "<page>")`（Go）或 `scripts/testing/admin_ui_scripts.cjs` 的 `pageSource("<page>")`（Node），它们拼接该目录下全部文件，目录为空或内容为空时失败；不要把测试写死到单个文件路径。脚本清单（Go：`adminUIScriptManifest()`，Node：`manifest()`）从装配后的 HTML 推导，不要再维护硬编码列表。
+- 装配拒绝：同一 partial 被 include 两次（会产生重复 DOM id）、任何被引文件含 UTF-8 BOM。
+- 样式写入 `ui/css/admin.css`；`index.html` 内除 boot watchdog 外不得新增内联脚本。
 
 ## UI 弹层统一规范（强制）
 

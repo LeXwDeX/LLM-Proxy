@@ -4,9 +4,10 @@ const {test, before, after} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { assembleAdminHTML } = require("../../../scripts/testing/assemble_admin_html.cjs");
 const playwright = require("playwright");
 
-const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8")
+const html = assembleAdminHTML()
   .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
 const engine = process.env.UI_TEST_WEBKIT === "1" ? "webkit" : "chromium";
 let browser;

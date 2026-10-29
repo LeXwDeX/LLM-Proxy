@@ -1,0 +1,12 @@
+  <!-- ===== Job Level Modal（结构化职级：三系数） ===== -->
+  <div class="modal-overlay" id="jobLevelModal">
+    <div class="modal" style="max-width:480px;">
+      <div class="modal-header"><h3 id="jobLevelModalTitle">新增职级</h3><button type="button" class="modal-close" data-close="jobLevelModal" aria-label="关闭">&times;</button></div>
+      <div class="modal-body">
+        <div class="form-group"><label>职级名称</label><input class="form-control" id="jobLevelName" placeholder="例如：L5" required></div>
+        <div id="jobLevelDimensions" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;"></div>
+        <small style="display:block;color:var(--text-muted);font-size:12px;margin-top:8px;">职级倍率只放大可用额度上限，不改变模型扣费。留空按 1 倍；0 表示对应周期额度不限。重命名会更新已绑定客户端。</small>
+      </div>
+      <div class="modal-footer"><button class="btn" data-close="jobLevelModal">取消</button><button class="btn btn-primary readonly-hide" id="saveJobLevelBtn">保存</button></div>
+    </div>
+  </div>

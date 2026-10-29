@@ -78,7 +78,7 @@ func TestHandlerUIQuotaManagementFeatures(t *testing.T) {
 		`"/admin/data/quota/"\s*\+\s*encodeURIComponent\(source\)\s*\+\s*"/sync"`,
 		`"/admin/data/quota/"\s*\+\s*encodeURIComponent\(state\.editingQuotaClient\)`,
 	} {
-		if !regexp.MustCompile(pattern).MatchString(adminUIQuotaJS) {
+		if !regexp.MustCompile(pattern).MatchString(adminUIPageScripts(t, "quota")) {
 			t.Errorf("quota.js missing API expression %s", pattern)
 		}
 	}
@@ -87,7 +87,7 @@ func TestHandlerUIQuotaManagementFeatures(t *testing.T) {
 		`function quotaConvertedDetail(status)`,
 		`data-model-binding-target`,
 	} {
-		if !strings.Contains(adminUIQuotaJS, marker) {
+		if !strings.Contains(adminUIPageScripts(t, "quota"), marker) {
 			t.Errorf("quota.js missing %q", marker)
 		}
 	}

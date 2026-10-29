@@ -1,0 +1,123 @@
+        <!-- ========== Page: 总览 ========== -->
+        <div class="page active" id="page-overview" aria-busy="false">
+          <div class="activity-heading overview-heading">
+            <h2>总览</h2>
+            <div class="overview-range" id="overviewRange" role="group" aria-label="统计区间">
+              <button type="button" data-overview-range="today" aria-pressed="true">今日</button>
+              <button type="button" data-overview-range="yesterday" aria-pressed="false">昨日</button>
+              <button type="button" data-overview-range="7d" aria-pressed="false">近 7 天</button>
+              <button type="button" data-overview-range="30d" aria-pressed="false">近 30 天</button>
+              <button type="button" data-overview-range="last_month" aria-pressed="false">上个自然月</button>
+            </div>
+            <div class="activity-refresh"><time id="activityUpdatedAt">等待首次采样</time><button class="btn" id="refreshOverviewBtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"/></svg>刷新</button></div>
+          </div>
+          <p class="overview-range-window" id="ovRangeWindow">正在计算统计区间…</p>
+          <div class="overview-band">
+            <section class="overview-group" id="overviewRangeGroup" aria-labelledby="ovRangeHeading">
+              <div class="overview-group-heading"><h3 id="ovRangeHeading">区间用量</h3><span class="overview-tag" id="ovRangeLabel">今日</span></div>
+              <div class="overview-cards">
+                <article class="overview-card"><div class="overview-card-label">请求数</div><strong id="ovRangeRequests">—</strong><small>区间内用量记录</small></article>
+                <article class="overview-card"><div class="overview-card-label" title="输入含缓存读取、缓存写入与独立工具输入；输入 + 输出 = 总 Token">总 Token</div><strong id="ovRangeTotalTokens">—</strong><small>输入 <span id="ovRangeInputTokens">—</span> / 输出 <span id="ovRangeOutputTokens">—</span></small></article>
+                <article class="overview-card"><div class="overview-card-label">估算费用</div><strong id="ovRangeCost">—</strong><small>估算 · 含模型组系数</small></article>
+                <article class="overview-card"><div class="overview-card-label">活跃客户端</div><strong id="ovRangeClients">—</strong><small>区间内有用量</small></article>
+                <article class="overview-card"><div class="overview-card-label">活跃模型</div><strong id="ovRangeModels">—</strong><small>区间内有用量</small></article>
+              </div>
+              <p id="ovRangeStatus" class="overview-status" role="status" aria-live="polite">正在加载区间用量…</p>
+            </section>
+            <section class="overview-group" id="chainSummary" data-state="loading" aria-labelledby="ovLiveHeading">
+              <div class="overview-group-heading"><h3 id="ovLiveHeading">实时状态</h3><span class="overview-tag overview-tag-live">实时 · 不随区间</span></div>
+              <div class="overview-cards">
+                <article class="overview-card"><div class="overview-card-label">当前在途<button type="button" class="activity-info" aria-label="当前在途说明" aria-describedby="activityTooltip" data-activity-info="HTTP/SSE 在途请求与有效 WebSocket 推理轮次；不含空闲连接。数值为全站当前请求数；下方为配置客户端数与当前有在途请求的客户端数。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></div><strong id="activityActiveRequests">—</strong><small id="chainClients">—</small></article>
+                <article class="overview-card"><div class="overview-card-label">WebSocket 会话<button type="button" class="activity-info" aria-label="WebSocket 会话说明" aria-describedby="activityTooltip" data-activity-info="当前已建立的 Responses WebSocket 会话，包含空闲会话；与正在推理的有效轮次分别计数。下方为代理自启动以来的累计请求与运行时长。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></div><strong id="activityWebsocketSessions">—</strong><small id="chainProxy">—</small></article>
+                <article class="overview-card"><div class="overview-card-label">上游目标</div><strong id="chainTargets">—</strong><small>正常 / 总数</small></article>
+                <article class="overview-card"><div class="overview-card-label">密钥可用</div><strong id="chainKeys">—</strong><small id="chainKeysDetail">可用 / 总数</small></article>
+                <article class="overview-card"><div class="overview-card-label">72 小时成功率</div><strong id="ovLiveSuccessRate">—</strong><small id="ovLiveSuccessDetail">请求完成样本</small></article>
+              </div>
+              <p class="overview-status" id="chainStatus" role="status">正在加载实时状态…</p>
+              <p class="overview-status overview-ops-notice" id="chainOpsNotice" role="status" hidden></p>
+            </section>
+          </div>
+          <div class="overview-band">
+            <section class="overview-group" id="overviewTrends" aria-labelledby="ovTrendHeading">
+              <div class="overview-group-heading"><h3 id="ovTrendHeading">区间趋势</h3><span class="overview-tag" id="ovTrendUnit">按小时</span></div>
+              <div class="activity-chart-grid">
+                <figure class="activity-chart">
+                  <figcaption><h4>Token 趋势</h4><button type="button" class="activity-info" aria-label="Token 趋势说明" aria-describedby="activityTooltip" data-activity-info="每个时间桶已记录的输入与输出 Token，堆叠显示；输入含缓存读、缓存写与独立工具输入。今日、昨日按小时；多日区间由小时桶在浏览器中按本地自然日汇总。没有用量的时间桶按 0 显示，不推算未上报的 Token。两图按同一时间桶联动，方向键左右移动，Home/End 跳到首末桶。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></figcaption>
+                  <div class="activity-chart-legend"><span class="activity-legend-swatch activity-input"></span><span>输入</span><span class="activity-legend-swatch activity-output"></span><span>输出</span><span class="activity-chart-unit">Token</span></div>
+                  <svg id="ovTokenTrend" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互柱状图" aria-label="Token 趋势，正在加载" aria-describedby="ovTokenTrendReadout"></svg>
+                  <p id="ovTokenTrendReadout" class="activity-chart-readout" aria-live="polite">正在加载趋势…</p>
+                </figure>
+                <figure class="activity-chart">
+                  <figcaption><h4>请求数 / 估算费用</h4><div class="overview-toggle" role="group" aria-label="柱状图指标"><button type="button" data-overview-bar="requests" aria-pressed="true">请求数</button><button type="button" data-overview-bar="cost" aria-pressed="false">估算费用</button></div></figcaption>
+                  <div class="activity-chart-legend"><span class="overview-legend-bar" id="ovBarLegendSwatch" data-metric="requests"></span><span id="ovBarLegend">请求数</span><span class="activity-chart-unit" id="ovBarUnit">个请求</span></div>
+                  <svg id="ovBarTrend" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互柱状图" aria-label="请求数趋势，正在加载" aria-describedby="ovBarTrendReadout"></svg>
+                  <p id="ovBarTrendReadout" class="activity-chart-readout" aria-live="polite">正在加载趋势…</p>
+                </figure>
+              </div>
+              <p id="ovTrendStatus" class="overview-status" role="status">正在加载区间趋势…</p>
+            </section>
+            <section class="overview-group activity-charts" aria-labelledby="ovRealtimeHeading">
+              <div class="overview-group-heading"><h3 id="ovRealtimeHeading">实时 · 近 5 分钟</h3><span class="overview-tag overview-tag-live">实时 · 不随区间</span></div>
+              <div class="overview-live-strip" aria-label="近5分钟用量">
+                <div class="overview-live-item"><span class="overview-live-label">当前请求客户端<button type="button" class="activity-info" aria-label="当前请求客户端说明" aria-describedby="activityTooltip" data-activity-info="当前有在途请求的客户端数量；已有连接但未请求的客户端不计入。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></span><strong id="activityActiveClients">—</strong></div>
+                <div class="overview-live-item"><span class="overview-live-label">近5分钟 Token<button type="button" class="activity-info" aria-label="近5分钟 Token说明" aria-describedby="activityTooltip" data-activity-info="已记录用量的输入与输出之和，不估算在途生成量。输入已包含缓存读、缓存写与独立工具输入，不重复相加。未配置客户端的近期用量也包含在全站合计中。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></span><strong id="activityTotalTokens">—</strong><span class="activity-token-split">输入 <span id="activityInputTokens">—</span><span class="activity-split-divider">/</span>输出 <span id="activityOutputTokens">—</span></span></div>
+              </div>
+              <div class="activity-scope"><span>图表范围</span><strong id="activityChartScope">全站</strong><button class="btn btn-sm" id="activityResetScope" type="button" hidden>返回全站</button><span id="activityScopeStatus" role="status"></span></div>
+              <div class="activity-chart-grid">
+                <figure class="activity-chart">
+                  <figcaption><h4>并发峰值 <span>/ 10秒</span></h4><button type="button" class="activity-info" aria-label="并发峰值说明" aria-describedby="activityTooltip" data-activity-info="每个10秒时间桶中同时在途请求的最大值。使用独立的全站采样，不将客户端峰值相加。启动前或已裁剪的未采样峰值留空；部分桶可能不足10秒。两图按同一时间桶联动，方向键左右移动，Home/End 跳到首末桶。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></figcaption>
+                  <div class="activity-chart-legend"><span class="activity-legend-swatch activity-concurrency"></span>在途请求峰值<span class="activity-chart-unit">个请求</span></div>
+                  <svg id="activityConcurrencyChart" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互柱状图" aria-label="并发峰值，正在加载" aria-describedby="activityConcurrencyReadout"></svg>
+                  <p id="activityConcurrencyReadout" class="activity-chart-readout" aria-live="polite">正在加载图表…</p>
+                </figure>
+                <figure class="activity-chart">
+                  <figcaption><h4>输入 / 输出 Token <span>/ 10秒</span></h4><button type="button" class="activity-info" aria-label="Token 柱状图说明" aria-describedby="activityTooltip" data-activity-info="每个10秒时间桶已记录的输入与输出 Token；输入含缓存读、缓存写与独立工具输入。用量不完整时显示短提示，不推算未上报的 Token。输入与输出堆叠显示，柱高为两者之和。两图按同一时间桶联动，方向键左右移动，Home/End 跳到首末桶。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></figcaption>
+                  <div class="activity-chart-legend"><span class="activity-legend-swatch activity-input"></span><span>输入</span><span class="activity-legend-swatch activity-output"></span><span>输出</span><span class="activity-chart-unit">Token</span></div>
+                  <svg id="activityTokenChart" class="activity-plot" viewBox="0 0 560 230" preserveAspectRatio="none" tabindex="0" role="group" aria-roledescription="交互柱状图" aria-label="Token，正在加载" aria-describedby="activityTokenReadout"></svg>
+                  <p id="activityTokenReadout" class="activity-chart-readout" aria-live="polite">正在加载图表…</p>
+                </figure>
+              </div>
+              <p id="activityStatus" class="activity-status" role="status" aria-live="polite">正在加载实时活动…</p>
+            </section>
+          </div>
+          <div class="overview-tables">
+            <section class="overview-panel" id="topClients" aria-labelledby="topClientsHeading">
+              <div class="overview-panel-heading"><div><h3 id="topClientsHeading">客户端排行</h3><span class="overview-tag" id="topClientsRange">今日</span></div></div>
+              <div class="table-wrap overview-table-wrap"><table class="overview-table overview-rank-table"><thead><tr><th scope="col">客户端</th><th scope="col">请求</th><th scope="col">总 Token</th><th scope="col">估算费用</th><th scope="col">费用占比</th></tr></thead><tbody id="topClientsBody"><tr><td colspan="5">正在加载费用排行…</td></tr></tbody></table></div>
+              <p class="overview-status overview-panel-note" id="topClientsStatus" role="status">正在加载费用排行…</p>
+            </section>
+            <section class="overview-panel" id="topModels" aria-labelledby="topModelsHeading">
+              <div class="overview-panel-heading"><div><h3 id="topModelsHeading">模型排行</h3><span class="overview-tag" id="topModelsRange">今日</span></div></div>
+              <div class="table-wrap overview-table-wrap"><table class="overview-table overview-rank-table"><thead><tr><th scope="col">模型</th><th scope="col">请求</th><th scope="col">总 Token</th><th scope="col">估算费用</th><th scope="col">费用占比</th></tr></thead><tbody id="topModelsBody"><tr><td colspan="5">正在加载费用排行…</td></tr></tbody></table></div>
+              <p class="overview-status overview-panel-note" id="topModelsStatus" role="status">正在加载费用排行…</p>
+            </section>
+            <section class="overview-panel" id="targetHealth" aria-label="目标健康">
+              <div class="overview-panel-heading">
+                <div><h3>目标健康</h3><span id="targetHealthCount">—</span></div>
+                <span class="overview-status" id="targetHealthStatus" role="status">正在加载目标健康…</span>
+              </div>
+              <div class="table-wrap overview-table-wrap"><table class="overview-table"><thead><tr><th scope="col">目标</th><th scope="col">状态</th><th scope="col">密钥</th><th scope="col">在途 / 容量</th><th scope="col">近 15 分钟</th></tr></thead><tbody id="targetHealthBody"><tr><td colspan="5">正在加载目标健康…</td></tr></tbody></table></div>
+            </section>
+            <section class="overview-panel" id="recentChanges" aria-label="最近变更">
+              <div class="overview-panel-heading"><div><h3>最近变更</h3></div><span class="overview-status" id="recentChangesStatus" role="status">正在加载最近变更…</span></div>
+              <div class="table-wrap overview-table-wrap"><table class="overview-table"><thead><tr><th scope="col">时间</th><th scope="col">操作者</th><th scope="col">动作</th><th scope="col">对象</th><th scope="col">结果</th></tr></thead><tbody id="recentChangesBody"><tr><td colspan="5">正在加载最近变更…</td></tr></tbody></table></div>
+            </section>
+            <section class="overview-panel activity-clients" aria-label="客户端实时活动">
+              <div class="activity-table-heading"><div><h3>客户端实时活动<button type="button" class="activity-info" aria-label="客户端活动说明" aria-describedby="activityTooltip" data-activity-info="点击客户端姓名或所在行，近5分钟两张图切换到该客户端；再次点击或使用“返回全站”恢复。全站汇总数字始终保持全站范围。未配置表示已删除或未知客户端仍有近期用量。姓名、在途、会话与 Token 列均可排序。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></h3><span id="activityClientCount">等待采样</span></div><label class="activity-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input id="activityClientSearch" type="search" placeholder="搜索客户端" aria-label="搜索客户端" autocomplete="off"></label></div>
+              <div class="activity-table-wrap"><table class="activity-client-table"><thead><tr><th scope="col" aria-sort="none"><button type="button" data-activity-sort="name" data-label="客户端">客户端<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="active_requests" data-label="当前在途">当前在途<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="websocket_sessions" data-label="WS 会话">WS 会话<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="input_tokens" data-label="5m 输入">5m 输入<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="output_tokens" data-label="5m 输出">5m 输出<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th><th scope="col" aria-sort="none"><button type="button" data-activity-sort="total_tokens" data-label="5m 总量">5m 总量<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg></button></th></tr></thead><tbody id="activityClientsBody"><tr class="activity-initial-row"><td colspan="6">正在加载客户端活动…</td></tr></tbody></table></div>
+            </section>
+          </div>
+          <details class="activity-history">
+            <summary>历史统计与费用 <span>72小时请求完成统计 · 用量事件</span><span id="activityHistoryState" class="activity-history-state" role="status"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg></summary>
+            <div class="activity-history-body">
+              <div class="activity-history-heading"><h3>最近72小时请求完成统计</h3><button type="button" class="activity-info" aria-label="历史请求完成统计说明" aria-describedby="activityTooltip" data-activity-info="请求完成统计正在加载。" data-activity-info-source="activityHistoryTooltip"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></div>
+              <span id="activityHistoryTooltip" hidden>请求完成统计正在加载。</span>
+              <div class="activity-history-metrics" id="overviewStats"><div><span>请求总量</span><strong id="ovTotalReqs">—</strong></div><div><span>请求成功率</span><strong id="ovSuccessRate">—</strong></div><div><span>活跃目标数</span><strong id="ovTargets">—</strong></div><div><span>配置客户端数</span><strong id="ovClients">—</strong></div><div><span>模型费用配置数</span><strong id="ovModelCosts">—</strong></div></div>
+              <p id="ovRequestStatsStatus" class="activity-history-status" role="status">正在加载请求完成统计…</p>
+              <div class="activity-history-heading"><h3>历史用量事件与费用</h3><button type="button" class="activity-info" aria-label="历史用量事件与费用说明" aria-describedby="activityTooltip" data-activity-info="来自原有历史用量事件统计；事件数不是请求完成样本，也不能代替请求成功率。费用为估算金额，已含模型组系数（模型组扣费系数）。每60秒更新，手动刷新可立即重试。"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg></button></div>
+              <div class="activity-table-wrap" id="overviewUsageSummary">正在加载历史费用…</div>
+              <div class="billing-basis-note" id="overviewBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;line-height:1.6;margin:10px 0 0;"><strong>计费口径：</strong>费用按上游官方返回的 token 用量和已配置价格估算，价格依次取目标计费模板、全局模板和内置模型目录默认价，均未配置时按 0 计；金额已应用模型组系数（模型组扣费系数），是估算金额，不是厂商官方账单。系统不估算、不补算 token。客户端在上游返回用量前断开，或上游中途出错、超时、未返回最终用量时，该请求记为 0 token，日志标注“连接断开，未获取到计费字段”，因此统计可能少于厂商官方账单中这部分中断请求的用量。<details class="usage-basis-details"><summary>完整计费与费用口径</summary><span>费用使用与额度扣费同源的估算金额，已含模型组系数（模型组扣费系数）；前端不再乘系数，也不反推未折算的配置基础价。用量不完整或费用不完整时显示为部分，不用零替代。</span></details></div>
+            </div>
+          </details>
+          <div id="activityTooltip" class="activity-tooltip" role="tooltip" hidden></div>
+        </div>

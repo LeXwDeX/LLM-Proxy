@@ -1,0 +1,29 @@
+  <!-- ===== Quota Edit Drawer ===== -->
+  <div class="quota-drawer-overlay" id="quotaEditDrawer">
+    <div class="quota-drawer">
+      <div class="modal-header">
+        <h3 id="quotaEditDrawerTitle">编辑额度</h3>
+        <button type="button" class="modal-close" data-close="quotaEditDrawer" aria-label="关闭">&times;</button>
+      </div>
+      <div class="quota-drawer-body">
+        <p id="quotaEditDrawerInfo" style="font-size:12px;color:var(--text-muted);margin-bottom:12px;"></p>
+        <div class="quota-drawer-note">模型组页设置扣费折算系数和日/周/月额度基数；这里设置职级及个人可用额度倍率，不修改身份、密钥与授权。</div>
+        <div style="border-top:1px solid var(--line);padding-top:12px;">
+          <label style="font-weight:600;margin-bottom:8px;display:block;">职级绑定（可用额度倍率）</label>
+          <div class="form-group" style="margin:0;">
+            <select class="form-control readonly-disable" id="quotaEditJobLevel"></select>
+            <small style="display:block;color:var(--text-muted);font-size:12px;margin-top:4px;">可用额度上限 = 模型组额度基数 × 职级倍率 × 个人倍率；已折算消耗 = 模型原价 × 扣费折算系数。未绑职级的请求会被拒绝。</small>
+          </div>
+        </div>
+        <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px;">
+          <div class="form-group"><label style="font-size:12px;">添加模型组</label><select class="form-control readonly-disable" id="quotaEditGroupPicker"><option value="">选择模型组...</option></select></div>
+          <label class="quota-edit-selected-title">已选模型组</label>
+          <div id="quotaEditGroupEditor"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close="quotaEditDrawer">取消</button>
+        <button class="btn btn-primary readonly-hide" id="saveQuotaEditBtn">保存</button>
+      </div>
+    </div>
+  </div>

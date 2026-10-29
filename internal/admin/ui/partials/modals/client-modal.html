@@ -1,0 +1,41 @@
+  <!-- ===== Client Modal ===== -->
+  <div class="modal-overlay" id="clientModal">
+    <div class="modal" style="max-width:690px;">
+      <div class="modal-header">
+        <h3 id="clientModalTitle">新增客户端</h3>
+        <button type="button" class="modal-close" data-close="clientModal" aria-label="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>客户端名称</label>
+          <input class="form-control" id="clientName" placeholder="例如：client-prod" required>
+        </div>
+        <div class="form-group">
+          <label>Access Key</label>
+          <input class="form-control" id="clientAccessKey" placeholder="例如：sk-xxxxx" required>
+        </div>
+        <div class="form-group">
+          <label for="clientIPAddress">来源 IP 白名单（IPv4 / CIDR）</label>
+          <textarea class="form-control" id="clientIPAddress" rows="2" spellcheck="false" style="height:auto;min-height:60px;padding:8px 12px;resize:vertical;" placeholder="例如：192.168.0.0/16,192.168.50.0/24,10.0.1.1"></textarea>
+          <small style="color:var(--text-muted)">逗号、空格或换行分隔；匹配任一项即可访问。留空表示不限制来源 IP。</small>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div class="form-group"><label>职级</label><select class="form-control" id="clientJobLevel"></select></div>
+          <div class="form-group"><label>项目组</label><select class="form-control" id="clientProjectGroup"></select></div>
+        </div>
+        <div class="form-group">
+          <label>允许目标（点击选择，不选则允许全部）</label>
+          <div id="clientTargetTags" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;max-height:180px;overflow-y:auto;"></div>
+        </div>
+        <div class="form-group">
+          <label>允许部署池（点击选择，授权一池即授权其全部成员节点）</label>
+          <div id="clientPoolTags" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;max-height:120px;overflow-y:auto;"></div>
+          <small style="color:var(--text-muted)">与「允许目标」取并集；两者都不选表示允许全部目标</small>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close="clientModal">取消</button>
+        <button class="btn btn-primary readonly-hide" id="saveClientBtn">保存</button>
+      </div>
+    </div>
+  </div>

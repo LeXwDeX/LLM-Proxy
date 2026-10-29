@@ -4,6 +4,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { assembleAdminHTML } = require("./assemble_admin_html.cjs");
 const os = require("node:os");
 const http = require("node:http");
 const { chromium } = require("playwright");
@@ -83,14 +84,14 @@ async function main() {
     requests.push(endpoint);
     if (endpoint === "/admin" || endpoint === "/admin/ui") {
       res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(fs.readFileSync(path.join(root, "internal/admin/ui/index.html")));
+      res.end(assembleAdminHTML());
       return;
     }
-    if (/^\/admin\/ui\/js\/[^/]+\.js$/.test(endpoint)) {
+    if (/^\/admin\/ui\/js\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*\/[A-Za-z0-9_.-]+\.js$/.test(endpoint) && !endpoint.includes("..")) {
       res.writeHead(200, { "Content-Type": "text/javascript" });
       res.end(
         fs.readFileSync(
-          path.join(root, "internal/admin/ui/js", path.basename(endpoint)),
+          path.join(root, "internal/admin/ui/js", endpoint.slice("/admin/ui/js/".length)),
         ),
       );
       return;

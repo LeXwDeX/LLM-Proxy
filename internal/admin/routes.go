@@ -14,7 +14,7 @@ func (h *Handler) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Get("/", h.handleUI)
 	r.Get("/ui", h.handleUI)
-	r.Get("/ui/js/{file}", h.handleUIJS)
+	r.Get("/ui/js/*", h.handleUIJS)
 	r.Get("/healthz", h.handleHealthz)
 	r.Get("/metrics", h.handleMetrics)
 	r.Get("/api/me", h.handleMe)

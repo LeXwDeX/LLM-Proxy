@@ -1,0 +1,110 @@
+  <!-- ===== Model Cost Modal (Pricing Template) ===== -->
+  <div class="modal-overlay" id="modelCostModal">
+    <div class="modal pricing-modal">
+      <div class="modal-header">
+        <h3 id="modelCostModalTitle">新增模型计费</h3>
+        <button type="button" class="modal-close" data-close="modelCostModal" aria-label="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="pricing-form-section">
+          <div class="pricing-form-section-title">基础信息</div>
+          <div class="pricing-form-grid">
+            <div class="pricing-choice-panel">
+              <div class="pricing-choice-heading"><label for="ptTargetSearch" id="ptTargetLabel">Target</label><span class="pricing-choice-count" id="ptTargetCount"></span></div>
+              <input class="form-control pricing-choice-search" id="ptTargetSearch" type="search" placeholder="搜索 Target" autocomplete="off" aria-controls="ptTargetChoices">
+              <select id="ptTarget" multiple="multiple" hidden aria-hidden="true" tabindex="-1"></select>
+              <div class="pricing-choice-list" id="ptTargetChoices" role="group" aria-labelledby="ptTargetLabel" aria-describedby="ptSelectionHelp"></div>
+              <p class="pricing-choice-empty" id="ptTargetEmpty" hidden></p>
+            </div>
+            <div class="pricing-choice-panel">
+              <div class="pricing-choice-heading"><label for="ptModelSearch" id="ptModelLabel">模型</label><span class="pricing-choice-count" id="ptModelCount"></span></div>
+              <input class="form-control pricing-choice-search" id="ptModelSearch" type="search" placeholder="搜索模型" autocomplete="off" aria-controls="ptModelChoices">
+              <select id="ptModel" multiple="multiple" hidden aria-hidden="true" tabindex="-1" disabled></select>
+              <div class="pricing-choice-list" id="ptModelChoices" role="group" aria-labelledby="ptModelLabel" aria-describedby="ptSelectionHelp"></div>
+              <p class="pricing-choice-empty" id="ptModelEmpty" hidden></p>
+            </div>
+          </div>
+          <small class="pricing-help" id="ptSelectionHelp">勾选所需 Target 和模型，共用下方价格。全局兜底与具体 Target 互斥。</small>
+          <div class="pricing-selection-summary">
+            <div class="pricing-selection-heading"><span id="ptSelectionLabel">已选组合</span><span class="pricing-choice-count" id="ptSelectionCount" role="status" aria-live="polite"></span></div>
+            <ul class="pricing-selection-preview" id="ptSelectionPreview" aria-labelledby="ptSelectionLabel"></ul>
+          </div>
+          <small class="pricing-help" id="ptScopeNotice" role="status" aria-live="polite"></small>
+          <small class="pricing-help" id="ptTargetNotice" style="display:none;"></small>
+          <button type="button" class="btn btn-sm readonly-hide" id="ptCopyFromEditBtn" style="display:none; margin-top:8px;">更换 Target / 模型（复制价格）</button>
+        </div>
+        <div class="pricing-form-section">
+          <div class="pricing-form-section-title">计费规则</div>
+          <div class="form-group">
+          <label>计费模式</label>
+          <select class="form-control" id="ptMode" data-schema-options="pricing_modes"></select>
+          </div>
+        </div>
+        <div class="pricing-form-section">
+          <div class="pricing-form-section-title">基础价格与缓存细分</div>
+          <div class="pricing-form-section-hint">全天价格，或分时段未覆盖时使用的兜底价格；单位：每 1M tokens</div>
+          <div class="pricing-rate-editor">
+            <div class="form-group"><label>输入</label><input class="form-control" id="ptInput" type="number" step="any" min="0" placeholder="2.50"></div>
+            <div class="form-group"><label>输出</label><input class="form-control" id="ptOutput" type="number" step="any" min="0" placeholder="10.00"></div>
+            <div class="form-group"><label>缓存写入</label><input class="form-control" id="ptCacheWrite" type="number" step="any" min="0" placeholder="3.75"></div>
+            <div class="form-group"><label>缓存读取</label><input class="form-control" id="ptCacheRead" type="number" step="any" min="0" placeholder="0.30"></div>
+            <div class="form-group"><label>1 小时缓存写入（可选）</label><input class="form-control" id="ptWrite1h" type="number" step="any" min="0" placeholder="留空继承缓存写价；0 为免费"></div>
+            <div class="form-group"><label>5 分钟缓存写入（可选）</label><input class="form-control" id="ptWrite5m" type="number" step="any" min="0" placeholder="留空继承缓存写价；0 为免费"></div>
+            <div class="form-group"><label>显式缓存读取（可选）</label><input class="form-control" id="ptExplicitRead" type="number" step="any" min="0" placeholder="留空继承缓存读价；0 为免费"></div>
+            <div class="form-group"><label for="ptImageInput">图像输入（可选）</label><input class="form-control" id="ptImageInput" type="number" step="any" min="0" placeholder="留空表示缺价；0 为免费"></div>
+            <div class="form-group"><label for="ptCachedImageInput">缓存图像输入（可选）</label><input class="form-control" id="ptCachedImageInput" type="number" step="any" min="0" placeholder="留空继承图像输入价；0 为免费"></div>
+            <div class="form-group"><label for="ptImageOutput">图像输出（可选）</label><input class="form-control" id="ptImageOutput" type="number" step="any" min="0" placeholder="留空表示缺价；0 为免费"></div>
+          </div>
+        </div>
+        <details class="pricing-form-section pricing-context-section" id="ptAdvancedPricing">
+          <summary>条件价格与规则版本</summary>
+          <p class="pricing-help">总输入或实际档位未知、非标准组合未配置时，仅按当前时段基础价估算，并标记费用不完整。条件价格不会改变请求转发。</p>
+          <div class="pricing-form-grid">
+            <div class="form-group"><label for="ptVersion">规则版本</label><input class="form-control" id="ptVersion" type="number" min="0" step="1" value="0"><small class="pricing-help">用于计价证据；修改价格不会自动保留旧版。需保留历史时请创建新的生效模板。</small></div>
+            <div class="form-group"><label>规则 ID</label><div id="ptRuleID" class="pricing-help"></div></div>
+          </div>
+          <div id="ptContextRules"></div>
+        </details>
+        <div class="pricing-form-section" id="ptDateExceptionsGroup" style="display:none;">
+          <div class="pricing-context-heading"><div class="pricing-form-section-title">日期例外</div><button type="button" class="btn btn-sm readonly-hide" id="addPtDateException">添加日期例外</button></div>
+          <p class="pricing-help">开始日包含、结束日不包含，按下方模板时区解释。日期例外优先于星期时段；例外未命中时按星期时段与基础价计费。例外中的条件价需单独配置。</p>
+          <div id="ptDateExceptions"></div>
+        </div>
+        <div class="pricing-form-section" id="ptPeriodsGroup" style="display:none;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+            <div class="pricing-form-section-title" style="margin-bottom:0;">分时段列表</div>
+            <button type="button" class="btn btn-sm readonly-hide" id="addPtPeriod">添加时段</button>
+          </div>
+          <small class="pricing-help">每个时段按固定 UTC 偏移解释；同一星期内的时间范围不能交叉。</small>
+          <div class="pricing-period-editor" id="ptPeriods"></div>
+        </div>
+        <div class="pricing-form-section">
+          <div class="pricing-form-section-title">生效范围</div>
+          <div class="pricing-form-grid">
+            <div class="form-group">
+              <label>开始 (Start)</label>
+              <input type="datetime-local" class="form-control" id="ptStart">
+              <small class="pricing-help">留空 = 全天兜底价（模板 0）</small>
+            </div>
+            <div class="form-group">
+              <label>结束 (End)</label>
+              <input type="datetime-local" class="form-control" id="ptEnd">
+              <small class="pricing-help">留空 = 至今</small>
+            </div>
+          </div>
+        </div>
+        <div class="pricing-form-section">
+          <div class="pricing-form-section-title">时区</div>
+          <div class="pricing-timezone-row">
+          <label>UTC 偏移</label>
+          <input class="form-control" id="ptTimezone" pattern="[+-][0-9]{1,2}(:[0-9]{2})?">
+          <small class="pricing-help">请输入固定 UTC 偏移，例如 +08:00 或 -05:00（范围 -12:00 至 +14:00）。</small>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close="modelCostModal">取消</button>
+        <button class="btn btn-primary readonly-hide" id="saveModelCostBtn">保存</button>
+      </div>
+    </div>
+  </div>

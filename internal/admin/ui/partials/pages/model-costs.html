@@ -1,0 +1,32 @@
+        <!-- ========== Page: 模型计费 ========== -->
+        <div class="page" id="page-model-costs">
+          <div class="panel">
+            <div class="panel-header">
+              <h3>模型计费</h3>
+              <div class="btn-group">
+                <select class="form-control" id="mcTargetFilter" style="width:auto;font-size:13px;padding:4px 8px;"><option value="">全部目标</option></select>
+                <button class="btn" id="refreshModelCostsBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+                <button class="btn btn-primary readonly-hide" id="newModelCostBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增模板</button>
+              </div>
+            </div>
+            <div class="panel-body billing-basis-note" id="pricingBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;"><strong>计费口径：</strong>费用 = 上游官方 token 用量 × 适用的价格（目标模板、全局模板或目录默认价，均无则按 0 计），系统不估算 token。</div>
+            <div class="panel-body no-pad pricing-table-wrap">
+              <table class="pricing-table">
+                <thead>
+                  <tr>
+                    <th style="width:40px;"></th>
+                    <th>Target</th>
+                    <th>模型</th>
+                    <th>模板数</th>
+                    <th>模式</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="modelCostsTableBody">
+                  <tr class="empty-row"><td colspan="7">加载中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="panel-body" style="color:var(--text-muted);font-size:12px;">「全局默认」对所有目标生效；指定目标的价目优先于全局默认，再优先于模型目录价。分时段价请在模板的「分时段」模式下配置。</div>
+          </div>
+        </div>

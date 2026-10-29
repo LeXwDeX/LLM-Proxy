@@ -1,0 +1,160 @@
+        <!-- ========== Page: 消费统计 ========== -->
+        <div class="page" id="page-usage">
+          <div class="time-range-bar">
+            <button class="time-range-btn" data-range="1h">近1小时</button>
+            <button class="time-range-btn active" data-range="today">今日</button>
+            <button class="time-range-btn" data-range="yesterday">昨日</button>
+            <button class="time-range-btn" data-range="7d">近7天</button>
+            <button class="time-range-btn" data-range="30d">近30天</button>
+            <button class="time-range-btn" data-range="custom">自定义</button>
+            <div id="customRangeInputs" style="display:none;" class="form-row">
+              <div class="form-group">
+                <label>开始时间</label>
+                <input type="datetime-local" class="form-control" id="usageFrom">
+              </div>
+              <div class="form-group">
+                <label>结束时间</label>
+                <input type="datetime-local" class="form-control" id="usageTo">
+              </div>
+              <button class="btn btn-primary btn-sm" id="applyCustomRange">确定</button>
+            </div>
+            <div class="usage-filter-controls">
+              <label style="font-size:12px;color:var(--text-muted);white-space:nowrap;">客户端筛选</label>
+              <select class="form-control" id="usageClientFilter" style="width:160px;font-size:12px;padding:4px 8px;">
+                <option value="">全部客户端</option>
+              </select>
+              <label id="usageModelGroupFilterLabel" style="font-size:12px;color:var(--text-muted);white-space:nowrap;">模型组</label>
+              <div class="usage-model-group-filter" id="usageModelGroupFilter">
+                <button type="button" class="form-control" id="usageModelGroupFilterButton" aria-labelledby="usageModelGroupFilterLabel" aria-controls="usageModelGroupFilterMenu" aria-haspopup="true" aria-expanded="false">全部模型组</button>
+                <div class="usage-model-group-menu" id="usageModelGroupFilterMenu" role="group" aria-labelledby="usageModelGroupFilterLabel" hidden></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="usage-summary-strip" id="usageSummaryCards" aria-label="当前筛选汇总">
+            <div class="usage-summary-item">
+              <span class="usage-summary-label" title="请求权重，不是记录数；未选模型组时含全部请求，选中模型组时只含成功请求">请求权重</span>
+              <strong class="usage-summary-value" id="usReqs">—</strong>
+            </div>
+            <div class="usage-summary-item">
+              <span class="usage-summary-label" title="普通输入，不含缓存读取、缓存写入和工具输入">普通输入</span>
+              <strong class="usage-summary-value" id="usInput">—</strong>
+            </div>
+            <div class="usage-summary-item">
+              <span class="usage-summary-label" title="输出的另有推理子集，不重复相加">输出</span>
+              <strong class="usage-summary-value" id="usOutput">—</strong>
+            </div>
+            <div class="usage-summary-item">
+              <span class="usage-summary-label" title="显式缓存读取是缓存读取的子集，不重复相加">缓存读取</span>
+              <strong class="usage-summary-value" id="usCached">—</strong>
+            </div>
+            <div class="usage-summary-item">
+              <span class="usage-summary-label">缓存写入</span>
+              <strong class="usage-summary-value" id="usCacheWrite">—</strong>
+            </div>
+            <div class="usage-summary-item">
+              <span class="usage-summary-label" title="普通输入 + 输出 + 缓存读取 + 缓存写入 + 独立工具输入；推理与显式缓存读取是子集，不重复相加">总 Token</span>
+              <strong class="usage-summary-value" id="usTotal">—</strong>
+            </div>
+            <div class="usage-summary-item">
+              <span class="usage-summary-label" id="usCostLabel">估算费用<small>含模型组系数</small></span>
+              <strong class="usage-summary-value" id="usCost">—</strong>
+            </div>
+          </div>
+          <p class="usage-data-note" id="usageRequestNote">请求数按请求权重统计，不是记录数；补充用量记录权重为 0。未选模型组时汇总与客户端明细包含全部请求，选中模型组时只含成功请求（状态码 1–499）。模型组树始终为成功请求权重；模型明细优先取模型组明细，模型组明细为空时回退到按模型汇总，回退结果在未选模型组时含全部请求，选中模型组时为成功请求。本接口不能证明任意区间的成功率，因此不显示成功率。</p>
+
+          <div class="panel">
+            <div class="panel-body billing-basis-note" id="usageBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;line-height:1.6;"><strong>计费口径：</strong>费用按上游官方返回的 token 用量和已配置价格估算，价格依次取目标计费模板、全局模板和内置模型目录默认价，均未配置时按 0 计；金额已应用模型组系数（模型组扣费系数），是估算金额，不是厂商官方账单。系统不估算、不补算 token，也不重放请求；上游未返回用量字段的请求不计 token、不计费。客户端在上游返回用量前断开，或上游中途出错、超时、未返回最终用量时，该请求记为 0 token，日志标注“连接断开，未获取到计费字段”，因此统计可能少于厂商官方账单中这部分中断请求的用量。
+              <details class="usage-basis-details"><summary>完整计费与费用口径</summary>
+                <span>普通输入是 input_tokens，不含缓存读取和缓存写入。显式缓存读取是缓存读取的子集，推理是输出的子集；分期限缓存写与工具输入是独立字段，总 Token 才把普通输入、输出、缓存读取、缓存写入和工具输入相加，子集不重复相加或计费。费用使用与额度扣费同源的估算金额，已含模型组系数（模型组扣费系数）；前端不再乘系数，也不反推未折算的配置基础价。缺少可用价格时不补算费用。费用占比的分母是当前筛选的估算总费用。模型组树的请求数按成功请求加权，费用和 Token 统计全部已记录用量。费用占比在下列情况不可用：总费用为零或缺失，或用量、费用不完整；此时不推算。总费用与 Token 总量仍按已记录值展示（零显示 $0.00，缺失显示不可用），不补算。</span>
+              </details>
+            </div>
+          </div>
+
+          <div class="usage-tabs" id="usageTabList" role="tablist" aria-label="消费统计明细">
+            <button type="button" class="usage-tab active" id="usageTabGroup" data-usage-tab="group" role="tab" aria-selected="true" aria-controls="usagePanelGroup" tabindex="0">模型组</button>
+            <button type="button" class="usage-tab" id="usageTabClient" data-usage-tab="client" role="tab" aria-selected="false" aria-controls="usagePanelClient" tabindex="-1">客户端</button>
+            <button type="button" class="usage-tab" id="usageTabModel" data-usage-tab="model" role="tab" aria-selected="false" aria-controls="usagePanelModel" tabindex="-1">模型</button>
+          </div>
+
+          <div class="usage-tab-panel" id="usagePanelGroup" role="tabpanel" aria-labelledby="usageTabGroup">
+            <div class="panel">
+              <div class="panel-header"><h3>模型组 → 目标 → 模型</h3></div>
+              <div class="panel-body no-pad table-wrap">
+                <table id="usageByModelGroupTable" class="usage-table">
+                  <thead><tr>
+                    <th data-sort="model_group">消费归属</th><th data-sort="requests" title="成功请求权重（状态码 1–499），不是记录数">请求（成功）</th><th data-sort="input_tokens" title="普通输入，不含缓存读取和写入">普通输入</th>
+                    <th data-sort="output_tokens">输出</th><th data-sort="cached_tokens" title="显式缓存读取是其中子集，不重复相加">缓存读取</th><th data-sort="cache_creation_tokens">缓存写入</th><th data-sort="total" title="普通输入 + 输出 + 缓存读取 + 缓存写入 + 工具输入">总 Token</th><th data-sort="cost" title="已含模型组系数（模型组扣费系数）；占比分母为当前筛选估算总费用">估算费用</th>
+                  </tr></thead>
+                  <tbody id="usageByModelGroupBody"><tr class="empty-row"><td colspan="8">加载中...</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="usage-tab-panel" id="usagePanelClient" role="tabpanel" aria-labelledby="usageTabClient" hidden>
+            <div class="panel">
+              <div class="panel-header"><h3>按客户端聚合</h3></div>
+              <div class="panel-body no-pad table-wrap">
+                <table id="usageByClientTable" class="usage-table">
+                  <thead>
+                    <tr>
+                      <th data-sort="key">客户端</th>
+                      <th data-sort="requests" title="请求权重；未选模型组时含全部请求，选中模型组时只含成功请求">请求权重</th>
+                      <th data-sort="input_tokens" title="普通输入，不含缓存读取和写入">普通输入</th>
+                      <th data-sort="output_tokens" title="推理是输出子集，不重复相加">输出</th>
+                      <th data-sort="cached_tokens" title="显式缓存读取是其中子集，不重复相加">缓存读取</th><th data-sort="cache_creation_tokens">缓存写入</th>
+                      <th data-sort="total" title="普通输入 + 输出 + 缓存读取 + 缓存写入 + 工具输入">总 Token</th>
+                      <th data-sort="cost" title="已含模型组系数（模型组扣费系数）；占比分母为当前筛选估算总费用">估算费用</th>
+                    </tr>
+                  </thead>
+                  <tbody id="usageByClientBody">
+                    <tr class="empty-row"><td colspan="8">加载中...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="usage-tab-panel" id="usagePanelModel" role="tabpanel" aria-labelledby="usageTabModel" hidden>
+            <div class="panel">
+              <div class="panel-header"><h3>按模型组和模型聚合</h3></div>
+              <div class="panel-body no-pad table-wrap">
+                <table id="usageByModelTable" class="usage-table">
+                  <thead>
+                    <tr>
+                      <th data-sort="model_group">模型组</th>
+                      <th data-sort="model">模型名</th>
+                      <th data-sort="requests" id="usageModelRequestHeader" title="请求权重；实际口径按数据源在加载后标注">请求权重</th>
+                      <th data-sort="input_tokens" title="普通输入，不含缓存读取和写入">普通输入</th>
+                      <th data-sort="output_tokens" title="推理是输出子集，不重复相加">输出</th>
+                      <th data-sort="cached_tokens" title="显式缓存读取是其中子集，不重复相加">缓存读取</th><th data-sort="cache_creation_tokens">缓存写入</th>
+                      <th data-sort="total" title="普通输入 + 输出 + 缓存读取 + 缓存写入 + 工具输入">总 Token</th>
+                      <th data-sort="cost" title="已含模型组系数（模型组扣费系数）；占比分母为当前筛选估算总费用">估算费用</th>
+                    </tr>
+                  </thead>
+                  <tbody id="usageByModelBody">
+                    <tr class="empty-row"><td colspan="9">加载中...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header usage-chart-header">
+              <h3>用量趋势</h3>
+              <div class="usage-chart-metrics" id="usageChartMetricToggle" role="group" aria-label="趋势指标">
+                <button type="button" class="usage-chart-metric" id="usageChartMetricTokens" aria-pressed="true">Token</button>
+                <button type="button" class="usage-chart-metric" id="usageChartMetricCost" aria-pressed="false">费用</button>
+              </div>
+            </div>
+            <div class="panel-body">
+              <p class="usage-chart-note" id="usageChartNote">按 UTC 小时聚合；开始与结束时间所在整点小时均整桶计入（含边界小时），今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。</p>
+              <div class="chart-container" id="dailyChart">
+                <div class="loading-overlay"><span class="loading-spinner"></span> 加载中...</div>
+              </div>
+            </div>
+          </div>
+
+        </div>

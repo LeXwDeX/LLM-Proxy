@@ -1,32 +1,29 @@
 package admin
 
 import (
-	_ "embed"
+	"io/fs"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 )
 
-//go:embed ui/js/quota.js
-var adminUIQuotaJS string
-
 // adminUIJSSources enumerates the embedded scripts for contract checks.
 func adminUIJSSources() map[string]string {
-	entries, err := adminUIJSFS.ReadDir("ui/js")
-	if err != nil {
-		panic(err) // The directory is guaranteed by go:embed at build time.
-	}
-	sources := make(map[string]string, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	sources := map[string]string{}
+	err := fs.WalkDir(adminUIJSFS, "ui/js", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(name, ".js") {
+			return err
 		}
-		name := "ui/js/" + entry.Name()
 		data, err := adminUIJSFS.ReadFile(name)
 		if err != nil {
-			panic(err)
+			return err
 		}
 		sources[name] = string(data)
+		return nil
+	})
+	if err != nil {
+		panic(err) // The tree is guaranteed by go:embed at build time.
 	}
 	return sources
 }
@@ -160,8 +157,59 @@ func TestUIOverviewRangeLayout(t *testing.T) {
 	if strings.Contains(overview, "overview-chain-node") {
 		t.Error("链路摘要已并入实时状态卡片，不应再单独渲染")
 	}
-	js := adminUIJSSources()["ui/js/overview.js"]
+	js := adminUIPageScripts(t, "overview")
 	if !strings.Contains(js, "group_by=hour") || strings.Contains(js, "group_by=day") {
 		t.Error("总览区间数据必须只请求 group_by=hour 聚合，由前端汇总本地自然日")
 	}
+}
+
+var uiScriptTagRe = regexp.MustCompile(`<script\s+src="/admin/ui/js/([^"?]+\.js)(?:\?[^"]*)?"[^>]*></script>`)
+
+// adminUIScriptManifest returns the script paths (relative to ui/js) in the
+// order the assembled HTML loads them.
+func adminUIScriptManifest() []string {
+	var out []string
+	for _, m := range uiScriptTagRe.FindAllStringSubmatch(adminUIHTML, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// adminUIScript returns one embedded script ("core/core.js"); it fails when
+// the file is missing or empty so a moved file cannot make a check vacuous.
+func adminUIScript(t testing.TB, rel string) string {
+	t.Helper()
+	src := adminUIJSSources()["ui/js/"+rel]
+	if strings.TrimSpace(src) == "" {
+		t.Fatalf("script ui/js/%s is missing or empty", rel)
+	}
+	return src
+}
+
+// adminUIPageScripts concatenates every embedded .js file in ui/js/pages/<page>/
+// (sorted by path), so checks keep working when a page is split into several
+// files. It fails when the directory has no scripts or they are all empty.
+func adminUIPageScripts(t testing.TB, page string) string {
+	t.Helper()
+	prefix := "ui/js/pages/" + page + "/"
+	var keys []string
+	sources := adminUIJSSources()
+	for key := range sources {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		t.Fatalf("no scripts under %s", prefix)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString(sources[key])
+		b.WriteString("\n;\n")
+	}
+	if strings.TrimSpace(strings.ReplaceAll(b.String(), ";", "")) == "" {
+		t.Fatalf("scripts under %s are empty", prefix)
+	}
+	return b.String()
 }

@@ -1,0 +1,12 @@
+  <div class="modal-overlay" id="modelGroupModal">
+    <div class="modal">
+      <div class="modal-header"><h3 id="modelGroupModalTitle">新建模型组</h3><button type="button" class="modal-close" data-close="modelGroupModal" aria-label="关闭">&times;</button></div>
+      <div class="modal-body">
+        <div class="form-group"><label>模型组唯一标识</label><input class="form-control readonly-disable" id="modelGroupName" required></div>
+        <div class="form-group"><label>扣费折算系数（模型原价 × 此系数；0 = 不计消耗、额度不限）</label><input class="form-control readonly-disable" id="modelGroupCoefficient" type="number" min="0" step="0.01" value="1" required></div>
+        <div id="modelGroupDimensions" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;"></div>
+        <div class="form-group"><div style="display:flex;justify-content:space-between;align-items:center;"><label>所属模型</label><button class="btn btn-sm readonly-hide" id="addModelGroupBinding" type="button">+ 添加模型</button></div><div id="modelGroupBindingEditor"></div></div>
+      </div>
+      <div class="modal-footer"><button class="btn" data-close="modelGroupModal">取消</button><button class="btn btn-primary readonly-hide" id="saveModelGroupBtn">保存</button></div>
+    </div>
+  </div>

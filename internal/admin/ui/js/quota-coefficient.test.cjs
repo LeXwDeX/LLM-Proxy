@@ -2,9 +2,10 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { assembleAdminHTML } = require("../../../../scripts/testing/assemble_admin_html.cjs");
 const test = require("node:test");
 const { createHarness } = require("../../../../scripts/testing/admin_ui_test.cjs");
-const adminHtml = fs.readFileSync(path.join(__dirname, "../index.html"), "utf8");
+const adminHtml = assembleAdminHTML();
 const plain = value => JSON.parse(JSON.stringify(value));
 async function fixture() {
   const harness = createHarness();

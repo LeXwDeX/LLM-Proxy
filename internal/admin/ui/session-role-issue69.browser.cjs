@@ -4,12 +4,13 @@ const {test, before, after} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { assembleAdminHTML } = require("../../../scripts/testing/assemble_admin_html.cjs");
+const { manifest } = require("../../../scripts/testing/admin_ui_scripts.cjs");
 const playwright = require("playwright");
 const {schemaFixture} = require("../../../scripts/testing/admin_ui_test.cjs");
 
-const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
-const scripts = [...html.matchAll(/<script src="\/admin\/ui\/js\/([^"]+)"><\/script>/g)]
-  .map(match => fs.readFileSync(path.join(__dirname, "js", match[1]), "utf8"));
+const html = assembleAdminHTML();
+const scripts = manifest(html).map(s => s.source);
 const engine = process.env.UI_TEST_WEBKIT === "1" ? "webkit" : "chromium";
 let browser;
 before(async () => { browser = await playwright[engine].launch({headless: true}); });
