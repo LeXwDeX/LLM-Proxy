@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
+	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"net/http"
 	"strings"
 )
@@ -43,9 +44,7 @@ func (h *Handler) handleCreateModelGroup(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, status, errorResponse(err.Error()))
 		return
 	}
-	if h.quotaManager != nil {
-		h.quotaManager.RefreshAll()
-	}
+	h.scheduleQuotaRefresh(quota.RefreshScope{Groups: []string{req.Name}})
 	h.recordAudit(r, "model_group_create", req.Name, "success", "")
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 }
@@ -69,9 +68,7 @@ func (h *Handler) handleUpdateModelGroup(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, status, errorResponse(err.Error()))
 		return
 	}
-	if h.quotaManager != nil {
-		h.quotaManager.RefreshAll()
-	}
+	h.scheduleQuotaRefresh(quota.RefreshScope{Groups: []string{name, req.Name}})
 	detail := ""
 	if len(renamedClients) > 0 {
 		detail = "renamed_clients: " + strings.Join(renamedClients, ",")
@@ -94,9 +91,7 @@ func (h *Handler) handleDeleteModelGroup(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, status, errorResponse(err.Error()))
 		return
 	}
-	if h.quotaManager != nil {
-		h.quotaManager.RefreshAll()
-	}
+	h.scheduleQuotaRefresh(quota.RefreshScope{Groups: []string{name}})
 	detail := ""
 	if len(removedClients) > 0 {
 		detail = "removed_from_clients: " + strings.Join(removedClients, ",")

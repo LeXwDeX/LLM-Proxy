@@ -33,7 +33,7 @@ type Handler struct {
 	jobLevelStore        *nosql.JobLevelStore
 	dictStore            *nosql.DictStore
 	modelCatalog         *catalog.Catalog
-	quotaManager         *quota.Manager        // nil = 配额管理未启用
+	quotaManager         quotaController       // nil = 配额管理未启用
 	costCache            *pricing.PricingCache // nil = 回退到直接 List+ToCostTable
 	pricingTemplateStore *nosql.PricingTemplateStore
 	sessionManager       *SessionManager
@@ -57,6 +57,62 @@ type Handler struct {
 	authApply         func(clients []config.Client, targets []config.Target) error
 	// clientQuotaEvaluateHook 是测试注入点：客户端写入释放 configMu 之后、配额评估之前调用。
 	clientQuotaEvaluateHook func(name string)
+	// listETagsLoadedHook 是测试注入点：目标列表读完 ETag 之后、获取 configMu 之前调用。
+	listETagsLoadedHook func()
+}
+
+// quotaController 是 admin 依赖的额度管理接口（*quota.Manager 实现；测试可注入慢实现）。
+type quotaController interface {
+	Status(clientName string) quota.QuotaStatus
+	Evaluate(clientName string)
+	// ScheduleRefresh 登记后台、去抖、按范围的刷新，必须立即返回。
+	ScheduleRefresh(scope quota.RefreshScope)
+}
+
+// scheduleQuotaRefresh 在写操作提交后登记额度刷新。调用方不得持有 configMu
+// （持锁的 handler 通过 configTxn.refresh 延迟到释放锁之后）。
+func (h *Handler) scheduleQuotaRefresh(scope quota.RefreshScope) {
+	if h.quotaManager != nil {
+		h.quotaManager.ScheduleRefresh(scope)
+	}
+}
+
+// configTxn 包装 configMu 写 handler：锁内只做配置校验与落库，审计写入与额度
+// 刷新登记被推迟到释放 configMu 之后（审计是一次 bbolt 写事务，额度刷新可能
+// 很慢，二者都不应拖住其他配置写入与目标列表读取）。审计仍同步写入、不丢失；
+// 响应在 handler 返回时才结束，因此客户端收到响应时审计已落库。
+type configTxn struct {
+	h              *Handler
+	r              *http.Request
+	audits         []auditArgs
+	pendingRefresh []quota.RefreshScope
+}
+
+type auditArgs struct{ action, object, result, detail string }
+
+// lockConfig 获取 configMu 并返回事务；用法 `txn := h.lockConfig(r); defer txn.Unlock()`。
+func (h *Handler) lockConfig(r *http.Request) *configTxn {
+	h.configMu.Lock()
+	return &configTxn{h: h, r: r}
+}
+
+func (t *configTxn) audit(action, object, result, detail string) {
+	t.audits = append(t.audits, auditArgs{action, object, result, detail})
+}
+
+func (t *configTxn) refresh(scope quota.RefreshScope) {
+	t.pendingRefresh = append(t.pendingRefresh, scope)
+}
+
+// Unlock 先释放 configMu，再依次写审计、登记额度刷新。
+func (t *configTxn) Unlock() {
+	t.h.configMu.Unlock()
+	for _, a := range t.audits {
+		t.h.recordAudit(t.r, a.action, a.object, a.result, a.detail)
+	}
+	for _, scope := range t.pendingRefresh {
+		t.h.scheduleQuotaRefresh(scope)
+	}
 }
 
 // NewHandler constructs an HTTP router exposing admin endpoints.
@@ -93,10 +149,12 @@ func NewHandler(
 		dictStore:            nosql.NewDictStore(clientStore.DB()),
 		pricingTemplateStore: nosql.NewPricingTemplateStore(clientStore.DB()),
 		modelCatalog:         modelCatalog,
-		quotaManager:         quotaMgr,
 		costCache:            costCache,
 		sessionManager:       sessionMgr,
 		logger:               logger,
+	}
+	if quotaMgr != nil { // 避免把 typed nil 装进接口
+		h.quotaManager = quotaMgr
 	}
 	if _, err := rand.Read(h.keySnapshotSecret[:]); err == nil {
 		h.keySnapshotSecretReady = true

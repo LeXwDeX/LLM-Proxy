@@ -14,6 +14,13 @@
 //     the counter, eliminating the sub-second gap between boundary and
 //     calibration tick.
 //
+// Admin-triggered refreshes run in the background (ScheduleRefresh, refresh.go):
+// debounced, scoped to affected clients and bounded in concurrency. The
+// eventual-consistency window is documented there and in internal/admin/AGENTS.md.
+// The first admission of a client without counters waits for calibration at most
+// calibrationRequestTimeout; on timeout it is treated as a calibration failure
+// (rejected with the accounting-unavailable marker, retried with back-off).
+//
 // No 5-second ticker. No full-recompute polling.
 package quota
 
@@ -116,6 +123,17 @@ type Manager struct {
 	timerMu  sync.Mutex // protects calTimer (written by timer goroutine, read by Stop)
 	stopCh   chan struct{}
 	started  atomic.Bool
+
+	// 后台刷新（refresh.go）：admin 写操作之后的去抖、按范围的额度重算。
+	refreshMu       sync.Mutex
+	refreshCond     *sync.Cond
+	refreshPending  refreshSet
+	refreshActive   bool // 定时器已排期或循环正在运行
+	refreshStopped  bool
+	refreshTimer    *time.Timer
+	refreshDebounce time.Duration
+	// evaluateHook 是测试注入点：非 nil 时替代 evaluate（预加载、后台刷新、请求路径校准）。
+	evaluateHook func(name string, retry bool)
 }
 
 // New constructs a Manager.
@@ -124,7 +142,7 @@ func New(opts Options) (*Manager, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Manager{
+	m := &Manager{
 		catalog:             opts.Catalog,
 		costStore:           opts.CostStore,
 		costCache:           opts.CostCache,
@@ -141,7 +159,9 @@ func New(opts Options) (*Manager, error) {
 		calibrationErrors:   make(map[string]string),
 		calibrationRetryAt:  make(map[string]time.Time),
 		calibrationInFlight: make(map[string]chan struct{}),
-	}, nil
+	}
+	m.refreshCond = sync.NewCond(&m.refreshMu)
+	return m, nil
 }
 
 // Start runs one-time preload + launches hourly calibration timer.
@@ -158,17 +178,15 @@ func (m *Manager) Start(ctx context.Context) error {
 	if err != nil {
 		m.logger.Warn("quota.Manager: preload failed", "error", err)
 	}
-	for _, name := range names {
-		select {
-		case <-preloadCtx.Done():
-			m.logger.Warn("quota.Manager: preload timeout")
-			goto startCalibration
-		default:
-			m.Evaluate(name)
-		}
+	m.refreshMu.Lock()
+	m.refreshStopped = false
+	m.refreshMu.Unlock()
+	// 有界并发预加载；超时后未评估的客户端由首个请求按校准失败/超时语义处理。
+	m.evaluateMany(names, preloadConcurrency, preloadCtx.Done(), false)
+	if preloadCtx.Err() != nil {
+		m.logger.Warn("quota.Manager: preload timeout")
 	}
 
-startCalibration:
 	// Launch hourly calibration aligned to natural hours.
 	m.stopCh = make(chan struct{})
 	m.scheduleCalibration()
@@ -255,9 +273,9 @@ func (m *Manager) quotaClientNames() ([]string, error) {
 	return names, nil
 }
 
-// RefreshAll re-evaluates every quota client from the DB. Called by admin
-// handlers after global quota-affecting changes (model-group CRUD, target
-// deletion) that invalidate the resolved group bindings in in-memory counters.
+// RefreshAll re-evaluates every quota client from the DB synchronously.
+// Admin handlers must not call it on a request path: use ScheduleRefresh, which
+// is debounced, scoped to affected clients and runs in the background.
 func (m *Manager) RefreshAll() {
 	if m.clientStore == nil {
 		return
@@ -267,37 +285,13 @@ func (m *Manager) RefreshAll() {
 		m.logger.Warn("quota.Manager: RefreshAll quotaClientNames failed", "error", err)
 		return
 	}
-	active := make(map[string]struct{}, len(names))
 	for _, name := range names {
-		active[name] = struct{}{}
 		m.Evaluate(name)
 	}
 	// Clear stale in-memory state for clients that no longer have any quota
 	// configuration (e.g. a client whose last group was removed and whose
 	// personal quota is zero disappears from quotaClientNames).
-	m.mu.Lock()
-	for name := range m.counters {
-		if _, ok := active[name]; !ok {
-			delete(m.counters, name)
-		}
-	}
-	for name := range m.exceeded {
-		if _, ok := active[name]; !ok {
-			delete(m.exceeded, name)
-		}
-	}
-	for name := range m.groupExceeded {
-		if _, ok := active[name]; !ok {
-			delete(m.groupExceeded, name)
-		}
-	}
-	for name := range m.calibrationErrors {
-		if _, ok := active[name]; !ok {
-			delete(m.calibrationErrors, name)
-			delete(m.calibrationRetryAt, name)
-		}
-	}
-	m.mu.Unlock()
+	m.dropInactive(names)
 }
 
 // Stop halts calibration timer.
@@ -309,6 +303,7 @@ func (m *Manager) Stop() {
 	if m.stopCh != nil {
 		close(m.stopCh)
 	}
+	m.stopRefresh()
 	m.timerMu.Lock()
 	if m.calTimer != nil {
 		m.calTimer.Stop()
@@ -511,7 +506,8 @@ func (m *Manager) evaluate(clientName string, retry bool) {
 		m.mu.RLock()
 		failed := m.calibrationErrors[clientName] != ""
 		ready := m.counters[clientName] != nil && !failed
-		backedOff := failed && time.Now().Before(m.calibrationRetryAt[clientName])
+		// 请求路径超时只是让等待者退避，正在后台完成的这次校准本身不能因此放弃。
+		backedOff := failed && m.calibrationErrors[clientName] != errCalibrationTimeout.Error() && time.Now().Before(m.calibrationRetryAt[clientName])
 		m.mu.RUnlock()
 		if ready || backedOff {
 			return
@@ -557,7 +553,7 @@ func (m *Manager) evaluate(clientName string, retry bool) {
 	}
 
 	cc, err := calibratedCounters(clientName, qc, now, func(filter usage.Filter) ([]nosql.CostUnit, error) {
-		return m.usageStore.ReadCostUnits(context.Background(), filter, resolver, true)
+		return m.usageStore.ReadQuotaCostUnits(context.Background(), filter, resolver, true)
 	})
 	if err != nil {
 		m.calibrationFailed(clientName, err)
@@ -661,8 +657,12 @@ const calibrationRetryBackoff = 10 * time.Second
 func (m *Manager) retryCalibrationIfDue(clientName string) {
 	m.mu.Lock()
 	if inFlight := m.calibrationInFlight[clientName]; inFlight != nil {
+		// 已因超时/失败标记为不可用且仍在退避期：不要让每个请求都再等一个超时。
+		skip := m.calibrationErrors[clientName] != "" && time.Now().Before(m.calibrationRetryAt[clientName])
 		m.mu.Unlock()
-		<-inFlight
+		if !skip {
+			m.awaitCalibration(clientName, inFlight)
+		}
 		return
 	}
 	cold := m.counters[clientName] == nil
@@ -677,8 +677,36 @@ func (m *Manager) retryCalibrationIfDue(clientName string) {
 	done := make(chan struct{})
 	m.calibrationInFlight[clientName] = done
 	m.mu.Unlock()
-	defer func() { m.mu.Lock(); delete(m.calibrationInFlight, clientName); close(done); m.mu.Unlock() }()
-	m.evaluate(clientName, true)
+	// 校准在独立 goroutine 中运行：请求只等待 calibrationRequestTimeout，超时后
+	// 校准继续，成功即清除失败标记。
+	go func() {
+		defer func() { m.mu.Lock(); delete(m.calibrationInFlight, clientName); close(done); m.mu.Unlock() }()
+		m.runEvaluate(clientName, true)
+	}()
+	m.awaitCalibration(clientName, done)
+}
+
+// awaitCalibration 等待进行中的校准至多 calibrationRequestTimeout；超时按校准
+// 失败处理（calibrationErrors + 退避），调用方随后的准入检查会拒绝该客户端。
+func (m *Manager) awaitCalibration(clientName string, done <-chan struct{}) {
+	timer := time.NewTimer(calibrationRequestTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+	}
+	m.mu.Lock()
+	// 超时与完成可能同时发生：校准已成功则不得再标记失败。
+	notReady := m.counters[clientName] == nil || m.calibrationErrors[clientName] != ""
+	if notReady {
+		m.calibrationErrors[clientName] = errCalibrationTimeout.Error()
+		m.calibrationRetryAt[clientName] = time.Now().Add(calibrationRetryBackoff)
+	}
+	m.mu.Unlock()
+	if notReady {
+		m.logger.Warn("quota.Manager: request-path calibration timed out; rejecting until it completes", "client", clientName, "timeout", calibrationRequestTimeout)
+	}
 }
 
 func accountingUnavailableInfo() ExceededInfo {

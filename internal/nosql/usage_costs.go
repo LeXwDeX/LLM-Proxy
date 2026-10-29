@@ -44,6 +44,9 @@ type costReadHooks struct {
 	evidenceRaw func()     // additional raw rows visited for index completeness
 	direct      *directIntegrityHooks
 	forceLegacy bool // call-local test/benchmark comparison; never mutable store state
+	// windowKeys 只校验落在 [from, to] 小时范围内的额度聚合键（额度校准路径）。
+	// 默认 false：报表读取仍全量校验，范围外的畸形键同样报告为历史不完整。
+	windowKeys bool
 }
 
 type costReadResult struct {
@@ -159,6 +162,15 @@ func (s *UsageStore) ReadCostUnits(ctx context.Context, filter usage.Filter, res
 	return result.units, err
 }
 
+// ReadQuotaCostUnits 与 ReadCostUnits 语义一致，供额度校准使用：额度聚合键只
+// 校验请求窗口内的部分（Seek 到窗口起点，该步骤耗时随窗口而非历史总量增长）。
+// 窗口外的键按小时可解析即与本次读取无关；唯一差异是窗口外「小时部分无法解析」
+// 的畸形键不再使本次校准失败（它们无法归属到任何窗口，报表读取路径仍会报告）。
+func (s *UsageStore) ReadQuotaCostUnits(ctx context.Context, filter usage.Filter, resolver usage.RateResolver, precise bool) ([]CostUnit, error) {
+	result, err := s.readCostUnits(ctx, filter, resolver, precise, nil, costReadHooks{windowKeys: true})
+	return result.units, err
+}
+
 func costBounds(filter usage.Filter) (from, to time.Time) {
 	to = time.Now().UTC().Add(time.Hour)
 	if filter.From != nil {
@@ -184,6 +196,26 @@ func validateQuotaKeys(ctx context.Context, tx *bolt.Tx, filter usage.Filter, fr
 		_, err := quotaKeyInScope(k, filter, from, to, allow)
 		return err
 	})
+}
+
+// validateQuotaKeysWindow 是 validateQuotaKeys 的窗口版本：只检查小时前缀位于
+// [from, to] 的键，与 readCostRollups 的扫描范围一致。
+func validateQuotaKeysWindow(ctx context.Context, tx *bolt.Tx, filter usage.Filter, from, to time.Time, allow costPairFilter) error {
+	b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
+	if b == nil {
+		return nil
+	}
+	end := to.Truncate(time.Hour).Format(hourLayout) + "}"
+	c := b.Cursor()
+	for k, _ := c.Seek(hourPrefix(from)); k != nil && string(k) <= end; k, _ = c.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := quotaKeyInScope(k, filter, from, to, allow); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func quotaKeyInScope(key []byte, filter usage.Filter, from, to time.Time, allow costPairFilter) (bool, error) {
@@ -394,7 +426,11 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 				return err
 			}
 		}
-		if err := validateQuotaKeys(ctx, tx, filter, from, to, allow); err != nil {
+		validate := validateQuotaKeys
+		if hooks.windowKeys {
+			validate = validateQuotaKeysWindow
+		}
+		if err := validate(ctx, tx, filter, from, to, allow); err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
@@ -406,7 +442,11 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := checkDirectQuotaEvidenceContext(ctx, tx, filter, from, to, allow, hooks.direct); err != nil {
+		direct := hooks.direct
+		if hooks.windowKeys && direct == nil {
+			direct = &directIntegrityHooks{windowKeys: true}
+		}
+		if err := checkDirectQuotaEvidenceContext(ctx, tx, filter, from, to, allow, direct); err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {

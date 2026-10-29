@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"github.com/LeXwDeX/LLM-Proxy/internal/proxy"
+	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"github.com/go-chi/chi/v5"
 	"net/http"
 	"net/url"
@@ -33,6 +34,30 @@ func targetNameParam(r *http.Request) (string, error) {
 func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 	session, ok := SessionFromContext(r.Context())
 	admin := ok && session != nil && session.Role == RoleAdmin
+
+	// ETag 读库放在 configMu 之外，且先于配置快照：写入先落库再换运行时配置，
+	// 若期间有写入则（旧 ETag, 新配置）——客户端据此保存只会得到 ETag 冲突，
+	// 不会出现（新 ETag, 旧配置）造成的丢失更新。
+	var etags map[string]string
+	if h.targetStore != nil {
+		var err error
+		if etags, err = h.targetStore.ETags(); err != nil {
+			h.writeInternalError(w, "failed to load target etags", err)
+			return
+		}
+	}
+	keyIDSecret := h.keyIDSecret()
+	if h.listETagsLoadedHook != nil {
+		h.listETagsLoadedHook()
+	}
+
+	// configMu 只覆盖「取配置快照 + 绑定到同一运行时 revision 的密钥快照」；
+	// 其余（脱敏、拼装 JSON）在锁外完成。
+	type keySnap struct {
+		token    string
+		indices  []*int
+		statuses []proxy.KeyStatus
+	}
 	h.configMu.Lock()
 	cfg, err := h.currentConfig()
 	if err != nil {
@@ -40,16 +65,15 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		h.writeInternalError(w, "failed to load config", err)
 		return
 	}
-
-	var etags map[string]string
-	if h.targetStore != nil {
-		if etags, err = h.targetStore.ETags(); err != nil {
-			h.configMu.Unlock()
-			h.writeInternalError(w, "failed to load target etags", err)
-			return
+	snaps := make([]keySnap, len(cfg.Targets))
+	for i, t := range cfg.Targets {
+		token, _, statuses, indices := h.targetKeySnapshot(t)
+		if token == "" {
+			statuses = h.proxyService.KeyPoolStatus(t.Name)
 		}
+		snaps[i] = keySnap{token, indices, statuses}
 	}
-	keyIDSecret := h.keyIDSecret()
+	h.configMu.Unlock()
 
 	targets := make([]map[string]any, len(cfg.Targets))
 	for i, t := range cfg.Targets {
@@ -106,21 +130,18 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 			m["custom_body"] = nil
 		}
 		// Only publish a precondition when stored and runtime identity agree.
-		token, _, statuses, indices := h.targetKeySnapshot(t)
-		if token != "" {
-			m["key_snapshot"] = token
-			m["key_runtime_indices"] = indices
+		if snaps[i].token != "" {
+			m["key_snapshot"] = snaps[i].token
+			m["key_runtime_indices"] = snaps[i].indices
 		} else {
 			m["key_snapshot"] = nil
 			m["key_runtime_indices"] = nil
-			statuses = h.proxyService.KeyPoolStatus(t.Name)
 		}
-		if statuses != nil {
-			m["key_statuses"] = statuses
+		if snaps[i].statuses != nil {
+			m["key_statuses"] = snaps[i].statuses
 		}
 		targets[i] = m
 	}
-	h.configMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"targets": targets,
@@ -137,8 +158,8 @@ func readonlyTargetEndpoint(raw string) string {
 }
 
 func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	var body struct {
 		Name                        string                `json:"name"`
 		EndpointType                string                `json:"endpoint_type"`
@@ -283,13 +304,13 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.recordAudit(r, "create_target", name, "success", "")
+	txn.audit("create_target", name, "success", "")
 	writeJSON(w, http.StatusCreated, withWarning(map[string]any{"ok": true, "name": name, "etag": h.targetETag(name)}, warning))
 }
 
 func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	name, err := targetNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -547,7 +568,7 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.recordAudit(r, "update_target", name, "success", "")
+	txn.audit("update_target", name, "success", "")
 	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": name, "etag": h.targetETag(name)}, warning))
 }
 
@@ -628,8 +649,8 @@ func looksLikeMaskedTargetKey(value string) bool {
 }
 
 func (h *Handler) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	name, err := targetNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -685,14 +706,12 @@ func (h *Handler) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Target deletion invalidates model-group bindings that reference it:
-	// refresh in-memory quota counters so personnel quota and group states
-	// reflect the current catalog (stale bindings are kept and flagged in UI).
-	if h.quotaManager != nil {
-		h.quotaManager.RefreshAll()
-	}
+	// Target deletion invalidates model-group bindings that reference it. The
+	// quota counters of clients bound to this target are refreshed in the
+	// background after configMu is released (最终一致窗口见 AGENTS.md)。
+	txn.refresh(quota.RefreshScope{Targets: []string{name}})
 
-	h.recordAudit(r, "delete_target", name, "success", "")
+	txn.audit("delete_target", name, "success", "")
 	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true}, warning))
 }
 
@@ -732,8 +751,8 @@ func (h *Handler) handleTestModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleSetTargetPaused(w http.ResponseWriter, r *http.Request, paused bool) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	name, err := targetNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -792,7 +811,7 @@ func (h *Handler) handleSetTargetPaused(w http.ResponseWriter, r *http.Request, 
 	if paused {
 		action = "pause_target"
 	}
-	h.recordAudit(r, action, name, "success", "")
+	txn.audit(action, name, "success", "")
 	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": updatedTarget.Name, "paused": paused, "etag": h.targetETag(updatedTarget.Name)}, warning))
 }
 
