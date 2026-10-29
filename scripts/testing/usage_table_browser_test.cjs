@@ -56,11 +56,11 @@ async function main() {
       window.usageModules = {};
       window.usageFactories = [];
       // The usage page registers several modules (state, filters, tables, chart, ...);
-      // overview_range supplies the shared local-day range helper.
+      // overviewRange supplies the shared local-day range helper.
       window.app = {state: {modelGroupsLoaded:true,modelGroups:["API","订阅","自定义模型组"],usageModelGroupExpanded:{},usageModelTargetExpanded:{}}, bind: (module,key) => module === "quota" ? name => name === "company_general" ? "公司通用" : name : (module === "core" ? core[key] : (...args) => usageModules[module][key](...args))};
       window.AdminApp = {register: (name,factory) => { usageFactories.push({name, factory}); }};
     });
-    const rangeSupport = ["overview_state", "overview_util", "overview_range"].map((name) => manifest().find((script) => script.rel === `pages/overview/${name}.js`).source).join("\n;\n");
+    const rangeSupport = ["overviewState", "overviewUtil", "overviewRange"].map((name) => manifest().find((script) => script.rel === `pages/overview/${name}.js`).source).join("\n;\n");
     await page.addScriptTag({ content: rangeSupport });
     await page.addScriptTag({ content: pageSource("usage") });
     await page.evaluate(() => { for (const entry of usageFactories) usageModules[entry.name] = entry.factory(app); window.usage = usageModules.usage; });

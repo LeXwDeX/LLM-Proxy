@@ -1,26 +1,26 @@
 "use strict";
 // Overview live status: operations chain, target health, recent changes and historical stats.
-AdminApp.register("overview_health", function (app) {
+AdminApp.register("overviewHealth", function (app) {
   var esc = app.bind("core", "esc");
   var fmtNum = app.bind("core", "fmtNum");
   var fmtMoney = app.bind("core", "fmtMoney");
   var fmtPct = app.bind("core", "fmtPct");
   var totalTok = app.bind("core", "totalTok");
-  var S = app.bind("overview_state", "store")();
+  var S = app.bind("overviewState", "store")();
   var request = app.bind("overview", "request");
   var showTooltip = app.bind("overview", "showTooltip");
-  var counter = app.bind("overview_util", "counter");
-  var duration = app.bind("overview_util", "duration");
-  var el = app.bind("overview_util", "el");
-  var isObject = app.bind("overview_util", "isObject");
-  var keyIssue = app.bind("overview_util", "keyIssue");
-  var keySummary = app.bind("overview_util", "keySummary");
-  var localDate = app.bind("overview_util", "localDate");
-  var number = app.bind("overview_util", "number");
-  var phaseLabel = app.bind("overview_util", "phaseLabel");
-  var targetPhase = app.bind("overview_util", "targetPhase");
-  var targetRank = app.bind("overview_util", "targetRank");
-  var text = app.bind("overview_util", "text");
+  var counter = app.bind("overviewUtil", "counter");
+  var duration = app.bind("overviewUtil", "duration");
+  var el = app.bind("overviewUtil", "el");
+  var isObject = app.bind("overviewUtil", "isObject");
+  var keyIssue = app.bind("overviewUtil", "keyIssue");
+  var keySummary = app.bind("overviewUtil", "keySummary");
+  var localDate = app.bind("overviewUtil", "localDate");
+  var number = app.bind("overviewUtil", "number");
+  var phaseLabel = app.bind("overviewUtil", "phaseLabel");
+  var targetPhase = app.bind("overviewUtil", "targetPhase");
+  var targetRank = app.bind("overviewUtil", "targetRank");
+  var text = app.bind("overviewUtil", "text");
   function persistenceComplete(value) {
     return isObject(value) && ["usage_async_pending", "usage_async_deferred", "request_stats_dropped"].every(function (key) { return counter(value[key]); });
   }

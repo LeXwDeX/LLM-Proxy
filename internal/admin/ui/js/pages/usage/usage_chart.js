@@ -1,14 +1,14 @@
 "use strict";
 // Usage chart: metric toggle, bucket labels and the bar chart.
-AdminApp.register("usage_chart", function (app) {
+AdminApp.register("usageChart", function (app) {
   var esc = app.bind("core", "esc");
   var fmtNum = app.bind("core", "fmtNum");
   var fmtMoney = app.bind("core", "fmtMoney");
   var totalTok = app.bind("core", "totalTok");
-  var S = app.bind("usage_state", "store")();
-  var usageCell = app.bind("usage_tables", "usageCell");
-  var usageNumber = app.bind("usage_tables", "usageNumber");
-  var usageTokensAvailable = app.bind("usage_tables", "usageTokensAvailable");
+  var S = app.bind("usageState", "store")();
+  var usageCell = app.bind("usageTables", "usageCell");
+  var usageNumber = app.bind("usageTables", "usageNumber");
+  var usageTokensAvailable = app.bind("usageTables", "usageTokensAvailable");
   function setUsageChartNote(groupBy) {
     var note = document.getElementById("usageChartNote");
     if (!note) return;

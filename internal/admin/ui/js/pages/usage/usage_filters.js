@@ -1,6 +1,6 @@
 "use strict";
 // Usage filters: client and model-group selectors and the model-group list loader.
-AdminApp.register("usage_filters", function (app) {
+AdminApp.register("usageFilters", function (app) {
   var state = app.state;
   var modelGroupLabel = app.bind("quota", "modelGroupLabel");
   var api = app.bind("core", "api");

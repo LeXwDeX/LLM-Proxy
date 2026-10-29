@@ -1,6 +1,6 @@
 "use strict";
 // Overview shared state: one explicit object owned by this module; the other overview modules read and write it through store().
-AdminApp.register("overview_state", function (app) {
+AdminApp.register("overviewState", function (app) {
   var S = {
     snapshot: null,
     selectedClient: null,

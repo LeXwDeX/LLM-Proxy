@@ -14,10 +14,10 @@ import (
 
 var uiScriptPathMap = map[string][]string{
 	"core": {"core/core"}, "schema": {"core/schema"}, "navigation": {"core/navigation"}, "bootstrap": {"core/bootstrap"},
-	"overview": {"pages/overview/overview"},
+	"overview": {"pages/overview/overview_state", "pages/overview/overview_util", "pages/overview/overview_range", "pages/overview/overview_trends", "pages/overview/overview_health", "pages/overview/overview_activity", "pages/overview/overview"},
 	"targets": {"pages/targets/targets", "pages/targets/health", "pages/targets/detail", "pages/targets/key-list",
 		"pages/targets/model-mappings", "pages/targets/edit-modal", "pages/targets/save", "pages/targets/list"},
-	"pools": {"pages/pools/pools"}, "clients": {"pages/clients/clients"}, "pricing": {"pages/pricing/pricing"}, "usage": {"pages/usage/usage"},
+	"pools": {"pages/pools/pools"}, "clients": {"pages/clients/clients"}, "pricing": {"pages/pricing/pricing"}, "usage": {"pages/usage/usage_state", "pages/usage/usage_range", "pages/usage/usage_filters", "pages/usage/usage_tables", "pages/usage/usage_chart", "pages/usage/usage"},
 	"audit_trace": {"pages/audit_trace/audit_trace"}, "users": {"pages/users/users"},
 	"catalog": {"pages/catalog/catalog"}, "quota": {"pages/quota/quota"},
 }
@@ -40,31 +40,9 @@ func TestAssembledHTMLMatchesGolden(t *testing.T) {
 		// One golden tag expands to one tag per new path, in order.
 		return "/admin/ui/js/" + strings.Join(to, `.js"></script>`+"\n  "+`<script src="/admin/ui/js/`) + `.js"`
 	})
-	if got := collapsePageScripts(adminUIHTML); got != golden {
+	if got := adminUIHTML; got != golden {
 		t.Fatalf("assembled HTML differs from golden (len %d vs %d)", len(got), len(golden))
 	}
-}
-
-// collapsePageScripts folds consecutive script tags of one page directory
-// (pages/<name>/*.js, a page split into several files) back to the single
-// pages/<name>/<name>.js tag the golden records.
-func collapsePageScripts(html string) string {
-	tag := regexp.MustCompile(`^(\s*)<script src="/admin/ui/js/pages/([a-z_]+)/[^"/]+\.js"></script>$`)
-	var out []string
-	prev := ""
-	for _, line := range strings.Split(html, "\n") {
-		if m := tag.FindStringSubmatch(line); m != nil {
-			if prev == m[2] {
-				continue
-			}
-			prev = m[2]
-			out = append(out, m[1]+`<script src="/admin/ui/js/pages/`+m[2]+"/"+m[2]+`.js"></script>`)
-			continue
-		}
-		prev = ""
-		out = append(out, line)
-	}
-	return strings.Join(out, "\n")
 }
 
 func TestAssembleAdminHTMLFailsLoudly(t *testing.T) {

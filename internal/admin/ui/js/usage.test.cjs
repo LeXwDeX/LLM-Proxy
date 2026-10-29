@@ -902,7 +902,7 @@ test("usage presets use the same local-day windows as the overview range helper"
   const h = createHarness();
   const app = await h.run();
   const usage = app.modules.usage;
-  const overview = app.modules.overview_range;
+  const overview = app.modules.overviewRange;
   const now = new Date();
   for (const key of ["today", "yesterday", "7d", "30d"]) {
     const window = overview.rangeWindow(key, now);

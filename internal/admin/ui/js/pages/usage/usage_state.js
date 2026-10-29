@@ -1,6 +1,6 @@
 "use strict";
 // Usage shared state: one explicit object owned by this module; the other usage modules read and write it through store().
-AdminApp.register("usage_state", function (app) {
+AdminApp.register("usageState", function (app) {
   var S = {
     usageChartMetric: "tokens",
     usageChartBuckets: [],

@@ -12,31 +12,12 @@ const { assembleAdminHTML } = require("../../../scripts/testing/assemble_admin_h
 // Old script name -> ordered list of new paths (one golden tag expands to one tag per path).
 const scriptMap = {
   core: ["core/core"], schema: ["core/schema"], navigation: ["core/navigation"], bootstrap: ["core/bootstrap"],
-  overview: ["pages/overview/overview"],
+  overview: ["overview_state", "overview_util", "overview_range", "overview_trends", "overview_health", "overview_activity", "overview"].map((n) => `pages/overview/${n}`),
   targets: ["targets", "health", "detail", "key-list", "model-mappings", "edit-modal", "save", "list"].map((n) => `pages/targets/${n}`),
-  pools: ["pages/pools/pools"], clients: ["pages/clients/clients"], pricing: ["pages/pricing/pricing"], usage: ["pages/usage/usage"],
+  pools: ["pages/pools/pools"], clients: ["pages/clients/clients"], pricing: ["pages/pricing/pricing"], usage: ["usage_state", "usage_range", "usage_filters", "usage_tables", "usage_chart", "usage"].map((n) => `pages/usage/${n}`),
   audit_trace: ["pages/audit_trace/audit_trace"], users: ["pages/users/users"],
   catalog: ["pages/catalog/catalog"], quota: ["pages/quota/quota"],
 };
-
-// Folds consecutive script tags of one page directory (a page split into
-// several files) back to the single pages/<name>/<name>.js tag in the golden.
-function collapsePageScripts(html) {
-  const tag = /^(\s*)<script src="\/admin\/ui\/js\/pages\/([a-z_]+)\/[^"/]+\.js"><\/script>$/;
-  let prev = "";
-  const out = [];
-  for (const line of html.split("\n")) {
-    const m = tag.exec(line);
-    if (m) {
-      if (prev !== m[2]) out.push(`${m[1]}<script src="/admin/ui/js/pages/${m[2]}/${m[2]}.js"></script>`);
-      prev = m[2];
-      continue;
-    }
-    prev = "";
-    out.push(line);
-  }
-  return out.join("\n");
-}
 
 test("Node assembly equals the golden index.html modulo script paths", () => {
   const golden = fs.readFileSync(path.join(__dirname, "..", "testdata", "index.golden.html"), "utf8")
@@ -44,7 +25,7 @@ test("Node assembly equals the golden index.html modulo script paths", () => {
       assert.ok(scriptMap[name], `unknown script ${name}`);
       return `/admin/ui/js/${scriptMap[name].join('.js"></script>\n  <script src="/admin/ui/js/')}.js"`;
     });
-  assert.equal(collapsePageScripts(assembleAdminHTML()), golden);
+  assert.equal(assembleAdminHTML(), golden);
 });
 
 test("include errors fail loudly", () => {

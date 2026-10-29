@@ -1,32 +1,32 @@
 "use strict";
 // Overview range panels: summary cards, trend charts and top lists for the selected range.
-AdminApp.register("overview_trends", function (app) {
+AdminApp.register("overviewTrends", function (app) {
   var esc = app.bind("core", "esc");
   var fmtNum = app.bind("core", "fmtNum");
   var fmtMoney = app.bind("core", "fmtMoney");
   var fmtPct = app.bind("core", "fmtPct");
   var totalTok = app.bind("core", "totalTok");
-  var S = app.bind("overview_state", "store")();
+  var S = app.bind("overviewState", "store")();
   var request = app.bind("overview", "request");
-  var rangeOption = app.bind("overview_range", "rangeOption");
-  var rangeWindow = app.bind("overview_range", "rangeWindow");
-  var rollupBuckets = app.bind("overview_range", "rollupBuckets");
-  var windowSpan = app.bind("overview_range", "windowSpan");
-  var barRect = app.bind("overview_util", "barRect");
-  var barWidth = app.bind("overview_util", "barWidth");
-  var chartAxis = app.bind("overview_util", "chartAxis");
-  var chartGeometry = app.bind("overview_util", "chartGeometry");
-  var compactNumber = app.bind("overview_util", "compactNumber");
-  var counter = app.bind("overview_util", "counter");
-  var el = app.bind("overview_util", "el");
-  var inputTotal = app.bind("overview_util", "inputTotal");
-  var isObject = app.bind("overview_util", "isObject");
-  var offsetLabel = app.bind("overview_util", "offsetLabel");
-  var offsetMinutes = app.bind("overview_util", "offsetMinutes");
-  var shortDate = app.bind("overview_util", "shortDate");
-  var shortTime = app.bind("overview_util", "shortTime");
-  var stackedBars = app.bind("overview_util", "stackedBars");
-  var text = app.bind("overview_util", "text");
+  var rangeOption = app.bind("overviewRange", "rangeOption");
+  var rangeWindow = app.bind("overviewRange", "rangeWindow");
+  var rollupBuckets = app.bind("overviewRange", "rollupBuckets");
+  var windowSpan = app.bind("overviewRange", "windowSpan");
+  var barRect = app.bind("overviewUtil", "barRect");
+  var barWidth = app.bind("overviewUtil", "barWidth");
+  var chartAxis = app.bind("overviewUtil", "chartAxis");
+  var chartGeometry = app.bind("overviewUtil", "chartGeometry");
+  var compactNumber = app.bind("overviewUtil", "compactNumber");
+  var counter = app.bind("overviewUtil", "counter");
+  var el = app.bind("overviewUtil", "el");
+  var inputTotal = app.bind("overviewUtil", "inputTotal");
+  var isObject = app.bind("overviewUtil", "isObject");
+  var offsetLabel = app.bind("overviewUtil", "offsetLabel");
+  var offsetMinutes = app.bind("overviewUtil", "offsetMinutes");
+  var shortDate = app.bind("overviewUtil", "shortDate");
+  var shortTime = app.bind("overviewUtil", "shortTime");
+  var stackedBars = app.bind("overviewUtil", "stackedBars");
+  var text = app.bind("overviewUtil", "text");
   var trendIDs = ["ovTokenTrend", "ovBarTrend"];
   function rangeTotals() {
     return S.aggregateSnapshot && isObject(S.aggregateSnapshot.totals) ? S.aggregateSnapshot.totals : null;

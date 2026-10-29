@@ -1,13 +1,13 @@
 "use strict";
 // Usage tables: summaries, cost shares, aggregate tables and the model-group tree.
-AdminApp.register("usage_tables", function (app) {
+AdminApp.register("usageTables", function (app) {
   var state = app.state;
   var modelGroupLabel = app.bind("quota", "modelGroupLabel");
   var esc = app.bind("core", "esc");
   var fmtNum = app.bind("core", "fmtNum");
   var fmtMoney = app.bind("core", "fmtMoney");
   var totalTok = app.bind("core", "totalTok");
-  var S = app.bind("usage_state", "store")();
+  var S = app.bind("usageState", "store")();
   state.usageModelGroupExpanded = usageSafeMap(state.usageModelGroupExpanded);
   state.usageModelTargetExpanded = usageSafeMap(state.usageModelTargetExpanded);
   function usageSafeMap(source) {

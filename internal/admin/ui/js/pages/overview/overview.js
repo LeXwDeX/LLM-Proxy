@@ -2,23 +2,23 @@
 // Overview owns request plumbing, polling and the page entry points; the sibling overview_* modules own state, helpers and rendering.
 AdminApp.register("overview", function (app) {
   var api = app.bind("core", "api");
-  var S = app.bind("overview_state", "store")();
-  var loadActivity = app.bind("overview_activity", "loadActivity");
-  var renderChain = app.bind("overview_health", "renderChain");
-  var renderHistory = app.bind("overview_health", "renderHistory");
-  var renderRecentChanges = app.bind("overview_health", "renderRecentChanges");
-  var renderTargetHealth = app.bind("overview_health", "renderTargetHealth");
-  var aggregatePath = app.bind("overview_range", "aggregatePath");
-  var rangeOption = app.bind("overview_range", "rangeOption");
-  var rangeWindow = app.bind("overview_range", "rangeWindow");
-  var storeRange = app.bind("overview_range", "storeRange");
-  var renderRangePanels = app.bind("overview_trends", "renderRangePanels");
-  var renderRangeWindow = app.bind("overview_trends", "renderRangeWindow");
-  var el = app.bind("overview_util", "el");
-  var isObject = app.bind("overview_util", "isObject");
-  var text = app.bind("overview_util", "text");
-  var visible = app.bind("overview_util", "visible");
-  var rollupBuckets = app.bind("overview_range", "rollupBuckets");
+  var S = app.bind("overviewState", "store")();
+  var loadActivity = app.bind("overviewActivity", "loadActivity");
+  var renderChain = app.bind("overviewHealth", "renderChain");
+  var renderHistory = app.bind("overviewHealth", "renderHistory");
+  var renderRecentChanges = app.bind("overviewHealth", "renderRecentChanges");
+  var renderTargetHealth = app.bind("overviewHealth", "renderTargetHealth");
+  var aggregatePath = app.bind("overviewRange", "aggregatePath");
+  var rangeOption = app.bind("overviewRange", "rangeOption");
+  var rangeWindow = app.bind("overviewRange", "rangeWindow");
+  var storeRange = app.bind("overviewRange", "storeRange");
+  var renderRangePanels = app.bind("overviewTrends", "renderRangePanels");
+  var renderRangeWindow = app.bind("overviewTrends", "renderRangeWindow");
+  var el = app.bind("overviewUtil", "el");
+  var isObject = app.bind("overviewUtil", "isObject");
+  var text = app.bind("overviewUtil", "text");
+  var visible = app.bind("overviewUtil", "visible");
+  var rollupBuckets = app.bind("overviewRange", "rollupBuckets");
   var requestTimeoutMs = 12000;
   // Multi-day aggregates scan many hourly cells and get a longer deadline.
   var multiDayTimeoutMs = 45000;

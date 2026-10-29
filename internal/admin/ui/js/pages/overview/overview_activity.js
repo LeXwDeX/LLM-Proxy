@@ -1,25 +1,25 @@
 "use strict";
 // Overview live activity: five-minute activity snapshot, client table and activity charts.
-AdminApp.register("overview_activity", function (app) {
+AdminApp.register("overviewActivity", function (app) {
   var esc = app.bind("core", "esc");
-  var S = app.bind("overview_state", "store")();
-  var renderChain = app.bind("overview_health", "renderChain");
+  var S = app.bind("overviewState", "store")();
+  var renderChain = app.bind("overviewHealth", "renderChain");
   var request = app.bind("overview", "request");
   var schedule = app.bind("overview", "schedule");
-  var barRect = app.bind("overview_util", "barRect");
-  var barWidth = app.bind("overview_util", "barWidth");
-  var chartAxis = app.bind("overview_util", "chartAxis");
-  var chartGeometry = app.bind("overview_util", "chartGeometry");
-  var clock = app.bind("overview_util", "clock");
-  var compactNumber = app.bind("overview_util", "compactNumber");
-  var compareTime = app.bind("overview_util", "compareTime");
-  var counter = app.bind("overview_util", "counter");
-  var duration = app.bind("overview_util", "duration");
-  var el = app.bind("overview_util", "el");
-  var number = app.bind("overview_util", "number");
-  var stackedBars = app.bind("overview_util", "stackedBars");
-  var text = app.bind("overview_util", "text");
-  var visible = app.bind("overview_util", "visible");
+  var barRect = app.bind("overviewUtil", "barRect");
+  var barWidth = app.bind("overviewUtil", "barWidth");
+  var chartAxis = app.bind("overviewUtil", "chartAxis");
+  var chartGeometry = app.bind("overviewUtil", "chartGeometry");
+  var clock = app.bind("overviewUtil", "clock");
+  var compactNumber = app.bind("overviewUtil", "compactNumber");
+  var compareTime = app.bind("overviewUtil", "compareTime");
+  var counter = app.bind("overviewUtil", "counter");
+  var duration = app.bind("overviewUtil", "duration");
+  var el = app.bind("overviewUtil", "el");
+  var number = app.bind("overviewUtil", "number");
+  var stackedBars = app.bind("overviewUtil", "stackedBars");
+  var text = app.bind("overviewUtil", "text");
+  var visible = app.bind("overviewUtil", "visible");
   var rows = new Map();
   var metricIDs = ["activityActiveRequests", "activityActiveClients", "activityWebsocketSessions", "activityTotalTokens", "activityInputTokens", "activityOutputTokens"];
   var chartIDs = ["activityConcurrencyChart", "activityTokenChart"];

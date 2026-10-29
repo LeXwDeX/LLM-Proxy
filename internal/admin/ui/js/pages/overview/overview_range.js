@@ -1,12 +1,12 @@
 "use strict";
 // Overview range selection helpers: range options, persisted choice, local-day windows and bucket rollup.
-AdminApp.register("overview_range", function (app) {
-  var S = app.bind("overview_state", "store")();
-  var amount = app.bind("overview_util", "amount");
-  var counter = app.bind("overview_util", "counter");
-  var inputTotal = app.bind("overview_util", "inputTotal");
-  var shortDate = app.bind("overview_util", "shortDate");
-  var shortTime = app.bind("overview_util", "shortTime");
+AdminApp.register("overviewRange", function (app) {
+  var S = app.bind("overviewState", "store")();
+  var amount = app.bind("overviewUtil", "amount");
+  var counter = app.bind("overviewUtil", "counter");
+  var inputTotal = app.bind("overviewUtil", "inputTotal");
+  var shortDate = app.bind("overviewUtil", "shortDate");
+  var shortTime = app.bind("overviewUtil", "shortTime");
   // Overview-only presentation keys; they are not Schema business enums.
   var rangeOptions = [
     {key: "today", label: "今日"},

@@ -1,6 +1,6 @@
 "use strict";
 // Overview helpers: DOM shortcuts, value predicates, target classification and chart geometry. No page state.
-AdminApp.register("overview_util", function (app) {
+AdminApp.register("overviewUtil", function (app) {
   var state = app.state;
   var fmtNum = app.bind("core", "fmtNum");
   var totalTok = app.bind("core", "totalTok");

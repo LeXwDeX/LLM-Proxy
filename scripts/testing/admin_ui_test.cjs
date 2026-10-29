@@ -490,6 +490,12 @@ async function main() {
     "core",
     "schema",
     "navigation",
+    "overviewState",
+    "overviewUtil",
+    "overviewRange",
+    "overviewTrends",
+    "overviewHealth",
+    "overviewActivity",
     "overview",
     "targets",
     "targetsHealth",
@@ -502,24 +508,18 @@ async function main() {
     "pools",
     "clients",
     "pricing",
+    "usageState",
+    "usageRange",
+    "usageFilters",
+    "usageTables",
+    "usageChart",
     "usage",
     "audit_trace",
     "users",
     "catalog",
     "quota",
   ];
-  // A page split into several files registers helper modules named
-  // "<page>_<part>"; they must initialize before the page module itself.
-  const initialized = Object.keys(app.modules);
-  for (const name of initialized) {
-    const owner = expected.find((page) => name.startsWith(page + "_"));
-    if (owner) assert.ok(initialized.indexOf(name) < initialized.indexOf(owner), `${name} initializes before ${owner}`);
-  }
-  assert.deepEqual(
-    initialized.filter((name) => !expected.some((page) => name.startsWith(page + "_"))),
-    expected,
-    "every registered factory initializes",
-  );
+  assert.deepEqual(Object.keys(app.modules), expected, "every registered factory initializes");
   for (const script of scripts) {
     for (const match of script.source.matchAll(
       /app\.bind\("([^"\n]+)", "([^"\n]+)"\)/g,
