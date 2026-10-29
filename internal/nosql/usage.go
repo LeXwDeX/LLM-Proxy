@@ -243,8 +243,10 @@ func (s *UsageStore) recordBatchContext(ctx context.Context, events []usage.Even
 		}
 		fresh := make([]bool, len(bundles))
 		memo := freshScopeMemo{cells: make(map[string]bool), scopes: make(map[string]continuationProof)}
+		// The proofs below run before this transaction writes any raw row.
+		proofCtx := withTxScopeSummary(ctx, tx)
 		for i, bundle := range bundles {
-			fresh[i] = memo.proven(ctx, tx, bundle.rows)
+			fresh[i] = memo.proven(proofCtx, tx, bundle.rows)
 		}
 		for i, bundle := range bundles {
 			added, err := recordUsageBundleTx(tx, bundle.rows, bundle.keys, migrationErr)
@@ -695,6 +697,9 @@ var pruneTxBudget = 200 * time.Millisecond
 // queued writers (admin saves, usage batches) take the write lock.
 var pruneYield = time.Millisecond
 
+// pruneBetweenTx, when set by a test, runs between budget-limited transactions.
+var pruneBetweenTx func()
+
 // PruneEventsBefore deletes usage_events strictly older than cutoff, in bounded
 // per-transaction batches so the global bbolt write lock is never held long.
 // Returns the number of deleted events. The hourly agg bucket is intentionally
@@ -719,14 +724,25 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 	// 一秒，绝不误删 cutoff 之后的事件。
 	cutoffPrefix := cutoff.UTC().Add(-time.Second).Format(time.RFC3339Nano)
 	total := 0
+	// Rollup proof verdicts are reused across the budget-limited transactions
+	// of this call. They hold while the raw revision is the one this call left
+	// behind; any other writer advances it and the verdicts are dropped.
+	proofCache := make(map[string]bool)
+	var proofRevision uint64
+	proofRevisionKnown := false
 	for {
 		deleted := 0
 		quarantined := 0
 		limited := false
+		var removed [][]byte
 		err := s.db.Update(func(tx *bolt.Tx) error {
 			if _, err := rollupProofSource(tx); err != nil {
 				return err
 			}
+			if !proofRevisionKnown || rawRevision(tx) != proofRevision {
+				clear(proofCache)
+			}
+			proofRevisionKnown = false
 			progress, err := loadIndexProgressState(tx, false)
 			if err != nil {
 				return err
@@ -744,7 +760,6 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 				}
 				keys = append(keys, append([]byte(nil), k...))
 			}
-			proofCache := make(map[string]bool)
 			refs := &indexRawReferences{tx: tx}
 			started := time.Now()
 			processed := 0
@@ -798,13 +813,16 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 				if err := bumpRawRevision(tx); err != nil {
 					return err
 				}
+				removed = append(removed, k)
 			}
 			deleted = processed
+			proofRevision, proofRevisionKnown = rawRevision(tx), true
 			return nil
 		})
 		if err != nil {
 			return total, err
 		}
+		forgetCanonicalRows(removed)
 		if quarantined > 0 {
 			// Only log after the transaction commits, and never log raw bytes,
 			// record keys or a decoder error that could include event content.
@@ -813,6 +831,9 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 		total += deleted
 		if limited {
 			time.Sleep(pruneYield)
+			if pruneBetweenTx != nil {
+				pruneBetweenTx()
+			}
 			continue
 		}
 		if deleted < batchSize {

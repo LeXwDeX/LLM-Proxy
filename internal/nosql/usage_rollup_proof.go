@@ -68,6 +68,7 @@ func currentRollupIdentitiesContext(ctx context.Context, tx *bolt.Tx, source str
 	if err := ctx.Err(); err != nil {
 		return 0, xor, false, err
 	}
+	proofIdentityScans.Add(1)
 	raw := tx.Bucket([]byte(BucketUsageEvents))
 	receipts := tx.Bucket([]byte(BucketUsageReceipts))
 	index := tx.Bucket([]byte(BucketUsageEventsByClient))
@@ -108,7 +109,7 @@ func currentRollupIdentitiesContext(ctx context.Context, tx *bolt.Tx, source str
 		xorDigest(&xor, rollupIdentityDigest(k, digest))
 		return nil
 	}
-	if err := raw.ForEach(func(k, data []byte) error {
+	if err := forEachRawInHours(ctx, tx, raw, hours, func(k, data []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -157,7 +158,7 @@ func currentRollupIdentitiesContext(ctx context.Context, tx *bolt.Tx, source str
 	}); err != nil {
 		return 0, xor, false, ctx.Err()
 	}
-	if err := receipts.ForEach(func(k, _ []byte) error {
+	if err := forEachReceiptInHours(ctx, tx, receipts, hours, func(k, _ []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -728,11 +729,11 @@ func usageRetainedRollupsProvenImpl(ctx context.Context, tx *bolt.Tx, rows []usa
 	if checkUsageIdentityAdmission(tx, actual) != nil {
 		return false
 	}
-	if err := receipts.ForEach(func(key, _ []byte) error {
+	if err := forEachReceiptInHours(ctx, tx, receipts, hours, func(key, _ []byte) error {
 		if err := proofScanStep(ctx, true); err != nil {
 			return err
 		}
-		if !receiptMayOverlap(tx, key, owners, hours) {
+		if keyHourOutside(key, hours) || !receiptMayOverlap(tx, key, owners, hours) {
 			return nil
 		}
 		usageKey, quotaKey, ok := readReceiptCells(tx, key)

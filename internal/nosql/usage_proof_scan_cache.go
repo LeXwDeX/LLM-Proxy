@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/maphash"
@@ -18,6 +19,10 @@ import (
 // proofRawParses counts full parses of raw usage rows by the proof helpers.
 var proofRawParses atomic.Int64
 
+// proofIdentityScans counts rollup identity recomputations (each one walks the
+// raw rows and receipts of a cell's hour).
+var proofIdentityScans atomic.Int64
+
 // Proofs on upgraded databases scan every raw row inside the bbolt write
 // transaction. Legacy rows fail decodeProofEvent and are classified by
 // backfillRawScope; both are pure functions of the row bytes, so results are
@@ -33,7 +38,7 @@ var proofScanCacheFull sync.Once
 
 func warnProofScanCacheFull() {
 	proofScanCacheFull.Do(func() {
-		slog.Warn("usage proof scan cache is full; further legacy rows are parsed on every usage write", "max_entries", proofScanCacheMaxEntries)
+		slog.Warn("usage proof scan cache is full; rows beyond the cap are classified again on every proof scan, which can slow usage writes", "max_entries", proofScanCacheMaxEntries)
 	})
 }
 
@@ -58,11 +63,14 @@ var proofScanCache = struct {
 	sync.RWMutex
 	decodeFailed map[proofRawDigest]struct{}
 	scopes       map[proofRawDigest]proofRawScope
-	canonical    map[proofRawDigest]struct{}
+	// canonical remembers, per raw key, the digest of the key and bytes last
+	// classified as canonical. An overwrite replaces the entry and retention
+	// forgets deleted keys, so its size follows the retained rows.
+	canonical map[string]proofRawDigest
 }{
 	decodeFailed: make(map[proofRawDigest]struct{}),
 	scopes:       make(map[proofRawDigest]proofRawScope),
-	canonical:    make(map[proofRawDigest]struct{}),
+	canonical:    make(map[string]proofRawDigest),
 }
 
 // decodeProofEventCached is decodeProofEvent for full raw-bucket scans. Only
@@ -88,13 +96,17 @@ func decodeProofEventCached(data []byte, event *usage.Event) bool {
 	return false
 }
 
+// proofRowDigest digests key and data injectively: the length prefix keeps
+// (key, data) pairs with the same concatenation apart.
 func proofRowDigest(key, data []byte) proofRawDigest {
 	var sum proofRawDigest
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], uint64(len(key)))
 	for i := range sum {
 		var h maphash.Hash
 		h.SetSeed(proofDigestSeeds[i])
+		h.Write(size[:])
 		h.Write(key)
-		h.WriteByte(0)
 		h.Write(data)
 		sum[i] = h.Sum64()
 	}
@@ -102,14 +114,14 @@ func proofRowDigest(key, data []byte) proofRawDigest {
 }
 
 // canonicalRawRowCached reports decodeProofEvent(data) && usageKey(event)==key.
-// Only positive results are memoized, keyed by the digest of key and bytes, so
-// a rewritten row or a different key is classified again.
+// Only positive results are memoized, one entry per raw key holding the digest
+// of key and bytes, so a rewritten row classifies again and replaces its entry.
 func canonicalRawRowCached(key, data []byte) bool {
 	sum := proofRowDigest(key, data)
 	proofScanCache.RLock()
-	_, ok := proofScanCache.canonical[sum]
+	known, ok := proofScanCache.canonical[string(key)]
 	proofScanCache.RUnlock()
-	if ok {
+	if ok && known == sum {
 		return true
 	}
 	var event usage.Event
@@ -118,8 +130,8 @@ func canonicalRawRowCached(key, data []byte) bool {
 		return false
 	}
 	proofScanCache.Lock()
-	if len(proofScanCache.canonical) < proofScanCacheMaxEntries {
-		proofScanCache.canonical[sum] = struct{}{}
+	if _, replace := proofScanCache.canonical[string(key)]; replace || len(proofScanCache.canonical) < proofScanCacheMaxEntries {
+		proofScanCache.canonical[string(key)] = sum
 	} else {
 		defer warnProofScanCacheFull()
 	}
@@ -192,13 +204,21 @@ func receiptClientHashIfNamed(name string) string {
 // first usage write after startup does not parse the whole history while it
 // holds the bbolt writer. Databases tracked since creation never run the
 // legacy scans and are skipped. It returns the number of rows visited.
+//
+// It also checks the shape of every client index entry and persists a marker
+// when one is not canonical (see clientIndexReferencesKey), for tracked
+// databases too.
 func WarmUsageProofScanCache(db *bolt.DB) (int, error) {
 	visited := 0
+	nonCanonical := false
 	err := db.View(func(tx *bolt.Tx) error {
 		meta := tx.Bucket([]byte(BucketMeta))
 		raw := tx.Bucket([]byte(BucketUsageEvents))
 		if meta == nil || raw == nil {
 			return fmt.Errorf("usage proof cache warm-up: buckets missing")
+		}
+		if index := tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil {
+			nonCanonical = !clientIndexAllCanonical(index)
 		}
 		if string(meta.Get([]byte(usageAccountingProofTrackedKey))) == "1" {
 			return nil
@@ -212,6 +232,9 @@ func WarmUsageProofScanCache(db *bolt.DB) (int, error) {
 			return nil
 		})
 	})
+	if err == nil && nonCanonical {
+		err = markClientIndexNonCanonical(db)
+	}
 	return visited, err
 }
 
@@ -229,4 +252,13 @@ func warmCanonicalRawRows(db *bolt.DB) error {
 			return nil
 		})
 	})
+}
+
+// forgetCanonicalRows drops the memo entries of raw rows retention deleted.
+func forgetCanonicalRows(keys [][]byte) {
+	proofScanCache.Lock()
+	for _, key := range keys {
+		delete(proofScanCache.canonical, string(key))
+	}
+	proofScanCache.Unlock()
 }

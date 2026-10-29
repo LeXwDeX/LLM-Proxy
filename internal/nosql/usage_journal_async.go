@@ -52,6 +52,7 @@ type usageBatchRecorder interface {
 type journalAppend struct {
 	line   []byte
 	client string
+	owned  ownedLine
 	done   chan error
 }
 
@@ -134,7 +135,15 @@ func (j *UsageJournal) recordAsync(a *usageJournalAsync, event usage.Event) erro
 	if err := json.Unmarshal(data, &replayable); err != nil {
 		return fmt.Errorf("usage journal: decode usage event: %w", err)
 	}
-	req := &journalAppend{line: append(data, '\n'), client: strings.TrimSpace(event.ClientName), done: make(chan error, 1)}
+	client := strings.TrimSpace(event.ClientName)
+	req := &journalAppend{
+		line: append(data, '\n'), client: client, done: make(chan error, 1),
+		owned: ownedLine{
+			client:     client,
+			event:      usage.Event{ClientName: replayable.ClientName, Timestamp: replayable.Timestamp},
+			consistent: strings.TrimSpace(replayable.ClientName) == client,
+		},
+	}
 	a.appendCh <- req
 	if appendErr := <-req.done; appendErr != nil {
 		// The journal is unavailable (for example a full disk): keep the old
@@ -200,7 +209,7 @@ func (j *UsageJournal) runSyncer(a *usageJournalAsync) {
 				if _, dup := j.owned[line]; dup {
 					continue
 				}
-				j.owned[line] = req.client
+				j.owned[line] = req.owned
 				j.ownedByClient[req.client]++
 			}
 		} else {
@@ -351,10 +360,11 @@ func (j *UsageJournal) compact(force bool) error {
 }
 
 func (j *UsageJournal) disownLocked(line string) {
-	client, ok := j.owned[line]
+	owned, ok := j.owned[line]
 	if !ok {
 		return
 	}
+	client := owned.client
 	delete(j.owned, line)
 	if j.ownedByClient[client]--; j.ownedByClient[client] <= 0 {
 		delete(j.ownedByClient, client)

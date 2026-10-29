@@ -448,9 +448,13 @@ func writeUsageReceipt(tx *bolt.Tx, key []byte, digest string) error {
 // points at the raw key. Index keys are hex(client)|timestamp|rawKey and the
 // timestamp is recoverable from the raw key, so for each client prefix at most
 // one exact key can match; probing it costs O(clients * log n) instead of a
-// scan of every retained event. Anything that does not have the canonical
-// shape (unparseable stamp, index key without a client separator) falls back to
-// the exhaustive scan, so the answer is the same as scanning every value.
+// scan of every retained event.
+//
+// The probe answers like a scan of every value only while every index entry
+// has the canonical shape (clientIndexEntryCanonical). Normal writes produce
+// nothing else; WarmUsageProofScanCache persists a marker at startup when it
+// finds an entry that is not canonical, and lookupUsageIdentity then scans
+// instead of probing. A key that is itself not canonical also scans.
 func clientIndexReferencesKey(index *bolt.Bucket, key []byte) (bool, error) {
 	stamp, _, found := strings.Cut(string(key), "_")
 	at, err := time.Parse(time.RFC3339Nano, stamp)
@@ -521,9 +525,14 @@ func lookupUsageIdentity(tx *bolt.Tx, key, digest []byte) (receiptState, usage.E
 			return identityNew, usage.Event{}, nil, fmt.Errorf("%w: %w", ErrUsageIdentityUnverified, errRawOwnerOrphan)
 		}
 		if index := tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil {
-			referenced, err := clientIndexReferencesKey(index, key)
-			if err != nil {
-				return identityNew, usage.Event{}, nil, err
+			var referenced bool
+			if clientIndexNonCanonicalMarked(tx) {
+				referenced = clientIndexScanReferencesKey(index, key)
+			} else {
+				var err error
+				if referenced, err = clientIndexReferencesKey(index, key); err != nil {
+					return identityNew, usage.Event{}, nil, err
+				}
 			}
 			if referenced {
 				return identityNew, usage.Event{}, nil, fmt.Errorf("%w: retained index refers to absent identity", ErrUsageIdentityUnverified)

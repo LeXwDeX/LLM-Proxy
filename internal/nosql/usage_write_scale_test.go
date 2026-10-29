@@ -60,7 +60,11 @@ func TestRecordBatchTimeDoesNotScaleWithRetainedEvents(t *testing.T) {
 	}
 	measure := func() time.Duration {
 		var d []time.Duration
-		for round := 0; round < 21; round++ {
+		rounds := 21
+		if raceEnabled {
+			rounds = 9
+		}
+		for round := 0; round < rounds; round++ {
 			batch := make([]usage.Event, 64)
 			for k := range batch {
 				batch[k] = scaleEvent(next, base)
@@ -75,9 +79,15 @@ func TestRecordBatchTimeDoesNotScaleWithRetainedEvents(t *testing.T) {
 		sort.Slice(d, func(i, j int) bool { return d[i] < d[j] })
 		return d[len(d)/2]
 	}
-	fill(4000)
+	// The race detector multiplies every iteration several times over; the
+	// ratio is as telling on a smaller history.
+	smallN, largeN := 4000, 30000
+	if raceEnabled {
+		smallN, largeN = 1500, 9000
+	}
+	fill(smallN)
 	small := measure()
-	fill(30000)
+	fill(largeN)
 	large := measure()
 	t.Logf("batch(64) p50: 4k=%v 30k=%v ratio=%.2f", small, large, float64(large)/float64(small))
 	if large > 2*small {
@@ -91,7 +101,11 @@ func TestClientIndexReferencesKeyMatchesLegacyScan(t *testing.T) {
 	// clients exercise separator and ordering corner cases.
 	clients := []string{"a", "ab", "abc", "alice", "bob", "中文", " spaced ", "c01", "c0"}
 	base := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	for round := 0; round < 60; round++ {
+	rounds := 60
+	if raceEnabled {
+		rounds = 15
+	}
+	for round := 0; round < rounds; round++ {
 		db := testDB(t)
 		var keys [][]byte
 		err := db.Update(func(tx *bolt.Tx) error {
@@ -225,7 +239,11 @@ func TestPruneProofDecodesOnlyRelevantRange(t *testing.T) {
 		}
 		return proofRawParses.Load() - before
 	}
-	small, large := decodes(4000), decodes(16000)
+	smallN, largeN := 4000, 16000
+	if raceEnabled {
+		smallN, largeN = 400, 1600
+	}
+	small, large := decodes(smallN), decodes(largeN)
 	t.Logf("proof decodes while pruning: 4k retained=%d, 16k retained=%d", small, large)
 	if large > small+small/2+500 {
 		t.Fatalf("prune proof decodes scale with retained history: 4k=%d 16k=%d", small, large)
@@ -236,11 +254,15 @@ func TestPruneProofDecodesOnlyRelevantRange(t *testing.T) {
 func TestPruneYieldsWriteLockWithSameResult(t *testing.T) {
 	base := time.Now().UTC().Add(-90 * 24 * time.Hour).Truncate(time.Hour)
 	cutoff := base.Add(20 * time.Minute)
+	retainedForYield := 1000
+	if raceEnabled {
+		retainedForYield, cutoff = 200, base.Add(4*time.Minute)
+	}
 	run := func(budget time.Duration) (int, pruneSnapshot, int) {
 		oldBudget := pruneTxBudget
 		pruneTxBudget = budget
 		t.Cleanup(func() { pruneTxBudget = oldBudget })
-		db, store := seedScaleStore(t, 1000, base)
+		db, store := seedScaleStore(t, retainedForYield, base)
 		txs := 0
 		n, err := store.PruneEventsBefore(cutoff, 5000)
 		if err != nil {
@@ -282,8 +304,16 @@ type proofVerdict struct {
 func TestScopedProofScansMatchExhaustiveScans(t *testing.T) {
 	rng := rand.New(rand.NewSource(1120))
 	base := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Hour)
-	for round := 0; round < 12; round++ {
-		db, store := seedScaleStore(t, 300+rng.Intn(300), base)
+	rounds := 12
+	if raceEnabled {
+		rounds = 2
+	}
+	for round := 0; round < rounds; round++ {
+		seeded := 300 + rng.Intn(300)
+		if raceEnabled {
+			seeded = 140 + rng.Intn(80)
+		}
+		db, store := seedScaleStore(t, seeded, base)
 		// 清理最早的若干行，产生回执。
 		if rng.Intn(2) == 0 {
 			if _, err := store.PruneEventsBefore(base.Add(time.Duration(5+rng.Intn(20))*time.Minute), 1000); err != nil {
