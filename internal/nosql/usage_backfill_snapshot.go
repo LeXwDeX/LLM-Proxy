@@ -247,6 +247,7 @@ func preserveBackfillAccounting(tx *bolt.Tx, sourceName string) error {
 
 // Extract only independently valid dimensions from a complete JSON object.
 func backfillRawScope(raw []byte) (usage.Event, bool) {
+	proofRawParses.Add(1)
 	if !utf8.Valid(raw) || !json.Valid(raw) {
 		return usage.Event{}, true
 	}
