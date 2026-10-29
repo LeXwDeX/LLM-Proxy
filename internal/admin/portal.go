@@ -247,5 +247,13 @@ var adminLoginHTML = `<!doctype html>
       </div>
     </form>
   </main>
+  <script>
+    // Deep links: the server never sees the URL fragment, so carry it into next.
+    (function () {
+      var next = document.querySelector('input[name="next"]');
+      if (next && location.hash && next.value.indexOf("#") < 0 && (next.value === "" || next.value.indexOf("/admin") === 0))
+        next.value = (next.value || "/admin") + location.hash;
+    })();
+  </script>
 </body>
 </html>`

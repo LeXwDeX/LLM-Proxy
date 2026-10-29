@@ -144,7 +144,7 @@ func TestLoginPageRedesign(t *testing.T) {
 			t.Errorf("login page still contains removed legacy content %q", removed)
 		}
 	}
-	for _, forbidden := range []string{"<link", "<script", "@import", "url(", "http://", "https://"} {
+	for _, forbidden := range []string{"<link", "<script src", "@import", "url(", "http://", "https://"} {
 		if strings.Contains(body, forbidden) {
 			t.Errorf("login page must not load external resources, found %q", forbidden)
 		}
@@ -306,5 +306,13 @@ func TestLoginPostSessionLifecycle(t *testing.T) {
 		if location := redirect.Header().Get("Location"); location != "/admin" {
 			t.Errorf("login with next %q redirected to %q, want /admin", externalNext, location)
 		}
+	}
+}
+
+// A server-side login redirect cannot see the URL fragment, so the login page
+// must carry location.hash into the posted next value or deep links are lost.
+func TestLoginPageCarriesFragmentIntoNext(t *testing.T) {
+	if !strings.Contains(adminLoginHTML, "location.hash") || !strings.Contains(adminLoginHTML, `name="next"`) {
+		t.Fatal("login page must append location.hash to the hidden next field")
 	}
 }

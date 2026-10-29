@@ -102,10 +102,71 @@ async function runBrowser(pw, name, base) {
     await page.unroute("**/admin/ui/js/core/schema.js*");
     await Promise.all([page.waitForNavigation(), page.click("#adminBootRetry")]);
     await page.waitForFunction(() => window.AdminApp && window.AdminApp.state && window.AdminApp.state.ready === true, null, { timeout: 15000 });
+    await shellUx(page, name, base, pageErrors);
     console.log("PASS " + name);
   } finally {
     await browser.close();
   }
+}
+
+const loginViaFetch = (page) => page.evaluate((pw) => fetch("/login", { method: "POST", redirect: "manual",
+  body: new URLSearchParams({ username: "admin", password: pw, next: "/admin" }) }), ADMIN_PASSWORD);
+const bannerText = (page, id) => page.evaluate((i) => { const e = document.getElementById(i); return e ? e.textContent : null; }, id);
+
+// Issue #99: session expiry must not discard drafts, deep links survive login,
+// and a redeploy is surfaced. Expects a logged-in, booted /admin page.
+async function shellUx(page, name, base, pageErrors) {
+  const ready = () => page.waitForFunction(() => window.AdminApp && window.AdminApp.state && window.AdminApp.state.ready === true, null, { timeout: 15000 });
+  pageErrors.length = 0;
+
+  // 1. Open the target modal, lose the session, click save: banner shown, modal and draft kept.
+  await page.click('.sidebar-nav-item[data-page="targets"]');
+  await page.click("#newTargetBtn");
+  await page.waitForSelector("#targetModal.open");
+  await page.fill("#tgtName", "draft-keep");
+  await page.evaluate(() => fetch("/logout", { method: "POST", redirect: "manual" }));
+  await page.click("#saveTargetBtn");
+  await page.waitForFunction(() => !!document.getElementById("sessionExpiredBanner"), null, { timeout: 5000 }).catch(async () => {
+    // Client-side validation may stop before any request; force the save request path instead.
+    await page.evaluate(() => window.api("/admin/data/targets", { method: "POST", body: { name: "draft-keep" } }).catch(() => {}));
+    await page.waitForFunction(() => !!document.getElementById("sessionExpiredBanner"), null, { timeout: 5000 });
+  });
+  assert.match(await bannerText(page, "sessionExpiredBanner"), /会话已过期，请在新标签页登录后重试/, name + ": banner text");
+  const link = await page.evaluate(() => { const a = document.querySelector("#sessionExpiredBanner a"); return a && { href: a.getAttribute("href"), target: a.target, text: a.textContent }; });
+  assert.deepEqual(link, { href: "/login?next=/admin", target: "_blank", text: "打开登录页" });
+  assert.equal(new URL(page.url()).pathname, "/admin", name + ": page must not navigate away: " + page.url());
+  assert.equal(await page.evaluate(() => document.getElementById("targetModal").classList.contains("open")), true, name + ": modal stays open");
+  assert.equal(await page.inputValue("#tgtName"), "draft-keep", name + ": draft kept");
+
+  // 2. Re-login elsewhere (same cookie jar), the next successful call clears the banner.
+  await loginViaFetch(page);
+  await page.evaluate(() => window.api("/admin/api/me"));
+  assert.equal(await bannerText(page, "sessionExpiredBanner"), null, name + ": banner removed after recovery");
+  await page.evaluate(() => window.closeModal("targetModal"));
+
+  // 3. Redeploy detection: a changed /api/me version shows the reload banner.
+  await page.route("**/admin/api/me", async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    await route.fulfill({ response: res, json: Object.assign(body, { version: "redeployed-999" }) });
+  });
+  await page.evaluate(() => window.api("/admin/api/me"));
+  assert.match(await bannerText(page, "adminStaleBanner") || "", /后台已更新，请刷新页面/, name + ": stale banner");
+  await page.unroute("**/admin/api/me");
+
+  // 4. Deep link: logged-out navigation to /admin#clients returns there after login.
+  await page.evaluate(() => fetch("/logout", { method: "POST", redirect: "manual" }));
+  await page.goto(base + "/healthz"); // leave the document: a hash-only goto would not reload
+  await page.goto(base + "/admin#clients");
+  assert.match(page.url(), /\/login\?next=%2Fadmin/, name + ": redirected to login: " + page.url());
+  await page.fill("#username", "admin");
+  await page.fill("#password", ADMIN_PASSWORD);
+  await Promise.all([page.waitForURL(/\/admin#clients$/), page.click("button[type=submit]")]);
+  await ready();
+  assert.equal(await page.evaluate(() => window.AdminApp.state.currentPage), "clients", name + ": deep link opens clients");
+  await page.click('.sidebar-nav-item[data-page="targets"]');
+  assert.equal(await page.evaluate(() => location.hash), "#targets", name + ": hash follows navigation");
+  assert.deepEqual(pageErrors, [], name + ": page errors in shell UX flow");
 }
 
 async function main() {

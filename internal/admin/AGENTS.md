@@ -31,6 +31,14 @@
 4. **change-password 例外**：`POST /admin/api/change-password` 对包括 readonly 在内的所有已登录用户开放。
 5. **公开枚举与能力由领域代码声明**：UI 通过 `GET /admin/data/schema` 加载选项、徽章、协议能力和默认值；endpoint type 来源为 `internal/config/endpoint_type.go`。旧 `/endpoint-types` 接口保留兼容。定价、角色、额度作用域及目标状态引用各自领域定义，不在 JS 维护第二份表。
 
+## 外壳行为约定（会话 / 版本 / 深链）
+
+- **会话过期不丢草稿**：`core.api()` 收到 `401 {"error":"unauthorized"}` 时，若有打开的弹层/抽屉（`.modal-overlay.open`、`.quota-drawer-overlay.open`）或已用 `core.setFormDirty(key, true)` 标记的脏表单，不跳转登录页，而是显示持久横幅并以 `SessionExpiredError` 拒绝；调用方应保留表单。无未保存界面时仍跳转 `/login?next=<当前路径+hash>`，5 秒内未离开页面则复位重试锁。
+- **后台轮询不续期**：`api(url, {background: true})` 发送 `X-Admin-Background: 1`，`SessionManager.Middleware` 对该请求不滑动会话、不重发 Cookie。页面的纯轮询应逐步改用此选项。会话绝对上限当前无配置项，暂未实现。
+- **部署过期提示**：`/admin/api/me` 返回 `version`；core 记录首次版本，之后每 5 分钟及标签页恢复可见时后台复查，变化则显示“后台已更新，请刷新页面”。
+- **启动顺序**：schema 成功并 `initialize()` 后立即加载总览；`/api/me` 与 trace 探测并行，布局保持 `inert`、body 保持 `readonly-mode` 直到角色确认。`ready` 不等待 trace 探测。缺失模块（脚本加载失败）在启动横幅点名。
+- **深链**：`#<page>` 选择页面（`switchPage` 同步 hash）；登录页脚本把 URL hash 带入 `next`。`users`、`trace` 入口在角色/探测确认后才可作为深链目标。
+
 ## CRUD 接口约定
 
 - 资源路由模式：`GET/POST /admin/data/{resource}`，`PUT/DELETE /admin/data/{resource}/{name}`；新增资源沿用此模式。
