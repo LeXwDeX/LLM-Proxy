@@ -27,11 +27,21 @@ AdminApp.register("pools", function (app) {
     }
     return pool ? pool.display_name || pool.name || "" : "";
   }
+  // poolMemberCounter reads state.targets once and answers per-pool counts in
+  // O(1), so callers rendering many pools stay linear in pools + targets.
+  function poolMemberCounter() {
+    var counts = Object.create(null);
+    (state.targets || []).forEach(function (t) {
+      if (!t.pool) return;
+      var key = String(t.pool).toLowerCase();
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return function (poolName) {
+      return counts[String(poolName || "").toLowerCase()] || 0;
+    };
+  }
   function poolMemberCount(poolName) {
-    var key = String(poolName || "").toLowerCase();
-    return (state.targets || []).filter(function (t) {
-      return t.pool && String(t.pool).toLowerCase() === key;
-    }).length;
+    return poolMemberCounter()(poolName);
   }
   // poolMemberChips：池成员节点调度状态 chips（S5）。每 chip = 相位色点 + 名称，
   // hover 展示在途/利用率/亲和命中/熔断次数；运行时快照缺失时仅显示名称。
@@ -182,6 +192,9 @@ AdminApp.register("pools", function (app) {
       })
       .join("");
   }
+  // A repeated click must not send the same write twice while one is pending.
+  var rowActionsInFlight = Object.create(null);
+  var poolSaveInFlight = false;
   document
     .getElementById("poolsTableBody")
     .addEventListener("click", function (e) {
@@ -214,6 +227,8 @@ AdminApp.register("pools", function (app) {
       }
       if (t.dataset.resumePool) {
         var resumeName = t.dataset.resumePool;
+        if (rowActionsInFlight["resume:" + resumeName]) return;
+        rowActionsInFlight["resume:" + resumeName] = true;
         (async function () {
           try {
             await api(
@@ -224,6 +239,8 @@ AdminApp.register("pools", function (app) {
             await loadPools();
           } catch (e) {
             toast("恢复失败: " + e.message, "error");
+          } finally {
+            delete rowActionsInFlight["resume:" + resumeName];
           }
         })();
       }
@@ -279,6 +296,8 @@ AdminApp.register("pools", function (app) {
         toast("请填写池名称", "error");
         return;
       }
+      if (poolSaveInFlight) return;
+      poolSaveInFlight = true;
       try {
         if (state.editingPool) {
           await api("/admin/data/pools/" + encodeURIComponent(state.editingPool.name), {
@@ -306,6 +325,8 @@ AdminApp.register("pools", function (app) {
         await loadPools();
       } catch (e) {
         toast("保存失败: " + e.message, "error");
+      } finally {
+        poolSaveInFlight = false;
       }
     });
 
@@ -314,6 +335,7 @@ AdminApp.register("pools", function (app) {
   return {
     poolDisplayName: poolDisplayName,
     poolMemberCount: poolMemberCount,
+    poolMemberCounter: poolMemberCounter,
     poolMemberChips: poolMemberChips,
     loadPools: loadPools,
     renderPools: renderPools,

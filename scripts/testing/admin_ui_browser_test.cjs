@@ -33,7 +33,12 @@ const target = {
     },
     { upstream: "Second-MixedCase-Model", fallback: "glm-flash" },
   ],
+  // The server always sends the key snapshot the editor sends back on save.
+  has_api_key: false,
+  api_key: "",
   api_keys: [],
+  key_snapshot: "fixture-snapshot",
+  key_runtime_indices: [null],
   key_statuses: [],
 };
 const group = {
@@ -397,6 +402,8 @@ async function main() {
     assert.equal(await page.locator("#targetsPoolsTab").getAttribute("tabindex"), "-1");
     assert.equal(await page.locator("#targetsMainPanel").evaluate((el) => el.hidden), false);
     assert.equal(await page.locator("#targetsPoolsPanel").evaluate((el) => el.hidden), true);
+    // The tab switches above start refreshes; let them land before measuring.
+    await page.waitForLoadState("networkidle");
     const targetsLayout = await page.evaluate(() => {
       const cell = document.querySelector("#targetsTableBody .target-status-cell");
       const toggle = cell?.querySelector(".target-toggle");
