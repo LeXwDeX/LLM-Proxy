@@ -19,7 +19,7 @@ import (
 // ===== Target CRUD =====
 
 func targetNameParam(r *http.Request) (string, error) {
-	name, err := url.PathUnescape(chi.URLParam(r, "name"))
+	name, err := decodedPathParam(r, "name")
 	if err != nil {
 		return "", errors.New("invalid target name")
 	}

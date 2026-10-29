@@ -82,8 +82,10 @@ func TestListClientsMasksAccessKeyForNonAdmin(t *testing.T) {
 		}
 		return resp.Clients[0].AccessKey
 	}
-	if got := read(RoleReadonly); got != maskKey(key) {
-		t.Errorf("readonly access_key = %q, want %q", got, maskKey(key))
+	// Readonly sees at most the last four characters: a prefix plus suffix
+	// would reveal most of a short key.
+	if got := read(RoleReadonly); got != "****7890" {
+		t.Errorf("readonly access_key = %q, want %q", got, "****7890")
 	}
 	if got := read(RoleAdmin); got != key {
 		t.Errorf("admin access_key = %q, want plaintext", got)
@@ -157,5 +159,52 @@ func TestQuotaClientParamDecodesSlash(t *testing.T) {
 	enc := "/data/quota/" + url.PathEscape("q/1")
 	if rec := e.do(t, RoleAdmin, "op", http.MethodPut, enc, `{}`); rec.Code != http.StatusOK {
 		t.Fatalf("quota update: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// chi hands back an already-decoded segment unless the request carried an
+// escape it must preserve (RawPath). Decoding again turned the literal name
+// "a%41" into "aA" and updated the wrong record.
+func TestLiteralPercentNameIsNotDecodedTwice(t *testing.T) {
+	e := newIssue94Env(t)
+	for _, body := range []string{`{"name":"a%41","coefficient_daily":2}`, `{"name":"aA","coefficient_daily":2}`} {
+		if rec := e.do(t, RoleAdmin, "operator", http.MethodPost, "/data/job-levels", body); rec.Code != http.StatusCreated {
+			t.Fatalf("create %s: %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	enc := "/data/job-levels/" + url.PathEscape("a%41")
+	if rec := e.do(t, RoleAdmin, "operator", http.MethodPut, enc, `{"name":"a%41","coefficient_daily":9}`); rec.Code != http.StatusOK {
+		t.Fatalf("update %s: %d %s", enc, rec.Code, rec.Body.String())
+	}
+	levels, err := e.h.jobLevelStore.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, l := range levels {
+		if l.CoefficientDaily != nil {
+			got[l.Name] = *l.CoefficientDaily
+		}
+	}
+	if got["a%41"] != 9 || got["aA"] != 2 {
+		t.Fatalf("coefficients after update = %v; want a%%41=9 and aA untouched at 2", got)
+	}
+}
+
+func TestReadonlyClientKeyMaskHidesShortKeys(t *testing.T) {
+	e := newIssue94Env(t)
+	const key = "sk-short-k1"
+	if err := e.h.clientStore.Create(config.Client{Name: "bob", AccessKey: key}); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.do(t, RoleReadonly, "viewer", http.MethodGet, "/data/clients", "")
+	var resp struct {
+		Clients []config.Client `json:"clients"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || len(resp.Clients) != 1 {
+		t.Fatalf("decode: %v %s", err, rec.Body.String())
+	}
+	if got := resp.Clients[0].AccessKey; got != "****" {
+		t.Fatalf("readonly mask of an 11-character key = %q, want fully hidden", got)
 	}
 }

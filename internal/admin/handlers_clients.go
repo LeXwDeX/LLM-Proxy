@@ -19,7 +19,7 @@ func (h *Handler) handleListClients(w http.ResponseWriter, r *http.Request) {
 	// requests) get the same masked form targets use.
 	if session, ok := SessionFromContext(r.Context()); !ok || session == nil || session.Role != RoleAdmin {
 		for i := range clients {
-			clients[i].AccessKey = maskKey(clients[i].AccessKey)
+			clients[i].AccessKey = maskClientKeyForViewer(clients[i].AccessKey)
 		}
 	}
 
@@ -170,4 +170,14 @@ func (h *Handler) validateClientPoolQuotas(client *config.Client) error {
 		}
 	}
 	return nil
+}
+
+// maskClientKeyForViewer hides a client key from non-admin roles. Client keys
+// have no minimum length, so a prefix-plus-suffix mask could reveal most of a
+// short key; viewers see at most the last four characters of a long key.
+func maskClientKeyForViewer(key string) string {
+	if len(key) < 16 {
+		return "****"
+	}
+	return "****" + key[len(key)-4:]
 }
