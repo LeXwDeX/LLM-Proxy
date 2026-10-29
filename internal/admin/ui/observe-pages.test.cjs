@@ -102,8 +102,9 @@ test("braille spinner never leaks intervals and detail labels count real bytes",
   h.context.clearInterval = id => { live.delete(id); };
   const app = await h.run();
   const trace = app.modules.audit_trace;
+  const baseline = live.size; // intervals owned by the shell, not the spinner
   trace.startBrailleSpinner("a"); trace.startBrailleSpinner("b"); trace.stopBrailleSpinner();
-  assert.equal(live.size, 0, "starting twice must not orphan the first interval");
+  assert.equal(live.size, baseline, "starting twice must not orphan the first interval");
 
   const h2 = createHarness({fetch: async (url, options, fallback) => url.startsWith("/admin/data/trace/") ? json({trace_id: "Z", timestamp: "2026-10-29T01:00:00Z", request_body: "请求", response_body: "ok"}) : fallback(url, options)});
   const app2 = await h2.run();
