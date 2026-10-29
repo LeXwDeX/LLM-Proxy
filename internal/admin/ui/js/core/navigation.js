@@ -64,8 +64,24 @@ AdminApp.register("navigation", function (app) {
       if (firstNav) firstNav.focus();
     }
   }
-  function switchPage(page) {
+  // Keep the address bar in sync so reload/bookmark/post-login `next` return to
+  // this page. mode: "push" (user clicks, so Back works), "replace" (boot and
+  // corrections: no history entry) or "none". Neither fires hashchange.
+  function syncHash(page, mode) {
+    if (mode === "none") return;
+    try {
+      if ((location.hash || "") === "#" + page) return;
+      if (typeof history === "undefined" || !history) return;
+      var url = location.pathname + location.search + "#" + page;
+      if (mode === "push" && history.pushState) history.pushState(null, "", url);
+      else if (history.replaceState) history.replaceState(null, "", url);
+    } catch (e) {
+      /* sandboxed or file contexts may refuse; the hash is only a convenience */
+    }
+  }
+  function switchPage(page, mode) {
     state.currentPage = page;
+    syncHash(page, mode || "replace");
     document.querySelectorAll(".sidebar-nav-item").forEach(function (n) {
       var active = n.dataset.page === page;
       n.classList.toggle("active", active);
@@ -79,17 +95,69 @@ AdminApp.register("navigation", function (app) {
     /* Close sidebar on mobile */
     setSidebarOpen(false);
     /* Manage overview auto-refresh */
+    /* startOverviewAutoRefresh already loads the overview once. */
     if (page === "overview") {
       startOverviewAutoRefresh();
-    } else {
-      stopOverviewAutoRefresh();
+      return;
     }
+    stopOverviewAutoRefresh();
     /* Load data */
     loadPageData(page);
   }
+  function pageFromHash() {
+    var hash = typeof location !== "undefined" && location ? location.hash || "" : "";
+    var page = hash.replace(/^#\/?/, "");
+    return Object.prototype.hasOwnProperty.call(pageTitles, page) ? page : "";
+  }
+  function navItem(page) {
+    return Array.prototype.find.call(
+      document.querySelectorAll(".sidebar-nav-item"),
+      function (item) {
+        return item.dataset.page === page;
+      },
+    );
+  }
+  // Role-gated ("users") and probe-gated ("trace") entries stay hidden until
+  // known; a hidden entry is not a valid target.
+  function pageAllowed(page) {
+    var item = navItem(page);
+    return !!item && !(item.style && item.style.display === "none");
+  }
+  // Opens the page named by location.hash. Only call once the role is known
+  // (pages render readonly state at load time). Never overrides a user's own
+  // navigation. final=true also corrects a hash that names a page this user
+  // cannot reach. Returns true when it switched pages.
+  var userNavigated = false;
+  function resolveDeepLink(final) {
+    var page = pageFromHash();
+    if (!page || userNavigated || page === state.currentPage) return false;
+    if (!pageAllowed(page)) {
+      if (final) syncHash(state.currentPage, "replace");
+      return false;
+    }
+    switchPage(page, "replace");
+    return true;
+  }
+  // Back/Forward and hand-edited hashes. Unknown or unreachable pages are
+  // reverted to the page actually shown.
+  if (typeof window.addEventListener === "function")
+    window.addEventListener("hashchange", function () {
+      if (!state.ready) return;
+      var raw = (location.hash || "").replace(/^#\/?/, "");
+      var page = raw === "" ? "overview" : pageFromHash();
+      if (!page || !pageAllowed(page)) {
+        syncHash(state.currentPage, "replace");
+        return;
+      }
+      if (page !== state.currentPage) {
+        userNavigated = true;
+        switchPage(page, "none");
+      }
+    });
   document.querySelectorAll(".sidebar-nav-item").forEach(function (item) {
     function activate() {
-      switchPage(item.dataset.page);
+      userNavigated = true;
+      switchPage(item.dataset.page, "push");
     }
     item.addEventListener("click", activate);
     item.addEventListener("keydown", function (event) {
@@ -167,6 +235,7 @@ AdminApp.register("navigation", function (app) {
 
   return {
     switchPage: switchPage,
+    resolveDeepLink: resolveDeepLink,
     loadPageData: loadPageData,
   };
 });

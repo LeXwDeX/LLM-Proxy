@@ -12,25 +12,14 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// uiTargetsScripts is the split targets page: one golden tag expands to these
-// tags in dependency order (kept in sync with the index.html manifest).
-const uiTargetsScripts = "pages/targets/targets.js\"></script>\n" +
-	"  <script src=\"/admin/ui/js/pages/targets/health.js\"></script>\n" +
-	"  <script src=\"/admin/ui/js/pages/targets/detail.js\"></script>\n" +
-	"  <script src=\"/admin/ui/js/pages/targets/key-list.js\"></script>\n" +
-	"  <script src=\"/admin/ui/js/pages/targets/model-mappings.js\"></script>\n" +
-	"  <script src=\"/admin/ui/js/pages/targets/edit-modal.js\"></script>\n" +
-	"  <script src=\"/admin/ui/js/pages/targets/save.js\"></script>\n" +
-	"  <script src=\"/admin/ui/js/pages/targets/list"
-
-// uiScriptPathMap maps the pre-split flat script URLs (as recorded in
-// testdata/index.golden.html) to the current layout.
-var uiScriptPathMap = map[string]string{
-	"core": "core/core", "schema": "core/schema", "navigation": "core/navigation", "bootstrap": "core/bootstrap",
-	"overview": "pages/overview/overview", "targets": uiTargetsScripts, "pools": "pages/pools/pools",
-	"clients": "pages/clients/clients", "pricing": "pages/pricing/pricing", "usage": "pages/usage/usage",
-	"audit_trace": "pages/audit_trace/audit_trace", "users": "pages/users/users",
-	"catalog": "pages/catalog/catalog", "quota": "pages/quota/quota",
+var uiScriptPathMap = map[string][]string{
+	"core": {"core/core"}, "schema": {"core/schema"}, "navigation": {"core/navigation"}, "bootstrap": {"core/bootstrap"},
+	"overview": {"pages/overview/overview"},
+	"targets": {"pages/targets/targets", "pages/targets/health", "pages/targets/detail", "pages/targets/key-list",
+		"pages/targets/model-mappings", "pages/targets/edit-modal", "pages/targets/save", "pages/targets/list"},
+	"pools": {"pages/pools/pools"}, "clients": {"pages/clients/clients"}, "pricing": {"pages/pricing/pricing"}, "usage": {"pages/usage/usage"},
+	"audit_trace": {"pages/audit_trace/audit_trace"}, "users": {"pages/users/users"},
+	"catalog": {"pages/catalog/catalog"}, "quota": {"pages/quota/quota"},
 }
 
 // TestAssembledHTMLMatchesGolden pins the split layout to the original single
@@ -48,7 +37,8 @@ func TestAssembledHTMLMatchesGolden(t *testing.T) {
 		if !ok {
 			t.Fatalf("golden references unknown script %s", name)
 		}
-		return "/admin/ui/js/" + to + `.js"`
+		// One golden tag expands to one tag per new path, in order.
+		return "/admin/ui/js/" + strings.Join(to, `.js"></script>`+"\n  "+`<script src="/admin/ui/js/`) + `.js"`
 	})
 	if adminUIHTML != golden {
 		t.Fatalf("assembled HTML differs from golden (len %d vs %d)", len(adminUIHTML), len(golden))
