@@ -23,20 +23,7 @@ AdminApp.register("quotaModel", function (app) {
         .join(", ") || "未配置模型"
     );
   }
-  // Runs fn once at a time per key; the button stays disabled while it is in flight and is
-  // re-enabled afterwards (never restored from a value captured at start).
-  var inflight = Object.create(null);
-  async function runGuarded(key, button, fn) {
-    if (inflight[key]) return;
-    inflight[key] = true;
-    if (button) button.disabled = true;
-    try {
-      return await fn();
-    } finally {
-      inflight[key] = false;
-      if (button) button.disabled = false;
-    }
-  }
+  var runGuarded = app.bind("core", "runGuarded");
   // Reads a numeric <input>: null when blank, NaN when the browser holds text it cannot parse
   // (type=number reports value "" with validity.badInput), otherwise the number.
   function quotaInputNumber(input) {
@@ -209,7 +196,6 @@ AdminApp.register("quotaModel", function (app) {
     jobLevelCoefText: jobLevelCoefText,
     quotaNumber: quotaNumber,
     quotaResetText: quotaResetText,
-    runGuarded: runGuarded,
     quotaInputNumber: quotaInputNumber,
     quotaDimensions: quotaDimensions,
     shared: shared,

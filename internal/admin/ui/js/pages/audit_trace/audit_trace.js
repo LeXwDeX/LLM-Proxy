@@ -330,6 +330,9 @@ AdminApp.register("audit_trace", function (app) {
     });
     function options(select, all, seen) {
       var current = select.value;
+      // Keep the selection even when the reloaded first page lacks it, so the
+      // filter stays applied instead of silently reverting to "all".
+      if (current) seen[current] = true;
       select.innerHTML =
         "<option value=''>" + all + "</option>" +
         Object.keys(seen)

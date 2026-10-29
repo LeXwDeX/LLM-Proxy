@@ -13,7 +13,7 @@ AdminApp.register("quotaLevels", function (app) {
   var jobLevelByName = app.bind("quotaModel", "jobLevelByName");
   var jobLevelCoefText = app.bind("quotaModel", "jobLevelCoefText");
   var loadQuotaManagement = app.bind("quotaData", "loadQuotaManagement");
-  var runGuarded = app.bind("quotaModel", "runGuarded");
+  var runGuarded = app.bind("core", "runGuarded");
   var quotaInputNumber = app.bind("quotaModel", "quotaInputNumber");
   var loadDictOptions = app.bind("quotaData", "loadDictOptions");
   var quotaDimensions = app.modules.quotaModel.quotaDimensions;

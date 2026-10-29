@@ -258,6 +258,6 @@ test("a stored job level in another case is selected but submitted unchanged unt
 test("runGuarded re-enables from the current state, not the value captured at start", async () => {
   const {app} = await fixture();
   const button = {disabled: true};
-  await app.modules.quotaModel.runGuarded("k", button, async () => {});
+  await app.modules.core.runGuarded("k", button, async () => {});
   assert.equal(button.disabled, false);
 });

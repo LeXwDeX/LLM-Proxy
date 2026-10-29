@@ -9,7 +9,7 @@ AdminApp.register("quotaSync", function (app) {
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var jobLevelEntryName = app.bind("quotaModel", "jobLevelEntryName");
   var loadQuotaManagement = app.bind("quotaData", "loadQuotaManagement");
-  var runGuarded = app.bind("quotaModel", "runGuarded");
+  var runGuarded = app.bind("core", "runGuarded");
   function renderQuotaSyncClients() {
     var source = document.getElementById("quotaSyncSource"),
       current = source.value;

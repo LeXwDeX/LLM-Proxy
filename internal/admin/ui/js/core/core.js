@@ -558,7 +558,22 @@ AdminApp.register("core", function (app) {
   window.fmtMoney = fmtMoney;
   window.fmtTime = fmtTime;
 
+  // Runs fn once at a time per key; the button stays disabled while it is in flight and is
+  // re-enabled afterwards (never restored from a value captured at start).
+  var inflight = Object.create(null);
+  async function runGuarded(key, button, fn) {
+    if (inflight[key]) return;
+    inflight[key] = true;
+    if (button) button.disabled = true;
+    try {
+      return await fn();
+    } finally {
+      inflight[key] = false;
+      if (button) button.disabled = false;
+    }
+  }
   return {
+    runGuarded: runGuarded,
     esc: esc,
     fmtNum: fmtNum,
     fmtMoney: fmtMoney,

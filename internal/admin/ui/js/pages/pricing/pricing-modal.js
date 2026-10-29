@@ -24,7 +24,7 @@ AdminApp.register("pricingModal", function (app) {
   var pricingModelLabel = app.bind("pricingShared", "pricingModelLabel");
   var clonePricingValue = app.bind("pricingShared", "clonePricingValue");
   var pricingInputNumber = app.bind("pricingShared", "pricingInputNumber");
-  var runGuarded = app.bind("quotaModel", "runGuarded");
+  var runGuarded = app.bind("core", "runGuarded");
   var pricingPeriodTimeError = app.bind("pricingPeriods", "pricingPeriodTimeError");
   var pricingPeriodTimeValue = app.bind("pricingPeriods", "pricingPeriodTimeValue");
   var renderPricingContext = app.bind("pricingRates", "renderPricingContext");

@@ -1,8 +1,8 @@
 "use strict";
 // Usage time range helpers: preset windows and aggregate bucket granularity.
 AdminApp.register("usageRange", function (app) {
-  var rangeWindow = app.bind("overviewRange", "rangeWindow");
-  // Presets share the overview's local-day windows (overviewRange.rangeWindow):
+  var rangeWindow = app.bind("overview", "rangeWindow");
+  // Presets share the overview's local-day windows (overview.rangeWindow):
   // 7d is today plus the six previous local days, 30d today plus 29, and closed
   // ranges end 1ms before the next boundary so the aggregate API's inclusive end
   // hour never picks up the next period. Only "1h" is a rolling window.

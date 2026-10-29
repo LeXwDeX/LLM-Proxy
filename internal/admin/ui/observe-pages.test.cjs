@@ -166,3 +166,20 @@ test("catalog escapes capability labels, surfaces load errors and has an honest 
   assert.doesNotMatch(h.document.getElementById("catalogPageInfo").textContent, /1~0/);
   assert.match(h.document.getElementById("catalogPageInfo").textContent, /共 0 个模型/);
 });
+
+test("a selected trace filter seen only on a later page survives a refresh", async () => {
+  const t = await traceHarness(url => {
+    const offset = Number((/offset=(\d+)/.exec(url) || [0, 0])[1]);
+    return offset === 0
+      ? {records: [rec("b1", "bob")], count: 1, limit: 1, offset, stats: {}, enabled: true}
+      : {records: [rec("a1", "alice")], count: 1, limit: 1, offset, stats: {}, enabled: true};
+  });
+  await t.trace.checkTraceEnabled().catch(() => {});
+  await t.trace.loadTrace();
+  await t.h.document.getElementById("traceLoadMore").listeners.click[0]();
+  t.select("traceClientFilter", "alice");
+  await t.trace.loadTrace();
+  const filter = t.h.document.getElementById("traceClientFilter");
+  assert.match(filter.innerHTML, /<option value='alice' selected>/, "the selected option is kept so the select still reports it");
+  assert.equal(filter.value, "alice");
+});
