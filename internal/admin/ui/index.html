@@ -2868,6 +2868,47 @@
   <!-- ===== Toast Container ===== -->
   <div class="toast-container" id="toastContainer"></div>
 
+  <script data-boot-watchdog>
+  (function () {
+    // Boot watchdog: runs before the module scripts and has no dependencies. If a
+    // module fails to load/parse (e.g. a stale cached redirect served as JS) or
+    // bootstrap never starts, replace the permanent "加载中…" with a reload prompt.
+    var failed = false;
+    var TEXT = "页面资源加载失败";
+    function render() {
+      var status = document.getElementById("adminBootStatus");
+      var message = document.getElementById("adminBootMessage");
+      var retry = document.getElementById("adminBootRetry");
+      if (message && message.textContent !== TEXT) message.textContent = TEXT;
+      if (retry && retry.hidden) retry.hidden = false;
+      if (status && status.hidden) status.hidden = false;
+    }
+    function fail() {
+      if (failed) return;
+      failed = true;
+      render();
+      // bootstrap.js may still run (e.g. one module missing) and rewrite the
+      // status; keep the resource-failure message authoritative.
+      var status = document.getElementById("adminBootStatus");
+      if (status && window.MutationObserver) {
+        new MutationObserver(render).observe(status, { childList: true, characterData: true, subtree: true, attributes: true });
+      }
+    }
+    window.addEventListener("error", function (ev) {
+      var t = ev.target;
+      if (t && t.tagName === "SCRIPT" && t !== window) return fail();
+      var name = ev.filename || "";
+      if (name.indexOf("/admin/ui/js/") >= 0 && ev.error && ev.error.name === "SyntaxError") fail();
+    }, true);
+    document.addEventListener("DOMContentLoaded", function () {
+      setTimeout(function () {
+        if (!(window.AdminApp && window.AdminApp.boot)) fail();
+      }, 15000);
+    });
+    var retry = document.getElementById("adminBootRetry");
+    if (retry) retry.addEventListener("click", function () { if (failed) location.reload(); });
+  })();
+  </script>
   <script src="/admin/ui/js/core.js"></script>
   <script src="/admin/ui/js/schema.js"></script>
   <script src="/admin/ui/js/navigation.js"></script>

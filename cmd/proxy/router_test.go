@@ -49,12 +49,21 @@ func TestRouterAuthenticationBoundaries(t *testing.T) {
 	for _, path := range []string{"/admin/data/schema", "/admin/ui/js/core.js"} {
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-		want := http.StatusFound
-		if path == "/admin/data/schema" {
-			want = http.StatusUnauthorized
-		}
+		want := http.StatusUnauthorized // non-navigation requests never get a cacheable redirect
 		if rec.Code != want || adminCalls != 0 {
 			t.Errorf("unauthenticated %s reached admin: status=%d calls=%d", path, rec.Code, adminCalls)
+		}
+	}
+	nav := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	nav.Header.Set("Sec-Fetch-Mode", "navigate")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, nav)
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/login?next=%2Fadmin" || adminCalls != 0 {
+		t.Errorf("top-level navigation: status=%d location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	for _, h := range []string{"Cache-Control", "X-Content-Type-Options", "X-Frame-Options"} {
+		if rec.Header().Get(h) == "" {
+			t.Errorf("unauthenticated /admin response missing %s", h)
 		}
 	}
 	_, cookie, err := sessions.CreateSession("fixture-auditor", admin.RoleReadonly)
@@ -63,8 +72,11 @@ func TestRouterAuthenticationBoundaries(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/admin/data/schema", nil)
 	req.AddCookie(cookie)
-	rec := httptest.NewRecorder()
+	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
+	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("X-Frame-Options") != "DENY" {
+		t.Errorf("authenticated admin response lacks hardening headers: %v", rec.Header())
+	}
 	if rec.Code != http.StatusOK || adminCalls != 1 {
 		t.Errorf("authenticated admin read failed: status=%d calls=%d", rec.Code, adminCalls)
 	}

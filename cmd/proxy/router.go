@@ -39,6 +39,7 @@ func newRouter(deps routeDependencies) chi.Router {
 
 	// Every /admin route passes the session middleware.
 	adminRouter := chi.NewRouter()
+	adminRouter.Use(admin.AdminSecurityHeaders)
 	adminRouter.Use(deps.Sessions.Middleware)
 	adminRouter.Mount("/", deps.Admin)
 	router.Mount("/admin", adminRouter)

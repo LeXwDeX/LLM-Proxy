@@ -12,7 +12,7 @@ const html = fs.readFileSync(
 );
 const scripts = [
   ...html.matchAll(
-    /<script\s+src="\/admin\/ui\/js\/([^"/]+)"[^>]*><\/script>/g,
+    /<script\s+src="\/admin\/ui\/js\/([^"/?]+)(?:\?[^"]*)?"[^>]*><\/script>/g,
   ),
 ].map((match) => ({
   name: match[1],
