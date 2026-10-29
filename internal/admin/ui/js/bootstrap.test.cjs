@@ -211,6 +211,13 @@ test("another missing module is reported by name", async () => {
   assert.match(ids.get("adminBootMessage").textContent, /quota/);
 });
 
+test("a split page module nobody binds is still required at boot", async () => {
+  const {app, clock, ids} = boot({omitScripts: ["pages/targets/save.js"]});
+  await clock.advance(100);
+  assert.equal(app.state.ready, false);
+  assert.match(ids.get("adminBootMessage").textContent, /targetsSave/);
+});
+
 test("a #page deep link opens that page after boot", async () => {
   const {app, clock} = boot({hash: "#clients"});
   await clock.advance(100);

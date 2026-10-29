@@ -12,7 +12,8 @@ const { assembleAdminHTML } = require("../../../scripts/testing/assemble_admin_h
 // A page split into several files lists them in load order.
 const scriptMap = {
   core: ["core/core"], schema: ["core/schema"], navigation: ["core/navigation"], bootstrap: ["core/bootstrap"],
-  overview: ["pages/overview/overview"], targets: ["pages/targets/targets"], pools: ["pages/pools/pools"],
+  overview: ["pages/overview/overview"], pools: ["pages/pools/pools"],
+  targets: ["targets", "health", "detail", "key-list", "model-mappings", "edit-modal", "save", "list"].map((n) => `pages/targets/${n}`),
   clients: ["pages/clients/clients"], usage: ["pages/usage/usage"],
   pricing: ["pages/pricing/pricing-shared", "pages/pricing/pricing-rates", "pages/pricing/pricing-periods",
     "pages/pricing/pricing-list", "pages/pricing/pricing-modal", "pages/pricing/pricing"],

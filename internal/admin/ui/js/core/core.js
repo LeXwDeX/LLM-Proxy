@@ -23,6 +23,14 @@ window.AdminApp = {
       return exports[name].apply(exports, arguments);
     };
   },
+  // Declares modules this one needs without binding an export (e.g. a part
+  // that only wires event handlers), so missingModules still reports them.
+  requires: function (names) {
+    var app = this;
+    names.forEach(function (name) {
+      app.referenced[name] = true;
+    });
+  },
   initializeModule: function (name) {
     if (this.modules[name]) return this.modules[name];
     var entry = this.factories.find(function (candidate) {

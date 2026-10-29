@@ -17,7 +17,9 @@ import (
 // A page split into several files lists them in load order.
 var uiScriptPathMap = map[string][]string{
 	"core": {"core/core"}, "schema": {"core/schema"}, "navigation": {"core/navigation"}, "bootstrap": {"core/bootstrap"},
-	"overview": {"pages/overview/overview"}, "targets": {"pages/targets/targets"}, "pools": {"pages/pools/pools"},
+	"overview": {"pages/overview/overview"}, "pools": {"pages/pools/pools"},
+	"targets": {"pages/targets/targets", "pages/targets/health", "pages/targets/detail", "pages/targets/key-list",
+		"pages/targets/model-mappings", "pages/targets/edit-modal", "pages/targets/save", "pages/targets/list"},
 	"clients": {"pages/clients/clients"}, "usage": {"pages/usage/usage"},
 	"pricing": {"pages/pricing/pricing-shared", "pages/pricing/pricing-rates", "pages/pricing/pricing-periods",
 		"pages/pricing/pricing-list", "pages/pricing/pricing-modal", "pages/pricing/pricing"},

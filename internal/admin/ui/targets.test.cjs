@@ -235,21 +235,13 @@ test("multi-key health checks missing non-empty slots without rejecting empty or
   assert.equal(health(target({ api_keys: ["aaaa...1111"], key_runtime_indices: [0, 0], key_statuses: [status(0, "aaaa...1111")] })).key, "healthy", "duplicate keys share one runtime entry");
 });
 
-test("an older pending open cannot replace a newer editor or its draft", async () => {
-  let releases = [];
-  const f = await setup(target(), (url, opts, fallback) => url === "/admin/data/catalog"
-    ? new Promise(resolve => releases.push(resolve)) : fallback(url, opts));
-  f.app.state.catalogAllCache = null;
-  const older = f.app.modules.targets.openTargetModal(target({ name: "A" }));
-  const newer = f.app.modules.targets.openTargetModal(target({ name: "B" }));
-  assert.equal(releases.length, 2);
-  releases[1](response({ models: [] }));
-  await newer;
-  f.harness.ids.get("tgtEndpoint").value = "https://b-draft.invalid";
-  releases[0](response({ models: [] }));
-  await older;
+test("opening is synchronous, so the newest open owns the editor and its draft", async () => {
+  const f = await setup(target());
+  f.app.modules.targets.openTargetModal(target({ name: "A", endpoint: "https://a.invalid" }));
+  f.app.modules.targets.openTargetModal(target({ name: "B", endpoint: "https://b.invalid" }));
   assert.equal(f.app.state.editingTarget.name, "B");
-  assert.equal(f.harness.ids.get("tgtEndpoint").value, "https://b-draft.invalid");
+  assert.equal(f.harness.ids.get("tgtName").value, "B");
+  assert.equal(f.harness.ids.get("tgtEndpoint").value, "https://b.invalid");
 });
 
 test("selecting a model suggestion during save keeps the new mapping as an unsaved draft", async () => {
