@@ -7,7 +7,7 @@ import (
 )
 
 func TestUIModulesHaveExplicitStartupOrder(t *testing.T) {
-	names := []string{"core", "schema", "navigation", "overview", "targets", "pools", "clients", "pricing", "usage", "audit_trace", "users", "catalog", "quota", "bootstrap"}
+	names := []string{"core/core", "core/schema", "core/navigation", "pages/overview/overview", "pages/targets/targets", "pages/pools/pools", "pages/clients/clients", "pages/pricing/pricing", "pages/usage/usage", "pages/audit_trace/audit_trace", "pages/users/users", "pages/catalog/catalog", "pages/quota/quota", "core/bootstrap"}
 	last := -1
 	for _, name := range names {
 		path := "/admin/ui/js/" + name + ".js"
@@ -49,7 +49,7 @@ func TestUIClientPickerHasOneDefinition(t *testing.T) {
 func TestUIModuleManifestMatchesEmbeddedAssets(t *testing.T) {
 	sources := adminUIJSSources()
 	seen := map[string]bool{}
-	re := regexp.MustCompile(`<script\s+src="/admin/(ui/js/[^"/?]+)(?:\?[^"]*)?"[^>]*></script>`)
+	re := regexp.MustCompile(`<script\s+src="/admin/(ui/js/(?:core|pages/[a-z_]+)/[a-z_]+\.js)(?:\?[^"]*)?"[^>]*></script>`)
 	for _, match := range re.FindAllStringSubmatch(adminUIHTML, -1) {
 		name := match[1]
 		if seen[name] {

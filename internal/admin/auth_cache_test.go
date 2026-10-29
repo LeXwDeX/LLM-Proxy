@@ -46,10 +46,10 @@ func TestUnauthorizedOnlyRedirectsTopLevelNavigations(t *testing.T) {
 	}{
 		{"fetch-metadata navigate", "GET", "/admin?tab=keys", map[string]string{"Sec-Fetch-Mode": "navigate"}, 302, "/login?next=" + url.QueryEscape("/admin?tab=keys")},
 		{"fetch-metadata document", "GET", "/admin/ui", map[string]string{"Sec-Fetch-Dest": "document"}, 302, "/login?next=" + url.QueryEscape("/admin/ui")},
-		{"script subresource", "GET", "/admin/ui/js/core.js", map[string]string{"Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "script"}, 401, ""},
-		{"script with html accept and fetch metadata", "GET", "/admin/ui/js/core.js", map[string]string{"Sec-Fetch-Dest": "script", "Accept": "text/html"}, 401, ""},
+		{"script subresource", "GET", "/admin/ui/js/core/core.js", map[string]string{"Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "script"}, 401, ""},
+		{"script with html accept and fetch metadata", "GET", "/admin/ui/js/core/core.js", map[string]string{"Sec-Fetch-Dest": "script", "Accept": "text/html"}, 401, ""},
 		{"fallback html GET", "GET", "/admin", map[string]string{"Accept": "text/html,application/xhtml+xml"}, 302, "/login?next=%2Fadmin"},
-		{"fallback html under ui js", "GET", "/admin/ui/js/core.js", map[string]string{"Accept": "text/html"}, 401, ""},
+		{"fallback html under ui js", "GET", "/admin/ui/js/core/core.js", map[string]string{"Accept": "text/html"}, 401, ""},
 		{"fallback wildcard accept", "GET", "/admin", map[string]string{"Accept": "*/*"}, 401, ""},
 		{"fallback POST html", "POST", "/admin/data/targets", map[string]string{"Accept": "text/html"}, 401, ""},
 		{"json api", "GET", "/admin/api/me", map[string]string{"Sec-Fetch-Mode": "navigate"}, 401, ""},
@@ -183,9 +183,9 @@ func TestHandleUIVersionsScriptURLsWithFreshNonce(t *testing.T) {
 func TestHandleUIJSIgnoresQuery(t *testing.T) {
 	h := &Handler{}
 	r := chi.NewRouter()
-	r.Get("/ui/js/{file}", h.handleUIJS)
+	r.Get("/ui/js/*", h.handleUIJS)
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest("GET", "/ui/js/core.js?v=1-abc", nil))
+	r.ServeHTTP(rec, httptest.NewRequest("GET", "/ui/js/core/core.js?v=1-abc", nil))
 	if rec.Code != 200 || !strings.Contains(rec.Header().Get("Content-Type"), "javascript") {
 		t.Fatalf("status %d type %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
@@ -196,7 +196,7 @@ func TestHandleUIJSIgnoresQuery(t *testing.T) {
 
 func TestUIHTMLHasBootWatchdogBeforeScripts(t *testing.T) {
 	wd := strings.Index(adminUIHTML, "页面资源加载失败")
-	first := strings.Index(adminUIHTML, `<script src="/admin/ui/js/core.js"`)
+	first := strings.Index(adminUIHTML, `<script src="/admin/ui/js/core/core.js"`)
 	if wd < 0 || first < 0 || wd > first {
 		t.Fatalf("boot watchdog must be inline before the module scripts (wd=%d first=%d)", wd, first)
 	}

@@ -47,27 +47,19 @@ func TestUILongAdminQueriesDeclareTimeout(t *testing.T) {
 		`"/keys/wakeup"`:                     "timeoutMs: 0",
 	}
 	call := regexp.MustCompile(`(?s)api\((.*?)\)\s*(?:;|\.then|,\s*$|\n\s*\.then)`)
-	entries, err := adminUIJSFS.ReadDir("ui/js")
-	if err != nil {
-		t.Fatal(err)
-	}
 	seen := map[string]int{}
-	for _, entry := range entries {
-		if entry.Name() == "overview.js" {
+	for name, source := range adminUIJSSources() {
+		if strings.HasSuffix(name, "/overview.js") {
 			continue
 		}
-		data, err := adminUIJSFS.ReadFile("ui/js/" + entry.Name())
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, match := range call.FindAllStringSubmatch(string(data), -1) {
+		for _, match := range call.FindAllStringSubmatch(source, -1) {
 			for endpoint, want := range long {
 				if !strings.Contains(match[1], endpoint) {
 					continue
 				}
 				seen[endpoint]++
 				if !strings.Contains(match[1], want) {
-					t.Errorf("%s: api(%s…) 须显式传 %s", entry.Name(), endpoint, want)
+					t.Errorf("%s: api(%s…) 须显式传 %s", name, endpoint, want)
 				}
 			}
 		}

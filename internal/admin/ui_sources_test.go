@@ -2,31 +2,31 @@ package admin
 
 import (
 	_ "embed"
+	"io/fs"
 	"sort"
 	"strings"
 	"testing"
 )
 
-//go:embed ui/js/quota.js
+//go:embed ui/js/pages/quota/quota.js
 var adminUIQuotaJS string
 
 // adminUIJSSources enumerates the embedded scripts for contract checks.
 func adminUIJSSources() map[string]string {
-	entries, err := adminUIJSFS.ReadDir("ui/js")
-	if err != nil {
-		panic(err) // The directory is guaranteed by go:embed at build time.
-	}
-	sources := make(map[string]string, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	sources := map[string]string{}
+	err := fs.WalkDir(adminUIJSFS, "ui/js", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(name, ".js") {
+			return err
 		}
-		name := "ui/js/" + entry.Name()
 		data, err := adminUIJSFS.ReadFile(name)
 		if err != nil {
-			panic(err)
+			return err
 		}
 		sources[name] = string(data)
+		return nil
+	})
+	if err != nil {
+		panic(err) // The tree is guaranteed by go:embed at build time.
 	}
 	return sources
 }
@@ -160,7 +160,7 @@ func TestUIOverviewRangeLayout(t *testing.T) {
 	if strings.Contains(overview, "overview-chain-node") {
 		t.Error("链路摘要已并入实时状态卡片，不应再单独渲染")
 	}
-	js := adminUIJSSources()["ui/js/overview.js"]
+	js := adminUIJSSources()["ui/js/pages/overview/overview.js"]
 	if !strings.Contains(js, "group_by=hour") || strings.Contains(js, "group_by=day") {
 		t.Error("总览区间数据必须只请求 group_by=hour 聚合，由前端汇总本地自然日")
 	}

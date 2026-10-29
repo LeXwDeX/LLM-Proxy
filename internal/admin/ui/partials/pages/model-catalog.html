@@ -1,0 +1,46 @@
+        <!-- ========== Page: 模型目录 ========== -->
+        <div class="page" id="page-model-catalog">
+        <details class="panel" style="margin-bottom:16px;"><summary class="panel-header schema-summary-toggle" style="cursor:pointer;">配置 Schema 与上游兼容能力</summary><div class="panel-body" id="adminSchemaSummary"></div></details>
+          <div class="panel">
+            <div class="panel-header">
+              <h3>模型目录</h3>
+              <div class="btn-group">
+                <!-- 渠道筛选（选项由 endpoint-types API 在 bootstrap 时填充） -->
+                <select class="form-control endpoint-type-select" id="catalogEpFilter" data-include-empty="全部渠道" style="width:160px;">
+                </select>
+                <!-- 关键词搜索 -->
+                <input type="text" class="form-control" id="catalogSearch" placeholder="搜索模型名..." style="width:200px;">
+                <button class="btn" id="refreshCatalogBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+              </div>
+            </div>
+            <div class="panel-body no-pad table-wrap">
+              <table id="catalogTable">
+                <thead>
+                  <tr>
+                    <th>渠道</th>
+                    <th>模型名</th>
+                    <th>显示名</th>
+                    <th>模型家族</th>
+                    <th>上下文窗口</th>
+                    <th>最大输出</th>
+                    <th>能力标签</th>
+                    <th>输入价格 /1M</th>
+                    <th>输出价格 /1M</th>
+                  </tr>
+                </thead>
+                <tbody id="catalogTableBody">
+                  <tr class="empty-row"><td colspan="9">加载中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <!-- 分页条 -->
+            <div id="catalogPagination" style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-top:1px solid var(--card-border);">
+              <span id="catalogPageInfo" style="font-size:12px;color:var(--text-muted);"></span>
+              <div class="btn-group">
+                <button class="btn btn-sm" id="catalogPrevBtn">◀ 上一页</button>
+                <span id="catalogPageNum" style="padding:0 12px;font-size:13px;"></span>
+                <button class="btn btn-sm" id="catalogNextBtn">下一页 ▶</button>
+              </div>
+            </div>
+          </div>
+        </div>

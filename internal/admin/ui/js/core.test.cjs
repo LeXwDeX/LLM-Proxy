@@ -33,7 +33,7 @@ function loadCore({fetch, clock, location} = {}) {
     console,
   };
   sandbox.window = sandbox;
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "core.js"), "utf8"), sandbox);
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "core", "core.js"), "utf8"), sandbox);
   return sandbox.AdminApp.modules.core;
 }
 

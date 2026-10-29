@@ -1,0 +1,32 @@
+        <!-- ========== Page: 客户端管理 ========== -->
+        <div class="page" id="page-clients">
+          <div class="panel">
+            <div class="panel-header">
+              <h3>客户端管理</h3>
+              <div class="btn-group">
+                <button class="btn" id="refreshClientsBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+                <button class="btn btn-primary readonly-hide" id="newClientBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增客户端</button>
+              </div>
+            </div>
+            <div class="panel-body billing-basis-note" id="clientsBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;"><strong>计费口径：</strong>费用 = 上游官方 token 用量 × 适用的价格（目标模板、全局模板或目录默认价，均无则按 0 计），系统不估算 token。</div>
+            <div class="panel-body no-pad table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>名称</th>
+                    <th>IP 地址</th>
+                    <th>Access Key</th>
+                    <th>允许目标</th>
+                    <th>近30天 Token</th>
+                    <th>近30天费用</th>
+                    <th>额度（职级）</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+<tbody id="clientsTableBody">
+                   <tr class="empty-row"><td colspan="8">加载中...</td></tr>
+                 </tbody>
+              </table>
+            </div>
+          </div>
+        </div>

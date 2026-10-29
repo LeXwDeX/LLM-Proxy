@@ -1,0 +1,87 @@
+        <!-- ========== Page: 额度管理 ========== -->
+        <div class="page" id="page-quota">
+          <div class="quota-tabs">
+            <button class="quota-tab active" data-quota-tab="people">人员可用额度</button>
+            <button class="quota-tab" data-quota-tab="policy">模型组扣费与额度基数</button>
+            <button class="quota-tab readonly-hide" data-quota-tab="batch">批量操作</button>
+            <button class="quota-tab" data-quota-tab="settings">基础设置</button>
+          </div>
+
+          <!-- Tab 1: 人员额度 -->
+          <div class="quota-tab-panel active" id="quota-tab-people">
+            <div class="panel">
+              <div class="panel-header">
+                <h3>人员可用额度与已折算消耗</h3>
+                <button class="btn" id="refreshQuotaBtn">刷新</button>
+              </div>
+              <section class="quota-formula" id="quotaFormula" aria-label="额度计算口径">
+                <div class="quota-formula-main">
+                  <span class="quota-formula-label">可用额度上限</span>
+                  <span class="quota-formula-equation">模型组基数 <span class="quota-formula-op">×</span> 职级系数 <span class="quota-formula-op">×</span> 个人系数</span>
+                </div>
+                <div>
+                  <p class="quota-formula-note">模型组基数、职级系数、个人系数和模型组扣费系数均为正数时才生成正上限；任一为 0 时，该模型组在该周期显示“不限”。扣费系数不乘入上限公式，只用于已用费用折算一次；扣费系数为 0 时该组不限。未绑定职级或未加入模型组显示“未配置”，不按 0 或免费处理。</p>
+                  <p class="quota-formula-note">人员行的各周期进度是各独立限额组的合计，不是共享额度池；每个模型组的上限分别生效。展开明细可查看各组可用上限和各自的重置时间。</p>
+                </div>
+              </section>
+              <div class="quota-summary-toolbar">
+                <div class="form-group" style="width:200px;margin-bottom:0;"><label>搜索</label><input class="form-control" id="quotaSearch" type="text" placeholder="名称 / IP"></div>
+                <div class="form-group" style="width:160px;margin-bottom:0;"><label>项目组</label><select class="form-control" id="quotaSummaryProjectFilter"><option value="">全部项目组</option></select></div>
+                <div class="form-group" style="width:160px;margin-bottom:0;"><label>职级</label><select class="form-control" id="quotaSummaryJobFilter"><option value="">全部职级</option></select></div>
+                <div class="form-group" style="width:200px;margin-bottom:0;"><label>状态</label><select class="form-control" id="quotaSummaryStatusFilter"><option value="">全部状态</option><option value="ok">正常</option><option value="warn">接近限额</option><option value="joblevel">职级未配置</option><option value="accounting">计费校准不可用</option><option value="group">模型组超限</option><option value="unlimited">不限</option><option value="none">未配置</option></select></div>
+              </div>
+              <div class="panel-body billing-basis-note" id="quotaBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;"><strong>计费口径：</strong>费用按上游官方 token 用量和已配置价格估算，价格依次取目标计费模板、全局模板和内置模型目录默认价，均未配置时按 0 计。金额已应用模型组扣费系数（每次费用只折算一次），是估算金额，不是厂商官方账单；系统不估算 token，也不补算 token。30 天费用直接展示聚合接口 estimated_cost，不再次折算；返回 0 显示 $0.00，字段缺失或加载失败显示不可用。</div>
+              <div class="panel-body no-pad table-wrap">
+                <table>
+                  <thead id="quotaSummaryTableHead"></thead>
+                  <tbody id="quotaSummaryBody"><tr class="empty-row"><td colspan="10">加载中...</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2: 额度策略 -->
+          <div class="quota-tab-panel" id="quota-tab-policy">
+            <div class="panel">
+              <div class="panel-header"><h3>模型组扣费折算与额度基数</h3><button class="btn btn-primary readonly-hide" id="newModelGroupBtn">新建模型组</button></div>
+              <div class="panel-body no-pad table-wrap"><table><thead><tr><th>唯一标识</th><th>模型</th><th>扣费折算系数</th><th>日/周/月额度基数</th><th>操作</th></tr></thead><tbody id="modelGroupsBody"><tr class="empty-row"><td colspan="5">加载中...</td></tr></tbody></table></div>
+            </div>
+          </div>
+
+          <!-- Tab 3: 批量操作 -->
+          <div class="quota-tab-panel" id="quota-tab-batch">
+            <div class="panel readonly-hide" style="max-width:760px;">
+              <div class="panel-header"><h3>批量同步额度</h3></div>
+              <div class="panel-body" style="padding:12px 16px;">
+                <div class="quota-toolbar">
+                  <div class="form-group" style="width:200px;margin-bottom:0;"><label>源客户端</label><select class="form-control" id="quotaSyncSource"></select></div>
+                  <div class="form-group" style="width:160px;margin-bottom:0;"><label>同步范围</label><select class="form-control" id="quotaSyncMode" data-schema-options="quota_sync_modes"></select></div>
+                  <div class="form-group" style="width:160px;margin-bottom:0;display:none;" id="quotaSyncProjectTargetWrap"><label>项目组</label><select class="form-control" id="quotaSyncProjectTarget"></select></div>
+                  <div class="form-group" style="width:160px;margin-bottom:0;display:none;" id="quotaSyncJobTargetWrap"><label>职级</label><select class="form-control" id="quotaSyncJobTarget"></select></div>
+                  <div class="form-group" style="width:160px;margin-bottom:0;" id="quotaSyncProjectFilterWrap"><label>项目组筛选</label><select class="form-control" id="quotaSyncProjectFilter"><option value="">全部项目组</option></select></div>
+                  <button class="btn btn-primary" id="syncQuotaBtn" style="margin-bottom:0;">同步方案</button>
+                </div>
+                <div class="form-group quota-target-picker" id="quotaSyncClientsPicker" style="max-width:420px;margin-bottom:0;">
+                  <label>同步目标（可多选）</label>
+                  <button type="button" class="form-control quota-sync-trigger" id="quotaSyncTargetsBtn"><span id="quotaSyncTargetsLabel">未选择</span><span aria-hidden="true">▾</span></button>
+                  <div class="quota-sync-panel" id="quotaSyncTargetsPanel"></div>
+                </div>
+                <p id="quotaSyncHint" style="font-size:12px;color:var(--text-muted);margin-top:10px;">同步将覆盖目标客户端的模型组选择与个人可用额度倍率；不修改职级绑定，不影响身份、密钥与授权。</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 4: 基础设置 -->
+          <div class="quota-tab-panel" id="quota-tab-settings">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start;">
+              <div class="panel">
+                <div class="panel-header"><h3>职级可用额度倍率</h3><button class="btn btn-primary readonly-hide" id="newJobLevelBtn">新增职级</button></div>
+                <div class="panel-body no-pad table-wrap"><table><thead id="jobLevelTableHead"></thead><tbody id="jobLevelsBody"><tr class="empty-row"><td colspan="5">加载中...</td></tr></tbody></table></div>
+              </div>
+              <div class="panel">
+                <div class="panel-header"><h3>项目组</h3><button class="btn btn-primary readonly-hide" id="newProjectGroupBtn">新增项目组</button></div>
+                <div class="panel-body no-pad table-wrap"><table><thead><tr><th>项目组</th><th>操作</th></tr></thead><tbody id="projectGroupsBody"><tr class="empty-row"><td colspan="2">加载中...</td></tr></tbody></table></div>
+              </div>
+            </div>
+          </div>
+        </div>

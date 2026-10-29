@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { assembleAdminHTML } = require("./assemble_admin_html.cjs");
 const os = require("node:os");
 const playwright = require("playwright");
 const browserName = process.env.LLMS_UI_BROWSER || "chromium";
@@ -14,7 +15,7 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1920, height: 1400 } });
     const errors = [];
     page.on("pageerror", err => errors.push(err.message));
-    await page.setContent(fs.readFileSync(path.join(root, "internal/admin/ui/index.html"), "utf8").replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, ""));
+    await page.setContent(assembleAdminHTML().replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, ""));
     await page.evaluate(() => {
       document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
       document.getElementById("page-usage").classList.add("active");
@@ -54,7 +55,7 @@ async function main() {
       window.app = {state: {modelGroupsLoaded:true,modelGroups:["API","订阅","自定义模型组"],usageModelGroupExpanded:{},usageModelTargetExpanded:{}}, bind: (module,key) => module === "quota" ? name => name === "company_general" ? "公司通用" : name : core[key]};
       window.AdminApp = {register: (name,factory) => { window.usage = factory(app); }};
     });
-    await page.addScriptTag({ path: path.join(root, "internal/admin/ui/js/usage.js") });
+    await page.addScriptTag({ path: path.join(root, "internal/admin/ui/js/pages/usage/usage.js") });
     await page.evaluate(() => usage.loadUsage());
     assert.deepEqual(await page.evaluate(() => apiCalls.length), 1, "tables and trend share one aggregate request");
     assert.match(await page.evaluate(() => apiCalls[0]), /group_by=hour/, "today follows the hour bucket contract");

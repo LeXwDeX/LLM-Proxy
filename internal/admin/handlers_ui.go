@@ -4,6 +4,7 @@ package admin
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -44,8 +45,10 @@ func (h *Handler) handleUI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUIJS(w http.ResponseWriter, r *http.Request) {
-	file := chi.URLParam(r, "file")
-	if !strings.HasSuffix(file, ".js") || strings.ContainsAny(file, "/\\") {
+	// The wildcard may span subdirectories (core/, pages/<name>/). Serve only
+	// clean relative .js paths that exist in the embedded script tree.
+	file := chi.URLParam(r, "*")
+	if !strings.HasSuffix(file, ".js") || strings.Contains(file, "\\") || !fs.ValidPath(file) {
 		http.NotFound(w, r)
 		return
 	}

@@ -1,0 +1,31 @@
+  <!-- ===== User Modal (admin-only，新增/编辑用户) ===== -->
+  <div class="modal-overlay" id="userModal">
+    <div class="modal" style="max-width: 480px;">
+      <div class="modal-header">
+        <h3 id="userModalTitle">新增用户</h3>
+        <button type="button" class="modal-close" data-close="userModal" aria-label="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>用户名</label>
+          <input class="form-control" id="userUsername" autocomplete="off" required>
+        </div>
+        <div class="form-group">
+          <label>密码 <span id="userPasswordHint" style="color:var(--text-muted);font-size:12px;">(至少6位)</span></label>
+          <input class="form-control" id="userPassword" type="password" autocomplete="new-password" required>
+        </div>
+        <div class="form-group">
+          <label>确认密码</label>
+          <input class="form-control" id="userConfirmPassword" type="password" autocomplete="new-password" required>
+        </div>
+        <div class="form-group">
+          <label>角色</label>
+          <select class="form-control" id="userRole" data-schema-options="roles"></select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close="userModal">取消</button>
+        <button class="btn btn-primary" id="saveUserBtn">保存</button>
+      </div>
+    </div>
+  </div>

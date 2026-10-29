@@ -119,15 +119,15 @@ func TestHandlerUIEntry(t *testing.T) {
 			if !strings.Contains(body, "客户端管理") || !strings.Contains(body, "消费统计") {
 				t.Fatalf("ui page missing expected tab labels")
 			}
-			if !strings.Contains(body, `/admin/ui/js/clients.js`) || !strings.Contains(body, `/admin/ui/js/usage.js`) || !strings.Contains(adminUIAllScripts(), "/admin/data/clients") || !strings.Contains(adminUIAllScripts(), "/admin/data/usage/aggregate") {
+			if !strings.Contains(body, `/admin/ui/js/pages/clients/clients.js`) || !strings.Contains(body, `/admin/ui/js/pages/usage/usage.js`) || !strings.Contains(adminUIAllScripts(), "/admin/data/clients") || !strings.Contains(adminUIAllScripts(), "/admin/data/usage/aggregate") {
 				t.Fatalf("ui page missing expected admin api endpoints")
 			}
 		})
 
-		// 静态资源：额度管理 JS 已拆分为独立文件（见 ui/js/quota.js）
+		// 静态资源：额度管理 JS 已拆分为独立文件（见 ui/js/pages/quota/quota.js）
 		t.Run("quota js asset", func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://example.com/ui/js/quota.js", nil))
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://example.com/ui/js/pages/quota/quota.js", nil))
 			if rec.Code != http.StatusOK {
 				t.Fatalf("quota.js asset expected 200, got %d", rec.Code)
 			}

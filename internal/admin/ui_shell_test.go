@@ -115,16 +115,8 @@ func TestUIFontFamiliesUseTokens(t *testing.T) {
 	decl := regexp.MustCompile(`font-family\s*:\s*([^;'"}]+)`)
 	allowed := regexp.MustCompile(`^(var\(--font-(sans|mono)\)|inherit)\s*$`)
 	sources := map[string]string{"index.html": adminUIHTML}
-	entries, err := adminUIJSFS.ReadDir("ui/js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		data, err := adminUIJSFS.ReadFile("ui/js/" + entry.Name())
-		if err != nil {
-			t.Fatal(err)
-		}
-		sources[entry.Name()] = string(data)
+	for name, source := range adminUIJSSources() {
+		sources[name] = source
 	}
 	for name, source := range sources {
 		for _, match := range decl.FindAllStringSubmatch(source, -1) {
@@ -386,7 +378,7 @@ func TestUIBadgesUseThemeTokens(t *testing.T) {
 		}
 	}
 	hex := regexp.MustCompile(`#[0-9a-fA-F]{3,8}\b`)
-	for _, name := range []string{"targets.js", "pools.js", "quota.js", "schema.js"} {
+	for _, name := range []string{"pages/targets/targets.js", "pages/pools/pools.js", "pages/quota/quota.js", "core/schema.js"} {
 		if got := hex.FindString(adminUIJSSources()["ui/js/"+name]); got != "" {
 			t.Errorf("%s 仍含硬编码颜色 %s；动态徽章与状态色必须改用 CSS token", name, got)
 		}
@@ -394,7 +386,7 @@ func TestUIBadgesUseThemeTokens(t *testing.T) {
 }
 
 func TestUIEndpointBadgesUseThemeTokensInDarkMode(t *testing.T) {
-	schema := adminUIJSSources()["ui/js/schema.js"]
+	schema := adminUIJSSources()["ui/js/core/schema.js"]
 	styleFn := regexp.MustCompile(`(?s)function epBadgeStyle\(code\) \{.*?\n  \}`).FindString(schema)
 	if styleFn == "" {
 		t.Fatal("schema.js 缺少 epBadgeStyle")
@@ -410,7 +402,7 @@ func TestUIEndpointBadgesUseThemeTokensInDarkMode(t *testing.T) {
 		}
 	}
 
-	catalog := adminUIJSSources()["ui/js/catalog.js"]
+	catalog := adminUIJSSources()["ui/js/pages/catalog/catalog.js"]
 	badgeFn := regexp.MustCompile(`(?s)function epBadge\(ep\) \{.*?\n    \}`).FindString(catalog)
 	if badgeFn == "" {
 		t.Fatal("catalog.js 缺少 epBadge")
@@ -438,7 +430,7 @@ func TestUIEndpointBadgesUseThemeTokensInDarkMode(t *testing.T) {
 }
 
 func TestUIExpansionButtonsExposeAriaState(t *testing.T) {
-	for _, name := range []string{"quota.js", "usage.js", "pricing.js"} {
+	for _, name := range []string{"pages/quota/quota.js", "pages/usage/usage.js", "pages/pricing/pricing.js"} {
 		src := adminUIJSSources()["ui/js/"+name]
 		idx := strings.Index(src, "quota-expand-btn")
 		if idx < 0 {
@@ -455,7 +447,7 @@ func TestUIExpansionButtonsExposeAriaState(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"quota.js", "pricing.js"} {
+	for _, name := range []string{"pages/quota/quota.js", "pages/pricing/pricing.js"} {
 		source := adminUIJSSources()["ui/js/"+name]
 		idx := strings.Index(source, "quota-expand-btn")
 		end := strings.Index(source[idx:], "</button>")
@@ -463,14 +455,14 @@ func TestUIExpansionButtonsExposeAriaState(t *testing.T) {
 			t.Errorf("%s 展开按钮缺少 aria-controls", name)
 		}
 	}
-	quotaSrc := adminUIJSSources()["ui/js/quota.js"]
+	quotaSrc := adminUIJSSources()["ui/js/pages/quota/quota.js"]
 	if !strings.Contains(quotaSrc, "quota-detail-row' id='") || !strings.Contains(quotaSrc, "esc(detailId)") {
 		t.Error("quota 明细行必须用与 aria-controls 相同的 detailId")
 	}
 }
 
 func TestUIThemePreferenceContract(t *testing.T) {
-	core := adminUIJSSources()["ui/js/core.js"]
+	core := adminUIJSSources()["ui/js/core/core.js"]
 	for _, want := range []string{"localStorage", `classList.toggle("dark"`, "aria-pressed", "themeToggle"} {
 		if !strings.Contains(core, want) {
 			t.Errorf("core.js 主题逻辑缺少 %q", want)
@@ -515,7 +507,7 @@ func TestUIThemeToggleIconDirection(t *testing.T) {
 }
 
 func TestUIMobileSidebarIsolatesFocusWhenClosed(t *testing.T) {
-	nav := adminUIJSSources()["ui/js/navigation.js"]
+	nav := adminUIJSSources()["ui/js/core/navigation.js"]
 	for _, want := range []string{
 		`matchMedia("(max-width: 768px)")`,
 		"sidebar.inert = isolated",
@@ -533,7 +525,7 @@ func TestUIMobileSidebarIsolatesFocusWhenClosed(t *testing.T) {
 }
 
 func TestUIMobileNavFocusAndMenuLabel(t *testing.T) {
-	nav := adminUIJSSources()["ui/js/navigation.js"]
+	nav := adminUIJSSources()["ui/js/core/navigation.js"]
 	setOpen := regexp.MustCompile(`(?s)function setSidebarOpen\(open\) \{.*?\n  \}`).FindString(nav)
 	if setOpen == "" {
 		t.Fatal("navigation.js 缺少 setSidebarOpen")

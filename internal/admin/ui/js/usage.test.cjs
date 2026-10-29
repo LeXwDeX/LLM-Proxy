@@ -3,6 +3,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { assembleAdminHTML } = require("../../../../scripts/testing/assemble_admin_html.cjs");
 const { createHarness } = require("../../../../scripts/testing/admin_ui_test.cjs");
 
 test("model group sorting uses the visible label and keeps total-token tie breaking", async () => {
@@ -90,7 +91,7 @@ test("summary strip shows seven values, total includes tool tokens and labels th
   assert.equal(h.document.getElementById("usCacheWrite").textContent, "5");
   assert.equal(h.document.getElementById("usTotal").textContent, "162", "total includes tool input");
   assert.match(h.document.getElementById("usCost").innerHTML, /\$1\.50/);
-  assert.match(fs.readFileSync(path.join(__dirname, "../index.html"), "utf8"), /id="usCostLabel">估算费用<small>含模型组系数<\/small>/);
+  assert.match(assembleAdminHTML(), /id="usCostLabel">估算费用<small>含模型组系数<\/small>/);
   const totals = app.modules.usage.usageTotals();
   app.modules.usage.addUsageTotals(totals, {input_tokens: 1, output_tokens: 2, cached_tokens: 3, cache_creation_tokens: 4, tool_use_prompt_tokens: 5});
   assert.equal(totals.tool_use_prompt_tokens, 5);
@@ -239,7 +240,7 @@ test("chart notes disclose both UTC boundary hours, day grouping and local range
   assert.match(note.textContent, /整点小时/);
   assert.match(note.textContent, /不扩展到完整起止 UTC 日/);
   assert.match(note.textContent, /浏览器本地/);
-  const html = fs.readFileSync(path.join(__dirname, "../index.html"), "utf8");
+  const html = assembleAdminHTML();
   const initial = /<p class="usage-chart-note" id="usageChartNote">([^<]*)<\/p>/.exec(html);
   assert.ok(initial, "initial chart note must exist");
   assert.match(initial[1], /开始与结束时间所在整点小时/);
@@ -337,7 +338,7 @@ test("model request label follows the actual source and keeps the fallback expli
   assert.equal(header().textContent, "请求（成功）");
   assert.match(header().title, /成功请求权重/);
   app.modules.usage.setUsageModelRequestHeader("by_model_group_model", false);
-  const note = fs.readFileSync(path.join(__dirname, "../index.html"), "utf8");
+  const note = assembleAdminHTML();
   assert.match(note, /模型组明细为空时回退到按模型汇总/);
 });
 
@@ -466,7 +467,7 @@ test("tree subtotals do not turn a missing model cost into zero or a complete sh
 });
 
 test("billing basis explains the model-group tree request weight and cost denominator honestly", () => {
-  const html = fs.readFileSync(path.join(__dirname, "../index.html"), "utf8");
+  const html = assembleAdminHTML();
   const basis = /id="usageBillingBasis"[\s\S]*?<details class="usage-basis-details">([\s\S]*?)<\/details>/.exec(html);
   assert.ok(basis, "usage billing basis details must exist");
   const text = basis[1];

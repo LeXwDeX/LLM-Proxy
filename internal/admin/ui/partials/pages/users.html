@@ -1,0 +1,28 @@
+        <!-- ========== Page: 用户管理（admin-only，菜单仅 admin 可见） ========== -->
+        <div class="page" id="page-users">
+          <div class="panel">
+            <div class="panel-header">
+              <h3>用户管理</h3>
+              <div class="btn-group">
+                <button class="btn" id="refreshUsersBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+                <button class="btn btn-primary" id="newUserBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增用户</button>
+              </div>
+            </div>
+            <div class="panel-body no-pad table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:180px;">用户名</th>
+                    <th style="width:100px;">角色</th>
+                    <th style="width:100px;">状态</th>
+                    <th style="width:180px;">更新时间</th>
+                    <th style="width:230px;min-width:230px;">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="usersTableBody">
+                  <tr class="empty-row"><td colspan="5">加载中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>

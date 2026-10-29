@@ -22,8 +22,10 @@ function loadPlaywright() {
   throw new Error("playwright or playwright-core is not installed (set NODE_PATH)");
 }
 
-const SCRIPTS = ["core", "schema", "navigation", "overview", "targets", "pools", "clients",
-  "pricing", "usage", "audit_trace", "users", "catalog", "quota", "bootstrap"];
+const SCRIPTS = ["core/core", "core/schema", "core/navigation", "pages/overview/overview",
+  "pages/targets/targets", "pages/pools/pools", "pages/clients/clients", "pages/pricing/pricing",
+  "pages/usage/usage", "pages/audit_trace/audit_trace", "pages/users/users", "pages/catalog/catalog",
+  "pages/quota/quota", "core/bootstrap"];
 const STATE = () => (document.getElementById("adminBootMessage") || {}).textContent +
   " ready=" + (window.AdminApp && window.AdminApp.state && window.AdminApp.state.ready);
 
@@ -37,7 +39,7 @@ async function runBrowser(pw, name, base) {
 
     // 1. Logged-out subresource requests get a non-redirect, non-cacheable 401.
     const probe = await page.evaluate(async () => {
-      const r = await fetch("/admin/ui/js/core.js", { redirect: "manual" });
+      const r = await fetch("/admin/ui/js/core/core.js", { redirect: "manual" });
       return { status: r.status, type: r.type, cc: r.headers.get("cache-control") };
     });
     assert.equal(probe.status, 401, name + ": logged-out script must be 401, got " + JSON.stringify(probe));
@@ -93,13 +95,13 @@ async function runBrowser(pw, name, base) {
     await page.goto(base + "/login");
     await page.evaluate((pw) => fetch("/login", { method: "POST", redirect: "manual",
       body: new URLSearchParams({ username: "admin", password: pw, next: "/admin" }) }), ADMIN_PASSWORD);
-    await page.route("**/admin/ui/js/schema.js*", (route) => route.abort());
+    await page.route("**/admin/ui/js/core/schema.js*", (route) => route.abort());
     await page.goto(base + "/admin");
     await page.waitForFunction(
       () => /页面资源加载失败/.test((document.getElementById("adminBootMessage") || {}).textContent || ""),
       null, { timeout: 8000 });
     assert.equal(await page.evaluate(() => document.getElementById("adminBootRetry").hidden), false);
-    await page.unroute("**/admin/ui/js/schema.js*");
+    await page.unroute("**/admin/ui/js/core/schema.js*");
     await Promise.all([page.waitForNavigation(), page.click("#adminBootRetry")]);
     await page.waitForFunction(() => window.AdminApp && window.AdminApp.state && window.AdminApp.state.ready === true, null, { timeout: 15000 });
     console.log("PASS " + name);

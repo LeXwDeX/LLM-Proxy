@@ -6,16 +6,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const root = path.resolve(__dirname, "../..");
-const html = fs.readFileSync(
-  path.join(root, "internal/admin/ui/index.html"),
-  "utf8",
-);
+const { assembleAdminHTML } = require("./assemble_admin_html.cjs");
+const html = assembleAdminHTML();
 const scripts = [
   ...html.matchAll(
-    /<script\s+src="\/admin\/ui\/js\/([^"/?]+)(?:\?[^"]*)?"[^>]*><\/script>/g,
+    /<script\s+src="\/admin\/ui\/js\/([^"?]+\.js)(?:\?[^"]*)?"[^>]*><\/script>/g,
   ),
 ].map((match) => ({
-  name: match[1],
+  name: path.basename(match[1]),
   source: fs.readFileSync(
     path.join(root, "internal/admin/ui/js", match[1]),
     "utf8",

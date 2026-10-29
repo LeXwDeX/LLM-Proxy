@@ -46,7 +46,7 @@ func TestRouterAuthenticationBoundaries(t *testing.T) {
 			t.Errorf("public %s status=%d", path, rec.Code)
 		}
 	}
-	for _, path := range []string{"/admin/data/schema", "/admin/ui/js/core.js"} {
+	for _, path := range []string{"/admin/data/schema", "/admin/ui/js/core/core.js"} {
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		want := http.StatusUnauthorized // non-navigation requests never get a cacheable redirect

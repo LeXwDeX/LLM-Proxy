@@ -1,0 +1,80 @@
+        <!-- ========== Page: 目标与部署池 ========== -->
+        <div class="page" id="page-targets">
+          <div class="target-page-tabs" id="targetPageTabs" role="tablist" aria-label="目标与部署池">
+            <button type="button" class="target-page-tab active" id="targetsMainTab" role="tab" aria-selected="true" aria-controls="targetsMainPanel" tabindex="0">目标</button>
+            <button type="button" class="target-page-tab" id="targetsPoolsTab" role="tab" aria-selected="false" aria-controls="targetsPoolsPanel" tabindex="-1">部署池</button>
+          </div>
+
+          <section class="target-page-panel" id="targetsMainPanel" role="tabpanel" aria-labelledby="targetsMainTab">
+            <div class="panel">
+              <div class="panel-header">
+                <h3>目标健康摘要</h3>
+                <div class="btn-group">
+                  <button class="btn" id="refreshTargetsBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+                  <button class="btn btn-primary readonly-hide" id="newTargetBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增目标</button>
+                </div>
+              </div>
+              <div class="target-status-filters" id="targetStatusFilters" role="group" aria-label="按目标健康状态筛选">
+                <button type="button" class="target-status-chip" data-target-filter="all" aria-pressed="true">全部 <span class="target-status-count">0</span></button>
+                <button type="button" class="target-status-chip" data-target-filter="attention" aria-pressed="false">异常 <span class="target-status-count">0</span></button>
+                <button type="button" class="target-status-chip" data-target-filter="healthy" aria-pressed="false">正常 <span class="target-status-count">0</span></button>
+                <button type="button" class="target-status-chip" data-target-filter="paused" aria-pressed="false">已暂停 <span class="target-status-count">0</span></button>
+              </div>
+              <div class="panel-body no-pad table-wrap">
+                <table class="targets-table">
+                  <colgroup>
+                    <col class="col-status"><col class="col-name"><col class="col-keys">
+                    <col class="col-type"><col class="col-pool">
+                    <col class="col-scheduling"><col><col class="col-actions">
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>状态</th>
+                      <th>名称</th>
+                      <th>密钥状态</th>
+                      <th>类型</th>
+                      <th>部署池</th>
+                      <th>调度观测</th>
+                      <th>模型列表</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="targetsTableBody">
+                    <tr class="empty-row"><td colspan="8">加载中...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section class="target-page-panel" id="targetsPoolsPanel" role="tabpanel" aria-labelledby="targetsPoolsTab" hidden>
+            <div class="panel">
+              <div class="panel-header">
+                <h3>部署池管理</h3>
+                <div class="btn-group">
+                  <button class="btn" id="refreshPoolsBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+                  <button class="btn btn-primary readonly-hide" id="newPoolBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增部署池</button>
+                </div>
+              </div>
+              <div class="panel-body">
+                <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px;">部署池是路由构件：目标归属某池后，客户端授权该池即授权其全部成员节点；暂停/删除池影响转发候选。</p>
+              </div>
+              <div class="panel-body no-pad table-wrap">
+                <table class="pools-table">
+                  <thead>
+                    <tr>
+                      <th class="pool-name">名称</th>
+                      <th class="pool-description">描述</th>
+                      <th class="pool-status">状态</th>
+                      <th class="pool-members">成员（节点调度状态）</th>
+                      <th class="pool-actions">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="poolsTableBody">
+                    <tr class="empty-row"><td colspan="5">加载中...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        </div>

@@ -1,0 +1,28 @@
+  <!-- ===== Target Detail Drawer ===== -->
+  <div class="quota-drawer-overlay" id="targetDetailDrawer">
+    <div class="quota-drawer target-detail-drawer">
+      <div class="modal-header">
+        <div class="target-detail-heading">
+          <h3 id="targetDetailTitle">目标详情</h3>
+          <p id="targetDetailSubtitle"></p>
+        </div>
+        <button type="button" class="modal-close" data-close="targetDetailDrawer" aria-label="关闭">&times;</button>
+      </div>
+      <div class="target-detail-tabs" id="targetDetailTabs" role="tablist" aria-label="目标详情">
+        <button type="button" class="target-detail-tab active" id="targetDetailOverviewTab" data-target-detail-tab="overview" role="tab" aria-selected="true" aria-controls="targetDetailOverview" tabindex="0">概览</button>
+        <button type="button" class="target-detail-tab" id="targetDetailKeysTab" data-target-detail-tab="keys" role="tab" aria-selected="false" aria-controls="targetDetailKeys" tabindex="-1">密钥</button>
+        <button type="button" class="target-detail-tab" id="targetDetailModelsTab" data-target-detail-tab="models" role="tab" aria-selected="false" aria-controls="targetDetailModels" tabindex="-1">模型</button>
+        <button type="button" class="target-detail-tab" id="targetDetailAdvancedTab" data-target-detail-tab="advanced" role="tab" aria-selected="false" aria-controls="targetDetailAdvanced" tabindex="-1">高级设置</button>
+      </div>
+      <div class="quota-drawer-body target-detail-body">
+        <section class="target-detail-panel" id="targetDetailOverview" role="tabpanel" aria-labelledby="targetDetailOverviewTab"></section>
+        <section class="target-detail-panel" id="targetDetailKeys" role="tabpanel" aria-labelledby="targetDetailKeysTab" hidden></section>
+        <section class="target-detail-panel" id="targetDetailModels" role="tabpanel" aria-labelledby="targetDetailModelsTab" hidden></section>
+        <section class="target-detail-panel" id="targetDetailAdvanced" role="tabpanel" aria-labelledby="targetDetailAdvancedTab" hidden></section>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-close="targetDetailDrawer">关闭</button>
+        <button class="btn btn-primary readonly-hide" id="targetDetailEditBtn">编辑目标</button>
+      </div>
+    </div>
+  </div>

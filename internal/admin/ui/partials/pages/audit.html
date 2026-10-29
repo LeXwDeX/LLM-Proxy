@@ -1,0 +1,26 @@
+        <!-- ========== Page: 审计日志 ========== -->
+        <div class="page" id="page-audit">
+          <div class="panel">
+            <div class="panel-header">
+              <h3>审计日志</h3>
+              <button class="btn" id="refreshAuditBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
+            </div>
+            <div class="panel-body no-pad table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>操作者</th>
+                    <th>动作</th>
+                    <th>对象</th>
+                    <th>结果</th>
+                    <th>详情</th>
+                  </tr>
+                </thead>
+                <tbody id="auditTableBody">
+                  <tr class="empty-row"><td colspan="6">加载中...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
