@@ -14,12 +14,17 @@ import (
 
 // uiScriptPathMap maps the pre-split flat script URLs (as recorded in
 // testdata/index.golden.html) to the current layout.
-var uiScriptPathMap = map[string]string{
-	"core": "core/core", "schema": "core/schema", "navigation": "core/navigation", "bootstrap": "core/bootstrap",
-	"overview": "pages/overview/overview", "targets": "pages/targets/targets", "pools": "pages/pools/pools",
-	"clients": "pages/clients/clients", "pricing": "pages/pricing/pricing", "usage": "pages/usage/usage",
-	"audit_trace": "pages/audit_trace/audit_trace", "users": "pages/users/users",
-	"catalog": "pages/catalog/catalog", "quota": "pages/quota/quota",
+// A page split into several files lists them in load order.
+var uiScriptPathMap = map[string][]string{
+	"core": {"core/core"}, "schema": {"core/schema"}, "navigation": {"core/navigation"}, "bootstrap": {"core/bootstrap"},
+	"overview": {"pages/overview/overview"}, "targets": {"pages/targets/targets"}, "pools": {"pages/pools/pools"},
+	"clients": {"pages/clients/clients"}, "usage": {"pages/usage/usage"},
+	"pricing": {"pages/pricing/pricing-shared", "pages/pricing/pricing-rates", "pages/pricing/pricing-periods",
+		"pages/pricing/pricing-list", "pages/pricing/pricing-modal", "pages/pricing/pricing"},
+	"audit_trace": {"pages/audit_trace/audit_trace"}, "users": {"pages/users/users"},
+	"catalog": {"pages/catalog/catalog"},
+	"quota": {"pages/quota/quota-model", "pages/quota/quota-data", "pages/quota/quota-groups", "pages/quota/quota-levels",
+		"pages/quota/quota-summary", "pages/quota/quota-drawer", "pages/quota/quota-sync", "pages/quota/quota"},
 }
 
 // TestAssembledHTMLMatchesGolden pins the split layout to the original single
@@ -30,14 +35,18 @@ func TestAssembledHTMLMatchesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	re := regexp.MustCompile(`/admin/ui/js/([a-z_]+)\.js"`)
+	re := regexp.MustCompile(`<script src="/admin/ui/js/([a-z_]+)\.js"></script>`)
 	golden := re.ReplaceAllStringFunc(string(raw), func(m string) string {
 		name := re.FindStringSubmatch(m)[1]
 		to, ok := uiScriptPathMap[name]
 		if !ok {
 			t.Fatalf("golden references unknown script %s", name)
 		}
-		return "/admin/ui/js/" + to + `.js"`
+		tags := make([]string, len(to))
+		for i, rel := range to {
+			tags[i] = `<script src="/admin/ui/js/` + rel + `.js"></script>`
+		}
+		return strings.Join(tags, "\n  ")
 	})
 	if adminUIHTML != golden {
 		t.Fatalf("assembled HTML differs from golden (len %d vs %d)", len(adminUIHTML), len(golden))
