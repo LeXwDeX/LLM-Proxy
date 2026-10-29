@@ -122,6 +122,7 @@ test("model group creation preserves later edits and does not repeat POST", asyn
       ? new Promise(resolve => {release = resolve;}) : fallback(url, options)});
   const app = await h.run();
   await app.modules.quota.openModelGroupModal(null);
+  for (const dim of ["daily", "weekly", "monthly"]) h.ids.get("modelGroup-" + dim).value = "0"; // bases must be explicit
   h.ids.get("modelGroupName").value = "A";
   h.ids.get("modelGroupCoefficient").value = "1";
   const save = h.ids.get("saveModelGroupBtn").listeners.click[0]();

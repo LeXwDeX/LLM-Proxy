@@ -9,21 +9,25 @@ const os = require("node:os");
 const path = require("node:path");
 const { assembleAdminHTML } = require("../../../scripts/testing/assemble_admin_html.cjs");
 
-// Old script name -> ordered list of new paths (one golden tag expands to one tag per path).
+// A page split into several files lists them in load order.
 const scriptMap = {
   core: ["core/core"], schema: ["core/schema"], navigation: ["core/navigation"], bootstrap: ["core/bootstrap"],
-  overview: ["pages/overview/overview"],
+  overview: ["pages/overview/overview"], pools: ["pages/pools/pools"],
   targets: ["targets", "health", "detail", "key-list", "model-mappings", "edit-modal", "save", "list"].map((n) => `pages/targets/${n}`),
-  pools: ["pages/pools/pools"], clients: ["pages/clients/clients"], pricing: ["pages/pricing/pricing"], usage: ["pages/usage/usage"],
+  clients: ["pages/clients/clients"], usage: ["pages/usage/usage"],
+  pricing: ["pages/pricing/pricing-shared", "pages/pricing/pricing-rates", "pages/pricing/pricing-periods",
+    "pages/pricing/pricing-list", "pages/pricing/pricing-modal", "pages/pricing/pricing"],
   audit_trace: ["pages/audit_trace/audit_trace"], users: ["pages/users/users"],
-  catalog: ["pages/catalog/catalog"], quota: ["pages/quota/quota"],
+  catalog: ["pages/catalog/catalog"],
+  quota: ["pages/quota/quota-model", "pages/quota/quota-data", "pages/quota/quota-groups", "pages/quota/quota-levels",
+    "pages/quota/quota-summary", "pages/quota/quota-drawer", "pages/quota/quota-sync", "pages/quota/quota"],
 };
 
 test("Node assembly equals the golden index.html modulo script paths", () => {
   const golden = fs.readFileSync(path.join(__dirname, "..", "testdata", "index.golden.html"), "utf8")
-    .replace(/\/admin\/ui\/js\/([a-z_]+)\.js"/g, (_, name) => {
+    .replace(/<script src="\/admin\/ui\/js\/([a-z_]+)\.js"><\/script>/g, (_, name) => {
       assert.ok(scriptMap[name], `unknown script ${name}`);
-      return `/admin/ui/js/${scriptMap[name].join('.js"></script>\n  <script src="/admin/ui/js/')}.js"`;
+      return scriptMap[name].map((rel) => `<script src="/admin/ui/js/${rel}.js"></script>`).join("\n  ");
     });
   assert.equal(assembleAdminHTML(), golden);
 });
