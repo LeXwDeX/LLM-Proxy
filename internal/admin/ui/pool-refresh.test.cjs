@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { createHarness, withKeySnapshot, simulateTargetUpdate } = require("../../../scripts/testing/admin_ui_test.cjs");
+const { createHarness, withETag, simulateTargetUpdate } = require("../../../scripts/testing/admin_ui_test.cjs");
 
 function target(name, pool) {
   return {
@@ -14,14 +14,15 @@ function target(name, pool) {
   };
 }
 
-function editableTarget(name, pool, snapshot) {
-  return withKeySnapshot(target(name, pool), snapshot);
+function editableTarget(name, pool, revision) {
+  return withETag(target(name, pool), revision);
 }
 
-function assertConditionalPut(put, snapshot) {
+function assertConditionalPut(put, revision) {
   assert.ok(put, "target update was submitted");
-  assert.equal(put.options.headers["X-Target-Key-Snapshot"], snapshot);
-  assert.equal(JSON.parse(put.options.body).api_key, "__existing_key_index__:0");
+  assert.equal(put.options.headers["If-Match"], `"t1-${revision}"`);
+  assert.equal(put.options.headers["X-Target-Key-Snapshot"], undefined);
+  assert.equal(JSON.parse(put.options.body).api_key, "__existing_key_id__:kid-fixture-0");
   assert.deepEqual(JSON.parse(put.options.body).api_keys, []);
 }
 
@@ -122,7 +123,7 @@ test("a later pool load failure replaces the stale table with retry guidance", a
 
 test("failed pool option fetch keeps saved membership when editing", async () => {
   const harness = createHarness({
-    routes: { "/admin/data/targets": { targets: [editableTarget("member", "pool-a", "pool-snapshot-1")] } },
+    routes: { "/admin/data/targets": { targets: [editableTarget("member", "pool-a", 1)] } },
   });
   const app = await harness.run();
   harness.setRouteFailure("/admin/data/pools", true);
@@ -141,7 +142,7 @@ test("failed pool option fetch keeps saved membership when editing", async () =>
     "pool-a",
     "existing membership is selected",
   );
-  simulateTargetUpdate(harness, saved, editableTarget("member", "pool-a", "pool-snapshot-2"));
+  simulateTargetUpdate(harness, saved, editableTarget("member", "pool-a", 2));
   await harness.ids.get("saveTargetBtn").listeners.click[0]();
   const put = harness.requests.findLast(
     (request) =>
@@ -149,8 +150,8 @@ test("failed pool option fetch keeps saved membership when editing", async () =>
       request.options?.method === "PUT",
   );
   assert.ok(put, "target update was submitted");
-  assertConditionalPut(put, "pool-snapshot-1");
-  assert.equal(app.state.targets[0].key_snapshot, "pool-snapshot-2");
+  assertConditionalPut(put, 1);
+  assert.equal(app.state.targets[0].etag, "t1-2");
   assert.equal(
     JSON.parse(put.options.body).pool,
     "pool-a",
@@ -161,7 +162,7 @@ test("failed pool option fetch keeps saved membership when editing", async () =>
 test("stale roster after a failed refresh cannot erase a newly assigned pool", async () => {
   const harness = createHarness({
     routes: {
-      "/admin/data/targets": { targets: [editableTarget("member", "pool-a", "pool-snapshot-a")] },
+      "/admin/data/targets": { targets: [editableTarget("member", "pool-a", 11)] },
       "/admin/data/pools": { pools: [{ name: "pool-a" }] },
     },
   });
@@ -170,7 +171,7 @@ test("stale roster after a failed refresh cannot erase a newly assigned pool", a
   assert.equal(app.state.pools[0].name, "pool-a", "roster A is cached");
   // Another session assigns a newly created pool B; the next roster fetch fails.
   harness.setRoute("/admin/data/targets", {
-    targets: [editableTarget("member", "pool-b", "pool-snapshot-b")],
+    targets: [editableTarget("member", "pool-b", 12)],
   });
   harness.setRouteFailure("/admin/data/pools", true);
   await app.modules.targets.loadTargets();
@@ -181,15 +182,15 @@ test("stale roster after a failed refresh cannot erase a newly assigned pool", a
     "pool-b",
     "stale roster absence does not hide the saved membership",
   );
-  simulateTargetUpdate(harness, app.state.targets[0], editableTarget("member", "pool-b", "pool-snapshot-b-next"));
+  simulateTargetUpdate(harness, app.state.targets[0], editableTarget("member", "pool-b", 13));
   await harness.ids.get("saveTargetBtn").listeners.click[0]();
   const put = harness.requests.findLast(
     (request) =>
       request.url === "/admin/data/targets/member" &&
       request.options?.method === "PUT",
   );
-  assertConditionalPut(put, "pool-snapshot-b");
-  assert.equal(app.state.targets[0].key_snapshot, "pool-snapshot-b-next");
+  assertConditionalPut(put, 12);
+  assert.equal(app.state.targets[0].etag, "t1-13");
   assert.equal(
     JSON.parse(put.options.body).pool,
     "pool-b",
@@ -200,7 +201,7 @@ test("stale roster after a failed refresh cannot erase a newly assigned pool", a
 test("roster absence never erases a saved membership by itself", async () => {
   const harness = createHarness({
     routes: {
-      "/admin/data/targets": { targets: [editableTarget("member", "pool-b", "pool-snapshot-1")] },
+      "/admin/data/targets": { targets: [editableTarget("member", "pool-b", 1)] },
       "/admin/data/pools": { pools: [{ name: "other-pool" }] },
     },
   });
@@ -212,22 +213,22 @@ test("roster absence never erases a saved membership by itself", async () => {
     "pool-b",
     "missing roster entry is not treated as deletion proof",
   );
-  simulateTargetUpdate(harness, app.state.targets[0], editableTarget("member", "pool-b", "pool-snapshot-2"));
+  simulateTargetUpdate(harness, app.state.targets[0], editableTarget("member", "pool-b", 2));
   await harness.ids.get("saveTargetBtn").listeners.click[0]();
   const put = harness.requests.findLast(
     (request) =>
       request.url === "/admin/data/targets/member" &&
       request.options?.method === "PUT",
   );
-  assertConditionalPut(put, "pool-snapshot-1");
-  assert.equal(app.state.targets[0].key_snapshot, "pool-snapshot-2");
+  assertConditionalPut(put, 1);
+  assert.equal(app.state.targets[0].etag, "t1-2");
   assert.equal(JSON.parse(put.options.body).pool, "pool-b");
 });
 
 test("explicitly choosing no pool still unbinds on save", async () => {
   const harness = createHarness({
     routes: {
-      "/admin/data/targets": { targets: [editableTarget("member", "pool-b", "pool-snapshot-1")] },
+      "/admin/data/targets": { targets: [editableTarget("member", "pool-b", 1)] },
       "/admin/data/pools": { pools: [{ name: "pool-b" }] },
     },
   });
@@ -235,38 +236,41 @@ test("explicitly choosing no pool still unbinds on save", async () => {
   await app.modules.targets.loadTargets();
   await app.modules.targets.openTargetModal(app.state.targets[0]);
   harness.ids.get("tgtPool").value = "";
-  simulateTargetUpdate(harness, app.state.targets[0], editableTarget("member", "", "pool-snapshot-2"));
+  simulateTargetUpdate(harness, app.state.targets[0], editableTarget("member", "", 2));
   await harness.ids.get("saveTargetBtn").listeners.click[0]();
   const put = harness.requests.findLast(
     (request) =>
       request.url === "/admin/data/targets/member" &&
       request.options?.method === "PUT",
   );
-  assertConditionalPut(put, "pool-snapshot-1");
-  assert.equal(app.state.targets[0].key_snapshot, "pool-snapshot-2");
+  assertConditionalPut(put, 1);
+  assert.equal(app.state.targets[0].etag, "t1-2");
   assert.equal(JSON.parse(put.options.body).pool, "", "explicit removal is kept");
 });
 
-test("an absent snapshot cannot authorize a target update", async () => {
-  const saved = editableTarget("member", "pool-a", "unused-snapshot");
-  delete saved.key_snapshot;
+test("a target without usable key IDs saves other fields and sends no key fields", async () => {
+  const saved = editableTarget("member", "pool-a", 1);
+  delete saved.key_ids;
   const harness = createHarness({ routes: { "/admin/data/targets": { targets: [saved] } } });
   const app = await harness.run();
   await app.modules.targets.loadTargets();
   await app.modules.targets.openTargetModal(app.state.targets[0]);
   harness.ids.get("tgtEndpoint").value = "https://draft.invalid";
   await harness.ids.get("saveTargetBtn").listeners.click[0]();
-  assert.equal(harness.requests.filter((r) => r.options?.method === "PUT").length, 0);
-  assert.equal(harness.ids.get("tgtEndpoint").value, "https://draft.invalid");
-  assert.match(harness.ids.get("keyCardList").innerHTML, /重新.*确认|确认.*重新/);
+  assert.match(harness.ids.get("keyCardList").innerHTML, /密钥列表暂不可编辑/);
+  const puts = harness.requests.filter((r) => r.options?.method === "PUT");
+  assert.equal(puts.length, 1, "other fields remain saveable");
+  const body = JSON.parse(puts[0].options.body);
+  assert.equal(body.endpoint, "https://draft.invalid");
+  assert.ok(!("api_key" in body) && !("api_keys" in body), "no key field: the server keeps the stored keys");
 });
 
-test("a rejected stale snapshot preserves the draft and is not retried", async () => {
-  const saved = editableTarget("member", "pool-a", "expired-snapshot");
+test("a rejected stale revision preserves the draft and is not retried", async () => {
+  const saved = editableTarget("member", "pool-a", 7);
   const harness = createHarness({
     routes: { "/admin/data/targets": { targets: [saved] } },
     fetch: (url, options, fallback) => url === "/admin/data/targets/member" && options?.method === "PUT"
-      ? Promise.resolve({ ok: false, status: 409, text: async () => JSON.stringify({ error: "snapshot changed" }) })
+      ? Promise.resolve({ ok: false, status: 409, text: async () => JSON.stringify({ error: "target changed; refresh targets", code: "target_revision_conflict" }) })
       : fallback(url, options),
   });
   const app = await harness.run();
@@ -274,25 +278,24 @@ test("a rejected stale snapshot preserves the draft and is not retried", async (
   await app.modules.targets.openTargetModal(app.state.targets[0]);
   harness.ids.get("tgtEndpoint").value = "https://draft.invalid";
   await harness.ids.get("saveTargetBtn").listeners.click[0]();
-  await harness.ids.get("saveTargetBtn").listeners.click[0]();
   const writes = harness.requests.filter((r) => r.options?.method === "PUT");
   assert.equal(writes.length, 1);
-  assertConditionalPut(writes[0], "expired-snapshot");
+  assertConditionalPut(writes[0], 7);
   assert.equal(harness.ids.get("tgtEndpoint").value, "https://draft.invalid");
-  assert.match(harness.ids.get("keyCardList").innerHTML, /重新.*确认|确认.*重新/);
+  assert.match(harness.ids.get("keyCardList").innerHTML, /该目标已被修改，请重新加载后再保存/);
 });
 
-test("a null successor cannot authorize a draft after a key operation", async () => {
-  const saved = editableTarget("member", "pool-a", "pool-snapshot-1");
-  const fresh = editableTarget("member", "pool-a", "pool-snapshot-2");
+test("a key operation by ID leaves the draft and its revision intact", async () => {
+  const saved = editableTarget("member", "pool-a", 1);
+  const fresh = editableTarget("member", "pool-a", 1);
   fresh.key_statuses[0].blocked = true;
   fresh.key_statuses[0].status = "已屏蔽";
   const harness = createHarness({
     routes: { "/admin/data/targets": { targets: [saved] } },
     fetch: (url, options, fallback) => {
-      if (url === "/admin/data/targets/member/keys/0/block" && options?.method === "PUT") {
+      if (url === "/admin/data/targets/member/keys/id/kid-fixture-0/block" && options?.method === "PUT") {
         harness.setRoute("/admin/data/targets", { targets: [fresh] });
-        return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, key_snapshot: null }) });
+        return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) });
       }
       return fallback(url, options);
     },
@@ -304,14 +307,14 @@ test("a null successor cannot authorize a draft after a key operation", async ()
   app.modules.targets.addKeyToList();
   let confirm;
   app.modules.core.showConfirm = (_message, callback) => { confirm = callback; };
-  harness.ids.get("keyCardList").listeners.click[0]({ target: { dataset: { blockKeyIdx: "0" } } });
+  harness.ids.get("keyCardList").listeners.click[0]({ target: { dataset: { blockKeyId: "kid-fixture-0" } } });
   assert.ok(confirm, "blocking requires confirmation");
   await confirm();
   await harness.ids.get("saveTargetBtn").listeners.click[0]();
   const writes = harness.requests.filter((r) => r.options?.method === "PUT");
-  assert.equal(writes.length, 1, "the later GET cannot authorize a config update");
-  assert.equal(writes[0].url, "/admin/data/targets/member/keys/0/block");
-  assert.equal(writes[0].options.headers["X-Target-Key-Snapshot"], "pool-snapshot-1");
-  assert.match(harness.ids.get("keyCardList").innerHTML, /重新.*确认|确认.*重新/);
-  assert.match(harness.ids.get("keyCardList").innerHTML, /temp/, "the added key remains in the draft");
+  assert.equal(writes.length, 2, "block, then the update");
+  assert.equal(writes[0].url, "/admin/data/targets/member/keys/id/kid-fixture-0/block");
+  assert.equal(writes[0].options.headers["X-Target-Key-Snapshot"], undefined);
+  assert.equal(writes[1].options.headers["If-Match"], '"t1-1"', "blocking does not move the revision");
+  assert.deepEqual(JSON.parse(writes[1].options.body).api_keys, ["temporary-test-key"], "the added key remains in the draft");
 });

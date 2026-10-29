@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { createHarness, schemaFixture, withKeySnapshot, simulateTargetUpdate } = require("../../../scripts/testing/admin_ui_test.cjs");
+const { createHarness, schemaFixture, withETag, simulateTargetUpdate } = require("../../../scripts/testing/admin_ui_test.cjs");
 
 function fixture() {
   const schema = schemaFixture();
@@ -48,16 +48,16 @@ test("dual controls use capabilities, schema defaults, and preserve edits across
 test("saving a non-dual type keeps nonempty saved dual values", async () => {
   const { app, harness, el } = await setup();
   const saved = { name: "saved", endpoint_type: "provider-new", endpoint: "https://fixture.invalid", usage_adapter: "standard", openai_prefix: "/openai", anthropic_prefix: "/anthropic", supports_responses: true };
-  await app.modules.targets.openTargetModal(withKeySnapshot(saved, "dual-snapshot-1"));
+  await app.modules.targets.openTargetModal(withETag(saved, 1));
   el("tgtType").value = "provider-other";
   app.modules.targets.updateTargetFormVisibility();
-  simulateTargetUpdate(harness, withKeySnapshot(saved, "dual-snapshot-1"), withKeySnapshot({ ...saved, endpoint_type: "provider-other" }, "dual-snapshot-2"));
+  simulateTargetUpdate(harness, withETag(saved, 1), withETag({ ...saved, endpoint_type: "provider-other" }, 2));
   await el("saveTargetBtn").listeners.click[0]();
   const write = harness.requests.findLast(r => r.options?.method === "PUT");
   const body = JSON.parse(write.options.body);
-  assert.equal(write.options.headers["X-Target-Key-Snapshot"], "dual-snapshot-1");
-  assert.equal(body.api_key, "__existing_key_index__:0");
-  assert.equal(app.state.targets[0].key_snapshot, "dual-snapshot-2");
+  assert.equal(write.options.headers["If-Match"], '"t1-1"');
+  assert.equal(body.api_key, "__existing_key_id__:kid-fixture-0");
+  assert.equal(app.state.targets[0].etag, "t1-2");
   assert.equal(body.openai_prefix, "/openai");
   assert.equal(body.anthropic_prefix, "/anthropic");
   assert.equal(body.supports_responses, true);
@@ -66,7 +66,7 @@ test("create and update submit all dual fields, including clear values and hidde
   const { app, harness, el } = await setup();
   for (const editing of [false, true]) {
     const saved = { name: "saved", endpoint_type: "provider-new", endpoint: "https://fixture.invalid", usage_adapter: "standard", openai_prefix: "/before", anthropic_prefix: "/before", supports_responses: true };
-    await app.modules.targets.openTargetModal(editing ? withKeySnapshot(saved, "dual-clear-snapshot-1") : null);
+    await app.modules.targets.openTargetModal(editing ? withETag(saved, 1) : null);
     el("tgtName").value = "saved";
     el("tgtEndpoint").value = "https://fixture.invalid";
     el("tgtUsageAdapter").value = "standard";
@@ -76,15 +76,15 @@ test("create and update submit all dual fields, including clear values and hidde
     if (editing) {
       el("tgtType").value = "provider-other";
       app.modules.targets.updateTargetFormVisibility();
-      simulateTargetUpdate(harness, withKeySnapshot(saved, "dual-clear-snapshot-1"), withKeySnapshot({ ...saved, endpoint_type: "provider-other", openai_prefix: "", anthropic_prefix: "", supports_responses: false }, "dual-clear-snapshot-2"));
+      simulateTargetUpdate(harness, withETag(saved, 1), withETag({ ...saved, endpoint_type: "provider-other", openai_prefix: "", anthropic_prefix: "", supports_responses: false }, 2));
     }
     await el("saveTargetBtn").listeners.click[0]();
     const request = harness.requests.findLast(r => r.options?.method === (editing ? "PUT" : "POST"));
     const body = JSON.parse(request.options.body);
     if (editing) {
-      assert.equal(request.options.headers["X-Target-Key-Snapshot"], "dual-clear-snapshot-1");
-      assert.equal(body.api_key, "__existing_key_index__:0");
-      assert.equal(app.state.targets[0].key_snapshot, "dual-clear-snapshot-2");
+      assert.equal(request.options.headers["If-Match"], '"t1-1"');
+      assert.equal(body.api_key, "__existing_key_id__:kid-fixture-0");
+      assert.equal(app.state.targets[0].etag, "t1-2");
     }
     assert.equal(body.openai_prefix, editing ? "" : "/openai");
     assert.equal(body.anthropic_prefix, editing ? "" : "/anthropic");

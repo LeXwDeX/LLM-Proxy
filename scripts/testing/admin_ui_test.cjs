@@ -103,14 +103,37 @@ class Element {
   removeAttribute(name) {
     delete this.attrs[name];
   }
+  // Elements created through appendChild / innerHTML, recursively.
+  childrenDeep() {
+    return this.children.flatMap((child) => [child, ...child.childrenDeep()]);
+  }
+  // Static descendants come from the assembled HTML (set for overlays only), so a
+  // modal can enumerate its controls the way a real DOM would. They are consulted
+  // only for plain tag-name selectors, which keeps every other query as before.
+  allDescendants(includeStatic) {
+    const seen = new Set();
+    const out = [];
+    const visit = (items) => items.forEach((item) => {
+      if (seen.has(item)) return;
+      seen.add(item);
+      out.push(item);
+    });
+    if (includeStatic) (this.staticDescendants || []).forEach((item) => visit([item, ...item.childrenDeep()]));
+    visit(this.childrenDeep());
+    return out;
+  }
   querySelectorAll(selector) {
-    const dataSelector = selector.match(/^([a-z][\w-]*)?\[data-([\w-]+)\]$/i);
-    return this.children.flatMap((child) => [child, ...child.querySelectorAll("*")])
-      .filter((child) => selector === "*" ||
+    const parts = selector.split(",").map((part) => part.trim()).filter(Boolean);
+    const matches = (child, part) => {
+      const dataSelector = part.match(/^([a-z][\w-]*)?\[data-([\w-]+)\]$/i);
+      return part === "*" ||
         (dataSelector && (!dataSelector[1] || child.tagName === dataSelector[1].toUpperCase()) &&
           Object.prototype.hasOwnProperty.call(child.dataset, dataSelector[2].replace(/-([a-z])/g, (_, c) => c.toUpperCase()))) ||
-        (selector.startsWith(".") ? (child.className || child.attrs.class || "").split(/\s+/).includes(selector.slice(1))
-          : child.tagName === selector.toUpperCase()));
+        (part.startsWith(".") ? (child.className || child.attrs.class || "").split(/\s+/).includes(part.slice(1))
+          : child.tagName === part.toUpperCase());
+    };
+    const tagNamesOnly = parts.every((part) => /^[a-z][\w-]*$/i.test(part));
+    return this.allDescendants(tagNamesOnly).filter((child) => parts.some((part) => matches(child, part)));
   }
   querySelector(selector) {
     return this.querySelectorAll(selector)[0] || null;
@@ -124,14 +147,16 @@ class Element {
 function option(value, label = value) {
   return { value, label };
 }
-function withKeySnapshot(target, snapshot) {
-  assert.ok(typeof snapshot === "string" && snapshot, "success fixtures need an explicit snapshot");
+// A saved target as GET /admin/data/targets reports it: a content ETag plus stable key IDs.
+function withETag(target, version) {
+  assert.ok(Number.isInteger(version) && version >= 0, "fixtures need an explicit version");
   return {
     ...target,
     has_api_key: true,
     api_key: "fixt...0001",
     api_keys: [],
-    key_snapshot: snapshot,
+    etag: "t1-" + version,
+    key_ids: ["kid-fixture-0"],
     key_runtime_indices: [0],
     key_statuses: [{ index: 0, key_mask: "fixt...0001", status: "等待中", blocked: false, exhausted: false }],
   };
@@ -141,7 +166,8 @@ function simulateTargetUpdate(harness, current, successor) {
   harness.context.fetch = async (url, options) => {
     if (url !== "/admin/data/targets/" + encodeURIComponent(current.name) || options?.method !== "PUT")
       return fetch(url, options);
-    assert.equal(options.headers["X-Target-Key-Snapshot"], current.key_snapshot);
+    assert.equal(options.headers["If-Match"], `"${current.etag}"`);
+    assert.equal(options.headers["X-Target-Key-Snapshot"], undefined);
     harness.context.fetch = fetch;
     const response = await fetch(url, options);
     if (response.ok) harness.setRoute("/admin/data/targets", { targets: [successor] });
@@ -275,6 +301,18 @@ function createHarness({
     elements.push(element);
     if (element.id) ids.set(element.id, element);
   }
+  // Overlays enumerate their static controls: map each opening tag to its source
+  // position, then take every element between the overlay's open and its balanced </div>.
+  const tagPositions = [...html.matchAll(/<([a-z][\w-]*)\b([^>]*)>/gi)].map((match) => match.index);
+  elements.forEach((element, i) => {
+    if (element.tagName !== "DIV" || !element.classList.contains("modal-overlay")) return;
+    let depth = 0, end = html.length;
+    for (const tag of html.slice(tagPositions[i]).matchAll(/<(\/?)div\b[^>]*>/gi)) {
+      depth += tag[1] ? -1 : 1;
+      if (depth === 0) { end = tagPositions[i] + tag.index; break; }
+    }
+    element.staticDescendants = elements.filter((_, j) => tagPositions[j] > tagPositions[i] && tagPositions[j] < end);
+  });
   const body = elements.find((element) => element.tagName === "BODY");
   const querySelectorAll = (selector) =>
     elements.filter((element) => {
@@ -597,18 +635,19 @@ async function main() {
   for (const value of ["standard", "glm", "deepseek", "qwen", "kimi"]) {
     const target = { name: "edit-target", endpoint: "https://fixture.example",
       endpoint_type: "provider-new", usage_adapter: value };
-    const snapshot = `adapter-${value}-snapshot`;
-    const saved = withKeySnapshot(target, snapshot);
+    const revision = 3;
+    const saved = withETag(target, revision);
     await app.modules.targets.openTargetModal(saved);
     assert.equal(harness.ids.get("tgtUsageAdapter").value, value, "editing preserves adapter");
     harness.requests.length = 0;
-    simulateTargetUpdate(harness, saved, withKeySnapshot(target, `${snapshot}-next`));
+    simulateTargetUpdate(harness, saved, withETag(target, revision + 1));
     await harness.ids.get("saveTargetBtn").listeners.click[0]();
     const updated = harness.requests.find((r) => r.options?.method === "PUT");
     assert.equal(JSON.parse(updated.options.body).usage_adapter, value);
-    assert.equal(updated.options.headers["X-Target-Key-Snapshot"], snapshot);
-    assert.equal(JSON.parse(updated.options.body).api_key, "__existing_key_index__:0");
-    assert.equal(app.state.targets[0].key_snapshot, `${snapshot}-next`);
+    assert.equal(updated.options.headers["If-Match"], `"t1-${revision}"`);
+    assert.equal(updated.options.headers["X-Target-Key-Snapshot"], undefined);
+    assert.equal(JSON.parse(updated.options.body).api_key, "__existing_key_id__:kid-fixture-0");
+    assert.equal(app.state.targets[0].etag, "t1-" + (revision + 1));
   }
   app.modules.targets.updateTargetFormVisibility();
   for (const id of [
@@ -660,13 +699,13 @@ async function main() {
   for (const [type, want] of [["provider-new", true], ["provider-other", false]]) {
     const target = { name: "ws-target", endpoint: "https://ws.example",
       endpoint_type: "provider-new", usage_adapter: "standard" };
-    const snapshot = `ws-${type}-snapshot`;
-    const saved = withKeySnapshot(target, snapshot);
+    const revision = 4;
+    const saved = withETag(target, revision);
     await app.modules.targets.openTargetModal(saved);
     harness.ids.get("tgtPreferWS").checked = true;
     harness.ids.get("tgtType").value = type;
     harness.requests.length = 0;
-    simulateTargetUpdate(harness, saved, withKeySnapshot({ ...target, endpoint_type: type }, `${snapshot}-next`));
+    simulateTargetUpdate(harness, saved, withETag({ ...target, endpoint_type: type }, revision + 1));
     await harness.ids.get("saveTargetBtn").listeners.click[0]();
     const write = harness.requests.find(
       (request) =>
@@ -674,9 +713,9 @@ async function main() {
         request.url === "/admin/data/targets/ws-target",
     );
     assert.ok(write, "target update was sent");
-    assert.equal(write.options.headers["X-Target-Key-Snapshot"], snapshot);
+    assert.equal(write.options.headers["If-Match"], `"t1-${revision}"`);
     assert.equal(JSON.parse(write.options.body).prefer_websocket, want, `prefer_websocket for ${type}`);
-    assert.equal(app.state.targets[0].key_snapshot, `${snapshot}-next`);
+    assert.equal(app.state.targets[0].etag, "t1-" + (revision + 1));
   }
   app.state.targets = [];
   app.state.modelGroups = [
@@ -1601,4 +1640,4 @@ if (require.main === module)
     console.error(error);
     process.exitCode = 1;
   });
-module.exports = { createHarness, schemaFixture, withKeySnapshot, simulateTargetUpdate };
+module.exports = { createHarness, schemaFixture, withETag, simulateTargetUpdate };

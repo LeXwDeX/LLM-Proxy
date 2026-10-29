@@ -1,5 +1,5 @@
 "use strict";
-// Targets health: key status predicates, snapshot validation, per-target health, counts, sort and filter.
+// Targets health: key status predicates, key identity helpers, per-target health, counts, sort and filter.
 // Part of the targets page; shared mutable state lives in the object owned by the "targets" module.
 AdminApp.register("targetsHealth", function (app) {
   var ts = app.initializeModule("targets").shared;
@@ -43,10 +43,10 @@ AdminApp.register("targetsHealth", function (app) {
   function targetKeyStatusComplete(t) {
     var counts = targetKeyCounts(t);
     if (counts.total <= 1) return true;
-    if (usableKeySnapshot(t) && t.key_runtime_indices.every(function (i) { return i === null; })) return true;
+    if (keyRuntimeMapUsable(t) && t.key_runtime_indices.every(function (i) { return i === null; })) return true;
     if (hasUnmappedNonemptyKey(t)) return false;
     var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
-    var indices = usableKeySnapshot(t) ? t.key_runtime_indices : null;
+    var indices = keyRuntimeMapUsable(t) ? t.key_runtime_indices : null;
     var expected = indices
       ? indices.filter(function (i) { return Number.isInteger(i) && i >= 0; })
       : [];
@@ -259,10 +259,11 @@ AdminApp.register("targetsHealth", function (app) {
       return index === null && typeof mask === "string" && mask !== "****" && !!mask.replace("...", "").trim();
     });
   }
-  function usableKeySnapshot(t) {
+  // The runtime mapping (slot -> keypool index) is health-display data only; it
+  // never decides whether a target can be edited or saved.
+  function keyRuntimeMapUsable(t) {
     if (
-      !t || typeof t.key_snapshot !== "string" || !t.key_snapshot ||
-      typeof t.has_api_key !== "boolean" || typeof t.api_key !== "string" ||
+      !t || typeof t.has_api_key !== "boolean" || typeof t.api_key !== "string" ||
       t.has_api_key !== !!t.api_key || !Array.isArray(t.api_keys) ||
       !t.api_keys.every(function (k) { return typeof k === "string"; }) ||
       !Array.isArray(t.key_runtime_indices) ||
@@ -277,29 +278,67 @@ AdminApp.register("targetsHealth", function (app) {
       return i === null || (Number.isInteger(i) && i >= 0 && complete.has(i));
     });
   }
-  function keyListFromSnapshot(t) {
+  // key_ids has the shape of key_runtime_indices: slot 0 is the primary key, an
+  // empty slot is null. The server sends key_ids: null when it cannot derive IDs.
+  // Without usable IDs the key list is display-only and a save must carry no key
+  // fields at all (the server then keeps the stored keys). A null ID in a slot
+  // whose mask shows a real key means the payload is not trustworthy either.
+  function keyIdsUsable(t) {
+    if (!t || !Array.isArray(t.key_ids) || !Array.isArray(t.api_keys) ||
+        t.key_ids.length !== t.api_keys.length + 1) return false;
+    return t.key_ids.every(function (id, slot) {
+      if (typeof id === "string" && !!id) return true;
+      if (id !== null) return false;
+      // Short keys and empty slots both mask as "****"; only a longer mask proves a key.
+      var present = slot === 0 ? t.has_api_key === true : t.api_keys[slot - 1] !== "****";
+      return !present;
+    });
+  }
+  // Runtime index and status of one saved key, found by its stable ID.
+  function keyRuntimeByID(t, keyId) {
+    var slot = t && Array.isArray(t.key_ids) ? t.key_ids.indexOf(keyId) : -1;
+    var indices = t && Array.isArray(t.key_runtime_indices) ? t.key_runtime_indices : [];
+    var statuses = t && Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    var runtimeIndex = slot >= 0 ? indices[slot] : null;
+    var status = Number.isInteger(runtimeIndex)
+      ? statuses.find(function (s) { return s && s.index === runtimeIndex; }) || null : null;
+    return { runtimeIndex: Number.isInteger(runtimeIndex) ? runtimeIndex : null, status: status };
+  }
+  // Editor key cards for the saved keys. Saved keys are referenced by stable ID,
+  // so a card stays valid however the other keys or targets change meanwhile.
+  function keyListFromTarget(t) {
     var keys = Array.isArray(t.api_keys) ? t.api_keys : [];
-    var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
-    var indices = Array.isArray(t.key_runtime_indices) ? t.key_runtime_indices : [];
     var list = [];
+    if (!keyIdsUsable(t)) {
+      // Display only: the save request omits key fields while IDs are unusable.
+      if (t.has_api_key || keys.length) list.push({ value: t.api_key || "", existing: true, status: null });
+      keys.forEach(function (key) { list.push({ value: key, existing: true, status: null }); });
+      return list;
+    }
     function add(value, slot) {
-      var runtimeIndex = indices[slot];
-      var status = Number.isInteger(runtimeIndex)
-        ? statuses.find(function (s) { return s && s.index === runtimeIndex; }) || null
-        : null;
+      var keyId = t.key_ids[slot];
+      if (keyId === null) {
+        // An empty primary slot keeps its position; empty extra slots carry nothing.
+        if (slot === 0 && keys.length) list.push({ value: "", existing: true, emptyPrimary: true, status: null });
+        return;
+      }
+      var runtime = keyRuntimeByID(t, keyId);
       list.push({
-        value: value, ref: "__existing_key_index__:" + slot,
-        runtimeIndex: runtimeIndex, status: status,
+        value: value, existing: true, keyId: keyId, ref: "__existing_key_id__:" + keyId,
+        runtimeIndex: runtime.runtimeIndex, status: runtime.status,
       });
     }
-    if (t.has_api_key || keys.length) add(t.api_key || "", 0);
+    add(t.api_key || "", 0);
     keys.forEach(function (key, i) { add(key, i + 1); });
     return list;
   }
-  function sameKeyIndices(t) {
-    return usableKeySnapshot(t) && ts.editingKeyIndices &&
-      t.key_runtime_indices.length === ts.editingKeyIndices.length &&
-      t.key_runtime_indices.every(function (index, i) { return index === ts.editingKeyIndices[i]; });
+  // Content ETag of a target (hash of the stored bytes). Every stored target has
+  // one; "" only for a malformed payload, which must never be saved over.
+  function targetETag(t) {
+    return t && typeof t.etag === "string" && /^t1-\S+$/.test(t.etag) ? t.etag : "";
+  }
+  function etagHeaders(etag) {
+    return etag ? { "If-Match": '"' + etag + '"' } : undefined;
   }
   function keyStatusColor(s) {
     switch (s) {
@@ -343,13 +382,15 @@ AdminApp.register("targetsHealth", function (app) {
     filteredTargets: filteredTargets,
     keyStatusColor: keyStatusColor,
     keyCooldownEnd: keyCooldownEnd,
-    keyListFromSnapshot: keyListFromSnapshot,
+    keyListFromTarget: keyListFromTarget,
+    keyIdsUsable: keyIdsUsable,
+    keyRuntimeByID: keyRuntimeByID,
+    targetETag: targetETag,
+    etagHeaders: etagHeaders,
     keyStatusNeedsAttention: keyStatusNeedsAttention,
-    sameKeyIndices: sameKeyIndices,
     targetKeyCounts: targetKeyCounts,
     targetKeyStatusComplete: targetKeyStatusComplete,
     targetPhaseKnown: targetPhaseKnown,
     targetRuntimeFor: targetRuntimeFor,
-    usableKeySnapshot: usableKeySnapshot,
   };
 });

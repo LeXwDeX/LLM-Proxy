@@ -210,6 +210,21 @@ AdminApp.register("core", function (app) {
       !!error && (error.name === "TimeoutError" || error.isNetworkError === true)
     );
   }
+  // A write whose outcome the client cannot know: the request may or may not have
+  // been applied. Timeouts, network failures, any HTTP 5xx (a gateway 502/503/504
+  // can sit in front of a server that did commit) and error bodies that are not
+  // JSON (a proxy's HTML page, not our server's answer). Callers must look at the
+  // server's state before reporting success or failure. Deterministic 4xx answers
+  // with a JSON body are definite failures and are not unconfirmed.
+  function isUnconfirmedOutcome(error) {
+    if (!error) return false;
+    if (error.name === "TimeoutError" || error.isNetworkError === true) return true;
+    if (typeof error.status === "number") {
+      if (error.status >= 500) return true;
+      if (error.invalidBody === true) return true;
+    }
+    return false;
+  }
   // fetch() rejects with TypeError on network failure; aborts keep their name.
   function asNetworkError(e) {
     if (!e || e.name !== "TypeError") return e;
@@ -409,11 +424,13 @@ AdminApp.register("core", function (app) {
     var resp = result.resp;
     var text = result.text;
     var data = {};
+    var invalidBody = !text;
     if (text) {
       try {
         data = JSON.parse(text);
       } catch (e) {
         data = { raw: text };
+        invalidBody = true;
       }
     }
     if (resp.status === 401 && data && data.error === "unauthorized") {
@@ -431,8 +448,14 @@ AdminApp.register("core", function (app) {
       removeBanner(SESSION_BANNER_ID);
       if (/^\/admin\/api\/me(\?|$)/.test(url)) noteServerVersion(data && data.version);
     }
-    if (!resp.ok)
-      throw new Error(data.error || "请求失败 (HTTP " + resp.status + ")");
+    if (!resp.ok) {
+      // status and code let callers tell a revision conflict from a generic failure.
+      var httpError = new Error(data.error || "请求失败 (HTTP " + resp.status + ")");
+      httpError.status = resp.status;
+      if (invalidBody) httpError.invalidBody = true;
+      if (data && typeof data.code === "string") httpError.code = data.code;
+      throw httpError;
+    }
     return data;
   }
 
@@ -586,6 +609,7 @@ AdminApp.register("core", function (app) {
     toast: toast,
     api: api,
     isTransientError: isTransientError,
+    isUnconfirmedOutcome: isUnconfirmedOutcome,
     setFormDirty: setFormDirty,
     startVersionWatch: startVersionWatch,
     openModal: openModal,

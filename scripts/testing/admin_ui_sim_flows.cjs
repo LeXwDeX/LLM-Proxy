@@ -721,14 +721,21 @@ const list = [
     name: "key-block-and-unblock-in-edit-modal",
     async run({ page }) {
       await page.eval(`__sim.click('[data-edit-tgt=${js(S.tgtOpenAI)}]')`);
-      await page.waitFor(`__sim.open("targetModal") && document.querySelector('#keyCardList [data-block-key-idx="1"]')`, { what: "edit modal key cards" });
-      await page.eval(`__sim.click('#keyCardList [data-block-key-idx="1"]')`);
+      await page.waitFor(`__sim.open("targetModal") && document.querySelector('#keyCardList [data-block-key-id]')`, { what: "edit modal key cards" });
+      // Keys are addressed by stable ID, not by position.
+      const keyId = await page.eval(`document.querySelectorAll('#keyCardList [data-block-key-id]')[1]?.dataset.blockKeyId || ""`);
+      assert.ok(keyId, "second key card carries a key ID");
+      await page.eval(`document.querySelector('#keyCardList [data-block-key-id=${js(keyId)}]').click()`);
       await confirmModal(page);
       await expectToast(page, "已屏蔽 Key");
-      await page.waitFor(`document.querySelector('#keyCardList [data-unblock-key-idx="1"]')`, { what: "unblock button after block" });
-      await page.eval(`__sim.click('#keyCardList [data-unblock-key-idx="1"]')`);
+      await page.waitFor(`document.querySelector('#keyCardList [data-unblock-key-id=${js(keyId)}]')`, { what: "unblock button after block" });
+      await page.eval(`document.querySelector('#keyCardList [data-unblock-key-id=${js(keyId)}]').click()`);
       await confirmModal(page);
       await expectToast(page, "已解除屏蔽");
+      // Blocking does not change the stored target (so not its ETag): the draft still saves.
+      await page.eval(`__sim.click("#saveTargetBtn")`);
+      await expectToast(page, "目标已更新");
+      await page.waitFor(`!__sim.open("targetModal")`, { what: "modal closed after save" });
     },
   },
   {
@@ -752,6 +759,178 @@ const list = [
       const after = (await fakeRequests(stack.fakes[0])).length;
       assert.ok(after > before, "fake-a received no test-model request");
       await page.eval(`closeModal("targetModal"), true`);
+    },
+  },
+  {
+    name: "edit-save-survives-other-target-change",
+    async run({ page }) {
+      const etagOf = (name) => page.eval(`(AdminApp.state.targets.find(t => t.name === ${js(name)}) || {}).etag || ""`);
+      await goto(page, "targets");
+      await page.eval(`__sim.click('[data-edit-tgt=${js(S.tgtOpenAI)}]')`);
+      await page.waitFor(`__sim.open("targetModal")`, { what: "edit modal" });
+      // Another operator pauses a different target while this editor is open. (A pause followed
+      // by a resume would restore the exact stored bytes, hence the same content ETag.)
+      const before = await etagOf(S.tgtGLM);
+      const other = "/admin/data/targets/" + encodeURIComponent(S.tgtGLM);
+      await adminAPI(page, other + "/pause", { method: "PUT" });
+      await page.eval(`__sim.click("#refreshTargetsBtn")`);
+      await page.waitFor(`(AdminApp.state.targets.find(t => t.name === ${js(S.tgtGLM)}) || {}).etag !== ${js(before)}`, { what: "refreshed list" });
+      assert.ok(!(await page.eval(`__sim.text("#keyCardList")`)).includes("已在别处修改"), "an unrelated target never warns the editor");
+      await page.eval(`__sim.click("#saveTargetBtn")`);
+      await expectToast(page, "目标已更新");
+      await page.waitFor(`!__sim.open("targetModal")`, { what: "modal closed after save" });
+      await adminAPI(page, other + "/resume", { method: "PUT" });
+      const toasts = await page.eval("__sim.toasts()");
+      assert.ok(!toasts.some((t) => t.includes("保存失败") || t.includes("未保存")), `no failure toast: ${JSON.stringify(toasts)}`);
+    },
+  },
+  {
+    name: "edit-save-conflict-shows-reload-then-saves",
+    async run({ page }) {
+      await goto(page, "targets");
+      await page.eval(`__sim.click('[data-edit-tgt=${js(S.tgtOpenAI)}]')`);
+      await page.waitFor(`__sim.open("targetModal")`, { what: "edit modal" });
+      // Another operator saves this very target: the editor's ETag is now stale.
+      const self = "/admin/data/targets/" + encodeURIComponent(S.tgtOpenAI);
+      await adminAPI(page, self, { method: "PUT", body: { custom_headers: { "X-Sim-Other-Operator": "1" } } });
+      await page.eval(`__sim.click("#refreshTargetsBtn")`);
+      await page.waitFor(`__sim.text("#keyCardList").includes("已在别处修改")`, { what: "non-blocking changed-elsewhere warning" });
+      await page.eval(`__sim.fill("#tgtEndpoint", __sim.$("#tgtEndpoint").value)`);
+      await page.eval(`__sim.click("#saveTargetBtn")`);
+      await expectToast(page, "该目标已被修改，请重新加载后再保存", "error");
+      assert.ok(await page.eval(`__sim.open("targetModal")`), "conflict keeps the editor open");
+      assert.equal(await page.eval(`__sim.$("#saveTargetBtn").disabled`), false, "form is editable again");
+      await page.eval(`__sim.click("#keyCardList [data-reload-target]")`);
+      await confirmModal(page);
+      await page.waitFor(`!document.querySelector("#keyCardList [data-reload-target]")`, { what: "notice cleared after reload" });
+      // Reloading replaces the whole form with the server's content (the other operator's header).
+      assert.ok(await page.eval(`[...document.querySelectorAll("#custom-headers-container input")].some(i => i.value === "X-Sim-Other-Operator")`),
+        "form shows the other operator's change");
+      await page.eval(`__sim.click("#saveTargetBtn")`);
+      await expectToast(page, "目标已更新");
+      await page.waitFor(`!__sim.open("targetModal")`, { what: "modal closed after save" });
+      // Undo the fixture change so later flows see the original target.
+      await adminAPI(page, self, { method: "PUT", body: { custom_headers: {} } });
+    },
+  },
+  {
+    name: "two-editors-with-same-etag-one-conflicts",
+    async run({ page }) {
+      await goto(page, "targets");
+      const target = "/admin/data/targets/" + encodeURIComponent(S.tgtGLM);
+      const etag = await page.eval(`fetch("/admin/data/targets").then(r => r.json())
+        .then(d => d.targets.find(t => t.name === ${js(S.tgtGLM)}).etag)`);
+      assert.match(etag, /^t1-/, "stored targets expose a content ETag");
+      const write = (action, ifMatch) => page.eval(`fetch(${js(target + action)}, { method: "PUT",
+        headers: { "X-Requested-With": "XMLHttpRequest", "If-Match": ${js('"' + ifMatch + '"')} } })
+        .then(async (r) => ({ status: r.status, body: await r.text() }))`);
+      const first = await write("/pause", etag);
+      const second = await write("/resume", etag);
+      assert.equal(first.status, 200, first.body);
+      assert.equal(second.status, 409, `second editor with the same ETag: ${second.body}`);
+      assert.match(second.body, /target_revision_conflict/);
+      const fresh = await page.eval(`fetch("/admin/data/targets").then(r => r.json())
+        .then(d => d.targets.find(t => t.name === ${js(S.tgtGLM)}))`);
+      assert.equal(fresh.paused, true, "the loser changed nothing");
+      assert.notEqual(fresh.etag, etag);
+      const restored = await write("/resume", fresh.etag);
+      assert.equal(restored.status, 200, restored.body);
+    },
+  },
+  {
+    name: "unusable-key-ids-save-other-fields-without-keys",
+    async run({ page }) {
+      await goto(page, "targets");
+      const snapshot = () => page.eval(`fetch("/admin/data/targets").then(r => r.json())
+        .then(d => { const t = d.targets.find(t => t.name === ${js(S.tgtOpenAI)}); return JSON.stringify([t.api_key, t.api_keys, t.key_ids, t.request_stream_usage_if_missing]); })`);
+      const before = JSON.parse(await snapshot());
+      assert.ok(Array.isArray(before[2]), "real server sends key_ids");
+      // The server could not derive key IDs: it sends null. Simulate that for the list only.
+      await page.eval(`(() => {
+        window.__origFetch = window.fetch;
+        window.__puts = [];
+        window.fetch = async (url, init) => {
+          const method = (init && init.method) || "GET";
+          if (method === "PUT" && String(url).indexOf("/admin/data/targets/") === 0) window.__puts.push(JSON.parse(init.body || "{}"));
+          const response = await window.__origFetch(url, init);
+          if (method === "GET" && String(url) === "/admin/data/targets") {
+            const data = await response.clone().json();
+            data.targets.forEach((t) => { t.key_ids = null; });
+            return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
+          }
+          return response;
+        };
+      })()`);
+      try {
+        await page.eval(`__sim.click("#refreshTargetsBtn")`);
+        await page.waitFor(`(AdminApp.state.targets.find(t => t.name === ${js(S.tgtOpenAI)}) || {}).key_ids === null`, { what: "list with key_ids null" });
+        await page.eval(`__sim.click('[data-edit-tgt=${js(S.tgtOpenAI)}]')`);
+        await page.waitFor(`__sim.open("targetModal") && __sim.text("#keyCardList").includes("密钥列表暂不可编辑，其他字段可正常保存")`, { what: "read-only key list notice" });
+        await page.eval(`__sim.$("#tgtRequestStreamUsage").click()`);
+        await page.eval(`__sim.click("#saveTargetBtn")`);
+        await expectToast(page, "目标已更新");
+        await page.waitFor(`!__sim.open("targetModal")`, { what: "modal closed after save" });
+        const puts = await page.eval(`window.__puts`);
+        assert.equal(puts.length, 1, "one PUT");
+        assert.ok(!("api_key" in puts[0]) && !("api_keys" in puts[0]), `the save carries no key fields: ${Object.keys(puts[0])}`);
+      } finally {
+        await page.eval(`window.fetch = window.__origFetch`);
+      }
+      const after = JSON.parse(await snapshot());
+      assert.deepEqual([after[0], after[1], after[2]], [before[0], before[1], before[2]], "stored keys and their IDs are unchanged");
+      assert.equal(after[3], !before[3], "the other field was saved");
+      // Put the toggled field back through a normal save (real key IDs, keys referenced).
+      await page.eval(`__sim.click("#refreshTargetsBtn")`);
+      await page.waitFor(`Array.isArray((AdminApp.state.targets.find(t => t.name === ${js(S.tgtOpenAI)}) || {}).key_ids)`, { what: "list with real key_ids again" });
+      await page.eval(`__sim.click('[data-edit-tgt=${js(S.tgtOpenAI)}]')`);
+      await page.waitFor(`__sim.open("targetModal") && document.querySelector('#keyCardList [data-block-key-id]')`, { what: "editable key list again" });
+      await page.eval(`__sim.$("#tgtRequestStreamUsage").click()`);
+      await page.eval(`__sim.click("#saveTargetBtn")`);
+      await expectToast(page, "目标已更新");
+      await page.waitFor(`!__sim.open("targetModal")`, { what: "modal closed after restore" });
+      assert.deepEqual(JSON.parse(await snapshot()), before, "state restored");
+    },
+  },
+  {
+    name: "save-504-after-commit-reads-as-saved",
+    async run({ page }) {
+      await goto(page, "targets");
+      const flag = () => page.eval(`fetch("/admin/data/targets").then(r => r.json())
+        .then(d => d.targets.find(t => t.name === ${js(S.tgtOpenAI)}).request_stream_usage_if_missing)`);
+      const before = await flag();
+      await page.eval(`__sim.click('[data-edit-tgt=${js(S.tgtOpenAI)}]')`);
+      await page.waitFor(`__sim.open("targetModal") && document.querySelector('#keyCardList [data-block-key-id]')`, { what: "edit modal" });
+      await page.eval(`__sim.$("#tgtRequestStreamUsage").click()`);
+      // The gateway answers 504 with an HTML page, but the request did reach the server and committed.
+      await page.eval(`(() => {
+        window.__origFetch = window.fetch;
+        window.fetch = async (url, init) => {
+          const method = (init && init.method) || "GET";
+          const response = await window.__origFetch(url, init);
+          if (method === "PUT" && String(url).indexOf("/admin/data/targets/") === 0 && response.ok) {
+            return new Response("<html><body>504 Gateway Timeout</body></html>", { status: 504, headers: { "Content-Type": "text/html" } });
+          }
+          return response;
+        };
+      })()`);
+      try {
+        await page.eval(`__sim.click("#saveTargetBtn")`);
+        await expectToast(page, "已保存");
+        await page.waitFor(`!__sim.open("targetModal")`, { what: "modal closed after the read-back confirmed the save" });
+      } finally {
+        await page.eval(`window.fetch = window.__origFetch`);
+      }
+      const toasts = await page.eval("__sim.toasts()");
+      assert.ok(!toasts.some((t) => t.includes("保存失败") || t.includes("未确认")), `no failure or unconfirmed toast: ${JSON.stringify(toasts)}`);
+      assert.equal(await flag(), !before, "the committed change is on the server");
+      // Put the toggled field back through a normal save.
+      await page.eval(`__sim.click('[data-edit-tgt=${js(S.tgtOpenAI)}]')`);
+      await page.waitFor(`__sim.open("targetModal") && document.querySelector('#keyCardList [data-block-key-id]')`, { what: "edit modal again" });
+      await page.eval(`__sim.$("#tgtRequestStreamUsage").click()`);
+      await page.eval(`__sim.click("#saveTargetBtn")`);
+      await expectToast(page, "目标已更新");
+      await page.waitFor(`!__sim.open("targetModal")`, { what: "modal closed after restore" });
+      assert.equal(await flag(), before, "state restored");
     },
   },
   {

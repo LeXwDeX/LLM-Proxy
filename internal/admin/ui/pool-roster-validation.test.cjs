@@ -1,14 +1,14 @@
 "use strict";
 const assert = require("node:assert/strict");
 const {test} = require("node:test");
-const {createHarness, withKeySnapshot} = require("../../../scripts/testing/admin_ui_test.cjs");
+const {createHarness, withETag} = require("../../../scripts/testing/admin_ui_test.cjs");
 
 const badRosters = [
   {pools: [null]}, {pools: [{name: ""}]}, {pools: [{name: "   "}]},
   {pools: [[]]}, {pools: [{name: "ok"}, null]}, {pools: [{name: "ok", paused: "false"}]},
 ];
-const target = withKeySnapshot({name: "member", pool: "pool-a", endpoint_type: "provider-new",
-  endpoint: "https://fixture.invalid", usage_adapter: "standard"}, "snapshot");
+const target = withETag({name: "member", pool: "pool-a", endpoint_type: "provider-new",
+  endpoint: "https://fixture.invalid", usage_adapter: "standard"}, 1);
 const routes = () => ({"/admin/data/targets": {targets: [target]},
   "/admin/data/pools": {pools: [{name: "pool-a", paused: false}]}, "/admin/data/catalog": {models: []}});
 
