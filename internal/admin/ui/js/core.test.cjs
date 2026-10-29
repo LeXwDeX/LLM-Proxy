@@ -341,3 +341,25 @@ test("global error handlers log and toast with throttling, ignoring expired-sess
   env.winListeners.unhandledrejection.forEach(fn => fn({reason: expired}));
   assert.equal(toasts(), 2, "the banner already explains an expired session");
 });
+
+test("a background request that gets 401 never navigates: banner + SessionExpiredError", async () => {
+  const assigned = [];
+  const env = loadCoreEnv({clock: fakeClock(), location: {pathname: "/admin", assign: (u) => assigned.push(u)}, fetch: async () => unauthorized()});
+  await assert.rejects(env.core.api("/admin/api/me", {background: true}), (e) => e.name === "SessionExpiredError");
+  assert.deepEqual(assigned, [], "an inline-form editor must not be bounced by a poll");
+  assert.ok(banner(env, "sessionExpiredBanner"));
+  await assert.rejects(env.core.api("/admin/data/x"), /unauthorized/);
+  assert.equal(assigned.length, 1, "foreground calls without unsaved UI still redirect");
+});
+
+test("global handlers ignore benign ResizeObserver noise and script-load failures owned by the boot watchdog", () => {
+  const env = loadCoreEnv({clock: fakeClock(), fetch: async () => jsonResponse(200, {})});
+  const fire = (event) => env.winListeners.error.forEach(fn => fn(event));
+  fire({message: "ResizeObserver loop completed with undelivered notifications."});
+  fire({message: "ResizeObserver loop limit exceeded"});
+  fire({message: "Script error", filename: "http://h/admin/ui/js/pages/users/users.js?v=1-ab", error: Object.assign(new Error("x"), {name: "SyntaxError"})});
+  fire({message: "Unexpected token '<'", filename: "http://h/admin/ui/js/core/schema.js"});
+  assert.equal(env.toastContainer.children.length, 0);
+  fire({message: "boom", error: new Error("boom")});
+  assert.equal(env.toastContainer.children.length, 1, "real errors are still reported");
+});

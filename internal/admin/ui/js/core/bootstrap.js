@@ -29,12 +29,24 @@
   // Modules bootstrap itself calls; every module bound through app.bind is
   // checked as well (AdminApp.missingModules).
   var BOOT_MODULES = ["core", "schema", "navigation", "users", "overview", "audit_trace"];
+  function scriptFor(name) {
+    return name === "core" || name === "schema" || name === "navigation" || name === "bootstrap"
+      ? "/admin/ui/js/core/" + name + ".js"
+      : "/admin/ui/js/pages/" + name + "/" + name + ".js";
+  }
   function assertModulesLoaded() {
     var missing = app.missingModules(BOOT_MODULES);
-    if (missing.length)
-      throw new Error(
-        "以下模块未加载，对应脚本可能加载失败或存在语法错误: " + missing.join(", "),
-      );
+    if (!missing.length) return;
+    var error = new Error(
+      "页面资源加载失败，以下模块未加载: " +
+        missing
+          .map(function (name) {
+            return name + "（应由 " + scriptFor(name) + " 定义，可能加载失败或存在语法错误）";
+          })
+          .join("、"),
+    );
+    error.bootKind = "modules";
+    throw error;
   }
   function boot() {
     if (inFlight) return inFlight;
@@ -51,6 +63,7 @@
       var message = document.getElementById("adminBootMessage");
       var retry = document.getElementById("adminBootRetry");
       retry.hidden = true;
+      status.removeAttribute("data-boot-error");
       message.textContent = "加载中…";
       function onRetry(error, attempt, max) {
         message.textContent =
@@ -64,25 +77,26 @@
         app.initialize();
         assertModulesLoaded();
         var navigation = app.modules.navigation;
-        // Read-only data loads start now; the layout stays inert and the body
-        // readonly until /api/me resolves, so nothing editable is reachable.
-        if (!navigation.resolveDeepLink())
+        // Read-only overview loads start now; the layout stays inert and the
+        // body readonly until /api/me resolves. Other pages (deep links) wait
+        // for the role: they render readonly state once, at load time.
+        if (app.state.currentPage === "overview")
           app.modules.overview.startOverviewAutoRefresh();
         // Trace is optional and must not delay readiness: an unreachable probe
         // leaves its page hidden. TODO: switch to the lightweight
         // /admin/data/trace/stats probe once that endpoint exists (the probe
         // URL lives in audit_trace.checkTraceEnabled).
+        var probeSettled = false;
+        function probeDone() {
+          probeSettled = true;
+          if (app.state.ready) navigation.resolveDeepLink(true);
+        }
         withRetry(
           function () {
             return app.modules.audit_trace.checkTraceEnabled();
           },
           function () {},
-        ).then(
-          function () {
-            navigation.resolveDeepLink();
-          },
-          function () {},
-        );
+        ).then(probeDone, probeDone);
         var role;
         await withRetry(async function () {
           role = await app.modules.users.loadUserInfo();
@@ -92,7 +106,10 @@
         if (role === "admin") document.body.classList.remove("readonly-mode");
         if (layout) layout.inert = false;
         status.hidden = true;
-        navigation.resolveDeepLink();
+        // A retried boot may already show another page: reload it with the
+        // role known instead of restarting the overview behind it.
+        if (!navigation.resolveDeepLink(probeSettled) && app.state.currentPage !== "overview")
+          navigation.loadPageData(app.state.currentPage);
         app.modules.core.startVersionWatch();
         return true;
       } catch (e) {
@@ -102,6 +119,7 @@
         } catch (stopError) {
           /* the overview module may be the one that failed */
         }
+        status.setAttribute("data-boot-error", e.bootKind || "error");
         app.modules.core.toast("管理初始化失败: " + e.message, "error");
         message.textContent = "加载失败: " + e.message + "。编辑功能尚未启用。";
         status.hidden = false;

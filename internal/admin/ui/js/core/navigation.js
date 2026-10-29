@@ -65,18 +65,23 @@ AdminApp.register("navigation", function (app) {
     }
   }
   // Keep the address bar in sync so reload/bookmark/post-login `next` return to
-  // this page (replaceState: no history entry, no hashchange).
-  function syncHash(page) {
+  // this page. mode: "push" (user clicks, so Back works), "replace" (boot and
+  // corrections: no history entry) or "none". Neither fires hashchange.
+  function syncHash(page, mode) {
+    if (mode === "none") return;
     try {
-      if (typeof history !== "undefined" && history && history.replaceState)
-        history.replaceState(null, "", location.pathname + location.search + "#" + page);
+      if ((location.hash || "") === "#" + page) return;
+      if (typeof history === "undefined" || !history) return;
+      var url = location.pathname + location.search + "#" + page;
+      if (mode === "push" && history.pushState) history.pushState(null, "", url);
+      else if (history.replaceState) history.replaceState(null, "", url);
     } catch (e) {
       /* sandboxed or file contexts may refuse; the hash is only a convenience */
     }
   }
-  function switchPage(page) {
+  function switchPage(page, mode) {
     state.currentPage = page;
-    syncHash(page);
+    syncHash(page, mode || "replace");
     document.querySelectorAll(".sidebar-nav-item").forEach(function (n) {
       var active = n.dataset.page === page;
       n.classList.toggle("active", active);
@@ -112,23 +117,47 @@ AdminApp.register("navigation", function (app) {
       },
     );
   }
-  // Opens the page named by location.hash once its nav entry is visible (the
-  // role-gated "users" and probe-gated "trace" entries appear later during
-  // boot, so bootstrap calls this again). Never overrides a user's own click.
-  // Returns true when it switched pages.
+  // Role-gated ("users") and probe-gated ("trace") entries stay hidden until
+  // known; a hidden entry is not a valid target.
+  function pageAllowed(page) {
+    var item = navItem(page);
+    return !!item && !(item.style && item.style.display === "none");
+  }
+  // Opens the page named by location.hash. Only call once the role is known
+  // (pages render readonly state at load time). Never overrides a user's own
+  // navigation. final=true also corrects a hash that names a page this user
+  // cannot reach. Returns true when it switched pages.
   var userNavigated = false;
-  function resolveDeepLink() {
+  function resolveDeepLink(final) {
     var page = pageFromHash();
     if (!page || userNavigated || page === state.currentPage) return false;
-    var item = navItem(page);
-    if (!item || (item.style && item.style.display === "none")) return false;
-    switchPage(page);
+    if (!pageAllowed(page)) {
+      if (final) syncHash(state.currentPage, "replace");
+      return false;
+    }
+    switchPage(page, "replace");
     return true;
   }
+  // Back/Forward and hand-edited hashes. Unknown or unreachable pages are
+  // reverted to the page actually shown.
+  if (typeof window.addEventListener === "function")
+    window.addEventListener("hashchange", function () {
+      if (!state.ready) return;
+      var raw = (location.hash || "").replace(/^#\/?/, "");
+      var page = raw === "" ? "overview" : pageFromHash();
+      if (!page || !pageAllowed(page)) {
+        syncHash(state.currentPage, "replace");
+        return;
+      }
+      if (page !== state.currentPage) {
+        userNavigated = true;
+        switchPage(page, "none");
+      }
+    });
   document.querySelectorAll(".sidebar-nav-item").forEach(function (item) {
     function activate() {
       userNavigated = true;
-      switchPage(item.dataset.page);
+      switchPage(item.dataset.page, "push");
     }
     item.addEventListener("click", activate);
     item.addEventListener("keydown", function (event) {

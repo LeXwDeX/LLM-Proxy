@@ -411,7 +411,9 @@ AdminApp.register("core", function (app) {
     if (resp.status === 401 && data && data.error === "unauthorized") {
       // Never throw away unsaved input: keep the page and ask for a re-login
       // in another tab; the caller keeps its form and may retry afterwards.
-      if (hasUnsavedUi()) {
+      // Background polls never navigate: they may fire while the user edits an
+      // inline form that is invisible to hasUnsavedUi().
+      if (background || hasUnsavedUi()) {
         showSessionExpiredBanner();
         throw namedError("SessionExpiredError", SESSION_EXPIRED_MESSAGE);
       }
@@ -443,6 +445,16 @@ AdminApp.register("core", function (app) {
   }
   if (typeof window.addEventListener === "function") {
     window.addEventListener("error", function (event) {
+      var message = (event && event.message) || "";
+      // Benign browser notification, not a failure.
+      if (event && !event.error && /^ResizeObserver loop/.test(message)) return;
+      // Script load/parse failures of our own modules belong to the boot watchdog.
+      if (
+        event &&
+        String(event.filename || "").indexOf("/admin/ui/js/") >= 0 &&
+        (!event.error || event.error.name === "SyntaxError")
+      )
+        return;
       reportUnhandled("error", (event && (event.error || event.message)) || event);
     });
     window.addEventListener("unhandledrejection", function (event) {

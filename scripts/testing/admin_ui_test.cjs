@@ -100,6 +100,9 @@ class Element {
   getAttribute(name) {
     return this.attrs[name] ?? null;
   }
+  removeAttribute(name) {
+    delete this.attrs[name];
+  }
   querySelectorAll(selector) {
     const dataSelector = selector.match(/^([a-z][\w-]*)?\[data-([\w-]+)\]$/i);
     return this.children.flatMap((child) => [child, ...child.querySelectorAll("*")])
@@ -250,7 +253,9 @@ function createHarness({
   location = {},
   // Script names (e.g. "pages/users/users.js") that fail to load, to model a 404/SyntaxError.
   omitScripts = [],
+  history = undefined,
 } = {}) {
+  const windowListeners = {};
   const harnessScripts = scripts.filter((script) => !omitScripts.includes(script.name));
   const elements = [],
     ids = new Map(),
@@ -325,7 +330,10 @@ function createHarness({
     setInterval: () => 1,
     clearInterval() {},
     navigator: { clipboard: { writeText: async () => {} } },
-    addEventListener() {},
+    addEventListener(type, fn) {
+      (windowListeners[type] = windowListeners[type] || []).push(fn);
+    },
+    history,
     location,
     requestAnimationFrame: (fn) => fn(),
     fetch: (url, options) => {
@@ -391,6 +399,7 @@ function createHarness({
   return {
     context,
     document,
+    windowListeners,
     ids,
     requests,
     setFailure: (value) => {

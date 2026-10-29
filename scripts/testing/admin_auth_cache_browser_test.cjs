@@ -99,6 +99,7 @@ async function runBrowser(pw, name, base) {
       () => /页面资源加载失败/.test((document.getElementById("adminBootMessage") || {}).textContent || ""),
       null, { timeout: 8000 });
     assert.equal(await page.evaluate(() => document.getElementById("adminBootRetry").hidden), false);
+    assert.match(await page.evaluate(() => document.getElementById("adminBootMessage").textContent), /schema[^]*\/admin\/ui\/js\/core\/schema\.js/, "boot banner names the missing module and its script");
     await page.unroute("**/admin/ui/js/core/schema.js*");
     await Promise.all([page.waitForNavigation(), page.click("#adminBootRetry")]);
     await page.waitForFunction(() => window.AdminApp && window.AdminApp.state && window.AdminApp.state.ready === true, null, { timeout: 15000 });
@@ -124,19 +125,23 @@ async function shellUx(page, name, base, pageErrors) {
   await page.click("#newTargetBtn");
   await page.waitForSelector("#targetModal.open");
   await page.fill("#tgtName", "draft-keep");
+  await page.fill("#tgtEndpoint", "https://draft.example.invalid");
+  await page.selectOption("#tgtUsageAdapter", "standard");
+  await page.fill("#tgtNewKeyInput", "sk-draft-not-real");
+  await page.click("#addKeyBtn");
   await page.evaluate(() => fetch("/logout", { method: "POST", redirect: "manual" }));
+  // The real save request must be what hits the 401 (no client-validation stop, no api() fallback).
+  const saveRequest = page.waitForResponse((r) => r.url().includes("/admin/data/targets") && r.request().method() === "POST");
   await page.click("#saveTargetBtn");
-  await page.waitForFunction(() => !!document.getElementById("sessionExpiredBanner"), null, { timeout: 5000 }).catch(async () => {
-    // Client-side validation may stop before any request; force the save request path instead.
-    await page.evaluate(() => window.api("/admin/data/targets", { method: "POST", body: { name: "draft-keep" } }).catch(() => {}));
-    await page.waitForFunction(() => !!document.getElementById("sessionExpiredBanner"), null, { timeout: 5000 });
-  });
+  assert.equal((await saveRequest).status(), 401, name + ": save request must be sent and rejected with 401");
+  await page.waitForFunction(() => !!document.getElementById("sessionExpiredBanner"), null, { timeout: 5000 });
   assert.match(await bannerText(page, "sessionExpiredBanner"), /会话已过期，请在新标签页登录后重试/, name + ": banner text");
   const link = await page.evaluate(() => { const a = document.querySelector("#sessionExpiredBanner a"); return a && { href: a.getAttribute("href"), target: a.target, text: a.textContent }; });
   assert.deepEqual(link, { href: "/login?next=/admin", target: "_blank", text: "打开登录页" });
   assert.equal(new URL(page.url()).pathname, "/admin", name + ": page must not navigate away: " + page.url());
   assert.equal(await page.evaluate(() => document.getElementById("targetModal").classList.contains("open")), true, name + ": modal stays open");
   assert.equal(await page.inputValue("#tgtName"), "draft-keep", name + ": draft kept");
+  assert.equal(await page.inputValue("#tgtEndpoint"), "https://draft.example.invalid", name + ": endpoint draft kept");
 
   // 2. Re-login elsewhere (same cookie jar), the next successful call clears the banner.
   await loginViaFetch(page);

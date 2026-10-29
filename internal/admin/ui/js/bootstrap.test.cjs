@@ -9,19 +9,27 @@ const {fakeClock} = require("./fake-clock.cjs");
 const hang = () => new Promise(() => {});
 const SCHEMA = "/admin/data/schema";
 
-function boot({fetch, schema, hash = "", omitScripts} = {}) {
+function boot({fetch, schema, hash = "", omitScripts, withHistory = false} = {}) {
   const clock = fakeClock();
   const assigned = [];
+  const location = {pathname: "/admin", search: "", hash, assign: (url) => assigned.push(url)};
+  const urlCalls = [];
+  const record = (kind) => (state, title, url) => {
+    urlCalls.push([kind, url]);
+    location.hash = url.includes("#") ? url.slice(url.indexOf("#")) : "";
+  };
+  const history = {replaceState: record("replace"), pushState: record("push")};
   const harness = createHarness({
     fetch,
     schema,
     timers: clock,
     omitScripts,
-    location: {pathname: "/admin", search: "", hash, assign: (url) => assigned.push(url)},
+    history: withHistory ? history : undefined,
+    location,
   });
   const app = harness.start();
   const count = (url) => harness.requests.filter((request) => request.url === url).length;
-  return {app, clock, harness, assigned, count, ids: harness.ids};
+  return {app, clock, harness, assigned, count, location, urlCalls, ids: harness.ids};
 }
 
 test("boot gives up with a usable retry button when every schema request hangs", async () => {
@@ -208,6 +216,103 @@ test("a #page deep link opens that page after boot", async () => {
   await clock.advance(100);
   await app.bootPromise;
   assert.equal(app.state.currentPage, "clients");
+});
+
+test("a deep link is deferred until the role is known so the page renders with admin state", async () => {
+  let releaseMe;
+  const meGate = new Promise((resolve) => (releaseMe = resolve));
+  const readonlyAtTargets = [];
+  const {app, clock, count, harness} = boot({
+    hash: "#targets",
+    fetch: async (url, options, fixture) => {
+      if (url === "/admin/data/targets")
+        readonlyAtTargets.push(harness.document.body.classList.contains("readonly-mode"));
+      if (url === ME) await meGate;
+      return fixture(url, options);
+    },
+  });
+  await clock.advance(100);
+  assert.equal(count("/admin/data/targets"), 0, "no page data is rendered while the role is unknown");
+  assert.equal(app.state.currentPage, "overview");
+  releaseMe();
+  await clock.advance(100);
+  await app.bootPromise;
+  assert.equal(app.state.currentPage, "targets");
+  assert.ok(count("/admin/data/targets") >= 1);
+  assert.deepEqual([...new Set(readonlyAtTargets)], [false], "targets rendered after readonly-mode was lifted");
+});
+
+test("a boot retry reloads the current non-overview page instead of restarting the overview", async () => {
+  let failMe = true;
+  const {app, clock, count} = boot({
+    hash: "#clients",
+    fetch: (url, options, fixture) =>
+      url === ME && failMe
+        ? Promise.resolve({ok: false, status: 500, text: async () => JSON.stringify({error: "me down"})})
+        : fixture(url, options),
+  });
+  await clock.advance(100);
+  assert.equal(app.state.ready, false);
+  app.state.currentPage = "clients"; // as if a previous boot had already switched
+  const before = count(ACTIVITY);
+  failMe = false;
+  await app.boot();
+  assert.equal(count(ACTIVITY), before, "overview refresh is not restarted behind another page");
+  assert.ok(count("/admin/data/clients") >= 1, "the visible page is (re)loaded once the role is known");
+});
+
+test("the missing-module banner names the module and the script that should define it", async () => {
+  const {app, clock, ids} = boot({omitScripts: ["pages/users/users.js"]});
+  await clock.advance(100);
+  const text = ids.get("adminBootMessage").textContent;
+  assert.match(text, /页面资源加载失败/);
+  assert.match(text, /users/);
+  assert.match(text, /\/admin\/ui\/js\/pages\/users\/users\.js/);
+  assert.equal(ids.get("adminBootStatus").getAttribute("data-boot-error"), "modules", "tells the watchdog to yield");
+});
+
+test("user navigation pushes history entries; boot and corrections replace", async () => {
+  const {app, clock, harness, urlCalls} = boot({hash: "#clients", withHistory: true});
+  await clock.advance(100);
+  await app.bootPromise;
+  assert.deepEqual(urlCalls, [], "the boot deep link already matches the address bar: no history write");
+  const item = harness.document.querySelectorAll(".sidebar-nav-item").find((el) => el.dataset.page === "usage");
+  item.listeners.click[0]();
+  assert.deepEqual(urlCalls, [["push", "/admin#usage"]]);
+  assert.equal(app.state.currentPage, "usage");
+});
+
+test("hashchange (Back or a hand-edited hash) switches pages within the whitelist", async () => {
+  const {app, clock, harness, location, urlCalls} = boot({withHistory: true});
+  await clock.advance(100);
+  await app.bootPromise;
+  const fire = (hash) => {
+    location.hash = hash;
+    (harness.windowListeners.hashchange || []).forEach((fn) => fn({}));
+  };
+  fire("#audit");
+  assert.equal(app.state.currentPage, "audit");
+  fire("#nonsense");
+  assert.equal(app.state.currentPage, "audit", "unknown pages are ignored");
+  assert.equal(location.hash, "#audit", "and the hash is corrected to the page shown");
+  fire("");
+  assert.equal(app.state.currentPage, "overview", "an empty hash means the overview");
+  assert.equal(urlCalls.filter(([kind]) => kind === "push").length, 0, "hashchange itself never pushes");
+});
+
+test("a readonly user on #users keeps the overview and the hash is corrected", async () => {
+  const hash = "#users";
+  const clock = fakeClock();
+  const location = {pathname: "/admin", search: "", hash, assign() {}};
+  const history = {replaceState: (s, t, url) => (location.hash = url.slice(url.indexOf("#"))), pushState() {}};
+  const harness = createHarness({role: "readonly", timers: clock, history, location});
+  const app = await harness.run();
+  await clock.advance(100);
+  assert.equal(app.state.currentPage, "overview");
+  assert.equal(location.hash, "#overview");
+  (harness.windowListeners.hashchange || []).forEach((fn) => { location.hash = "#users"; fn({}); });
+  assert.equal(app.state.currentPage, "overview", "admin-only pages are not reachable through the hash");
+  assert.equal(location.hash, "#overview");
 });
 
 test("a #users deep link waits for the admin role; readonly users stay on overview", async () => {
