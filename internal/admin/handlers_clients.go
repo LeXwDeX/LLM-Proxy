@@ -39,6 +39,7 @@ func (h *Handler) evaluateClientQuota(name string) {
 		h.clientQuotaEvaluateHook(name)
 	}
 	if h.quotaManager != nil {
+		h.quotaManager.NoteConfigChange()
 		h.quotaManager.Evaluate(name)
 	}
 }

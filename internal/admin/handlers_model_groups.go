@@ -46,7 +46,7 @@ func (h *Handler) handleCreateModelGroup(w http.ResponseWriter, r *http.Request)
 	}
 	h.scheduleQuotaRefresh(quota.RefreshScope{Groups: []string{req.Name}})
 	h.recordAudit(r, "model_group_create", req.Name, "success", "")
-	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusCreated, h.withQuotaRefresh(map[string]any{"status": "ok"}))
 }
 
 func (h *Handler) handleUpdateModelGroup(w http.ResponseWriter, r *http.Request) {
@@ -77,7 +77,7 @@ func (h *Handler) handleUpdateModelGroup(w http.ResponseWriter, r *http.Request)
 	if renamedClients == nil {
 		renamedClients = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "renamed_clients": renamedClients})
+	writeJSON(w, http.StatusOK, h.withQuotaRefresh(map[string]any{"status": "ok", "renamed_clients": renamedClients}))
 }
 
 func (h *Handler) handleDeleteModelGroup(w http.ResponseWriter, r *http.Request) {
@@ -100,5 +100,5 @@ func (h *Handler) handleDeleteModelGroup(w http.ResponseWriter, r *http.Request)
 	if removedClients == nil {
 		removedClients = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "removed_from_clients": removedClients})
+	writeJSON(w, http.StatusOK, h.withQuotaRefresh(map[string]any{"status": "ok", "removed_from_clients": removedClients}))
 }

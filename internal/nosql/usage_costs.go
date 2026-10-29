@@ -44,8 +44,8 @@ type costReadHooks struct {
 	evidenceRaw func()     // additional raw rows visited for index completeness
 	direct      *directIntegrityHooks
 	forceLegacy bool // call-local test/benchmark comparison; never mutable store state
-	// windowKeys 只校验落在 [from, to] 小时范围内的额度聚合键（额度校准路径）。
-	// 默认 false：报表读取仍全量校验，范围外的畸形键同样报告为历史不完整。
+	// windowKeys 标记额度校准路径：直接完整性检查里对窗口外事件/键的累积与遍历
+	// 被裁剪。键格式的全量校验（validateQuotaKeys）在两条路径上都执行。
 	windowKeys bool
 }
 
@@ -196,26 +196,6 @@ func validateQuotaKeys(ctx context.Context, tx *bolt.Tx, filter usage.Filter, fr
 		_, err := quotaKeyInScope(k, filter, from, to, allow)
 		return err
 	})
-}
-
-// validateQuotaKeysWindow 是 validateQuotaKeys 的窗口版本：只检查小时前缀位于
-// [from, to] 的键，与 readCostRollups 的扫描范围一致。
-func validateQuotaKeysWindow(ctx context.Context, tx *bolt.Tx, filter usage.Filter, from, to time.Time, allow costPairFilter) error {
-	b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
-	if b == nil {
-		return nil
-	}
-	end := to.Truncate(time.Hour).Format(hourLayout) + "}"
-	c := b.Cursor()
-	for k, _ := c.Seek(hourPrefix(from)); k != nil && string(k) <= end; k, _ = c.Next() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if _, err := quotaKeyInScope(k, filter, from, to, allow); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func quotaKeyInScope(key []byte, filter usage.Filter, from, to time.Time, allow costPairFilter) (bool, error) {
@@ -426,11 +406,8 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 				return err
 			}
 		}
-		validate := validateQuotaKeys
-		if hooks.windowKeys {
-			validate = validateQuotaKeysWindow
-		}
-		if err := validate(ctx, tx, filter, from, to, allow); err != nil {
+		// 全量校验：窗口外「小时部分无法解析」的畸形键同样必须使额度读取 fail-closed。
+		if err := validateQuotaKeys(ctx, tx, filter, from, to, allow); err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {

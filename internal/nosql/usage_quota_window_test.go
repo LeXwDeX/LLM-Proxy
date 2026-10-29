@@ -2,6 +2,8 @@ package nosql
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -70,53 +72,64 @@ func TestReadQuotaCostUnitsMatchesFullValidation(t *testing.T) {
 	}
 }
 
-// 窗口外聚合键数量放大 100 倍，窗口读取耗时不应随之线性增长。
-func TestReadQuotaCostUnitsDoesNotScaleWithOutOfWindowBuckets(t *testing.T) {
+// 额度键格式全量校验：窗口外「小时无法解析」的畸形键也必须使额度读取 fail-closed。
+func TestReadQuotaCostUnitsRejectsMalformedKeyOutsideWindow(t *testing.T) {
 	db := testDB(t)
 	store := NewUsageStore(db)
-	now := time.Now().UTC().Truncate(time.Hour)
-	for i := 0; i < 20; i++ {
-		e := usage.Event{Timestamp: now.Add(-time.Duration(i) * time.Hour), ClientName: "alice", Target: "t", Model: "m", InputTokens: 1000, StatusCode: 200}
-		if err := store.Record(e); err != nil {
-			t.Fatal(err)
-		}
+	now := time.Now().UTC().Truncate(time.Minute)
+	if err := store.Record(usage.Event{Timestamp: now, ClientName: "alice", Target: "t", Model: "m", InputTokens: 1000, StatusCode: 200}); err != nil {
+		t.Fatal(err)
 	}
-	from, to := now.Add(-48*time.Hour), now.Add(time.Hour)
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketQuotaUsageAggHourly)).Put([]byte("zz-bad-hour|alice|t|m"), []byte(`{"requests":1,"record_count":1}`))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	from, to := now.Add(-48*time.Hour), now
 	f := usage.Filter{ClientName: "alice", From: &from, To: &to}
-	measure := func(read func(context.Context, usage.Filter, usage.RateResolver, bool) ([]CostUnit, error)) time.Duration {
-		best := time.Hour
-		for i := 0; i < 5; i++ {
-			st := time.Now()
-			if _, err := read(context.Background(), f, quotaWindowRates{}, true); err != nil {
-				t.Fatal(err)
-			}
-			if d := time.Since(st); d < best {
-				best = d
-			}
-		}
-		return best
+	if units, err := store.ReadQuotaCostUnits(context.Background(), f, quotaWindowRates{}, true); !errors.Is(err, ErrUsageHistoryIncomplete) || len(units) != 0 {
+		t.Fatalf("quota path must fail closed on out-of-window malformed key: units=%v err=%v", units, err)
 	}
-	fill := func(n, base int) {
-		if err := db.Update(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
-			for i := 0; i < n; i++ {
-				at := now.Add(-time.Duration(90*24+base+i) * time.Hour)
-				if err := b.Put(quotaAggKey(at, "other", "t", "m"), []byte(`{"requests":1,"record_count":1}`)); err != nil {
-					return err
-				}
-			}
-			return nil
-		}); err != nil {
+	if _, err := store.ReadCostUnits(context.Background(), f, quotaWindowRates{}, true); !errors.Is(err, ErrUsageHistoryIncomplete) {
+		t.Fatalf("report path must also fail: %v", err)
+	}
+}
+
+// 报表路径（带 allow）：空 target 与 "unknown" 共享 usage 聚合键。范围外（被 allow
+// 排除）的空 target 事件仍须参与对照，否则对共享聚合格的篡改无法发现。
+func TestDirectIntegrityAllowPathKeepsOutOfScopeEventsForSharedUsageKey(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	now := time.Now().UTC().Truncate(time.Hour).Add(5 * time.Minute)
+	for _, target := range []string{"", "unknown"} {
+		if err := store.Record(usage.Event{Timestamp: now, ClientName: "alice", Target: target, Model: "m", InputTokens: 1000, StatusCode: 200}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	fill(500, 0)
-	small := measure(store.ReadQuotaCostUnits)
-	fill(100000, 500)
-	large := measure(store.ReadQuotaCostUnits)
-	full := measure(store.ReadCostUnits)
-	t.Logf("windowed small=%v large=%v ; full-validation large=%v", small, large, full)
-	if large > 5*small+5*time.Millisecond {
-		t.Fatalf("windowed read scales with out-of-window buckets: small=%v large=%v", small, large)
+	// 把共享的 usage 聚合格篡改为只含 "unknown" 那一条事件。
+	if err := db.Update(func(tx *bolt.Tx) error {
+		agg := tx.Bucket([]byte(BucketUsageAggHourly))
+		key := aggKey(now, "", "alice", "m", "")
+		if agg.Get(key) == nil {
+			return fmt.Errorf("shared usage cell missing")
+		}
+		var cell AggCell
+		accumulateAggCell(&cell, usage.Event{Timestamp: now, ClientName: "alice", Target: "unknown", Model: "m", InputTokens: 1000, StatusCode: 200})
+		data, err := json.Marshal(cell)
+		if err != nil {
+			return err
+		}
+		return agg.Put(key, data)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	from, to := now.Truncate(time.Hour), now.Truncate(time.Hour).Add(time.Hour)
+	f := usage.Filter{ClientName: "alice", From: &from, To: &to}
+	allow := costPairFilter(func(target, model string) bool { return target == "unknown" })
+	for name, hooks := range map[string]*directIntegrityHooks{"report": nil, "report+windowKeys": {windowKeys: true}} {
+		err := db.View(func(tx *bolt.Tx) error { return checkDirectQuotaEvidence(tx, f, from, to, allow, hooks) })
+		if !errors.Is(err, ErrUsageHistoryIncomplete) {
+			t.Fatalf("%s: tampered shared usage cell undetected: %v", name, err)
+		}
 	}
 }

@@ -236,7 +236,7 @@ AdminApp.register("pricingList", function (app) {
         await api("/admin/data/pricing-templates/" + encodeURIComponent(id), {
           method: "DELETE",
         });
-        toast("模型计费已删除", "success");
+        toast("模型计费已删除，额度将在后台刷新", "success");
         await loadPricingTemplates();
       } catch (e) {
         toast("删除失败: " + e.message, "error");

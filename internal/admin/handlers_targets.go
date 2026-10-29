@@ -712,7 +712,7 @@ func (h *Handler) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 	txn.refresh(quota.RefreshScope{Targets: []string{name}})
 
 	txn.audit("delete_target", name, "success", "")
-	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true}, warning))
+	writeJSON(w, http.StatusOK, h.withQuotaRefresh(withWarning(map[string]any{"ok": true}, warning)))
 }
 
 func (h *Handler) handlePauseTarget(w http.ResponseWriter, r *http.Request) {

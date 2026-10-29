@@ -21,8 +21,10 @@ type slowQuota struct {
 	lockHeld []bool
 }
 
-func (q *slowQuota) Status(string) quota.QuotaStatus { return quota.QuotaStatus{} }
-func (q *slowQuota) Evaluate(string)                 {}
+func (q *slowQuota) Status(string) quota.QuotaStatus    { return quota.QuotaStatus{} }
+func (q *slowQuota) Evaluate(string)                    {}
+func (q *slowQuota) NoteConfigChange() uint64           { return 0 }
+func (q *slowQuota) RefreshStatus() quota.RefreshStatus { return quota.RefreshStatus{} }
 func (q *slowQuota) ScheduleRefresh(scope quota.RefreshScope) {
 	held := !q.h.configMu.TryLock()
 	if !held {

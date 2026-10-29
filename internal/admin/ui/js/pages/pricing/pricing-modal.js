@@ -481,17 +481,17 @@ AdminApp.register("pricingModal", function (app) {
       }
       try {
         if (editing && editing.id) {
-          await api(
+          var updated = await api(
             "/admin/data/pricing-templates/" + encodeURIComponent(editing.id),
             { method: "PUT", body: payload },
           );
-          toast("模型计费已更新", "success");
+          toast("模型计费已更新" + (updated && updated.quota_refresh === "pending" ? "，额度将在后台刷新" : ""), "success");
         } else {
-          await api("/admin/data/pricing-templates", {
+          var created = await api("/admin/data/pricing-templates", {
             method: "POST",
             body: payload,
           });
-          toast("模型计费已创建", "success");
+          toast("模型计费已创建" + (created && created.quota_refresh === "pending" ? "，额度将在后台刷新" : ""), "success");
         }
         closeModal("modelCostModal");
         await loadPricingTemplates();

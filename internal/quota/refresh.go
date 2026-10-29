@@ -2,6 +2,7 @@ package quota
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -14,20 +15,22 @@ import (
 // 派生的值。窗口内准入仍使用已校准的旧计数器（旧模型组绑定/系数/限额），
 // 不会放行未校准客户端；窗口只影响「配置变更何时对额度判定生效」，不影响
 // 用量记账（Increment 与校准仍按各自的分片锁互斥）。
-// 小时整点校准会兜底收敛任何遗漏。
+// 配置代次（NoteConfigChange）保证正在进行的校准不会用提交前读到的旧配置落地计数器：
+// 代次变化则丢弃重算。小时整点校准会兜底收敛任何遗漏。
 
 const (
 	// refreshDebounce 合并连续写操作：窗口内的多次调度只触发一轮刷新。
 	defaultRefreshDebounce = 300 * time.Millisecond
 	// refreshConcurrency 限制后台刷新的并发 Evaluate 数，避免与请求争抢 bbolt 读。
-	refreshConcurrency = 4
+	refreshConcurrency = 2
 	// preloadConcurrency 限制启动预加载的并发 Evaluate 数。
 	preloadConcurrency = 4
 )
 
 // calibrationRequestTimeout 是请求路径等待校准完成的上限。超时按校准失败处理
 // （拒绝准入并退避重试），后台校准继续并在完成后自动恢复。
-var calibrationRequestTimeout = 3 * time.Second
+// 一次 evaluate 本身需要 2.5-3s，上限太小会把「慢」变成「拒绝」。
+var calibrationRequestTimeout = 15 * time.Second
 
 var errCalibrationTimeout = errors.New("calibration timed out on request path; retrying in background")
 
@@ -94,6 +97,9 @@ func (m *Manager) ScheduleRefresh(scope RefreshScope) {
 	if scope.empty() {
 		return
 	}
+	// 先推进配置代次（调用方已提交写入）：此刻起，所有读取了旧配置的 evaluate 都会在
+	// 写计数器前发现代次变化而重算，包括「正在校准、尚无计数器」的客户端。
+	m.NoteConfigChange()
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	if m.refreshStopped {
@@ -109,6 +115,28 @@ func (m *Manager) ScheduleRefresh(scope RefreshScope) {
 		debounce = defaultRefreshDebounce
 	}
 	m.refreshTimer = time.AfterFunc(debounce, m.refreshLoop)
+}
+
+// NoteConfigChange 推进配置代次，不排期刷新。会影响额度判定的管理写入在提交成功
+// 之后调用（ScheduleRefresh 已包含）；在途校准据此丢弃按旧配置算出的结果。
+func (m *Manager) NoteConfigChange() uint64 { return m.configGen.Add(1) }
+
+// RefreshStatus 是后台刷新的可回读状态。
+type RefreshStatus struct {
+	// ConfigGeneration 是已提交的额度相关配置变更次数（单调递增）。
+	ConfigGeneration uint64 `json:"config_generation"`
+	// Completed 是已完成的后台刷新批次数。
+	Completed uint64 `json:"completed_batches"`
+	// Pending 为 true 表示有刷新已排期或正在运行，窗口内准入仍用旧计数器。
+	Pending bool `json:"pending"`
+}
+
+// RefreshStatus 回读后台刷新状态。
+func (m *Manager) RefreshStatus() RefreshStatus {
+	m.refreshMu.Lock()
+	pending := m.refreshActive
+	m.refreshMu.Unlock()
+	return RefreshStatus{ConfigGeneration: m.configGen.Load(), Completed: m.refreshDone.Load(), Pending: pending}
 }
 
 // FlushRefresh 阻塞直到没有待处理或运行中的刷新（测试与停机使用）。
@@ -134,6 +162,7 @@ func (m *Manager) refreshLoop() {
 		m.refreshPending = refreshSet{}
 		m.refreshMu.Unlock()
 		m.runRefresh(batch)
+		m.refreshDone.Add(1)
 	}
 }
 
@@ -153,17 +182,24 @@ func (m *Manager) runRefresh(batch refreshSet) {
 	} else {
 		names = m.affectedClients(batch)
 	}
-	m.evaluateMany(names, refreshConcurrency, m.stopCh, false)
+	m.evaluateMany(names, refreshConcurrency, m.stopChan(), false)
 }
 
 // affectedClients 依据内存计数器（上一次校准时的绑定/职级/plan）找出受影响客户端。
-// 尚无计数器的客户端首个请求会自行校准，不在此列。
+// 另外一律纳入：正在校准（calibrationInFlight）与处于校准失败（calibrationErrors）
+// 的客户端，它们要么还没有计数器、要么计数器不可信，不能靠计数器内容判断是否受影响。
 func (m *Manager) affectedClients(b refreshSet) []string {
 	set := make(map[string]struct{}, len(b.clients))
 	for n := range b.clients {
 		set[n] = struct{}{}
 	}
 	m.mu.RLock()
+	for name := range m.calibrationInFlight {
+		set[name] = struct{}{}
+	}
+	for name := range m.calibrationErrors {
+		set[name] = struct{}{}
+	}
 	for name, cc := range m.counters {
 		if cc == nil {
 			continue
@@ -232,6 +268,13 @@ feed:
 
 // runEvaluate 是后台刷新、预加载与请求路径校准的统一入口（evaluateHook 供测试注入慢评估）。
 func (m *Manager) runEvaluate(name string, retry bool) {
+	// 校准 panic 不得带崩进程或留下假「已就绪」状态：记录后按校准失败处理（fail-closed）。
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("quota.Manager: calibration panicked", "client", name, "panic", fmt.Sprint(r))
+			m.calibrationFailed(name, fmt.Errorf("calibration panicked: %v", r))
+		}
+	}()
 	if m.evaluateHook != nil {
 		m.evaluateHook(name, retry)
 		return

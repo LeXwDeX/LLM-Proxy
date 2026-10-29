@@ -158,7 +158,7 @@ func (h *Handler) handleUpdateJobLevel(w http.ResponseWriter, r *http.Request) {
 	if renamedClients == nil {
 		renamedClients = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "renamed_clients": renamedClients})
+	writeJSON(w, http.StatusOK, h.withQuotaRefresh(map[string]any{"status": "ok", "renamed_clients": renamedClients}))
 }
 
 // handleDeleteJobLevel 删除职级。仍被活跃客户端绑定时拒绝并列出客户端名

@@ -136,10 +136,10 @@ func (h *Handler) handleUpsertModelCost(w http.ResponseWriter, r *http.Request) 
 	h.scheduleQuotaRefresh(quota.RefreshScope{All: true})
 	h.recordAudit(r, "model_cost_upsert", model, "success", "")
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, h.withQuotaRefresh(map[string]any{
 		"ok":    true,
 		"model": model,
-	})
+	}))
 }
 
 func (h *Handler) handleDeleteModelCost(w http.ResponseWriter, r *http.Request) {
@@ -232,7 +232,7 @@ func (h *Handler) handleCreatePricingTemplate(w http.ResponseWriter, r *http.Req
 		return
 	}
 	h.afterPricingTemplateWrite(r, "pricing_template_create", stored.ID)
-	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "template": stored})
+	writeJSON(w, http.StatusCreated, h.withQuotaRefresh(map[string]any{"ok": true, "template": stored}))
 }
 
 func (h *Handler) handleUpdatePricingTemplate(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +273,7 @@ func (h *Handler) handleUpdatePricingTemplate(w http.ResponseWriter, r *http.Req
 		return
 	}
 	h.afterPricingTemplateWrite(r, "pricing_template_update", id)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "template": stored})
+	writeJSON(w, http.StatusOK, h.withQuotaRefresh(map[string]any{"ok": true, "template": stored}))
 }
 
 func (h *Handler) handleDeletePricingTemplate(w http.ResponseWriter, r *http.Request) {

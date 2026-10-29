@@ -243,6 +243,8 @@ func (h *Handler) commitConfigChange(w http.ResponseWriter, cfg *config.Config, 
 		return "", false
 	}
 
+	// 目标/部署池变化会影响计价与额度解析：落库成功即推进额度配置代次，在途校准据此重算。
+	h.noteQuotaConfigChange()
 	warning := ""
 	h.proxyService.CommitPrepared(prepared)
 	applyAuth := h.authApply

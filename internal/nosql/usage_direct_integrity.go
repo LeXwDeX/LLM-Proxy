@@ -188,11 +188,13 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 			}
 			quotaKeyBytes := quotaAggKey(event.Timestamp, event.ClientName, event.Target, event.Model)
 			quotaKey := string(quotaKeyBytes)
-			// 后续所有读取（原始计数/分区、usage 聚合对照、额度键检查）都只消费
-			// quotaKeyInScope 为真或报错的键。范围外且无错的事件对这些 map 没有可观察
-			// 贡献，跳过累积（与全量累积等价），只保留上面的完整性校验。
-			if inScope, scopeErr := quotaKeyInScope(quotaKeyBytes, filter, from, to, allow); scopeErr == nil && !inScope {
-				return nil
+			// 仅额度路径（无 allow、无模型过滤）：后续读取只消费 quotaKeyInScope 为真或
+			// 报错的键，范围外且无错的事件跳过累积。带 allow/模型过滤的报表路径中，空
+			// target 与 "unknown" 共享 usage 聚合键，范围外事件仍需参与对照，保持原行为。
+			if hooks != nil && hooks.windowKeys && allow == nil && filter.Model == "" {
+				if inScope, scopeErr := quotaKeyInScope(quotaKeyBytes, filter, from, to, allow); scopeErr == nil && !inScope {
+					return nil
+				}
 			}
 			rawCounts[quotaKey]++
 			cell := rawCells[quotaKey]
