@@ -9,9 +9,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { assembleAdminHTML } = require("../../../scripts/testing/assemble_admin_html.cjs");
 
+// The targets page is split into several files: one golden tag expands to all tags.
+const targetsScripts = ["targets", "health", "detail", "key-list", "model-mappings", "edit-modal", "save", "list"]
+  .map((n) => `pages/targets/${n}`).join('.js"></script>\n  <script src="/admin/ui/js/');
 const scriptMap = {
   core: "core/core", schema: "core/schema", navigation: "core/navigation", bootstrap: "core/bootstrap",
-  overview: "pages/overview/overview", targets: "pages/targets/targets", pools: "pages/pools/pools",
+  overview: "pages/overview/overview", targets: targetsScripts, pools: "pages/pools/pools",
   clients: "pages/clients/clients", pricing: "pages/pricing/pricing", usage: "pages/usage/usage",
   audit_trace: "pages/audit_trace/audit_trace", users: "pages/users/users",
   catalog: "pages/catalog/catalog", quota: "pages/quota/quota",
