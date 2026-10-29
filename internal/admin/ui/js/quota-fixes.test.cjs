@@ -239,3 +239,25 @@ test("an existing group whose stored 0 bases are omitted on the wire reopens as 
   await quota.openModelGroupModal(null);
   assert.equal(field(h, "modelGroup-weekly").value, "");
 });
+
+test("a stored job level in another case is selected but submitted unchanged until the user picks one", async () => {
+  const {h, quota} = await fixture();
+  await quota.loadQuotaManagement();
+  quota.openQuotaEditDrawer({client: {name: "c1", job_level: "lead", quota_groups: []}});
+  assert.match(field(h, "quotaEditJobLevel").innerHTML, /<option value='Lead' selected>/);
+  field(h, "quotaEditJobLevel").value = "Lead"; // what the browser reports for the selected option
+  await field(h, "saveQuotaEditBtn").listeners.click[0]();
+  assert.equal(JSON.parse(sent(h, "PUT", "/admin/data/quota/c1")[0].options.body).job_level, "lead");
+  quota.openQuotaEditDrawer({client: {name: "c1", job_level: "lead", quota_groups: []}});
+  field(h, "quotaEditJobLevel").value = "Lead";
+  field(h, "quotaEditJobLevel").listeners.change[0]();
+  await field(h, "saveQuotaEditBtn").listeners.click[0]();
+  assert.equal(JSON.parse(sent(h, "PUT", "/admin/data/quota/c1")[1].options.body).job_level, "Lead");
+});
+
+test("runGuarded re-enables from the current state, not the value captured at start", async () => {
+  const {app} = await fixture();
+  const button = {disabled: true};
+  await app.modules.quotaModel.runGuarded("k", button, async () => {});
+  assert.equal(button.disabled, false);
+});

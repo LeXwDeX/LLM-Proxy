@@ -31,6 +31,10 @@ AdminApp.register("quotaDrawer", function (app) {
       "编辑可用额度 — " + c.name;
     document.getElementById("quotaEditDrawerInfo").textContent =
       (c.ip_address || "-") + (c.project_group ? " · " + c.project_group : "");
+    // The select matches names case-insensitively; keep the stored spelling to submit
+    // unless the user actually picks a job level.
+    state.quotaEditJobLevelOriginal = c.job_level || "";
+    state.quotaEditJobLevelTouched = false;
     document.getElementById("quotaEditJobLevel").innerHTML = dictOptionsHTML(
       state.jobLevels,
       c.job_level || "",
@@ -146,6 +150,7 @@ AdminApp.register("quotaDrawer", function (app) {
     .getElementById("quotaEditJobLevel")
     .addEventListener("change", function () {
       if (isReadonlyMode()) return;
+      state.quotaEditJobLevelTouched = true;
       syncQuotaEditGroups();
       renderQuotaEditGroups();
     });
@@ -231,6 +236,13 @@ AdminApp.register("quotaDrawer", function (app) {
       state.quotaEditGroups.splice(Number(card.dataset.editGroupIndex), 1);
       renderQuotaEditGroups();
     });
+  function submittedJobLevel() {
+    var value = document.getElementById("quotaEditJobLevel").value;
+    var original = state.quotaEditJobLevelOriginal || "";
+    if (!state.quotaEditJobLevelTouched && original && value.toLowerCase() === original.toLowerCase())
+      return original;
+    return value;
+  }
   async function saveQuotaEdit() {
     if (isReadonlyMode() || !state.editingQuotaClient) return;
     var groups = syncQuotaEditGroups();
@@ -242,7 +254,7 @@ AdminApp.register("quotaDrawer", function (app) {
       return;
     }
     var payload = {
-      job_level: document.getElementById("quotaEditJobLevel").value,
+      job_level: submittedJobLevel(),
       quota_groups: groups,
     };
     try {

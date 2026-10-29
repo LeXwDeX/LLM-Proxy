@@ -81,20 +81,6 @@ AdminApp.register("pricingShared", function (app) {
   function pricingRateInputValue(v) {
     return v == null || !Number.isFinite(Number(v)) ? "" : String(v);
   }
-  // Runs fn once at a time per key and keeps the button disabled while it is in flight.
-  var inflight = Object.create(null);
-  async function runGuarded(key, button, fn) {
-    if (inflight[key]) return;
-    inflight[key] = true;
-    var wasDisabled = button ? button.disabled : false;
-    if (button) button.disabled = true;
-    try {
-      return await fn();
-    } finally {
-      inflight[key] = false;
-      if (button) button.disabled = wasDisabled;
-    }
-  }
   function pricingWeekdays(wds) {
     if (!wds || !wds.length)
       return "<span style='color:var(--text-muted);'>未选</span>";
@@ -238,7 +224,6 @@ AdminApp.register("pricingShared", function (app) {
     pricingRate: pricingRate,
     pricingInputNumber: pricingInputNumber,
     pricingRateInputValue: pricingRateInputValue,
-    runGuarded: runGuarded,
     pricingWeekdays: pricingWeekdays,
     pricingRatesHtml: pricingRatesHtml,
     pricingRateGridHtml: pricingRateGridHtml,

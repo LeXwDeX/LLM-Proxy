@@ -24,8 +24,9 @@ AdminApp.register("pricingModal", function (app) {
   var pricingModelLabel = app.bind("pricingShared", "pricingModelLabel");
   var clonePricingValue = app.bind("pricingShared", "clonePricingValue");
   var pricingInputNumber = app.bind("pricingShared", "pricingInputNumber");
-  var runGuarded = app.bind("pricingShared", "runGuarded");
+  var runGuarded = app.bind("quotaModel", "runGuarded");
   var pricingPeriodTimeError = app.bind("pricingPeriods", "pricingPeriodTimeError");
+  var pricingPeriodTimeValue = app.bind("pricingPeriods", "pricingPeriodTimeValue");
   var renderPricingContext = app.bind("pricingRates", "renderPricingContext");
   var syncPricingContextInput = app.bind("pricingRates", "syncPricingContextInput");
   var validatePricingContext = app.bind("pricingRates", "validatePricingContext");
@@ -232,6 +233,7 @@ AdminApp.register("pricingModal", function (app) {
       (template && template.timezone) || state.schema.defaults.pricing_timezone;
     state.ptPeriods = template && Array.isArray(template.periods) ? clonePricingValue(template.periods) : [];
     state.ptPeriods.forEach(function (period) {
+      period.original = { start: period.start, end: period.end };
       period.rates = period.rates || {};
       contextRateFields.forEach(function (field) { if (period.rates[field[0]] == null) period.rates[field[0]] = field[2] ? null : 0; });
     });
@@ -461,8 +463,8 @@ AdminApp.register("pricingModal", function (app) {
         payload.periods = periods.map(function (p) {
           return {
             weekdays: p.weekdays,
-            start: p.start,
-            end: p.end,
+            start: pricingPeriodTimeValue(p, "start"),
+            end: pricingPeriodTimeValue(p, "end"),
             rates: p.rates,
             conditions: p.conditions || [],
           };

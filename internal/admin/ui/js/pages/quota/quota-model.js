@@ -23,18 +23,18 @@ AdminApp.register("quotaModel", function (app) {
         .join(", ") || "未配置模型"
     );
   }
-  // Runs fn once at a time per key and keeps the button disabled while it is in flight.
+  // Runs fn once at a time per key; the button stays disabled while it is in flight and is
+  // re-enabled afterwards (never restored from a value captured at start).
   var inflight = Object.create(null);
   async function runGuarded(key, button, fn) {
     if (inflight[key]) return;
     inflight[key] = true;
-    var wasDisabled = button ? button.disabled : false;
     if (button) button.disabled = true;
     try {
       return await fn();
     } finally {
       inflight[key] = false;
-      if (button) button.disabled = wasDisabled;
+      if (button) button.disabled = false;
     }
   }
   // Reads a numeric <input>: null when blank, NaN when the browser holds text it cannot parse

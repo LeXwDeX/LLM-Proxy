@@ -231,3 +231,24 @@ test("rates are displayed with every stored digit", async () => {
   assert.equal(pricing.pricingRate(1e-7), "$0.0000001");
   assert.equal(pricing.pricingRate(null), "$0");
 });
+
+test("period times accept H:mm like the backend; only edited fields are normalized", async () => {
+  const {h, pricing} = await fixture();
+  let cards = await openSchedule(h, pricing, period("9:00", "24:00"));
+  await save(h);
+  let body = JSON.parse(puts(h)[0].options.body);
+  assert.equal(body.periods[0].start, "9:00", "an unchanged stored value is sent verbatim");
+  cards = await openSchedule(h, pricing, period("9:00", "10:00"));
+  assert.equal(puts(h).length, 1);
+  await save(h);
+  assert.equal(puts(h).length, 2, "9:00-10:00 is ordered by minutes, not as strings");
+  cards = await openSchedule(h, pricing, period("09:00", "18:00"));
+  cards[0].inputs.start.value = "9:30";
+  await save(h);
+  body = JSON.parse(puts(h)[2].options.body);
+  assert.equal(body.periods[0].start, "09:30", "an edited H:mm value is normalized to HH:mm");
+  cards = await openSchedule(h, pricing, period("09:00", "18:00"));
+  cards[0].inputs.start.value = "9:60";
+  await save(h);
+  assert.equal(puts(h).length, 3);
+});

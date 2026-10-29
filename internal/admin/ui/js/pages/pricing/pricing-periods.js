@@ -115,14 +115,25 @@ AdminApp.register("pricingPeriods", function (app) {
   }
   // Period bounds are HH:mm; only the end may be 24:00 (end of day, backend parseHM accepts it).
   // Native <input type=time> cannot express 24:00, hence the validated text inputs.
-  var PERIOD_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+  // The backend parses H:mm / HH:mm (time.Parse "15:04") and 24:00 for the end only.
+  var PERIOD_TIME_RE = /^([01]?\d|2[0-3]):[0-5]\d$/;
+  function periodMinutes(text) {
+    var parts = String(text).split(":");
+    return Number(parts[0]) * 60 + Number(parts[1]);
+  }
   function pricingPeriodTimeError(period, label) {
     if (!PERIOD_TIME_RE.test(period.start || ""))
       return label + " 的开始时间格式应为 HH:mm（00:00–23:59）";
     if (!PERIOD_TIME_RE.test(period.end || "") && period.end !== "24:00")
       return label + " 的结束时间格式应为 HH:mm，或 24:00 表示到当日结束";
-    if (period.start >= period.end) return label + " 开始时间必须早于结束时间";
+    if (periodMinutes(period.start) >= periodMinutes(period.end)) return label + " 开始时间必须早于结束时间";
     return "";
+  }
+  // Values the user did not edit are sent exactly as stored; edited H:mm becomes HH:mm.
+  function pricingPeriodTimeValue(period, key) {
+    var value = period[key];
+    if (period.original && period.original[key] === value) return value;
+    return value === "24:00" ? value : ("0" + value).slice(-5);
   }
   function collectPricingPeriods() {
     var result = [];
@@ -183,6 +194,7 @@ AdminApp.register("pricingPeriods", function (app) {
   });
   return {
     pricingPeriodTimeError: pricingPeriodTimeError,
+    pricingPeriodTimeValue: pricingPeriodTimeValue,
     updatePricingModeUI: updatePricingModeUI,
     renderPricingPeriods: renderPricingPeriods,
     syncPricingPeriod: syncPricingPeriod,
