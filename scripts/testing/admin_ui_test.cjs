@@ -28,6 +28,9 @@ class Element {
     this._html = "";
     this.textContent = "";
     this.style = {};
+    // Inline display (e.g. the role-gated nav entries) is part of the shell contract.
+    const inlineDisplay = /(?:^|;)\s*display\s*:\s*([\w-]+)/.exec(attrs.style || "");
+    if (inlineDisplay) this.style.display = inlineDisplay[1];
     this.listeners = {};
     this.disabled = false;
     this.hidden = false;
@@ -245,7 +248,10 @@ function createHarness({
   fetch: fetchOverride = null,
   timers = null,
   location = {},
+  // Script names (e.g. "pages/users/users.js") that fail to load, to model a 404/SyntaxError.
+  omitScripts = [],
 } = {}) {
+  const harnessScripts = scripts.filter((script) => !omitScripts.includes(script.name));
   const elements = [],
     ids = new Map(),
     requests = [],
@@ -404,12 +410,12 @@ function createHarness({
     },
     // start() runs the scripts without waiting for boot, for hung-transport tests.
     start: () => {
-      for (const script of scripts)
+      for (const script of harnessScripts)
         vm.runInContext(script.source, context, { filename: script.name });
       return context.AdminApp;
     },
     run: async () => {
-      for (const script of scripts)
+      for (const script of harnessScripts)
         vm.runInContext(script.source, context, { filename: script.name });
       if (context.AdminApp?.bootPromise) await context.AdminApp.bootPromise;
       return context.AdminApp;
@@ -1494,7 +1500,7 @@ async function main() {
   assert.equal(readonlyApp.modules.users.isReadonlyMode(), true);
   assert.equal(
     readonly.ids.get("nav-users").style.display,
-    undefined,
+    "none",
     "admin menu remains hidden",
   );
   await readonlyApp.modules.targets.openTargetModal(null);

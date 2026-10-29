@@ -9,14 +9,15 @@ const {fakeClock} = require("./fake-clock.cjs");
 const hang = () => new Promise(() => {});
 const SCHEMA = "/admin/data/schema";
 
-function boot({fetch, schema} = {}) {
+function boot({fetch, schema, hash = "", omitScripts} = {}) {
   const clock = fakeClock();
   const assigned = [];
   const harness = createHarness({
     fetch,
     schema,
     timers: clock,
-    location: {pathname: "/admin", search: "", hash: "", assign: (url) => assigned.push(url)},
+    omitScripts,
+    location: {pathname: "/admin", search: "", hash, assign: (url) => assigned.push(url)},
   });
   const app = harness.start();
   const count = (url) => harness.requests.filter((request) => request.url === url).length;
@@ -141,4 +142,80 @@ test("a hung trace probe only disables the optional trace page", async () => {
   assert.equal(app.state.ready, true, "trace is optional and does not block startup");
   assert.equal(ids.get("adminBootStatus").hidden, true);
   assert.notEqual(ids.get("nav-trace").style.display, "", "trace entry stays hidden");
+});
+
+const ACTIVITY = "/admin/api/activity";
+const ME = "/admin/api/me";
+
+test("overview and the trace probe start without waiting for /api/me; the layout stays inert until the role is known", async () => {
+  const {app, clock, ids, count, harness} = boot({
+    fetch: (url, options, fixture) => (url === ME ? hang() : fixture(url, options)),
+  });
+  await clock.advance(100);
+  assert.ok(count(ACTIVITY) >= 1, "overview loads while /api/me is pending");
+  assert.ok(count("/admin/data/trace?limit=1") >= 1, "trace probe runs in parallel with /api/me");
+  assert.equal(app.state.ready, false);
+  assert.equal(harness.document.querySelector(".layout").inert, true, "no control is reachable before the role is known");
+  assert.equal(harness.document.body.classList.contains("readonly-mode"), true, "readonly until proven admin");
+  assert.equal(ids.get("adminBootRetry").hidden, true);
+});
+
+test("a hung trace probe does not delay ready", async () => {
+  const {app, clock} = boot({
+    fetch: (url, options, fixture) => (url === "/admin/data/trace?limit=1" ? hang() : fixture(url, options)),
+  });
+  await clock.advance(100);
+  assert.equal(app.state.ready, true);
+});
+
+test("the initial overview load is requested once", async () => {
+  const {app, clock, count} = boot();
+  await clock.advance(100);
+  await app.bootPromise;
+  assert.equal(count(ACTIVITY), 1);
+});
+
+test("a boot failure after initialize stops the already-started overview refresh", async () => {
+  const {app, clock, ids} = boot({
+    fetch: (url, options, fixture) =>
+      url === ME ? Promise.resolve({ok: false, status: 500, text: async () => JSON.stringify({error: "me down"})}) : fixture(url, options),
+  });
+  await clock.advance(100);
+  assert.equal(app.state.ready, false);
+  assert.match(ids.get("adminBootMessage").textContent, /me down/);
+  assert.equal(ids.get("adminBootRetry").hidden, false);
+});
+
+test("a module whose script failed to load is named in the boot banner", async () => {
+  const {app, clock, ids} = boot({omitScripts: ["pages/users/users.js"]});
+  await clock.advance(100);
+  assert.equal(app.state.ready, false);
+  const text = ids.get("adminBootMessage").textContent;
+  assert.match(text, /users/);
+  assert.match(text, /未加载|加载失败/);
+  assert.doesNotMatch(text, /Cannot read|undefined/);
+});
+
+test("another missing module is reported by name", async () => {
+  const {app, clock, ids} = boot({omitScripts: ["pages/quota/quota.js"]});
+  await clock.advance(100);
+  assert.equal(app.state.ready, false);
+  assert.match(ids.get("adminBootMessage").textContent, /quota/);
+});
+
+test("a #page deep link opens that page after boot", async () => {
+  const {app, clock} = boot({hash: "#clients"});
+  await clock.advance(100);
+  await app.bootPromise;
+  assert.equal(app.state.currentPage, "clients");
+});
+
+test("a #users deep link waits for the admin role; readonly users stay on overview", async () => {
+  const admin = boot({hash: "#users"});
+  await admin.clock.advance(100);
+  await admin.app.bootPromise;
+  assert.equal(admin.app.state.currentPage, "users");
+  const ro = createHarness({role: "readonly", timers: fakeClock(), location: {pathname: "/admin", search: "", hash: "#users", assign() {}}});
+  const roApp = await ro.run();
+  assert.equal(roApp.state.currentPage, "overview");
 });

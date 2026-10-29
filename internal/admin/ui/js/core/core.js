@@ -3,6 +3,7 @@
 window.AdminApp = {
   modules: {},
   factories: [],
+  referenced: {}, // module names other modules bound to (see missingModules)
   register: function (name, factory) {
     if (
       this.factories.some(function (entry) {
@@ -14,6 +15,7 @@ window.AdminApp = {
   },
   bind: function (module, name) {
     var app = this;
+    app.referenced[module] = true;
     return function () {
       var exports = app.modules[module];
       if (!exports || typeof exports[name] !== "function")
@@ -27,9 +29,30 @@ window.AdminApp = {
       return candidate.name === name;
     });
     if (!entry) throw new Error("模块未注册: " + name);
-    var exports = entry.factory(this);
+    var exports;
+    try {
+      exports = entry.factory(this);
+    } catch (e) {
+      var failure = new Error("模块 " + name + " 初始化失败: " + (e && e.message));
+      failure.cause = e;
+      throw failure;
+    }
     this.modules[name] = exports;
     return exports;
+  },
+  // Names (from the given list plus every module bound so far) whose factory
+  // never registered, i.e. whose script failed to load or parse.
+  missingModules: function (names) {
+    var app = this;
+    var wanted = (names || []).concat(Object.keys(app.referenced));
+    return wanted.filter(function (name, i) {
+      return (
+        wanted.indexOf(name) === i &&
+        !app.factories.some(function (entry) {
+          return entry.name === name;
+        })
+      );
+    });
   },
   initialize: function () {
     var app = this;
@@ -164,6 +187,7 @@ AdminApp.register("core", function (app) {
   // opts.timeoutMs overrides it; 0 disables it for intentionally long calls.
   var API_TIMEOUT_MS = 15000;
   var loginRedirecting = false;
+  var LOGIN_REDIRECT_RESET_MS = 5000;
   function namedError(name, message) {
     var error = new Error(message);
     error.name = name;
@@ -171,10 +195,21 @@ AdminApp.register("core", function (app) {
   }
   // Timeouts and fetch network failures (TypeError) are worth a fresh attempt;
   // HTTP errors and validation failures are deterministic and are not.
+  // Only failures marked by api() itself count: a TypeError thrown by page code
+  // is a bug, not a flaky network, and must not be retried.
   function isTransientError(error) {
     return (
-      !!error && (error.name === "TimeoutError" || error.name === "TypeError")
+      !!error && (error.name === "TimeoutError" || error.isNetworkError === true)
     );
+  }
+  // fetch() rejects with TypeError on network failure; aborts keep their name.
+  function asNetworkError(e) {
+    if (!e || e.name !== "TypeError") return e;
+    var error = new Error(e.message);
+    error.name = "NetworkError";
+    error.isNetworkError = true;
+    error.cause = e;
+    return error;
   }
   // Matches SessionManager.unauthorized (session.go): 401 {"error":"unauthorized"}.
   // Other 401 bodies (e.g. "not authenticated") and other statuses never navigate.
@@ -187,11 +222,107 @@ AdminApp.register("core", function (app) {
       typeof location === "undefined" ||
       !location ||
       typeof location.assign !== "function"
-    )
+    ) {
+      loginRedirecting = false;
       return;
+    }
     var here =
       (location.pathname || "") + (location.search || "") + (location.hash || "");
     location.assign("/login" + (here ? "?next=" + encodeURIComponent(here) : ""));
+    // A page that is really leaving never runs this timer; if navigation was
+    // blocked (beforeunload, offline), later 401s must be able to retry.
+    setTimeout(function () {
+      loginRedirecting = false;
+    }, LOGIN_REDIRECT_RESET_MS);
+  }
+
+  /* ===== Banners (session expiry, stale deploy) ===== */
+  var BANNER_STYLE =
+    "position:fixed;left:0;right:0;z-index:3000;padding:10px 16px;display:flex;gap:12px;align-items:center;justify-content:center;font-size:14px;";
+  function showBanner(id, position, message, action) {
+    if (document.getElementById(id)) return;
+    var el = document.createElement("div");
+    el.id = id;
+    el.setAttribute("role", "alert");
+    el.style.cssText =
+      BANNER_STYLE +
+      position +
+      ":0;background:var(--warn-soft,#fff3cd);color:var(--warn,#7a4b00);box-shadow:0 1px 6px rgba(0,0,0,.2);";
+    var text = document.createElement("span");
+    text.textContent = message;
+    el.appendChild(text);
+    if (action) el.appendChild(action);
+    document.body.appendChild(el);
+  }
+  function removeBanner(id) {
+    var el = document.getElementById(id);
+    if (el) el.remove();
+  }
+  // True when navigating away would discard user input: an open modal/drawer
+  // or a form that registered itself through setFormDirty.
+  var dirtyForms = {};
+  function setFormDirty(key, dirty) {
+    if (dirty) dirtyForms[key] = true;
+    else delete dirtyForms[key];
+  }
+  function hasUnsavedUi() {
+    if (Object.keys(dirtyForms).length > 0) return true;
+    try {
+      return (
+        document.querySelectorAll(
+          ".modal-overlay.open, .quota-drawer-overlay.open",
+        ).length > 0 ||
+        document.querySelectorAll('[data-dirty="true"]').length > 0
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+  var SESSION_BANNER_ID = "sessionExpiredBanner";
+  var SESSION_EXPIRED_MESSAGE = "会话已过期，请在新标签页登录后重试";
+  function showSessionExpiredBanner() {
+    var link = document.createElement("a");
+    link.href = "/login?next=/admin";
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "打开登录页";
+    link.style.cssText = "font-weight:600;text-decoration:underline;color:inherit;";
+    showBanner(SESSION_BANNER_ID, "top", SESSION_EXPIRED_MESSAGE, link);
+  }
+  var knownVersion = null;
+  var STALE_BANNER_ID = "adminStaleBanner";
+  function noteServerVersion(version) {
+    if (typeof version !== "string" || !version) return;
+    if (knownVersion === null) {
+      knownVersion = version;
+      return;
+    }
+    if (version === knownVersion) return;
+    var reload = document.createElement("button");
+    reload.type = "button";
+    reload.className = "btn btn-sm";
+    reload.textContent = "刷新页面";
+    reload.addEventListener("click", function () {
+      if (typeof location !== "undefined" && location && location.reload)
+        location.reload();
+    });
+    showBanner(STALE_BANNER_ID, "bottom", "后台已更新，请刷新页面", reload);
+  }
+  // A cheap background /api/me check (does not slide the session) catches a
+  // deploy that happened while this tab stayed open.
+  var VERSION_CHECK_MS = 5 * 60 * 1000;
+  var versionWatching = false;
+  function checkVersion() {
+    if (document.getElementById(STALE_BANNER_ID)) return Promise.resolve();
+    return api("/admin/api/me", { background: true }).catch(function () {});
+  }
+  function startVersionWatch() {
+    if (versionWatching) return;
+    versionWatching = true;
+    if (typeof setInterval === "function") setInterval(checkVersion, VERSION_CHECK_MS);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) checkVersion();
+    });
   }
   async function api(url, opts) {
     var init = Object.assign({}, opts || {});
@@ -200,9 +331,13 @@ AdminApp.register("core", function (app) {
         ? API_TIMEOUT_MS
         : Number(init.timeoutMs) || 0;
     delete init.timeoutMs;
+    var background = init.background === true;
+    delete init.background;
     var callerSignal = init.signal || null;
     init.headers = Object.assign({}, init.headers || {});
     init.headers["X-Requested-With"] = "XMLHttpRequest";
+    // Polls must not keep the session alive (SessionManager.Middleware).
+    if (background) init.headers["X-Admin-Background"] = "1";
     if (init.body && typeof init.body !== "string") {
       init.body = JSON.stringify(init.body);
       init.headers["Content-Type"] = "application/json";
@@ -243,8 +378,13 @@ AdminApp.register("core", function (app) {
     });
     guard.catch(function () {});
     var exchange = (async function () {
-      var resp = await fetch(url, init);
-      var text = await resp.text();
+      var resp, text;
+      try {
+        resp = await fetch(url, init);
+        text = await resp.text();
+      } catch (e) {
+        throw asNetworkError(e);
+      }
       return { resp: resp, text: text };
     })();
     exchange.catch(function () {});
@@ -268,11 +408,46 @@ AdminApp.register("core", function (app) {
         data = { raw: text };
       }
     }
-    if (resp.status === 401 && data && data.error === "unauthorized")
+    if (resp.status === 401 && data && data.error === "unauthorized") {
+      // Never throw away unsaved input: keep the page and ask for a re-login
+      // in another tab; the caller keeps its form and may retry afterwards.
+      if (hasUnsavedUi()) {
+        showSessionExpiredBanner();
+        throw namedError("SessionExpiredError", SESSION_EXPIRED_MESSAGE);
+      }
       redirectToLogin();
+    }
+    if (resp.ok) {
+      removeBanner(SESSION_BANNER_ID);
+      if (/^\/admin\/api\/me(\?|$)/.test(url)) noteServerVersion(data && data.version);
+    }
     if (!resp.ok)
       throw new Error(data.error || "请求失败 (HTTP " + resp.status + ")");
     return data;
+  }
+
+  /* ===== Global error handlers ===== */
+  // Last line of defence: log everything, tell the user at most once per window.
+  var errorToastCooldown = false;
+  function reportUnhandled(kind, reason) {
+    console.error("[admin] " + kind, reason);
+    if (reason && (reason.name === "SessionExpiredError" || reason.name === "AbortError"))
+      return;
+    if (errorToastCooldown) return;
+    errorToastCooldown = true;
+    setTimeout(function () {
+      errorToastCooldown = false;
+    }, 5000);
+    var detail = reason && reason.message ? reason.message : String(reason || "");
+    toast("页面出现未处理的错误" + (detail ? ": " + detail : ""), "error");
+  }
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener("error", function (event) {
+      reportUnhandled("error", (event && (event.error || event.message)) || event);
+    });
+    window.addEventListener("unhandledrejection", function (event) {
+      reportUnhandled("unhandledrejection", event && event.reason);
+    });
   }
 
   /* ===== Modal ===== */
@@ -376,6 +551,8 @@ AdminApp.register("core", function (app) {
     toast: toast,
     api: api,
     isTransientError: isTransientError,
+    setFormDirty: setFormDirty,
+    startVersionWatch: startVersionWatch,
     openModal: openModal,
     closeModal: closeModal,
     showConfirm: showConfirm,

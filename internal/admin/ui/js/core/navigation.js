@@ -64,8 +64,19 @@ AdminApp.register("navigation", function (app) {
       if (firstNav) firstNav.focus();
     }
   }
+  // Keep the address bar in sync so reload/bookmark/post-login `next` return to
+  // this page (replaceState: no history entry, no hashchange).
+  function syncHash(page) {
+    try {
+      if (typeof history !== "undefined" && history && history.replaceState)
+        history.replaceState(null, "", location.pathname + location.search + "#" + page);
+    } catch (e) {
+      /* sandboxed or file contexts may refuse; the hash is only a convenience */
+    }
+  }
   function switchPage(page) {
     state.currentPage = page;
+    syncHash(page);
     document.querySelectorAll(".sidebar-nav-item").forEach(function (n) {
       var active = n.dataset.page === page;
       n.classList.toggle("active", active);
@@ -79,16 +90,44 @@ AdminApp.register("navigation", function (app) {
     /* Close sidebar on mobile */
     setSidebarOpen(false);
     /* Manage overview auto-refresh */
+    /* startOverviewAutoRefresh already loads the overview once. */
     if (page === "overview") {
       startOverviewAutoRefresh();
-    } else {
-      stopOverviewAutoRefresh();
+      return;
     }
+    stopOverviewAutoRefresh();
     /* Load data */
     loadPageData(page);
   }
+  function pageFromHash() {
+    var hash = typeof location !== "undefined" && location ? location.hash || "" : "";
+    var page = hash.replace(/^#\/?/, "");
+    return Object.prototype.hasOwnProperty.call(pageTitles, page) ? page : "";
+  }
+  function navItem(page) {
+    return Array.prototype.find.call(
+      document.querySelectorAll(".sidebar-nav-item"),
+      function (item) {
+        return item.dataset.page === page;
+      },
+    );
+  }
+  // Opens the page named by location.hash once its nav entry is visible (the
+  // role-gated "users" and probe-gated "trace" entries appear later during
+  // boot, so bootstrap calls this again). Never overrides a user's own click.
+  // Returns true when it switched pages.
+  var userNavigated = false;
+  function resolveDeepLink() {
+    var page = pageFromHash();
+    if (!page || userNavigated || page === state.currentPage) return false;
+    var item = navItem(page);
+    if (!item || (item.style && item.style.display === "none")) return false;
+    switchPage(page);
+    return true;
+  }
   document.querySelectorAll(".sidebar-nav-item").forEach(function (item) {
     function activate() {
+      userNavigated = true;
       switchPage(item.dataset.page);
     }
     item.addEventListener("click", activate);
@@ -167,6 +206,7 @@ AdminApp.register("navigation", function (app) {
 
   return {
     switchPage: switchPage,
+    resolveDeepLink: resolveDeepLink,
     loadPageData: loadPageData,
   };
 });
