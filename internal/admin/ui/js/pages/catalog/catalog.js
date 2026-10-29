@@ -6,6 +6,7 @@ AdminApp.register("catalog", function (app) {
   var catalogSearchTimer = null;
   var esc = app.bind("core", "esc");
   var api = app.bind("core", "api");
+  var toast = app.bind("core", "toast");
   var epDisplayName = app.bind("schema", "epDisplayName");
   var epBadgeStyle = app.bind("schema", "epBadgeStyle");
   /* ===== Shared catalog helpers ===== */
@@ -20,6 +21,8 @@ AdminApp.register("catalog", function (app) {
       state.catalogCache[epType] = models;
       return models;
     } catch (e) {
+      // Callers keep working with an empty list, but the failure is no longer silent.
+      toast("加载模型目录失败（" + epType + "）: " + e.message, "error");
       return [];
     }
   }
@@ -149,7 +152,7 @@ AdminApp.register("catalog", function (app) {
       return caps
         .map(function (c) {
           var icon = capIcons[c] || "•";
-          var label = c.replace(/_/g, " ");
+          var label = esc(String(c).replace(/_/g, " "));
           return (
             "<span title='" +
             label +
@@ -207,14 +210,9 @@ AdminApp.register("catalog", function (app) {
           .join("")
       : "<tr class='empty-row'><td colspan='9'>无匹配模型</td></tr>";
 
-    document.getElementById("catalogPageInfo").textContent =
-      "共 " +
-      total +
-      " 个模型，第 " +
-      (start + 1) +
-      "~" +
-      Math.min(start + catalogPageSize, total) +
-      " 条";
+    document.getElementById("catalogPageInfo").textContent = total
+      ? "共 " + total + " 个模型，第 " + (start + 1) + "~" + Math.min(start + catalogPageSize, total) + " 条"
+      : "共 0 个模型";
     document.getElementById("catalogPageNum").textContent =
       catalogPage + " / " + pages;
     document.getElementById("catalogPrevBtn").disabled = catalogPage <= 1;

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 	"net/http"
@@ -37,11 +38,14 @@ func (h *Handler) handleAggregateUsage(w http.ResponseWriter, r *http.Request) {
 
 	var result usage.AggregateResult
 	if len(filter.ModelGroups) > 0 {
-		result, err = h.usageStore.AggregateByModelGroups(filter, r.URL.Query().Get("group_by"), h.getResolver(), h.targetStore, h.modelGroupStore)
+		result, err = h.usageStore.AggregateByModelGroupsContext(r.Context(), filter, r.URL.Query().Get("group_by"), h.getResolver(), h.targetStore, h.modelGroupStore)
 	} else {
-		result, err = h.usageStore.AggregateByModelGroupsAllRequests(filter, r.URL.Query().Get("group_by"), h.getResolver(), h.targetStore, h.modelGroupStore)
+		result, err = h.usageStore.AggregateByModelGroupsAllRequestsContext(r.Context(), filter, r.URL.Query().Get("group_by"), h.getResolver(), h.targetStore, h.modelGroupStore)
 	}
 	if err != nil {
+		if clientAborted(r, err) {
+			return
+		}
 		h.writeInternalError(w, "failed to aggregate usage", err)
 		return
 	}
@@ -55,8 +59,11 @@ func (h *Handler) handleUsageModelGroups(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
 		return
 	}
-	result, err := h.usageStore.AggregateModelGroups(filter, h.getResolver(), h.targetStore, h.modelGroupStore)
+	result, err := h.usageStore.AggregateModelGroupsContext(r.Context(), filter, h.getResolver(), h.targetStore, h.modelGroupStore)
 	if err != nil {
+		if clientAborted(r, err) {
+			return
+		}
 		h.writeInternalError(w, "failed to aggregate usage model groups", err)
 		return
 	}
@@ -64,13 +71,23 @@ func (h *Handler) handleUsageModelGroups(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
-	result, err := h.usageStore.Summary(time.Now().UTC(), h.getResolver())
+	result, err := h.usageStore.SummaryContext(r.Context(), time.Now().UTC(), h.getResolver())
 	if err != nil {
+		if clientAborted(r, err) {
+			return
+		}
 		h.writeInternalError(w, "failed to summarize usage", err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// clientAborted reports that err is the request context ending (client left or
+// deadline), so there is nobody to answer and nothing to log as a server fault.
+func clientAborted(r *http.Request, err error) bool {
+	return err != nil && r.Context().Err() != nil &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 func parseUsageFilter(r *http.Request, withLimit bool) (usage.Filter, error) {

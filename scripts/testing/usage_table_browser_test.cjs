@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { assembleAdminHTML } = require("./assemble_admin_html.cjs");
-const { pageSource } = require("./admin_ui_scripts.cjs");
+const { pageSource, manifest } = require("./admin_ui_scripts.cjs");
 const os = require("node:os");
 const playwright = require("playwright");
 const browserName = process.env.LLMS_UI_BROWSER || "chromium";
@@ -53,10 +53,17 @@ async function main() {
         api: async url => { window.apiCalls.push(url); return fixtureAggregate; },
         toast: message => { throw Error(message); },
       };
-      window.app = {state: {modelGroupsLoaded:true,modelGroups:["API","订阅","自定义模型组"],usageModelGroupExpanded:{},usageModelTargetExpanded:{}}, bind: (module,key) => module === "quota" ? name => name === "company_general" ? "公司通用" : name : core[key]};
-      window.AdminApp = {register: (name,factory) => { window.usage = factory(app); }};
+      window.usageModules = {};
+      window.usageFactories = [];
+      // The usage page registers several modules (state, filters, tables, chart, ...);
+      // overview_range supplies the shared local-day range helper.
+      window.app = {state: {modelGroupsLoaded:true,modelGroups:["API","订阅","自定义模型组"],usageModelGroupExpanded:{},usageModelTargetExpanded:{}}, bind: (module,key) => module === "quota" ? name => name === "company_general" ? "公司通用" : name : (module === "core" ? core[key] : (...args) => usageModules[module][key](...args))};
+      window.AdminApp = {register: (name,factory) => { usageFactories.push({name, factory}); }};
     });
+    const rangeSupport = ["overview_state", "overview_util", "overview_range"].map((name) => manifest().find((script) => script.rel === `pages/overview/${name}.js`).source).join("\n;\n");
+    await page.addScriptTag({ content: rangeSupport });
     await page.addScriptTag({ content: pageSource("usage") });
+    await page.evaluate(() => { for (const entry of usageFactories) usageModules[entry.name] = entry.factory(app); window.usage = usageModules.usage; });
     await page.evaluate(() => usage.loadUsage());
     assert.deepEqual(await page.evaluate(() => apiCalls.length), 1, "tables and trend share one aggregate request");
     assert.match(await page.evaluate(() => apiCalls[0]), /group_by=hour/, "today follows the hour bucket contract");

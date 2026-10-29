@@ -39,6 +39,14 @@ AdminApp.register("overview_state", function (app) {
     trendFocus: null,
     tooltipTrigger: null,
     selectedRange: "today",
+    // Consecutive failed polls / refetches per resource; each drives an exponential backoff.
+    pollFailures: 0,
+    historyFailures: 0,
+    historyRetryAt: 0,
+    metricsFailures: 0,
+    metricsRetryAt: 0,
+    aggregateFailures: 0,
+    aggregateRetryAt: 0,
   };
   return {store: function () { return S; }};
 });

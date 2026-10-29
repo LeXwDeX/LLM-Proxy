@@ -105,7 +105,7 @@ function harness({sortButtons = [], infoButtons = [], rangeButtons = [], barButt
   vm.runInNewContext(pageSource("overview"), context);
   for (const entry of factories) modules[entry.name] = entry.factory(fakeApp);
   module = modules.overview;
-  return {module, get, doc, state, calls, timers, advance, setNow: value => now = new Date(value).getTime(), setActivity: a => answer = a, setOverview: o => overview = o, setMetrics: m => metrics = m, setAggregate: a => aggregate = a, setAggregateHandler: h => aggregateHandler = h, setHandler: h => handler = h};
+  return {module, get, doc, state, calls, timers, advance, now: () => now, setNow: value => now = new Date(value).getTime(), setActivity: a => answer = a, setOverview: o => overview = o, setMetrics: m => metrics = m, setAggregate: a => aggregate = a, setAggregateHandler: h => aggregateHandler = h, setHandler: h => handler = h};
 }
 test("homepage requests real activity, uses provided totals, and has no audit dependency", async () => {
   const h = harness(); await h.module.loadOverview();
@@ -395,7 +395,7 @@ test("hung activity expires, preserves its last sample and recovers without over
   assert.match(h.get("chainStatus").textContent, /实时活动.*超时/);
   assert.match(h.get("activityStatus").textContent, /超时.*上次/); await hung;
   h.setHandler(() => Promise.resolve(activity({generated_at: "2026-10-14T03:00:51Z", runtime: {...activity().runtime, active_requests: 7}})));
-  await h.advance(5000);
+  await h.advance(10000); // first failure doubles the 5s base interval (Issue #97)
   assert.equal(h.get("activityActiveRequests").textContent, "7"); assert.equal(h.get("refreshOverviewBtn").disabled, false);
   assert.equal(h.get("chainSummary").dataset.state, "ready");
   assert.equal(h.calls.filter(c => c.url.endsWith("activity")).length, 3);
@@ -543,11 +543,11 @@ test("legacy history table keeps missing periods and fields distinct from real z
   });
   await h.module.loadOverview(true);
   const html = h.get("overviewUsageSummary").innerHTML;
-  assert.match(html, /<th scope="row">近1小时<\/th><td>0<\/td><td>0<\/td><td>\$0\.00<\/td>/);
-  assert.match(html, /<th scope="row">今日<\/th><td>5<\/td><td>9<\/td><td>\$0\.50<\/td>/);
-  assert.match(html, /<th scope="row">昨日<\/th><td>不可用<\/td><td>不可用<\/td><td>不可用<\/td>/);
-  assert.match(html, /<th scope="row">近7天<\/th><td>4<\/td><td>不可用<\/td><td>不可用<\/td>/);
-  assert.match(html, /<th scope="row">近30天<\/th><td>不可用<\/td><td>不可用<\/td><td>不可用<\/td>/);
+  assert.match(html, /<th scope="row">近 1 小时（滚动）<\/th><td>0<\/td><td>0<\/td><td>\$0\.00<\/td>/);
+  assert.match(html, /<th scope="row">今日（UTC 日）<\/th><td>5<\/td><td>9<\/td><td>\$0\.50<\/td>/);
+  assert.match(html, /<th scope="row">昨日（UTC 日）<\/th><td>不可用<\/td><td>不可用<\/td><td>不可用<\/td>/);
+  assert.match(html, /<th scope="row">近 7 天（滚动 7×24 小时）<\/th><td>4<\/td><td>不可用<\/td><td>不可用<\/td>/);
+  assert.match(html, /<th scope="row">近 30 天（滚动 30×24 小时）<\/th><td>不可用<\/td><td>不可用<\/td><td>不可用<\/td>/);
 });
 
 test("target health sorts unknown states last and degrades single and zero key targets", async () => {
@@ -1405,7 +1405,7 @@ test("cards, both trend charts and both rankings follow the selected range", () 
   for (const id of ["ovTokenTrendReadout", "ovBarTrendReadout"]) {
     const readout = h.get(id).textContent;
     assert.match(readout, /01:00/, id);
-    assert.match(readout, /请求 3/, id);
+    assert.match(readout, /请求权重 3/, id);
     assert.match(readout, /输入 34/, id);
     assert.match(readout, /输出 6/, id);
     assert.match(readout, /\$1\.50/, id);
@@ -1725,3 +1725,66 @@ test("a timed-out refresh after midnight freezes the window note at the snapshot
   assert.match(h.get("ovRangeWindow").textContent, /10-25 00:00 – 10-25 23:50（截至 23:50）/);
   assert.match(h.get("ovRangeStatus").textContent, /更新超时，显示 10-25 00:00 – 10-25 23:50 的上次数据/);
 }));
+
+// ===== Issue #97 =====
+test("poll failures back off exponentially up to 60s and a success resets the interval", async () => {
+  const h = harness(); let offline = true;
+  h.setHandler(url => url.endsWith("activity") ? (offline ? Promise.reject(Error("offline")) : Promise.resolve(activity())) : Promise.resolve({}));
+  h.module.startOverviewAutoRefresh(); await h.advance(0);
+  const delays = [];
+  const pollDelay = () => Math.min(...[...h.timers.values()].map(t => t.at - h.now()));
+  delays.push(pollDelay());
+  for (let i = 0; i < 5; i++) { await h.advance(pollDelay()); delays.push(pollDelay()); }
+  assert.deepEqual(delays, [10000, 20000, 40000, 60000, 60000, 60000]);
+  offline = false;
+  await h.advance(pollDelay());
+  assert.equal(pollDelay(), 5000, "a successful poll returns to the base interval");
+  h.module.stopOverviewAutoRefresh();
+});
+
+test("multi-day aggregates get a longer deadline than single-day ranges", () => withTZ("Asia/Shanghai", async () => {
+  for (const [range, expireAt] of [["today", 12000], ["7d", 45000]]) {
+    const h = harness({storage: {getItem: () => range, setItem() {}}});
+    h.setNow(new Date(2026, 9, 26, 11, 15));
+    h.setAggregateHandler(() => new Promise(() => {}));
+    h.module.startOverviewAutoRefresh(); await h.advance(0);
+    await h.advance(expireAt - 1000);
+    assert.doesNotMatch(h.get("ovRangeStatus").textContent, /超时/, range + " is still within its deadline");
+    await h.advance(2500);
+    assert.match(h.get("ovRangeStatus").textContent, /超时/, range + " expires at its own deadline");
+    h.module.stopOverviewAutoRefresh();
+  }
+}));
+
+test("range request counts say they are request weight, not records", async () => {
+  const h = harness();
+  h.setAggregate(aggregateResult({totals: aggTotals({requests: 7}), buckets: [hourBucket(new Date("2026-10-14T03:00:00Z"), {requests: 7})]}));
+  await h.module.loadOverview();
+  const html = assembleAdminHTML();
+  assert.match(html, /overview-card-label">请求数（按请求权重）</);
+  assert.doesNotMatch(html, /区间内用量记录/);
+  assert.match(html, /data-overview-bar="requests"[^>]*>请求权重</);
+  await h.get("ovBarTrend").fire("keydown", {key: "End"});
+  assert.match(h.get("ovBarTrendReadout").textContent, /请求权重 7/);
+  assert.match(h.get("ovBarLegend").textContent, /请求权重/);
+});
+
+test("the historical summary table names its UTC and rolling windows", async () => {
+  const h = harness(); h.setOverview({usage_summary: {last_hour: {requests: 1}, today: {requests: 2}, yesterday: {}, last_7_days: {}, last_30_days: {}}});
+  await h.module.loadOverview(true);
+  const html = h.get("overviewUsageSummary").innerHTML;
+  assert.match(html, /近 1 小时（滚动）/);
+  assert.match(html, /今日（UTC 日）/);
+  assert.match(html, /昨日（UTC 日）/);
+  assert.match(html, /近 7 天（滚动 7×24 小时）/);
+  assert.match(html, /近 30 天（滚动 30×24 小时）/);
+  assert.match(html, /<th>请求权重<\/th>/);
+});
+
+test("recent changes with unparseable timestamps keep a stable order below dated ones", async () => {
+  const h = harness(); const ev = (id, timestamp) => ({id, timestamp, actor: "a", action: "x", object: "o", result: "ok"});
+  h.setOverview({recent_audit: [ev("bad1", "nope"), ev("old", "2026-10-13T01:00:00Z"), ev("bad2", ""), ev("new", "2026-10-14T01:00:00Z")]});
+  await h.module.loadOverview(true);
+  const ids = [...h.get("recentChangesBody").innerHTML.matchAll(/data-audit-id="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(ids, ["new", "old", "bad1", "bad2"]);
+});

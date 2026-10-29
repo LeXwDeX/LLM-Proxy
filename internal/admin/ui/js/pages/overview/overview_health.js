@@ -246,7 +246,8 @@ AdminApp.register("overview_health", function (app) {
       var at = Date.parse(a && a.timestamp), bt = Date.parse(b && b.timestamp);
       at = isFinite(at) ? at : -Infinity;
       bt = isFinite(bt) ? bt : -Infinity;
-      return bt - at;
+      // Equal keys (two unparseable stamps give -Infinity - -Infinity = NaN) stay in input order.
+      return bt === at ? 0 : bt > at ? 1 : -1;
     });
     events = events.slice(0, 5);
     body.innerHTML = events.map(function (event, index) {
@@ -280,8 +281,8 @@ AdminApp.register("overview_health", function (app) {
     text("ovClients", counter(ov.client_count) ? fmtNum(ov.client_count) : "不可用");
     text("ovModelCosts", counter(ov.model_cost_count) ? fmtNum(ov.model_cost_count) : "不可用");
     var summary = isObject(ov.usage_summary) ? ov.usage_summary : null;
-    var periods = [{k: "last_hour", l: "近1小时"}, {k: "today", l: "今日"}, {k: "yesterday", l: "昨日"}, {k: "last_7_days", l: "近7天"}, {k: "last_30_days", l: "近30天"}];
-    el("overviewUsageSummary").innerHTML = '<table class="activity-history-table"><thead><tr><th>区间</th><th>用量事件数</th><th>总 Token</th><th>历史费用</th></tr></thead><tbody>' + periods.map(function (period) {
+    var periods = [{k: "last_hour", l: "近 1 小时（滚动）"}, {k: "today", l: "今日（UTC 日）"}, {k: "yesterday", l: "昨日（UTC 日）"}, {k: "last_7_days", l: "近 7 天（滚动 7×24 小时）"}, {k: "last_30_days", l: "近 30 天（滚动 30×24 小时）"}];
+    el("overviewUsageSummary").innerHTML = '<table class="activity-history-table"><thead><tr><th>区间（服务端口径）</th><th>请求权重</th><th>总 Token</th><th>历史费用</th></tr></thead><tbody>' + periods.map(function (period) {
       var data = summary && isObject(summary[period.k]) ? summary[period.k] : null;
       var requests = data && counter(data.requests) ? fmtNum(data.requests) : "不可用";
       var total = data && counter(data.input_tokens) && counter(data.output_tokens) ? fmtNum(totalTok(data)) : "不可用";

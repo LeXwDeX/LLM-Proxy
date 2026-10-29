@@ -5,6 +5,7 @@ AdminApp.register("usage_state", function (app) {
     usageChartMetric: "tokens",
     usageChartBuckets: [],
     usageChartGroupBy: "day",
+    usageChartRange: null,
     usageLoadVersion: 0,
     usageSnapshot: null,
     usageDenominator: { total: null, usageIncomplete: false, costIncomplete: false },

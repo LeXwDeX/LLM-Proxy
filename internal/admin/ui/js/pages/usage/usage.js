@@ -260,7 +260,7 @@ AdminApp.register("usage", function (app) {
     S.usageChartBuckets = mainAgg.buckets || [];
     S.usageChartGroupBy = responseGroupBy;
     setUsageChartNote(responseGroupBy);
-    renderDailyChart(S.usageChartBuckets, responseGroupBy);
+    renderDailyChart(S.usageChartBuckets, responseGroupBy, snapshot.range);
   }
 
   var usageTabItems = [

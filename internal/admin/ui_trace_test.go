@@ -14,6 +14,11 @@ func TestUITraceEventsPreserveUntrustedIDsAsData(t *testing.T) {
 	runAdminNodeTest(t, "ui/trace-events.test.cjs")
 }
 
+// Issue #97: trace paging/filters/races, audit detail and catalog robustness.
+func TestUIObservePages(t *testing.T) {
+	runAdminNodeTest(t, "ui/observe-pages.test.cjs")
+}
+
 func TestUIEditableBindingsPreserveRestrictions(t *testing.T) {
 	runAdminNodeTest(t, "ui/form-roundtrip.test.cjs")
 }
@@ -40,11 +45,11 @@ func TestUIStartupTransportResilience(t *testing.T) {
 // the listed timeoutMs. overview.js uses its own request() with a 12s budget.
 func TestUILongAdminQueriesDeclareTimeout(t *testing.T) {
 	long := map[string]string{
-		`"/admin/data/usage/aggregate`:       "timeoutMs: 60000",
-		`"/admin/data/trace?limit=" + limit`: "timeoutMs: 60000",
-		`"/sync"`:                            "timeoutMs: 60000",
-		`"/test-model"`:                      "timeoutMs: 0",
-		`"/keys/wakeup"`:                     "timeoutMs: 0",
+		`"/admin/data/usage/aggregate`: "timeoutMs: 60000",
+		`tracePath(`:                   "timeoutMs: 60000", // builds /admin/data/trace?limit=…&offset=…&view=summary
+		`"/sync"`:                      "timeoutMs: 60000",
+		`"/test-model"`:                "timeoutMs: 0",
+		`"/keys/wakeup"`:               "timeoutMs: 0",
 	}
 	call := regexp.MustCompile(`(?s)api\((.*?)\)\s*(?:;|\.then|,\s*$|\n\s*\.then)`)
 	seen := map[string]int{}

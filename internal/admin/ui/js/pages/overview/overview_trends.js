@@ -31,7 +31,7 @@ AdminApp.register("overview_trends", function (app) {
   function rangeTotals() {
     return S.aggregateSnapshot && isObject(S.aggregateSnapshot.totals) ? S.aggregateSnapshot.totals : null;
   }
-  // True when the shown S.snapshot covers a different period than the one just
+  // True when the shown snapshot covers a different period than the one just
   // requested, e.g. yesterday's "today" after the page stayed open past midnight.
   // Within the same period only `to` advances and `from` stays equal.
   function snapshotOutdated() {
@@ -46,8 +46,8 @@ AdminApp.register("overview_trends", function (app) {
   function rangeComplete(data) {
     return isObject(data) && ["requests", "input_tokens", "output_tokens", "estimated_cost"].every(function (key) { return counter(data[key]); });
   }
-  // frozen: the window describes a retained S.snapshot after a failed refresh, so an
-  // open range ends at the S.snapshot's end instead of "now".
+  // frozen: the window describes a retained snapshot after a failed refresh, so an
+  // open range ends at the snapshot's end instead of "now".
   function renderRangeWindow(window, staleText, frozen) {
     var note = el("ovRangeWindow");
     if (!window) { note.textContent = "统计区间不可用"; return; }
@@ -61,7 +61,7 @@ AdminApp.register("overview_trends", function (app) {
   }
   function renderRange() {
     var option = rangeOption(S.selectedRange);
-    // Describe the data on screen: the S.snapshot's own window until a newer request succeeds.
+    // Describe the data on screen: the snapshot's own window until a newer request succeeds.
     var shownWindow = S.aggregateSnapshotWindow || S.aggregateRequestWindow || rangeWindow(S.selectedRange, Date.now());
     var frozen = !!S.aggregateError && !!S.aggregateSnapshot && shownWindow === S.aggregateSnapshotWindow;
     renderRangeWindow(shownWindow, S.aggregateError && snapshotOutdated() ? aggregateStaleText() : "", frozen);
@@ -112,7 +112,7 @@ AdminApp.register("overview_trends", function (app) {
   }
   function slotReadout(slot) {
     var span = trendGranularity() === "hour" ? shortDate(slot.start) + " " + shortTime(slot.start) + "–" + shortTime(slot.end) : shortDate(slot.start);
-    var parts = [span, "请求 " + fmtNum(slot.requests), "输入 " + fmtNum(slot.input), "输出 " + fmtNum(slot.output), "估算费用 " + fmtMoney(slot.cost)];
+    var parts = [span, "请求权重 " + fmtNum(slot.requests), "输入 " + fmtNum(slot.input), "输出 " + fmtNum(slot.output), "估算费用 " + fmtMoney(slot.cost)];
     if (slot.incompleteUsage > 0) parts.push("用量不完整");
     if (slot.incompleteCost > 0) parts.push("成本覆盖不完整");
     if (slot.missing) parts.push("部分字段不可用");
@@ -165,13 +165,13 @@ AdminApp.register("overview_trends", function (app) {
     S.barButtons.forEach(function (button) {
       button.setAttribute("aria-pressed", button.dataset.overviewBar === S.barMetric ? "true" : "false");
     });
-    text("ovBarLegend", S.barMetric === "cost" ? "估算费用（含模型组系数）" : "请求数");
-    text("ovBarUnit", S.barMetric === "cost" ? "美元" : "个请求");
+    text("ovBarLegend", S.barMetric === "cost" ? "估算费用（含模型组系数）" : "请求权重");
+    text("ovBarUnit", S.barMetric === "cost" ? "美元" : "请求权重");
     el("ovBarLegendSwatch").setAttribute("data-metric", S.barMetric);
   }
   function trendLabel(token) {
     var option = rangeOption(S.selectedRange);
-    var name = token ? "Token 趋势（输入与输出）" : (S.barMetric === "cost" ? "估算费用趋势" : "请求数趋势");
+    var name = token ? "Token 趋势（输入与输出）" : (S.barMetric === "cost" ? "估算费用趋势" : "请求权重趋势");
     return option.label + "，" + name;
   }
   // drawTrends redraws from cached slots; hover and keyboard moves never refetch.
@@ -257,7 +257,7 @@ AdminApp.register("overview_trends", function (app) {
     var cost = entry && counter(entry.estimated_cost) ? fmtMoney(entry.estimated_cost) : "不可用";
     return '<tr data-' + attribute + '="' + esc(name) + '"><td>' + esc(name) + '</td><td>' + requests + '</td><td>' + tokens + '</td><td>' + cost + '</td><td>' + esc(costShare(entry, total)) + '</td></tr>';
   }
-  var topCaveat = "按估算费用、再按请求数排序；费用为估算金额，已含模型组系数（模型组扣费系数），占比按区间总估算费用计算；$0.00 不推断为未定价或免费。";
+  var topCaveat = "按估算费用、再按请求权重排序；费用为估算金额，已含模型组系数（模型组扣费系数），占比按区间总估算费用计算；$0.00 不推断为未定价或免费。";
   function renderTopPanel(bodyID, statusID, list, kind, attribute) {
     var body = el(bodyID);
     var status = el(statusID);

@@ -926,11 +926,17 @@ func (s *UsageStore) SumTargetModelRange(filter usage.Filter) ([]TargetModelCell
 // over whole-target bindings, mirroring quota-side group matching. The variadic
 // form preserves compatibility for callers that do not supply a catalog store.
 func (s *UsageStore) AggregateModelGroups(filter usage.Filter, costs usage.RateResolver, targets *TargetStore, globalGroups ...*ModelGroupStore) (usage.ModelGroupUsageResult, error) {
+	return s.AggregateModelGroupsContext(context.Background(), filter, costs, targets, globalGroups...)
+}
+
+// AggregateModelGroupsContext is AggregateModelGroups bounded by ctx: a canceled
+// request context stops the scan.
+func (s *UsageStore) AggregateModelGroupsContext(ctx context.Context, filter usage.Filter, costs usage.RateResolver, targets *TargetStore, globalGroups ...*ModelGroupStore) (usage.ModelGroupUsageResult, error) {
 	ownership, err := loadUsageOwnership(targets, globalGroups...)
 	if err != nil {
 		return usage.ModelGroupUsageResult{}, err
 	}
-	data, err := s.readCostUnitsInScope(context.Background(), filter, costs, false, nil, costReadHooks{}, ownership.pairFilter(filter.ModelGroups))
+	data, err := s.readCostUnitsInScope(ctx, filter, costs, false, nil, costReadHooks{}, ownership.pairFilter(filter.ModelGroups))
 	if err != nil {
 		return usage.ModelGroupUsageResult{}, err
 	}
@@ -1057,7 +1063,12 @@ func (s *UsageStore) aggregateModelGroupCostUnits(filter usage.Filter, cells []C
 // model-group filter is active because legacy hourly cells do not retain target
 // ownership.
 func (s *UsageStore) AggregateByModelGroups(filter usage.Filter, groupBy string, costs usage.RateResolver, targets *TargetStore, globalGroups ...*ModelGroupStore) (usage.AggregateResult, error) {
-	return s.aggregateTargetModelCells(filter, groupBy, costs, targets, true, globalGroups...)
+	return s.AggregateByModelGroupsContext(context.Background(), filter, groupBy, costs, targets, globalGroups...)
+}
+
+// AggregateByModelGroupsContext is AggregateByModelGroups bounded by ctx.
+func (s *UsageStore) AggregateByModelGroupsContext(ctx context.Context, filter usage.Filter, groupBy string, costs usage.RateResolver, targets *TargetStore, globalGroups ...*ModelGroupStore) (usage.AggregateResult, error) {
+	return s.aggregateTargetModelCellsReadContext(ctx, filter, groupBy, costs, targets, true, costReadHooks{}, globalGroups...)
 }
 
 // AggregateByModelGroupsAllRequests is like AggregateByModelGroups but counts the
@@ -1065,7 +1076,12 @@ func (s *UsageStore) AggregateByModelGroups(filter usage.Filter, groupBy string,
 // no-filter consumption page's historical request-count semantics while still
 // pricing by (target, model, hour).
 func (s *UsageStore) AggregateByModelGroupsAllRequests(filter usage.Filter, groupBy string, costs usage.RateResolver, targets *TargetStore, globalGroups ...*ModelGroupStore) (usage.AggregateResult, error) {
-	return s.aggregateTargetModelCells(filter, groupBy, costs, targets, false, globalGroups...)
+	return s.AggregateByModelGroupsAllRequestsContext(context.Background(), filter, groupBy, costs, targets, globalGroups...)
+}
+
+// AggregateByModelGroupsAllRequestsContext is AggregateByModelGroupsAllRequests bounded by ctx.
+func (s *UsageStore) AggregateByModelGroupsAllRequestsContext(ctx context.Context, filter usage.Filter, groupBy string, costs usage.RateResolver, targets *TargetStore, globalGroups ...*ModelGroupStore) (usage.AggregateResult, error) {
+	return s.aggregateTargetModelCellsReadContext(ctx, filter, groupBy, costs, targets, false, costReadHooks{}, globalGroups...)
 }
 
 func (s *UsageStore) aggregateTargetModelCells(filter usage.Filter, groupBy string, costs usage.RateResolver, targets *TargetStore, successRequests bool, globalGroups ...*ModelGroupStore) (usage.AggregateResult, error) {
@@ -1073,6 +1089,10 @@ func (s *UsageStore) aggregateTargetModelCells(filter usage.Filter, groupBy stri
 }
 
 func (s *UsageStore) aggregateTargetModelCellsRead(filter usage.Filter, groupBy string, costs usage.RateResolver, targets *TargetStore, successRequests bool, hooks costReadHooks, globalGroups ...*ModelGroupStore) (usage.AggregateResult, error) {
+	return s.aggregateTargetModelCellsReadContext(context.Background(), filter, groupBy, costs, targets, successRequests, hooks, globalGroups...)
+}
+
+func (s *UsageStore) aggregateTargetModelCellsReadContext(ctx context.Context, filter usage.Filter, groupBy string, costs usage.RateResolver, targets *TargetStore, successRequests bool, hooks costReadHooks, globalGroups ...*ModelGroupStore) (usage.AggregateResult, error) {
 	groupBy = usage.NormalizeGroupBy(groupBy)
 	result := usage.AggregateResult{GroupBy: groupBy}
 	if filter.From != nil {
@@ -1085,7 +1105,7 @@ func (s *UsageStore) aggregateTargetModelCellsRead(filter usage.Filter, groupBy 
 	if err != nil {
 		return result, err
 	}
-	data, err := s.readCostUnitsInScope(context.Background(), filter, costs, false, nil, hooks, snapshot.pairFilter(filter.ModelGroups))
+	data, err := s.readCostUnitsInScope(ctx, filter, costs, false, nil, hooks, snapshot.pairFilter(filter.ModelGroups))
 	if err != nil {
 		return result, err
 	}

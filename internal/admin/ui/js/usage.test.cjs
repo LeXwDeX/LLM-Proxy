@@ -885,3 +885,53 @@ test("invalid custom apply invalidates an earlier pending custom request", async
   assert.equal(h.document.getElementById("usReqs").textContent, "4");
   assert.match(h.document.getElementById("usCost").innerHTML, /\$1\.00/);
 });
+
+// ===== Issue #97 =====
+function withTZ(zone, fn) {
+  const previous = process.env.TZ;
+  process.env.TZ = zone;
+  const restore = () => { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; };
+  let result;
+  try { result = fn(); } catch (error) { restore(); throw error; }
+  if (result && typeof result.then === "function") return result.finally(restore);
+  restore();
+  return result;
+}
+
+test("usage presets use the same local-day windows as the overview range helper", () => withTZ("Asia/Shanghai", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  const usage = app.modules.usage;
+  const overview = app.modules.overview_range;
+  const now = new Date();
+  for (const key of ["today", "yesterday", "7d", "30d"]) {
+    const window = overview.rangeWindow(key, now);
+    const range = usage.getTimeRange(key);
+    assert.equal(range.from, window.from.toISOString(), key + " starts at the same local midnight");
+    if (window.closed) assert.equal(range.to, window.to.toISOString(), key + " ends 1ms before the next boundary");
+  }
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  assert.equal(usage.getTimeRange("7d").from, new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6).toISOString(), "7d is today plus six previous local days");
+  assert.equal(usage.getTimeRange("30d").from, new Date(today.getFullYear(), today.getMonth(), today.getDate() - 29).toISOString(), "30d is today plus 29 previous local days");
+  const hour = usage.getTimeRange("1h");
+  assert.ok(Math.abs((Date.parse(hour.to) - Date.parse(hour.from)) - 3600000) < 1000, "1h stays a rolling hour");
+}));
+
+test("daily chart zero-fills missing buckets inside the queried range and labels hours in local time", () => withTZ("Asia/Shanghai", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  const chart = h.document.getElementById("dailyChart");
+  app.modules.usage.renderDailyChart([
+    {bucket_start: "2026-10-26T16:00:00Z", input_tokens: 10, output_tokens: 5},
+    {bucket_start: "2026-10-26T19:00:00Z", input_tokens: 1, output_tokens: 1},
+  ], "hour", {from: "2026-10-26T16:30:00Z", to: "2026-10-26T19:10:00Z"});
+  const labels = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(labels, ["10-27 00:00", "10-27 01:00", "10-27 02:00", "10-27 03:00"], "every hour of the range is drawn, in local time");
+  const values = [...chart.innerHTML.matchAll(/class='chart-value'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(values, ["15", "0", "0", "2"], "gaps are real zeros, not missing");
+  assert.match(chart.innerHTML, /本地 10-27 00:00/);
+  assert.match(chart.innerHTML, /UTC 10-26 16:00/);
+  app.modules.usage.renderDailyChart([{bucket_start: "2026-10-24T00:00:00Z", input_tokens: 4}], "day", {from: "2026-10-24T00:00:00Z", to: "2026-10-26T05:00:00Z"});
+  const days = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(days, ["10-24 (UTC)", "10-25 (UTC)", "10-26 (UTC)"], "day buckets are UTC days and say so");
+}));

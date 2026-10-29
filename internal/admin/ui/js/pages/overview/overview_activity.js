@@ -137,6 +137,7 @@ AdminApp.register("overview_activity", function (app) {
           renderChain();
           return;
         }
+        S.pollFailures = 0;
         renderSnapshot(data);
       } catch (error) {
         if (epoch !== S.generation || !visible() || (controller.signal.aborted && error.name !== "TimeoutError")) return;
@@ -149,6 +150,7 @@ AdminApp.register("overview_activity", function (app) {
           emptyCell.textContent = "客户端活动暂不可用";
           el("activityClientsBody").appendChild(emptyRow);
         }
+        S.pollFailures++;
         reportActivityStatus(error);
         S.activityError = (S.snapshot ? "实时活动" : "") + el("activityStatus").textContent;
         renderChain();

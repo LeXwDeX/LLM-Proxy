@@ -20,17 +20,25 @@ AdminApp.register("overview", function (app) {
   var visible = app.bind("overview_util", "visible");
   var rollupBuckets = app.bind("overview_range", "rollupBuckets");
   var requestTimeoutMs = 12000;
+  // Multi-day aggregates scan many hourly cells and get a longer deadline.
+  var multiDayTimeoutMs = 45000;
+  var baseDelayMs = 5000;
+  var maxBackoffMs = 60000;
+  // Exponential backoff: 5s, 10s, 20s, 40s, then 60s while a resource keeps failing.
+  function backoffDelay(failures) {
+    return Math.min(baseDelayMs * Math.pow(2, Math.max(0, failures)), maxBackoffMs);
+  }
   function schedule() {
     if (S.timer !== null) clearTimeout(S.timer);
     S.timer = null;
     if (S.enabled && visible()) S.timer = setTimeout(function () {
       S.timer = null;
       loadOverview();
-    }, 5000);
+    }, backoffDelay(S.pollFailures));
   }
   // Each page-owned request settles even if the transport ignores cancellation.
   // Abort also releases the real fetch before another poll can start.
-  function request(path, controller) {
+  function request(path, controller, timeoutMs) {
     var timeout, onAbort;
     var expired = false;
     return new Promise(function (resolve, reject) {
@@ -40,7 +48,7 @@ AdminApp.register("overview", function (app) {
         reject(error);
       };
       controller.signal.addEventListener("abort", onAbort, {once: true});
-      timeout = setTimeout(function () { expired = true; controller.abort(); }, requestTimeoutMs);
+      timeout = setTimeout(function () { expired = true; controller.abort(); }, timeoutMs || requestTimeoutMs);
       // timeoutMs: 0 turns off the core api default so requestTimeoutMs is the only deadline.
       Promise.resolve(api(path, {signal: controller.signal, timeoutMs: 0})).then(resolve, reject);
     }).finally(function () {
@@ -80,6 +88,7 @@ AdminApp.register("overview", function (app) {
     if (!visible()) return Promise.resolve();
     if (S.metricsFlight) return S.metricsFlight;
     if (!force && S.metricsFetchedAt && Date.now() - S.metricsFetchedAt < 60000) return Promise.resolve();
+    if (!force && Date.now() < S.metricsRetryAt) return Promise.resolve();
     var epoch = S.generation;
     var controller = new AbortController();
     S.metricsController = controller;
@@ -90,11 +99,14 @@ AdminApp.register("overview", function (app) {
         if (!isObject(data)) throw new Error("指标数据格式无效");
         S.metricsSnapshot = data;
         S.metricsFetchedAt = Date.now();
+        S.metricsFailures = 0;
+        S.metricsRetryAt = 0;
         renderChain();
       } catch (error) {
         if (epoch !== S.generation || !visible() || (controller.signal.aborted && error.name !== "TimeoutError")) return;
         S.metricsSnapshot = null;
         S.metricsFetchedAt = 0;
+        S.metricsRetryAt = Date.now() + backoffDelay(S.metricsFailures++);
         renderChain();
       } finally {
         if (epoch === S.generation) { S.metricsFlight = null; S.metricsController = null; }
@@ -107,6 +119,7 @@ AdminApp.register("overview", function (app) {
     if (!visible()) return Promise.resolve();
     if (S.aggregateFlight) return S.aggregateFlight;
     if (!force && S.aggregateFetchedAt && Date.now() - S.aggregateFetchedAt < 60000) return Promise.resolve();
+    if (!force && Date.now() < S.aggregateRetryAt) return Promise.resolve();
     var epoch = S.aggregateGeneration;
     var controller = new AbortController();
     var window = rangeWindow(S.selectedRange, Date.now());
@@ -119,18 +132,21 @@ AdminApp.register("overview", function (app) {
     }
     var flight = (async function () {
       try {
-        var data = await request(aggregatePath(window), controller);
+        var data = await request(aggregatePath(window), controller, window.granularity === "day" ? multiDayTimeoutMs : requestTimeoutMs);
         if (epoch !== S.aggregateGeneration || controller.signal.aborted || !visible()) return;
         if (!isObject(data) || !isObject(data.totals)) throw new Error("聚合数据格式无效");
         S.aggregateSnapshot = data;
         S.aggregateSnapshotWindow = window;
         S.aggregateError = "";
         S.aggregateFetchedAt = Date.now();
+        S.aggregateFailures = 0;
+        S.aggregateRetryAt = 0;
       } catch (error) {
         if (epoch !== S.aggregateGeneration || !visible() || (controller.signal.aborted && error.name !== "TimeoutError")) return;
-        // Keep the last S.snapshot (and its own window) of this range and mark it stale.
+        // Keep the last snapshot (and its own window) of this range and mark it stale.
         S.aggregateError = error.name === "TimeoutError" ? "加载超时" : "加载失败";
         S.aggregateFetchedAt = 0;
+        S.aggregateRetryAt = Date.now() + backoffDelay(S.aggregateFailures++);
       } finally {
         if (epoch === S.aggregateGeneration) {
           S.aggregateLoading = false;
@@ -150,12 +166,14 @@ AdminApp.register("overview", function (app) {
     }
     S.selectedRange = key;
     storeRange(key);
-    // A new S.generation makes any in-flight response for the old range inert.
+    // A new generation makes any in-flight response for the old range inert.
     S.aggregateGeneration++;
     if (S.aggregateController) S.aggregateController.abort();
     S.aggregateFlight = null;
     S.aggregateController = null;
     S.aggregateFetchedAt = 0;
+    S.aggregateFailures = 0;
+    S.aggregateRetryAt = 0;
     S.aggregateSnapshot = null;
     S.aggregateSnapshotWindow = null;
     S.aggregateRequestWindow = rangeWindow(key, Date.now());
@@ -170,6 +188,7 @@ AdminApp.register("overview", function (app) {
     if (!visible()) return Promise.resolve();
     if (S.historyFlight) return S.historyFlight;
     if (!force && S.historyFetchedAt && Date.now() - S.historyFetchedAt < 60000) return Promise.resolve();
+    if (!force && Date.now() < S.historyRetryAt) return Promise.resolve();
     var epoch = S.generation;
     var controller = new AbortController();
     S.historyController = controller;
@@ -180,11 +199,14 @@ AdminApp.register("overview", function (app) {
         if (epoch === S.generation && !controller.signal.aborted && visible()) {
           S.historySnapshot = isObject(data) ? data : {};
           S.historyError = "";
+          S.historyFailures = 0;
+          S.historyRetryAt = 0;
           renderHistory(S.historySnapshot);
         }
       } catch (error) {
         if (epoch !== S.generation || !visible() || (controller.signal.aborted && error.name !== "TimeoutError")) return;
         S.historyFetchedAt = 0;
+        S.historyRetryAt = Date.now() + backoffDelay(S.historyFailures++);
         var reason = error.name === "TimeoutError" ? "加载超时" : "加载失败";
         S.historyError = reason;
         text("activityHistoryState", reason);
@@ -205,10 +227,12 @@ AdminApp.register("overview", function (app) {
     return flight;
   }
   function loadOverview(forceHistory) {
+    if (forceHistory === true) S.pollFailures = 0;
     return Promise.all([loadActivity(), loadHistory(forceHistory === true), loadMetrics(forceHistory === true), loadAggregate(forceHistory === true)]);
   }
   function startOverviewAutoRefresh() {
     S.enabled = true;
+    S.pollFailures = 0;
     loadOverview();
   }
   function stopOverviewAutoRefresh() {

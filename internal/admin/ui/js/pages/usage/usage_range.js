@@ -1,33 +1,18 @@
 "use strict";
 // Usage time range helpers: preset windows and aggregate bucket granularity.
 AdminApp.register("usage_range", function (app) {
+  var rangeWindow = app.bind("overview_range", "rangeWindow");
+  // Presets share the overview's local-day windows (overview_range.rangeWindow):
+  // 7d is today plus the six previous local days, 30d today plus 29, and closed
+  // ranges end 1ms before the next boundary so the aggregate API's inclusive end
+  // hour never picks up the next period. Only "1h" is a rolling window.
   function getTimeRange(range) {
     var now = new Date();
-    var to = now;
-    var from;
-    switch (range) {
-      case "1h":
-        from = new Date(now.getTime() - 3600 * 1000);
-        break;
-      case "today":
-        from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        break;
-      case "yesterday":
-        from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-        to = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        break;
-      case "7d":
-        from = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
-        from.setHours(0, 0, 0, 0);
-        break;
-      case "30d":
-        from = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
-        from.setHours(0, 0, 0, 0);
-        break;
-      default:
-        from = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
+    if (range === "1h") {
+      return { from: new Date(now.getTime() - 3600 * 1000).toISOString(), to: now.toISOString() };
     }
-    return { from: from.toISOString(), to: to.toISOString() };
+    var window = rangeWindow(range === "today" || range === "yesterday" || range === "7d" || range === "30d" ? range : "7d", now);
+    return { from: window.from.toISOString(), to: window.to.toISOString() };
   }
 
   function usageGroupBy(rangeName, range) {
