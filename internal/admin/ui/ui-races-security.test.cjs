@@ -170,10 +170,10 @@ test("a malformed pool roster is unknown and cannot erase a saved grant", async 
   assert.equal(tags.children.find(e => e.dataset.pool === "saved").dataset.selected, "1");
 });
 
-test("single key with a null runtime index remains saveable with its snapshot", async () => {
+test("single key with a null runtime index remains saveable by its key ID", async () => {
   const saved = {name: "single", endpoint_type: "provider-new", endpoint: "https://fixture.invalid",
     usage_adapter: "standard", has_api_key: true, api_key: "long...1234", api_keys: [],
-    key_snapshot: "snapshot", key_runtime_indices: [null]};
+    etag: "t1-3", key_ids: ["kid-single"], key_runtime_indices: [null]};
   const r = routes(); r["/admin/data/targets"] = {targets: [saved]};
   const h = createHarness({routes: r});
   const app = await h.run();
@@ -182,14 +182,14 @@ test("single key with a null runtime index remains saveable with its snapshot", 
   await h.ids.get("saveTargetBtn").listeners.click[0]();
   const put = h.requests.find(req => req.options?.method === "PUT");
   assert.ok(put);
-  assert.equal(put.options.headers["X-Target-Key-Snapshot"], "snapshot");
-  assert.equal(JSON.parse(put.options.body).api_key, "__existing_key_index__:0");
+  assert.equal(put.options.headers["If-Match"], '"t1-3"');
+  assert.equal(JSON.parse(put.options.body).api_key, "__existing_key_id__:kid-single");
 });
 
-test("single effective key with duplicate or empty slots keeps its exact saved slot references", async () => {
+test("duplicate saved keys keep distinct IDs and empty extra slots carry nothing", async () => {
   const saved = {name: "duplicate", endpoint_type: "provider-new", endpoint: "https://fixture.invalid",
     usage_adapter: "standard", has_api_key: true, api_key: "long...1234", api_keys: ["long...1234", "****"],
-    key_snapshot: "snapshot", key_runtime_indices: [null, null, null]};
+    etag: "t1-3", key_ids: ["kid-dup", "kid-dup.1", null], key_runtime_indices: [null, null, null]};
   const r = routes(); r["/admin/data/targets"] = {targets: [saved]};
   const h = createHarness({routes: r, metrics: {targets_runtime: [{name: "duplicate", phase: "ready"}]}});
   const app = await h.run();
@@ -199,30 +199,33 @@ test("single effective key with duplicate or empty slots keeps its exact saved s
   await h.ids.get("saveTargetBtn").listeners.click[0]();
   const put = h.requests.find(req => req.options?.method === "PUT");
   assert.ok(put);
-  assert.equal(put.options.headers["X-Target-Key-Snapshot"], "snapshot");
-  assert.deepEqual(JSON.parse(put.options.body).api_keys, ["__existing_key_index__:1", "__existing_key_index__:2"]);
+  assert.equal(put.options.headers["If-Match"], '"t1-3"');
+  assert.equal(JSON.parse(put.options.body).api_key, "__existing_key_id__:kid-dup");
+  assert.deepEqual(JSON.parse(put.options.body).api_keys, ["__existing_key_id__:kid-dup.1"]);
 });
 
-test("creating a target preserves edits made while POST is pending and cannot POST twice", async () => {
+test("creating a target locks the form while POST is pending, cannot POST twice and closes green", async () => {
   let release;
   const h = createHarness({routes: routes(), fetch: (url, options, fallback) =>
     url === "/admin/data/targets" && options?.method === "POST" ? new Promise(resolve => {release = resolve;}) : fallback(url, options)});
   const app = await h.run();
+  const messages = [];
+  app.modules.core.toast = (msg, kind) => messages.push({msg, kind});
   await app.modules.targets.openTargetModal(null);
   h.ids.get("tgtName").value = "new-target";
   h.ids.get("tgtEndpoint").value = "https://before.invalid";
   h.ids.get("tgtUsageAdapter").value = "standard";
   const save = h.ids.get("saveTargetBtn").listeners.click[0]();
   assert.ok(release);
+  assert.equal(h.ids.get("tgtEndpoint").disabled, true);
+  assert.equal(h.ids.get("tgtNewKeyInput").disabled, true);
   await h.ids.get("saveTargetBtn").listeners.click[0]();
   assert.equal(h.requests.filter(req => req.options?.method === "POST" && req.url === "/admin/data/targets").length, 1);
-  h.ids.get("tgtEndpoint").value = "https://draft.invalid";
-  h.ids.get("targetModal").listeners.input[0]();
   release(response({ok: true}));
   await save;
-  assert.equal(h.ids.get("targetModal").classList.contains("open"), true);
-  assert.equal(h.ids.get("tgtEndpoint").value, "https://draft.invalid");
-  assert.match(h.ids.get("keyCardList").innerHTML, /已创建.*未保存/);
-  await h.ids.get("saveTargetBtn").listeners.click[0]();
-  assert.equal(h.requests.filter(req => req.options?.method === "POST" && req.url === "/admin/data/targets").length, 1);
+  assert.equal(h.ids.get("targetModal").classList.contains("open"), false);
+  assert.ok(messages.some(m => m.msg === "目标已创建" && m.kind === "success"));
+  assert.ok(!messages.some(m => /未保存|保存失败/.test(m.msg)));
+  await app.modules.targets.openTargetModal(null);
+  assert.equal(h.ids.get("tgtEndpoint").disabled, false, "the next editor starts unlocked");
 });

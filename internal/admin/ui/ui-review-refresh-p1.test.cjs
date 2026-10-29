@@ -103,7 +103,7 @@ test("a late open of the old group cannot survive a successful rename and refres
   assert.equal(app.state.modelGroups[0].name, "B");
 });
 
-test("a retained created-target draft cannot accept an unsaveable new key or post twice", async () => {
+test("a pending create refuses new keys and a second POST", async () => {
   let release;
   const h = createHarness({routes: routes(), fetch: (url, options, fallback) =>
     url === "/admin/data/targets" && options?.method === "POST"
@@ -116,22 +116,22 @@ test("a retained created-target draft cannot accept an unsaveable new key or pos
   h.ids.get("tgtNewKeyInput").value = "first-fixture-key";
   app.modules.targets.addKeyToList();
   const save = h.ids.get("saveTargetBtn").listeners.click[0]();
-  h.ids.get("tgtEndpoint").value = "https://draft.invalid";
-  h.ids.get("targetModal").listeners.input[0]();
-  release(response({status: "ok"}));
-  await save;
-  assert.equal(h.ids.get("targetModal").classList.contains("open"), true);
-  assert.equal(h.ids.get("tgtEndpoint").value, "https://draft.invalid");
+  assert.ok(release);
   assert.equal(h.ids.get("tgtNewKeyInput").disabled, true);
   assert.equal(h.ids.get("addKeyBtn").disabled, true);
   h.ids.get("tgtNewKeyInput").value = "second-fixture-key";
   app.modules.targets.addKeyToList();
-  assert.equal(h.ids.get("tgtNewKeyInput").value, "second-fixture-key");
+  assert.equal(h.ids.get("tgtNewKeyInput").value, "second-fixture-key", "a pending create takes no further keys");
   await h.ids.get("saveTargetBtn").listeners.click[0]();
-  assert.equal(h.requests.filter(r => r.url === "/admin/data/targets" && r.options?.method === "POST").length, 1);
+  release(response({status: "ok"}));
+  await save;
+  const posts = h.requests.filter(r => r.url === "/admin/data/targets" && r.options?.method === "POST");
+  assert.equal(posts.length, 1);
+  assert.deepEqual(JSON.parse(posts[0].options.body).api_keys, [], "only the first key was submitted, as the primary");
+  assert.equal(JSON.parse(posts[0].options.body).api_key, "first-fixture-key");
 });
 
-test("opening a new target replaces the retained created-target draft", async () => {
+test("opening a new target while a create is pending starts from a clean, unlocked form", async () => {
   let releaseSave;
   const h = createHarness({routes: routes(), fetch: (url, options, fallback) =>
     url === "/admin/data/targets" && options?.method === "POST"
@@ -142,13 +142,13 @@ test("opening a new target replaces the retained created-target draft", async ()
   h.ids.get("tgtEndpoint").value = "https://before.invalid";
   h.ids.get("tgtUsageAdapter").value = "standard";
   const save = h.ids.get("saveTargetBtn").listeners.click[0]();
-  h.ids.get("tgtEndpoint").value = "https://draft.invalid";
-  h.ids.get("targetModal").listeners.input[0]();
-  releaseSave(response({status: "ok"}));
-  await save;
-  assert.equal(h.ids.get("tgtNewKeyInput").disabled, true, "retained draft stays locked until reopened");
+  assert.equal(h.ids.get("tgtNewKeyInput").disabled, true);
   app.modules.targets.openTargetModal(null);
   assert.equal(h.ids.get("tgtNewKeyInput").disabled, false);
   assert.equal(h.ids.get("addKeyBtn").disabled, false);
+  assert.equal(h.ids.get("saveTargetBtn").disabled, false);
   assert.equal(h.ids.get("tgtEndpoint").value, "", "the new editor starts from a clean form");
+  releaseSave(response({status: "ok"}));
+  await save;
+  assert.equal(h.ids.get("targetModal").classList.contains("open"), true, "a late response never closes the newer editor");
 });

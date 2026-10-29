@@ -8,6 +8,7 @@ AdminApp.register("targetsList", function (app) {
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
   var showConfirm = app.bind("core", "showConfirm");
+  var isUnconfirmedOutcome = app.bind("core", "isUnconfirmedOutcome");
   var epDisplayName = app.bind("schema", "epDisplayName");
   var schemaLabel = app.bind("schema", "schemaLabel");
   var poolDisplayName = app.bind("pools", "poolDisplayName");
@@ -24,6 +25,8 @@ AdminApp.register("targetsList", function (app) {
   var targetHealth = app.bind("targetsHealth", "targetHealth");
   var targetHealthCounts = app.bind("targetsHealth", "targetHealthCounts");
   var targetPhaseKnown = app.bind("targetsHealth", "targetPhaseKnown");
+  var targetETag = app.bind("targetsHealth", "targetETag");
+  var etagHeaders = app.bind("targetsHealth", "etagHeaders");
   var targetFilterSpecs = [
     { key: "all", label: "全部" },
     { key: "attention", label: "异常" },
@@ -464,6 +467,50 @@ AdminApp.register("targetsList", function (app) {
   function endRowAction(key) {
     delete rowActionsInFlight[key];
   }
+  // Row writes carry the ETag the user saw (If-Match), always. A conflict means the
+  // target changed elsewhere: say so and refresh instead of showing a bare error.
+  // Null means the list carries no usable ETag for the row: nothing is sent.
+  function rowETagHeaders(name) {
+    var saved = state.targets.find(function (x) { return x.name === name; });
+    var headers = etagHeaders(targetETag(saved));
+    if (!headers) toast("目标「" + name + "」缺少版本信息，请刷新列表后重试", "error");
+    return headers || null;
+  }
+  // A committed write whose follow-up (auth reload) is still pending is not a failure.
+  function reportRowSuccess(message, result) {
+    if (result && typeof result.warning === "string" && result.warning) {
+      toast(message + "，但认证配置刷新待处理（" + result.warning + "），请稍后核对", "warn");
+    } else {
+      toast(message, "success");
+    }
+  }
+  // verify describes the expected end state of the action: the success message and a
+  // predicate over the target as the server now has it (undefined when it is absent).
+  async function reportRowFailure(prefix, name, error, verify) {
+    if (error && error.code === "target_revision_conflict") {
+      toast("目标「" + name + "」已被修改，列表已刷新，请确认后重试", "error");
+      await loadTargets();
+      return;
+    }
+    if (verify && isUnconfirmedOutcome(error)) {
+      // The write may have been applied: read the list back, then judge by its state.
+      var targets = null;
+      try {
+        targets = await loadTargets(true);
+      } catch (e) {
+        targets = null;
+      }
+      if (!targets) {
+        toast("操作结果未确认，且无法刷新列表，请稍后核对", "warn");
+        return;
+      }
+      var fresh = targets.find(function (x) { return x.name === name; });
+      if (verify.check(fresh)) toast(verify.success, "success");
+      else toast("操作结果未确认，列表已刷新", "warn");
+      return;
+    }
+    toast(prefix + error.message, "error");
+  }
   // ===== 供应商 → 模型 → 费用/计费 层级入口（二级弹窗） =====
   document
     .getElementById("targetsTableBody")
@@ -487,37 +534,48 @@ AdminApp.register("targetsList", function (app) {
       }
       if (t.dataset.delTgt) {
         var name = t.dataset.delTgt;
+        var delHeaders = rowETagHeaders(name);
+        if (!delHeaders) return;
         showConfirm(
           "确认删除目标「" + name + "」？此操作不可恢复。",
           async function () {
             try {
-              await api("/admin/data/targets/" + encodeURIComponent(name), {
+              var delResult = await api("/admin/data/targets/" + encodeURIComponent(name), {
                 method: "DELETE",
+                headers: delHeaders,
               });
-              toast("已删除目标: " + name, "success");
+              reportRowSuccess("已删除目标: " + name, delResult);
               await loadTargets();
             } catch (e) {
-              toast("删除失败: " + e.message, "error");
+              await reportRowFailure("删除失败: ", name, e, {
+                success: "已删除目标: " + name,
+                check: function (fresh) { return !fresh; },
+              });
             }
           },
         );
       }
       if (t.dataset.pauseTgt) {
         var pauseName = t.dataset.pauseTgt;
+        var pauseHeaders = rowETagHeaders(pauseName);
+        if (!pauseHeaders) return;
         showConfirm(
           "确认暂停目标「" + pauseName + "」？暂停后不会转发到该上游。",
           async function () {
             try {
-              await api(
+              var pauseResult = await api(
                 "/admin/data/targets/" +
                   encodeURIComponent(pauseName) +
                   "/pause",
-                { method: "PUT" },
+                { method: "PUT", headers: pauseHeaders },
               );
-              toast("已暂停目标: " + pauseName, "success");
+              reportRowSuccess("已暂停目标: " + pauseName, pauseResult);
               await loadTargets();
             } catch (e) {
-              toast("暂停失败: " + e.message, "error");
+              await reportRowFailure("暂停失败: ", pauseName, e, {
+                success: "已暂停目标: " + pauseName,
+                check: function (fresh) { return !!fresh && fresh.paused === true; },
+              });
             }
           },
         );
@@ -525,18 +583,26 @@ AdminApp.register("targetsList", function (app) {
       if (t.dataset.resumeTgt) {
         var resumeName = t.dataset.resumeTgt;
         if (!beginRowAction("resume:" + resumeName)) return;
+        var resumeHeaders = rowETagHeaders(resumeName);
+        if (!resumeHeaders) {
+          endRowAction("resume:" + resumeName);
+          return;
+        }
         (async function () {
           try {
-            await api(
+            var resumeResult = await api(
               "/admin/data/targets/" +
                 encodeURIComponent(resumeName) +
                 "/resume",
-              { method: "PUT" },
+              { method: "PUT", headers: resumeHeaders },
             );
-            toast("已恢复目标: " + resumeName, "success");
+            reportRowSuccess("已恢复目标: " + resumeName, resumeResult);
             await loadTargets();
           } catch (e) {
-            toast("恢复失败: " + e.message, "error");
+            await reportRowFailure("恢复失败: ", resumeName, e, {
+              success: "已恢复目标: " + resumeName,
+              check: function (fresh) { return !!fresh && fresh.paused === false; },
+            });
           } finally {
             endRowAction("resume:" + resumeName);
           }

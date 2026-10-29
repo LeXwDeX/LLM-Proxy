@@ -10,78 +10,92 @@ AdminApp.register("targetsKeyList", function (app) {
   var api = app.bind("core", "api");
   var showConfirm = app.bind("core", "showConfirm");
   var keyCooldownEnd = app.bind("targetsHealth", "keyCooldownEnd");
-  var keyListFromSnapshot = app.bind("targetsHealth", "keyListFromSnapshot");
+  var keyListFromTarget = app.bind("targetsHealth", "keyListFromTarget");
+  var keyIdsUsable = app.bind("targetsHealth", "keyIdsUsable");
+  var keyRuntimeByID = app.bind("targetsHealth", "keyRuntimeByID");
+  var targetETag = app.bind("targetsHealth", "targetETag");
+  var openTargetModal = app.bind("targetsModal", "openTargetModal");
   var keyStatusColor = app.bind("targetsHealth", "keyStatusColor");
   var loadTargets = app.bind("targets", "loadTargets");
-  var sameKeyIndices = app.bind("targetsHealth", "sameKeyIndices");
-  var usableKeySnapshot = app.bind("targetsHealth", "usableKeySnapshot");
-  ["input", "change"].forEach(function (eventName) {
-    document.getElementById("targetModal").addEventListener(eventName, function () { ts.editingDraftRevision++; });
-  });
-  document.getElementById("targetModal").addEventListener("click", function (event) {
-    var button = event.target.closest("button");
-    if (ts.editingKeySaving && button && button.id !== "saveTargetBtn") ts.editingDraftRevision++;
-  });
+  // Saved keys follow the fresh target by stable ID; their status comes from its runtime map.
   function updateEditingKeyStatuses(t) {
-    var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
     ts.tgtKeyList.forEach(function (item) {
-      if (item.ref) item.status = Number.isInteger(item.runtimeIndex)
-        ? statuses.find(function (s) { return s && s.index === item.runtimeIndex; }) || null : null;
+      if (!item.existing || !item.keyId) return;
+      var runtime = keyRuntimeByID(t, item.keyId);
+      item.runtimeIndex = runtime.runtimeIndex;
+      item.status = runtime.status;
     });
     ts.editingKeyStatusStale = false;
+  }
+  // Called for every published target list while a target is being edited. Only
+  // the edited target counts. A changed ETag is a hint, never a block: the
+  // server arbitrates the save through If-Match.
+  function syncEditingWithRefresh() {
+    var name = state.editingTarget && state.editingTarget.name;
+    var fresh = state.targets.find(function (t) { return t.name === name; });
+    if (!fresh) {
+      ts.editingRemote = "missing";
+      return;
+    }
+    // A save in flight may already have advanced the ETag it is about to report.
+    if (!ts.editingKeySaving) ts.editingRemote = targetETag(fresh) !== ts.editingETag ? "changed" : "";
+    updateEditingKeyStatuses(fresh);
   }
   async function refreshEditingTarget() {
     var session = ts.editingKeySession;
     var name = state.editingTarget && state.editingTarget.name;
     var targets = await loadTargets();
     if (session !== ts.editingKeySession || !state.editingTarget || state.editingTarget.name !== name) return;
-    if (!targets) {
-      ts.editingKeyStatusStale = true;
-    } else {
-      var fresh = targets.find(function (t) { return t.name === name; });
-      if (!fresh || fresh.key_snapshot !== ts.editingKeySnapshot || !sameKeyIndices(fresh)) {
-        ts.editingKeyNeedsReview = true;
-      } else if (!ts.editingKeyNeedsReview) {
-        updateEditingKeyStatuses(fresh);
-      }
-    }
+    // On success loadTargets already synced the editor; a failed load keeps the last statuses.
+    if (!targets) ts.editingKeyStatusStale = true;
     renderKeyList();
   }
 
-  async function reloadEditingKeys(session, name) {
-    var targets = await loadTargets();
+  // Reload the edited target: the whole form is replaced with the server's current
+  // content. The draft, including keys typed in but not yet saved, is discarded
+  // (the user confirmed that), so nothing stale can overwrite someone else's change.
+  async function reloadEditingTarget(session, name) {
+    var targets;
+    try {
+      targets = await loadTargets(true);
+    } catch (e) {
+      targets = null;
+    }
     if (session !== ts.editingKeySession || !state.editingTarget || state.editingTarget.name !== name) return;
     var fresh = targets && targets.find(function (t) { return t.name === name; });
-    if (!usableKeySnapshot(fresh)) {
-      ts.editingKeyNeedsReview = true;
-      renderKeyList();
-      toast("密钥快照不可用，请刷新后重新确认", "error");
+    if (!fresh) {
+      toast(targets ? "该目标已不在列表中，无法重新加载" : "重新加载失败，请稍后重试", "error");
       return;
     }
-    var additions = ts.tgtKeyList.filter(function (item) { return !item.ref; });
-    ts.tgtKeyList = keyListFromSnapshot(fresh).concat(additions);
-    state.editingTarget = fresh;
-    ts.editingKeySnapshot = fresh.key_snapshot;
-    ts.editingKeyIndices = fresh.key_runtime_indices.slice();
-    ts.editingKeyNeedsReview = false;
-    ts.editingKeyStatusStale = false;
-    renderKeyList();
+    // Reopening resets every editor field and flag from the fresh target.
+    openTargetModal(fresh);
+  }
+  function reloadButton() {
+    return " <button type='button' class='btn btn-sm readonly-hide' data-reload-target='1'" +
+      (ts.editingKeyBusy || ts.editingKeySaving ? " disabled" : "") + ">" +
+      (ts.editingKeyReloading ? "正在载入…" : "重新加载") + "</button>";
   }
   function renderKeyList() {
     var container = document.getElementById("keyCardList");
     var notice = "";
-    if (ts.editingKeySaving && !state.editingTarget) {
+    var isEditing = !!state.editingTarget;
+    if (ts.editingKeySaving && !isEditing) {
       notice = "<p role='status'>目标创建中，暂不能修改密钥。</p>";
     }
-    if (ts.createdDraftNeedsReopen) {
-      notice = "<p role='alert'>目标已创建，后续修改未保存。请复制草稿并重新打开目标编辑。</p>";
+    if (isEditing && ts.editingConflict) {
+      notice = "<p role='alert'>该目标已被修改，请重新加载后再保存。草稿仍保留；重新加载会放弃当前草稿（包括尚未保存的新增密钥），用服务器最新内容替换整个表单。" +
+        reloadButton() + "</p>";
+    } else if (isEditing && ts.editingRemote === "changed") {
+      notice = "<p role='status'>该目标已在别处修改。仍可保存，服务端会按版本裁决；如需基于最新内容修改，请重新加载（会放弃当前草稿）。" +
+        reloadButton() + "</p>";
+    } else if (isEditing && ts.editingRemote === "missing") {
+      notice = "<p role='status'>该目标已不在目标列表中（可能已被删除或改名），保存可能失败。</p>";
     }
-    if (state.editingTarget && ts.editingKeyNeedsReview) {
-      notice = "<p role='alert'>密钥快照已变化或不可用，草稿仍保留。请重新载入并确认；已移除的已保存密钥需要重新选择，新增密钥及其他表单草稿会保留。保存前请核对其他草稿，它们可能覆盖其他人更新的配置。 " +
-        "<button type='button' class='btn btn-sm readonly-hide' data-reload-key-draft='1'" + (ts.editingKeyBusy ? " disabled" : "") + ">" +
-        (ts.editingKeyReloading ? "正在载入…" : "重新载入密钥并确认") + "</button></p>";
-    } else if (state.editingTarget && ts.editingKeyStatusStale) {
-      notice = "<p role='status'>密钥状态刷新失败，卡片显示上次状态；请刷新后查看。</p>";
+    if (isEditing && !ts.editingKeyIdsOk) {
+      notice += "<p role='status'>密钥列表暂不可编辑，其他字段可正常保存。" + reloadButton() + "</p>";
+    }
+    if (isEditing && ts.editingKeyStatusStale) {
+      notice += "<p role='status'>密钥状态刷新失败，卡片显示上次状态；请刷新后查看。</p>";
     }
     if (!ts.targetPoolsSnapshot || ts.targetPoolOptionsSnapshot !== ts.targetPoolsSnapshot) {
       notice += "<p role='status'>部署池数据不可用或选项可能过期，当前选择已保留；请重新打开编辑查看最新选项。</p>";
@@ -92,10 +106,9 @@ AdminApp.register("targetsKeyList", function (app) {
       return;
     }
     container.style.display = "block";
-    var isEditing = !!state.editingTarget;
     container.innerHTML = notice + ts.tgtKeyList
       .map(function (item, i) {
-        var mask = item.status && item.status.key_mask ? item.status.key_mask : item.ref
+        var mask = item.status && item.status.key_mask ? item.status.key_mask : item.existing
           ? (item.value || "空主密钥槽位") : item.value.length <= 8 ? "****" : maskKey(item.value);
         var statusBadge = "";
         if (item.status) {
@@ -107,25 +120,25 @@ AdminApp.register("targetsKeyList", function (app) {
             "</span>";
         }
         var actions = "";
-        if (isEditing && item.status && typeof item.status.blocked === "boolean" &&
-            typeof item.status.exhausted === "boolean" && !ts.editingKeyNeedsReview && !ts.editingKeyStatusStale && !ts.editingKeyBusy) {
-          var idx = item.status.index;
+        if (isEditing && item.keyId && item.status && typeof item.status.blocked === "boolean" &&
+            typeof item.status.exhausted === "boolean" && !ts.editingKeyStatusStale &&
+            !ts.editingKeyBusy && !ts.editingKeySaving) {
           if (item.status.blocked || item.status.exhausted) {
             actions =
-              "<button class='btn btn-sm readonly-hide' data-unblock-key-idx='" +
-              idx +
+              "<button class='btn btn-sm readonly-hide' data-unblock-key-id='" +
+              esc(item.keyId) +
               "' title='解除屏蔽' aria-label='解除屏蔽' style='padding:2px 8px;font-size:11px;'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='4' y='11' width='16' height='10' rx='2'></rect><path d='M8 11V7a4 4 0 0 1 7.5-2'></path></svg></button>";
           } else {
             actions =
-              "<button class='btn btn-sm readonly-hide' data-block-key-idx='" +
-              idx +
+              "<button class='btn btn-sm readonly-hide' data-block-key-id='" +
+              esc(item.keyId) +
               "' title='屏蔽' aria-label='屏蔽' style='padding:2px 8px;font-size:11px;'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='4' y='11' width='16' height='10' rx='2'></rect><path d='M8 11V7a4 4 0 0 1 8 0v4'></path></svg></button>";
           }
         }
         var removeBtn =
           "<button class='btn btn-sm readonly-hide' data-remove-key-idx='" +
           i +
-          "'" + ((ts.editingKeyReloading && item.ref) || (ts.editingKeySaving && !isEditing) || ts.createdDraftNeedsReopen ? " disabled" : "") +
+          "'" + ((ts.editingKeyReloading && item.existing) || ts.editingKeySaving || keysReadOnly() ? " disabled" : "") +
           " title='移除' aria-label='移除' style='padding:2px 8px;font-size:11px;color:var(--danger);'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M6 6l12 12M18 6L6 18'></path></svg></button>";
         var cooldownInfo = "";
         var itemCooldownEnd = keyCooldownEnd(item.status);
@@ -157,10 +170,18 @@ AdminApp.register("targetsKeyList", function (app) {
       .join("");
   }
 
+  // Editing a target whose key IDs are unusable: keys are shown but cannot change.
+  function keysReadOnly() {
+    return !!state.editingTarget && !ts.editingKeyIdsOk;
+  }
   function addKeyToList() {
     var input = document.getElementById("tgtNewKeyInput");
-    if ((ts.editingKeySaving && !state.editingTarget) || ts.createdDraftNeedsReopen) {
-      toast(ts.createdDraftNeedsReopen ? "目标已创建，请重新打开目标后再添加密钥。" : "创建请求进行中，请等待后再添加密钥。", "error");
+    if (keysReadOnly()) {
+      toast("密钥列表暂不可编辑，请先重新加载目标。", "error");
+      return;
+    }
+    if (ts.editingKeySaving) {
+      toast("保存进行中，请等待后再添加密钥。", "error");
       return;
     }
     var val = input.value.trim();
@@ -173,17 +194,15 @@ AdminApp.register("targetsKeyList", function (app) {
       }
     }
     ts.tgtKeyList.push({ value: val, status: null });
-    ts.editingDraftRevision++;
     input.value = "";
     renderKeyList();
   }
 
   function removeKeyFromList(idx) {
-    if ((ts.editingKeySaving && !state.editingTarget) || ts.createdDraftNeedsReopen) return;
+    if (ts.editingKeySaving || keysReadOnly()) return;
     if (!Number.isInteger(idx) || idx < 0 || idx >= ts.tgtKeyList.length ||
-        (ts.editingKeyReloading && ts.tgtKeyList[idx].ref)) return;
+        (ts.editingKeyReloading && ts.tgtKeyList[idx].existing)) return;
     ts.tgtKeyList.splice(idx, 1);
-    ts.editingDraftRevision++;
     renderKeyList();
   }
 
@@ -197,7 +216,7 @@ AdminApp.register("targetsKeyList", function (app) {
       }
     });
 
-  // Event delegation for key card actions (block/unblock/remove)
+  // Event delegation for key card actions (block/unblock/remove/reload)
   document
     .getElementById("keyCardList")
     .addEventListener("click", function (e) {
@@ -205,18 +224,18 @@ AdminApp.register("targetsKeyList", function (app) {
       if (t.dataset.removeKeyIdx !== undefined) {
         removeKeyFromList(parseInt(t.dataset.removeKeyIdx, 10));
       }
-      if (t.dataset.reloadKeyDraft !== undefined && state.editingTarget && !ts.editingKeyBusy) {
+      if (t.dataset.reloadTarget !== undefined && state.editingTarget && !ts.editingKeyBusy && !ts.editingKeySaving) {
         var reloadSession = ts.editingKeySession;
         var reloadName = state.editingTarget.name;
         showConfirm(
-          "重新载入已保存的密钥会重置本次密钥移除选择，请重新选择需要移除的密钥。新增密钥和其他表单草稿会保留，保存前请核对，以免覆盖其他人更新的配置。继续吗？",
+          "重新加载会放弃当前草稿（包括尚未保存的新增密钥和对已保存密钥的移除选择），用服务器最新内容替换整个表单。继续吗？",
           async function () {
-            if (reloadSession === ts.editingKeySession && !ts.editingKeyBusy) {
+            if (reloadSession === ts.editingKeySession && !ts.editingKeyBusy && !ts.editingKeySaving) {
               ts.editingKeyBusy = true;
               ts.editingKeyReloading = true;
               renderKeyList();
               try {
-                await reloadEditingKeys(reloadSession, reloadName);
+                await reloadEditingTarget(reloadSession, reloadName);
               } finally {
                 if (reloadSession === ts.editingKeySession) {
                   ts.editingKeyBusy = false;
@@ -228,43 +247,30 @@ AdminApp.register("targetsKeyList", function (app) {
           },
         );
       }
-      var block = t.dataset.blockKeyIdx !== undefined;
-      if ((block || t.dataset.unblockKeyIdx !== undefined) && state.editingTarget &&
-          !ts.editingKeyNeedsReview && !ts.editingKeyStatusStale && !ts.editingKeyBusy && ts.editingKeySnapshot) {
-        var idx = parseInt(block ? t.dataset.blockKeyIdx : t.dataset.unblockKeyIdx, 10);
+      var block = t.dataset.blockKeyId !== undefined;
+      if ((block || t.dataset.unblockKeyId !== undefined) && state.editingTarget &&
+          !ts.editingKeyStatusStale && !ts.editingKeyBusy && !ts.editingKeySaving) {
+        var keyId = block ? t.dataset.blockKeyId : t.dataset.unblockKeyId;
         var name = state.editingTarget.name;
         var session = ts.editingKeySession;
-        var snapshot = ts.editingKeySnapshot;
         showConfirm(block ? "确认屏蔽此 Key？屏蔽后该 Key 将不参与转发，直到手动解除。" : "确认解除屏蔽此 Key？解除后该 Key 将重新参与转发。", async function () {
-          if (session !== ts.editingKeySession || ts.editingKeyBusy || ts.editingKeyNeedsReview || ts.editingKeyStatusStale ||
-              snapshot !== ts.editingKeySnapshot || !ts.tgtKeyList.some(function (item) { return item.status && item.runtimeIndex === idx; })) return;
-          var targetsBeforeOperation = state.targets;
+          if (session !== ts.editingKeySession || ts.editingKeyBusy || ts.editingKeySaving ||
+              !ts.tgtKeyList.some(function (item) { return item.keyId === keyId; })) return;
           ts.editingKeyBusy = true;
           renderKeyList();
           try {
-            var result = await api("/admin/data/targets/" + encodeURIComponent(name) + "/keys/" + idx + (block ? "/block" : "/unblock"),
-              { method: "PUT", headers: { "X-Target-Key-Snapshot": snapshot } });
+            // Block state is not part of the stored target, so the edit ETag stays valid.
+            await api("/admin/data/targets/" + encodeURIComponent(name) + "/keys/id/" + encodeURIComponent(keyId) +
+              (block ? "/block" : "/unblock"), { method: "PUT" });
             if (session !== ts.editingKeySession) return;
-            if (result && typeof result.key_snapshot === "string" && result.key_snapshot && result.key_snapshot !== snapshot) {
-              ts.editingKeySnapshot = result.key_snapshot;
-            } else {
-              ts.editingKeyNeedsReview = true;
-            }
             ts.editingKeyStatusStale = true;
             toast(block ? "已屏蔽 Key" : "已解除屏蔽", "success");
             await refreshEditingTarget();
           } catch (err) {
             if (session !== ts.editingKeySession) return;
-            ts.editingKeyNeedsReview = true;
-            toast("操作失败，密钥草稿已保留，请重新确认", "error");
+            toast((block ? "屏蔽失败: " : "解除屏蔽失败: ") + err.message, "error");
           } finally {
             if (session === ts.editingKeySession) {
-              if (state.targets !== targetsBeforeOperation) {
-                var latest = state.targets.find(function (item) { return item.name === name; });
-                if (!latest || latest.key_snapshot !== ts.editingKeySnapshot || !sameKeyIndices(latest)) {
-                  ts.editingKeyNeedsReview = true;
-                }
-              }
               ts.editingKeyBusy = false;
               renderKeyList();
             }
@@ -278,5 +284,6 @@ AdminApp.register("targetsKeyList", function (app) {
     addKeyToList: addKeyToList,
     removeKeyFromList: removeKeyFromList,
     updateEditingKeyStatuses: updateEditingKeyStatuses,
+    syncEditingWithRefresh: syncEditingWithRefresh,
   };
 });

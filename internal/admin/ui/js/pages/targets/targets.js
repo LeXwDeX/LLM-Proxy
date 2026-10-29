@@ -8,8 +8,7 @@ AdminApp.register("targets", function (app) {
   var api = app.bind("core", "api");
   var renderKeyList = app.bind("targetsKeyList", "renderKeyList");
   var renderTargets = app.bind("targetsList", "renderTargets");
-  var sameKeyIndices = app.bind("targetsHealth", "sameKeyIndices");
-  var updateEditingKeyStatuses = app.bind("targetsKeyList", "updateEditingKeyStatuses");
+  var syncEditingWithRefresh = app.bind("targetsKeyList", "syncEditingWithRefresh");
   var updateTargetPoolAvailability = app.bind("targetsModal", "updateTargetPoolAvailability");
   // Shared mutable page state. Only this object crosses file boundaries; sibling
   // modules reach it through `shared` and never keep their own copies.
@@ -24,16 +23,18 @@ AdminApp.register("targets", function (app) {
     detailTargetName: "",
     detailTab: "overview",
     tgtKeyList: [],
-    editingKeySnapshot: null,
-    editingKeyIndices: null,
-    editingKeyNeedsReview: false,
+    // Editor state. editingETag is the server ETag the draft is based on; the server
+    // arbitrates conflicts through If-Match. editingKeyIdsOk false means the saved
+    // keys cannot be referenced safely: the key list is display-only and saves omit it.
+    editingETag: "",
+    editingKeyIdsOk: true,
+    editingConflict: false,
+    editingRemote: "",
     editingKeyStatusStale: false,
     editingKeyBusy: false,
     editingKeyReloading: false,
     editingKeySaving: false,
     editingKeySession: 0,
-    editingDraftRevision: 0,
-    createdDraftNeedsReopen: false,
     healthMemo: null,
     runtimeEpoch: 0,
   };
@@ -83,19 +84,11 @@ AdminApp.register("targets", function (app) {
     ts.targetPoolsSnapshot = validPoolRoster(pools) ? pools.pools : null;
     if (ts.targetPoolsSnapshot) state.pools = ts.targetPoolsSnapshot;
     updateTargetPoolAvailability();
-    if (document.getElementById("targetModal").classList.contains("open")) renderKeyList();
     ts.targetsLoaded = true;
     ts.targetsLoadFailed = false;
-    if (state.editingTarget && !ts.editingKeyBusy) {
-      var editing = state.targets.find(function (t) { return t.name === state.editingTarget.name; });
-      if (!editing || editing.key_snapshot !== ts.editingKeySnapshot || !sameKeyIndices(editing)) {
-        ts.editingKeyNeedsReview = true;
-        renderKeyList();
-      } else if (!ts.editingKeyNeedsReview) {
-        updateEditingKeyStatuses(editing);
-        renderKeyList();
-      }
-    }
+    // Only the edited target matters here: another target changing never touches the editor.
+    if (state.editingTarget) syncEditingWithRefresh();
+    if (document.getElementById("targetModal").classList.contains("open")) renderKeyList();
     renderTargets();
     if (app.modules.clients) app.modules.clients.onSchedulingRefresh();
     if (app.modules.pools) app.modules.pools.onSchedulingRefresh();

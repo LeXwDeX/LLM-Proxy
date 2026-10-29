@@ -87,6 +87,10 @@ func OpenDB(path string) (*bolt.DB, error) {
 			}
 		}
 		meta := tx.Bucket([]byte(BucketMeta))
+		// 稳定 key ID 的派生密钥：只生成一次，重复打开不变。
+		if _, err := ensureKeyIDSecret(tx); err != nil {
+			return err
+		}
 		if freshUsage {
 			if err := meta.Put([]byte(usageAccountingProofTrackedKey), []byte("1")); err != nil {
 				return err

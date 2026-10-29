@@ -33,11 +33,12 @@ const target = {
     },
     { upstream: "Second-MixedCase-Model", fallback: "glm-flash" },
   ],
-  // The server always sends the key snapshot the editor sends back on save.
+  // The server always sends the revision and stable key IDs the editor sends back on save.
   has_api_key: false,
   api_key: "",
   api_keys: [],
-  key_snapshot: "fixture-snapshot",
+  etag: "t1-1",
+  key_ids: [null],
   key_runtime_indices: [null],
   key_statuses: [],
 };

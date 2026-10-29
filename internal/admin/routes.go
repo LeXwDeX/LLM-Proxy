@@ -104,6 +104,8 @@ func (h *Handler) routes() chi.Router {
 		guarded.Post("/targets/{name}/test-model", h.handleTestModel)
 		guarded.Put("/targets/{name}/keys/{index}/block", h.handleBlockTargetKey)
 		guarded.Put("/targets/{name}/keys/{index}/unblock", h.handleUnblockTargetKey)
+		guarded.Put("/targets/{name}/keys/id/{key_id}/block", h.handleBlockTargetKeyByID)
+		guarded.Put("/targets/{name}/keys/id/{key_id}/unblock", h.handleUnblockTargetKeyByID)
 		guarded.Post("/targets/{name}/keys/wakeup", h.handleWakeUpTargetKeys)
 
 		// Pool write

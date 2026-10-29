@@ -14,11 +14,12 @@ AdminApp.register("targetsModal", function (app) {
   var addCustomBodyRow = app.bind("targetsMappings", "addCustomBodyRow");
   var addCustomHeaderRow = app.bind("targetsMappings", "addCustomHeaderRow");
   var addModelMappingRow = app.bind("targetsMappings", "addModelMappingRow");
-  var keyListFromSnapshot = app.bind("targetsHealth", "keyListFromSnapshot");
+  var keyListFromTarget = app.bind("targetsHealth", "keyListFromTarget");
+  var keyIdsUsable = app.bind("targetsHealth", "keyIdsUsable");
+  var targetETag = app.bind("targetsHealth", "targetETag");
   var renderKeyList = app.bind("targetsKeyList", "renderKeyList");
   var renderTgtModelSuggestions = app.bind("targetsMappings", "renderTgtModelSuggestions");
   var updateModelPrefixPreview = app.bind("targetsMappings", "updateModelPrefixPreview");
-  var usableKeySnapshot = app.bind("targetsHealth", "usableKeySnapshot");
   function updateTargetFormVisibility() {
     var epType = document.getElementById("tgtType").value;
     var meta = epMeta(epType) || {};
@@ -67,6 +68,24 @@ AdminApp.register("targetsModal", function (app) {
     if (ep) ep.placeholder = meta.endpoint_placeholder || "";
     if (hint) hint.textContent = meta.endpoint_hint || "";
   }
+  // While a save is in flight the whole editor is read-only: nothing typed or
+  // clicked in that window can be lost or left unsaved. Only controls this helper
+  // disabled are re-enabled, so unrelated disabled states survive.
+  function setTargetFormLocked(locked) {
+    document.getElementById("targetModal")
+      .querySelectorAll("input, select, textarea, button")
+      .forEach(function (el) {
+        if (locked) {
+          if (!el.disabled) {
+            el.disabled = true;
+            el.dataset.lockedBySave = "1";
+          }
+        } else if (el.dataset.lockedBySave) {
+          el.disabled = false;
+          delete el.dataset.lockedBySave;
+        }
+      });
+  }
   function openTargetModal(t) {
     if (document.body.classList.contains("readonly-mode")) {
       toast("只读用户无法执行此操作", "error");
@@ -75,17 +94,18 @@ AdminApp.register("targetsModal", function (app) {
     // Opening is synchronous: nothing here awaits, so the target passed in is
     // the one filled into the form. Model suggestions load per type, on demand.
     ++ts.editingKeySession;
-    ts.createdDraftNeedsReopen = false;
+    // A save still in flight from an earlier editor no longer owns the form.
+    setTargetFormLocked(false);
     document.getElementById("tgtNewKeyInput").disabled = false;
     document.getElementById("addKeyBtn").disabled = false;
     state.editingTarget = t || null;
-    ts.editingDraftRevision = 0;
     ts.editingKeyBusy = false;
     ts.editingKeyReloading = false;
     ts.editingKeySaving = false;
-    ts.editingKeySnapshot = usableKeySnapshot(t) ? t.key_snapshot : null;
-    ts.editingKeyIndices = usableKeySnapshot(t) ? t.key_runtime_indices.slice() : null;
-    ts.editingKeyNeedsReview = !!t && (!ts.editingKeySnapshot || ts.targetsLoadFailed);
+    ts.editingETag = targetETag(t);
+    ts.editingKeyIdsOk = !t || keyIdsUsable(t);
+    ts.editingConflict = false;
+    ts.editingRemote = "";
     ts.editingKeyStatusStale = false;
     document.getElementById("targetModalTitle").textContent = t
       ? "编辑目标"
@@ -163,8 +183,8 @@ AdminApp.register("targetsModal", function (app) {
       });
     }
     if (bodyContainer.children.length === 0) addCustomBodyRow("", "");
-    // Config slot references must stay paired with the snapshot that issued them.
-    ts.tgtKeyList = t ? keyListFromSnapshot(t) : [];
+    // Saved keys are referenced by stable ID, so the cards stay valid across other changes.
+    ts.tgtKeyList = t ? keyListFromTarget(t) : [];
     document.getElementById("tgtNewKeyInput").value = "";
     document.getElementById("tgtKeyResetTime").value =
       t && t.key_reset_time ? t.key_reset_time : "";
@@ -241,6 +261,7 @@ AdminApp.register("targetsModal", function (app) {
     openTargetModal: openTargetModal,
     renderTargetPoolOptions: renderTargetPoolOptions,
     setUsageAdapterError: setUsageAdapterError,
+    setTargetFormLocked: setTargetFormLocked,
     updateTargetPoolAvailability: updateTargetPoolAvailability,
   };
 });

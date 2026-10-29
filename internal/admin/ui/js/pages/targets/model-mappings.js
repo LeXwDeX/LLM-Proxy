@@ -25,6 +25,8 @@ AdminApp.register("targetsMappings", function (app) {
       tag.textContent = m.model || m.display_name || "";
       tag.title = m.display_name || m.model;
       tag.addEventListener("click", function () {
+        // The editor is read-only while a save is in flight; a suggestion is not a button.
+        if (ts.editingKeySaving) return;
         var modelName = m.model;
         // Skip if this model already exists in some row
         var existingInputs = document.querySelectorAll(
@@ -34,7 +36,6 @@ AdminApp.register("targetsMappings", function (app) {
           if (existingInputs[i].value.trim() === modelName) return;
         }
         addModelMappingRow(modelName, "", !!state.editingTarget);
-        ts.editingDraftRevision++;
       });
       container.appendChild(tag);
     });

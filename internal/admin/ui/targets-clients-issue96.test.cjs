@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
-const { createHarness, withKeySnapshot } = require("../../../scripts/testing/admin_ui_test.cjs");
+const { createHarness, withETag } = require("../../../scripts/testing/admin_ui_test.cjs");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const plain = (value) => JSON.parse(JSON.stringify(value)); // values built inside the vm context
@@ -19,9 +19,9 @@ async function setup(options = {}) {
   const app = await harness.run();
   return { harness, app, el: (id) => harness.ids.get(id) };
 }
-const saved = (extra = {}) => withKeySnapshot({
+const saved = (extra = {}) => withETag({
   name: "saved", endpoint_type: "provider-new", endpoint: "https://fixture.invalid", usage_adapter: "standard", ...extra,
-}, "issue96-snapshot");
+}, 1);
 
 test("P1-1: opening the target modal needs no catalog download and no await", async () => {
   const { harness, app, el } = await setup();
@@ -152,6 +152,7 @@ test("P2: pool save ignores a second click while a save is in flight", async () 
 
 test("P2: resuming a target or a pool twice sends one request", async () => {
   const { harness, app, el } = await setup();
+  app.state.targets = [{ name: "t1", etag: "t1-1" }]; // row writes always carry an If-Match
   for (const [bodyId, dataset, suffix] of [
     ["targetsTableBody", { resumeTgt: "t1" }, "/admin/data/targets/t1/resume"],
     ["poolsTableBody", { resumePool: "p1" }, "/admin/data/pools/p1/resume"],
