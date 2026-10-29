@@ -185,7 +185,7 @@ const list = [
           password: pass ? pass.value : null,
           passwordType: pass ? pass.type : null,
           cards: document.querySelectorAll("form.login-card").length,
-          scripts: document.querySelectorAll("script, link").length,
+          scripts: document.querySelectorAll("script[src], link").length,
           width: document.documentElement.scrollWidth,
           client: document.documentElement.clientWidth,
         };
