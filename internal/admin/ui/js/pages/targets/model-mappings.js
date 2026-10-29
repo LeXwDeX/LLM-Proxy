@@ -8,10 +8,15 @@ AdminApp.register("targetsMappings", function (app) {
   var api = app.bind("core", "api");
   var loadCatalog = app.bind("catalog", "loadCatalog");
   var catalogFilterModels = app.bind("catalog", "catalogFilterModels");
+  // Each call supersedes earlier ones: a slow catalog response for an old type
+  // or filter must not append its tags after a newer render.
+  var suggestionSequence = 0;
   async function renderTgtModelSuggestions(epType, filterText) {
+    var sequence = ++suggestionSequence;
     var container = document.getElementById("tgtModelSuggestions");
     container.innerHTML = "";
     var models = await loadCatalog(epType);
+    if (sequence !== suggestionSequence) return;
     var filtered = catalogFilterModels(models, filterText);
     filtered.slice(0, 50).forEach(function (m) {
       var tag = document.createElement("span");
@@ -147,7 +152,7 @@ AdminApp.register("targetsMappings", function (app) {
         } else {
           var errMsg = res && res.error ? res.error : "未知错误";
           var status =
-            res && res.statusCode ? " (HTTP " + res.statusCode + ")" : "";
+            res && res.status_code ? " (HTTP " + res.status_code + ")" : "";
           toast("测试失败: " + errMsg + status, "error");
         }
       })
@@ -194,23 +199,38 @@ AdminApp.register("targetsMappings", function (app) {
   document.getElementById("tgtModelPrefix").addEventListener("input", updateModelPrefixPreview);
   document.getElementById("model-mappings-container").addEventListener("input", updateModelPrefixPreview);
   // ===== Custom Headers KV editor =====
-  function addCustomHeaderRow(name, value) {
-    var container = document.getElementById("custom-headers-container");
+  // Rows are built with createElement and .value: user text is never parsed as
+  // markup, so "&amp;" and quotes survive a load/save round trip unchanged.
+  function addKvRow(container, namePlaceholder, valuePlaceholder, valueStyle, name, value) {
     var row = document.createElement("div");
     row.style.cssText =
       "display:flex;gap:8px;margin-bottom:4px;align-items:center;";
-    row.innerHTML =
-      '<input class="form-control" placeholder="Header Name" style="flex:1;font-size:13px;" value="' +
-      (name || "").replace(/"/g, "&quot;") +
-      '">' +
-      '<input class="form-control" placeholder="Value" style="flex:2;font-size:13px;" value="' +
-      (value || "").replace(/"/g, "&quot;") +
-      '">' +
-      '<button type="button" class="btn btn-sm btn-danger" style="padding:2px 8px;">&times;</button>';
-    row.querySelector("button").addEventListener("click", function () {
+    var nameInput = document.createElement("input");
+    nameInput.className = "form-control";
+    nameInput.placeholder = namePlaceholder;
+    nameInput.style.cssText = "flex:1;font-size:13px;";
+    nameInput.value = name || "";
+    var valueInput = document.createElement("input");
+    valueInput.className = "form-control";
+    valueInput.placeholder = valuePlaceholder;
+    valueInput.style.cssText = "flex:2;font-size:13px;" + valueStyle;
+    valueInput.value = value || "";
+    var removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "btn btn-sm btn-danger";
+    removeBtn.style.cssText = "padding:2px 8px;";
+    removeBtn.textContent = "\u00d7";
+    removeBtn.addEventListener("click", function () {
       row.remove();
     });
+    row.appendChild(nameInput);
+    row.appendChild(valueInput);
+    row.appendChild(removeBtn);
     container.appendChild(row);
+  }
+  function addCustomHeaderRow(name, value) {
+    addKvRow(document.getElementById("custom-headers-container"),
+      "Header Name", "Value", "", name, value);
   }
   document
     .getElementById("add-custom-header")
@@ -233,22 +253,8 @@ AdminApp.register("targetsMappings", function (app) {
 
   // ===== Custom Body KV editor =====
   function addCustomBodyRow(name, value) {
-    var container = document.getElementById("custom-body-container");
-    var row = document.createElement("div");
-    row.style.cssText =
-      "display:flex;gap:8px;margin-bottom:4px;align-items:center;";
-    row.innerHTML =
-      '<input class="form-control" placeholder="Field Name" style="flex:1;font-size:13px;" value="' +
-      (name || "").replace(/"/g, "&quot;") +
-      '">' +
-      '<input class="form-control" placeholder="Value (JSON)" style="flex:2;font-size:13px;font-family:var(--font-mono);" value="' +
-      (value || "").replace(/"/g, "&quot;") +
-      '">' +
-      '<button type="button" class="btn btn-sm btn-danger" style="padding:2px 8px;">&times;</button>';
-    row.querySelector("button").addEventListener("click", function () {
-      row.remove();
-    });
-    container.appendChild(row);
+    addKvRow(document.getElementById("custom-body-container"),
+      "Field Name", "Value (JSON)", "font-family:var(--font-mono);", name, value);
   }
   document
     .getElementById("add-custom-body")

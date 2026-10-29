@@ -82,37 +82,6 @@ test("client picker waits for the current roster before rendering fallback optio
   assert.deepEqual(harness.ids.get("clientTargetTags").children.map(el => el.dataset.target), ["new"]);
 });
 
-test("a metrics-only successor cannot make the editor use the previous target roster", async () => {
-  const pendingTargets = [];
-  let metrics;
-  let delayMetrics = false;
-  const harness = createHarness({
-    routes: { "/admin/data/catalog": { models: [] }, "/admin/data/pools": { pools: [] } },
-    fetch: (url, options, fallback) => {
-      if (url === "/admin/data/targets") return new Promise(resolve => pendingTargets.push(resolve));
-      if (delayMetrics && url === "/admin/metrics") return new Promise(resolve => { metrics = resolve; });
-      return fallback(url, options);
-    },
-  });
-  const app = await harness.run();
-  app.state.targets = [{ name: "old" }];
-  const editor = app.modules.quota.openModelGroupModal({ name: "group", cost_coefficient: 1,
-    bindings: [{ target: "new" }] });
-  delayMetrics = true;
-  const runtime = app.modules.targets.fetchSchedulingRuntime();
-  delayMetrics = false;
-  pendingTargets[0](response({ targets: [{ name: "old" }] }));
-  metrics(response({ targets_runtime: [] }));
-  await runtime;
-  for (let i = 0; i < 50 && pendingTargets.length < 2; i++) await Promise.resolve();
-  assert.equal(harness.ids.get("modelGroupModal").classList.contains("open"), false);
-  assert.equal(pendingTargets.length, 2, "metrics alone must trigger a target refresh");
-  pendingTargets[1](response({ targets: [{ name: "new" }] }));
-  await editor;
-  assert.match(harness.ids.get("modelGroupBindingEditor").innerHTML, /new/);
-  assert.doesNotMatch(harness.ids.get("modelGroupBindingEditor").innerHTML, /目标已删除/);
-});
-
 for (const [name, open, modal, delayedUrl] of [
   ["model group", app => app.modules.quota.openModelGroupModal(null), "modelGroupModal", "/admin/data/catalog"],
   ["client", app => app.modules.clients.openClientModal(null), "clientModal", "/admin/data/job-levels"],
@@ -206,9 +175,10 @@ test("a stale quota failure cannot invalidate a newer target snapshot", async ()
   assert.doesNotMatch(harness.ids.get("targetsTableBody").innerHTML, /加载.*失败/);
 });
 
-for (const [name, start] of [
-  ["client list", app => app.modules.clients.loadClients()],
-  ["client picker", app => app.modules.clients.ensureClientPickerData()],
+for (const [name, start, initialTargets] of [
+  // The list prefetches targets only when none are loaded (#96), so it starts empty.
+  ["client list", app => app.modules.clients.loadClients(), []],
+  ["client picker", app => app.modules.clients.ensureClientPickerData(), [{ name: "member" }]],
 ]) {
   test(`${name}: an old pool-only fallback cannot replace a newer roster`, async () => {
     let release;
@@ -222,7 +192,7 @@ for (const [name, start] of [
       },
     });
     const app = await harness.run();
-    app.state.targets = [{ name: "member" }];
+    app.state.targets = initialTargets;
     const old = start(app);
     assert.ok(release);
     delay = false;

@@ -14,6 +14,7 @@ AdminApp.register("targetsList", function (app) {
   var loadPools = app.bind("pools", "loadPools");
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var filteredTargets = app.bind("targetsHealth", "filteredTargets");
+  var withHealthMemo = app.bind("targetsHealth", "withHealthMemo");
   var keyStatusColor = app.bind("targetsHealth", "keyStatusColor");
   var keyStatusNeedsAttention = app.bind("targetsHealth", "keyStatusNeedsAttention");
   var loadTargets = app.bind("targets", "loadTargets");
@@ -76,12 +77,24 @@ AdminApp.register("targetsList", function (app) {
     return pools ? loadPools() : loadTargets();
   }
   function renderTargets() {
+    return withHealthMemo(renderTargetsBody);
+  }
+  // Rows are replaced only when their markup changed. A refresh that returns the
+  // same data (tab switch, manual refresh) would otherwise swap the DOM under
+  // the pointer and keyboard focus, dropping hovers and clicks in flight.
+  var renderedTableHtml = null;
+  function writeTargetsTable(tb, html) {
+    if (renderedTableHtml === html) return;
     if (modelHint) hideModelHint();
+    tb.innerHTML = html;
+    renderedTableHtml = html;
+  }
+  function renderTargetsBody() {
     renderTargetStatusFilters();
     var tb = document.getElementById("targetsTableBody");
     var targets = filteredTargets();
     if (ts.targetsLoadFailed && !ts.targetsLoaded) {
-      tb.innerHTML = "<tr class='empty-row'><td colspan='8' role='alert'>加载目标失败，请点击「刷新」重试。</td></tr>";
+      writeTargetsTable(tb, "<tr class='empty-row'><td colspan='8' role='alert'>加载目标失败，请点击「刷新」重试。</td></tr>");
       return;
     }
     var staleNotice = ts.targetsLoadFailed
@@ -90,18 +103,18 @@ AdminApp.register("targetsList", function (app) {
       staleNotice += "<tr><td colspan='8' role='status'>部署池数据不可用，池名称及表单选项可能是上次数据；请刷新重试。</td></tr>";
     }
     if (!state.targets.length) {
-      tb.innerHTML =
-        staleNotice + "<tr class='empty-row'><td colspan='8'>暂无目标配置</td></tr>";
+      writeTargetsTable(tb,
+        staleNotice + "<tr class='empty-row'><td colspan='8'>暂无目标配置</td></tr>");
       refreshOpenTargetDetail();
       return;
     }
     if (!targets.length) {
-      tb.innerHTML =
-        staleNotice + "<tr class='empty-row'><td colspan='8'>当前筛选无目标</td></tr>";
+      writeTargetsTable(tb,
+        staleNotice + "<tr class='empty-row'><td colspan='8'>当前筛选无目标</td></tr>");
       refreshOpenTargetDetail();
       return;
     }
-    tb.innerHTML = staleNotice + targets
+    writeTargetsTable(tb, staleNotice + targets
       .map(function (t) {
         var health = targetHealth(t);
         var poolCell = t.pool
@@ -380,7 +393,7 @@ AdminApp.register("targetsList", function (app) {
           "</div></td></tr>"
         );
       })
-      .join("");
+      .join(""));
     refreshOpenTargetDetail();
   }
   // Mount outside the scrolling cell so the full name is never clipped by the table.
@@ -440,6 +453,17 @@ AdminApp.register("targetsList", function (app) {
   window.addEventListener("resize", hideModelHint);
   document.addEventListener("scroll", hideModelHint, true);
 
+  // Row actions that must not run twice at once (double click, repeated confirm).
+  var WAKEUP_TIMEOUT_MS = 10 * 60 * 1000;
+  var rowActionsInFlight = Object.create(null);
+  function beginRowAction(key) {
+    if (rowActionsInFlight[key]) return false;
+    rowActionsInFlight[key] = true;
+    return true;
+  }
+  function endRowAction(key) {
+    delete rowActionsInFlight[key];
+  }
   // ===== 供应商 → 模型 → 费用/计费 层级入口（二级弹窗） =====
   document
     .getElementById("targetsTableBody")
@@ -500,6 +524,7 @@ AdminApp.register("targetsList", function (app) {
       }
       if (t.dataset.resumeTgt) {
         var resumeName = t.dataset.resumeTgt;
+        if (!beginRowAction("resume:" + resumeName)) return;
         (async function () {
           try {
             await api(
@@ -512,6 +537,8 @@ AdminApp.register("targetsList", function (app) {
             await loadTargets();
           } catch (e) {
             toast("恢复失败: " + e.message, "error");
+          } finally {
+            endRowAction("resume:" + resumeName);
           }
         })();
       }
@@ -523,19 +550,23 @@ AdminApp.register("targetsList", function (app) {
             name +
             "」执行唤醒探测？\n将尝试恢复所有被屏蔽/超额的 Key。",
           async function () {
+            if (!beginRowAction("wakeup:" + name)) return;
             try {
               var result = await api(
                 "/admin/data/targets/" +
                   encodeURIComponent(name) +
                   "/keys/wakeup",
-                // Server probes keys sequentially, 5s each; no client deadline.
-                { method: "POST", timeoutMs: 0 },
+                // The server probes keys one by one (5s each). The deadline is
+                // generous but finite so a dead connection cannot hang the UI.
+                { method: "POST", timeoutMs: WAKEUP_TIMEOUT_MS },
               );
               var recovered = result.recovered || 0;
               toast("唤醒完成: 恢复了 " + recovered + " 个 Key", "success");
               await loadTargets();
             } catch (e) {
               toast("唤醒失败: " + e.message, "error");
+            } finally {
+              endRowAction("wakeup:" + name);
             }
           },
         );

@@ -33,6 +33,8 @@ AdminApp.register("targets", function (app) {
     editingKeySession: 0,
     editingDraftRevision: 0,
     createdDraftNeedsReopen: false,
+    healthMemo: null,
+    runtimeEpoch: 0,
   };
   function targetPoolsAvailable() { return ts.targetPoolsSnapshot !== null; }
   function beginSchedulingRefresh() {
@@ -49,7 +51,6 @@ AdminApp.register("targets", function (app) {
       var result = await refresh.promise;
       if (refresh !== ts.schedulingRefresh || result.superseded) continue;
       if (result.error) throw result.error;
-      if (result.runtimeOnly) return loadTargets(true);
       return state.targets;
     }
   }
@@ -71,9 +72,13 @@ AdminApp.register("targets", function (app) {
   }
   function publishSchedulingRefresh(sequence, targets, runtime, pools) {
     if (!schedulingRefreshCurrent(sequence)) return null;
+    // The refresh settles with success only when every step below ran. A throw
+    // propagates to failSchedulingRefresh, which settles it with the error.
+    var refresh = ts.schedulingRefresh;
     if (!validTargets(targets)) throw new Error("目标列表格式无效");
     state.targets = targets.targets;
     state.runtime = runtime;
+    ts.runtimeEpoch++;
     ts.targetPoolsSnapshot = validPoolRoster(pools) ? pools.pools : null;
     if (ts.targetPoolsSnapshot) state.pools = ts.targetPoolsSnapshot;
     updateTargetPoolAvailability();
@@ -93,27 +98,33 @@ AdminApp.register("targets", function (app) {
     renderTargets();
     if (app.modules.clients) app.modules.clients.onSchedulingRefresh();
     if (app.modules.pools) app.modules.pools.onSchedulingRefresh();
-    ts.schedulingRefresh.finish({});
+    refresh.finish({});
     return state.targets;
   }
   function failSchedulingRefresh(sequence, error) {
     if (!schedulingRefreshCurrent(sequence)) return false;
-    ts.targetsLoadFailed = true;
-    ts.targetPoolsSnapshot = null;
-    updateTargetPoolAvailability();
-    if (document.getElementById("targetModal").classList.contains("open")) renderKeyList();
-    renderTargets();
-    if (app.modules.clients) app.modules.clients.onSchedulingRefresh();
-    if (app.modules.pools) app.modules.pools.onSchedulingRefresh();
-    ts.schedulingRefresh.finish({ error: error || new Error("目标列表加载失败") });
+    var refresh = ts.schedulingRefresh;
+    try {
+      ts.targetsLoadFailed = true;
+      ts.targetPoolsSnapshot = null;
+      updateTargetPoolAvailability();
+      if (document.getElementById("targetModal").classList.contains("open")) renderKeyList();
+      renderTargets();
+      if (app.modules.clients) app.modules.clients.onSchedulingRefresh();
+      if (app.modules.pools) app.modules.pools.onSchedulingRefresh();
+    } finally {
+      // Waiters must settle even if a render above throws.
+      refresh.finish({ error: error || new Error("目标列表加载失败") });
+    }
     return true;
   }
   async function loadTargets(propagateError) {
     var sequence = beginSchedulingRefresh();
     try {
       // Pool pause lives on the roster, and another admin session may resume it
-      // between refreshes. Reload it every time; a failed fetch keeps the last
-      // known roster instead of turning cached pause into an authoritative fact.
+      // between refreshes. Reload it every time. A failed fetch marks the roster
+      // unavailable (no snapshot, so cached pause is never treated as fact);
+      // state.pools keeps the last list only so names can still be displayed.
       var fetches = [
         api("/admin/data/targets"),
         fetchSchedulingRuntime(true),
@@ -137,8 +148,11 @@ AdminApp.register("targets", function (app) {
   }
   // fetchSchedulingRuntime：拉取 /admin/metrics 的 targets_runtime 调度观测快照
   // （S5）。失败时清空快照，避免把过期运行态当成当前健康状态。
+  // captureOnly: return the snapshot to the caller (a refresh in progress
+  // publishes it). Otherwise store it directly, unless a refresh published a
+  // newer runtime while this request was in flight.
   async function fetchSchedulingRuntime(captureOnly) {
-    var sequence = captureOnly ? null : beginSchedulingRefresh();
+    var epoch = ts.runtimeEpoch;
     var map = null;
     try {
       var m = await api("/admin/metrics");
@@ -152,9 +166,9 @@ AdminApp.register("targets", function (app) {
       // Stale snapshots would misreport health; metrics stay best-effort.
       map = null;
     }
-    if (!captureOnly && schedulingRefreshCurrent(sequence)) {
+    if (!captureOnly && epoch === ts.runtimeEpoch) {
       state.runtime = map;
-      ts.schedulingRefresh.finish({ runtimeOnly: true });
+      ts.runtimeEpoch++;
     }
     return map;
   }

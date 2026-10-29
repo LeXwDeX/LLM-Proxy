@@ -50,16 +50,21 @@ AdminApp.register("targetsHealth", function (app) {
     var expected = indices
       ? indices.filter(function (i) { return Number.isInteger(i) && i >= 0; })
       : [];
-    expected = expected.filter(function (i, n) { return expected.indexOf(i) === n; });
+    expected = Array.from(new Set(expected));
     if (!expected.length) {
       expected = Array.from({ length: counts.total }, function (_, i) { return i; });
     }
-    return expected.every(function (index) {
-      return statuses.some(function (s) {
-        return s && s.index === index && typeof s.blocked === "boolean" &&
-          typeof s.exhausted === "boolean" && typeof s.status === "string" && !!s.status;
-      });
+    var complete = completeStatusIndexes(statuses);
+    return expected.every(function (index) { return complete.has(index); });
+  }
+  // Indexes of statuses that report every field the health logic relies on.
+  function completeStatusIndexes(statuses) {
+    var complete = new Set();
+    statuses.forEach(function (s) {
+      if (s && typeof s.blocked === "boolean" && typeof s.exhausted === "boolean" &&
+          typeof s.status === "string" && !!s.status) complete.add(s.index);
     });
+    return complete;
   }
   function targetRuntimeFor(t) {
     return state.runtime
@@ -88,7 +93,26 @@ AdminApp.register("targetsHealth", function (app) {
       );
     });
   }
+  // Health is a pure function of the loaded state, so one render pass computes
+  // it once per target (sort, filter, counts and rows all share the result).
+  function withHealthMemo(fn) {
+    if (ts.healthMemo) return fn();
+    ts.healthMemo = new Map();
+    try {
+      return fn();
+    } finally {
+      ts.healthMemo = null;
+    }
+  }
   function targetHealth(t) {
+    var memo = ts.healthMemo;
+    if (memo && t && typeof t === "object") {
+      if (!memo.has(t)) memo.set(t, computeTargetHealth(t));
+      return memo.get(t);
+    }
+    return computeTargetHealth(t);
+  }
+  function computeTargetHealth(t) {
     var keys = targetKeyCounts(t);
     var rt = targetRuntimeFor(t);
     var phase = rt && rt.phase ? String(rt.phase) : "";
@@ -248,12 +272,9 @@ AdminApp.register("targetsHealth", function (app) {
         !(t.key_runtime_indices.every(function (i) { return i === null; }) &&
           (t.key_statuses == null || (Array.isArray(t.key_statuses) && !t.key_statuses.length))))
     ) return false;
-    var statuses = Array.isArray(t.key_statuses) ? t.key_statuses : [];
+    var complete = completeStatusIndexes(Array.isArray(t.key_statuses) ? t.key_statuses : []);
     return t.key_runtime_indices.every(function (i) {
-      return i === null || (Number.isInteger(i) && i >= 0 && statuses.some(function (s) {
-        return s && s.index === i && typeof s.blocked === "boolean" &&
-          typeof s.exhausted === "boolean" && typeof s.status === "string" && !!s.status;
-      }));
+      return i === null || (Number.isInteger(i) && i >= 0 && complete.has(i));
     });
   }
   function keyListFromSnapshot(t) {
@@ -318,6 +339,7 @@ AdminApp.register("targetsHealth", function (app) {
   return {
     targetHealth: targetHealth,
     targetHealthCounts: targetHealthCounts,
+    withHealthMemo: withHealthMemo,
     filteredTargets: filteredTargets,
     keyStatusColor: keyStatusColor,
     keyCooldownEnd: keyCooldownEnd,

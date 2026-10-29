@@ -5,12 +5,11 @@ AdminApp.register("targetsModal", function (app) {
   var ts = app.initializeModule("targets").shared;
   var state = app.state;
   var toast = app.bind("core", "toast");
-  var api = app.bind("core", "api");
   var openModal = app.bind("core", "openModal");
   var epMeta = app.bind("schema", "epMeta");
   var schemaLabel = app.bind("schema", "schemaLabel");
   var setSchemaSelectValue = app.bind("schema", "setSchemaSelectValue");
-  var poolMemberCount = app.bind("pools", "poolMemberCount");
+  var poolMemberCounter = app.bind("pools", "poolMemberCounter");
   var poolDisplayName = app.bind("pools", "poolDisplayName");
   var addCustomBodyRow = app.bind("targetsMappings", "addCustomBodyRow");
   var addCustomHeaderRow = app.bind("targetsMappings", "addCustomHeaderRow");
@@ -68,24 +67,14 @@ AdminApp.register("targetsModal", function (app) {
     if (ep) ep.placeholder = meta.endpoint_placeholder || "";
     if (hint) hint.textContent = meta.endpoint_hint || "";
   }
-  async function openTargetModal(t) {
+  function openTargetModal(t) {
     if (document.body.classList.contains("readonly-mode")) {
       toast("只读用户无法执行此操作", "error");
       return;
     }
-    var session = ++ts.editingKeySession;
-    // 保证模型目录缓存可用，供模型行的 datalist 软建议；失败不阻塞弹窗
-    if (!state.catalogAllCache) {
-      try {
-        var catData = await api("/admin/data/catalog");
-        state.catalogAllCache = Array.isArray(catData.models)
-          ? catData.models
-          : [];
-      } catch (e) {
-        /* 软建议数据缺失可容忍 */
-      }
-    }
-    if (session !== ts.editingKeySession) return;
+    // Opening is synchronous: nothing here awaits, so the target passed in is
+    // the one filled into the form. Model suggestions load per type, on demand.
+    ++ts.editingKeySession;
     ts.createdDraftNeedsReopen = false;
     document.getElementById("tgtNewKeyInput").disabled = false;
     document.getElementById("addKeyBtn").disabled = false;
@@ -176,11 +165,11 @@ AdminApp.register("targetsModal", function (app) {
     if (bodyContainer.children.length === 0) addCustomBodyRow("", "");
     // Config slot references must stay paired with the snapshot that issued them.
     ts.tgtKeyList = t ? keyListFromSnapshot(t) : [];
-    renderKeyList();
     document.getElementById("tgtNewKeyInput").value = "";
     document.getElementById("tgtKeyResetTime").value =
       t && t.key_reset_time ? t.key_reset_time : "";
     renderTargetPoolOptions(t && t.pool ? t.pool : "");
+    // Once, after the pool options: the key notice depends on that snapshot.
     renderKeyList();
     updateTargetFormVisibility();
     openModal("targetModal");
@@ -198,6 +187,7 @@ AdminApp.register("targetsModal", function (app) {
     ts.targetPoolOptionsSnapshot = ts.targetPoolsSnapshot;
     updateTargetPoolAvailability();
     var val = selected || "";
+    var memberCount = poolMemberCounter();
     sel.innerHTML = "<option value=''>不属于任何池</option>";
     (ts.targetPoolsSnapshot || state.pools || [])
       .slice()
@@ -209,8 +199,8 @@ AdminApp.register("targetsModal", function (app) {
         opt.value = p.name;
         opt.textContent =
           poolDisplayName(p) +
-          (poolMemberCount(p.name) > 0
-            ? "（" + poolMemberCount(p.name) + " 成员）"
+          (memberCount(p.name) > 0
+            ? "（" + memberCount(p.name) + " 成员）"
             : "");
         sel.appendChild(opt);
       });

@@ -14,13 +14,12 @@ AdminApp.register("clients", function (app) {
   var closeModal = app.bind("core", "closeModal");
   var showConfirm = app.bind("core", "showConfirm");
   var epShortLabel = app.bind("schema", "epShortLabel");
-  var poolMemberCount = app.bind("pools", "poolMemberCount");
+  var poolMemberCounter = app.bind("pools", "poolMemberCounter");
   var poolDisplayName = app.bind("pools", "poolDisplayName");
   var loadTargets = app.bind("targets", "loadTargets");
   var awaitSchedulingRefresh = app.bind("targets", "awaitSchedulingRefresh");
   var targetPoolsAvailable = app.bind("targets", "targetPoolsAvailable");
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
-  var loadQuotaEditorData = app.bind("quota", "loadQuotaEditorData");
   var loadDictOptions = app.bind("quota", "loadDictOptions");
   var dictEmptyLabel = app.bind("quota", "dictEmptyLabel");
   var dictOptionsHTML = app.bind("quota", "dictOptionsHTML");
@@ -58,8 +57,10 @@ AdminApp.register("clients", function (app) {
           return { key: "agg", data: r };
         }),
       ];
-      if (!state.targets || !state.targets.length || !state.pools || !state.pools.length) {
-        jobs.push(loadTargets(true));
+      // Targets feed the access pickers only. Prefetch when none are loaded, and
+      // never let that side request fail the clients list itself.
+      if (!state.targets || !state.targets.length) {
+        jobs.push(loadTargets(true).catch(function () { return null; }));
       }
       var results = await Promise.all(jobs);
       if (version !== clientLoadVersion) return;
@@ -86,7 +87,7 @@ AdminApp.register("clients", function (app) {
     var tb = document.getElementById("clientsTableBody");
     if (!state.clients.length) {
       tb.innerHTML =
-        "<tr class='empty-row'><td colspan='5'>暂无客户端</td></tr>";
+        "<tr class='empty-row'><td colspan='8'>暂无客户端</td></tr>";
       return;
     }
     tb.innerHTML = state.clients
@@ -199,6 +200,11 @@ AdminApp.register("clients", function (app) {
         );
       }
     });
+  // The client editor needs fresh targets and pools for its pickers, nothing
+  // else. loadTargets(true) settles the refresh itself and rethrows its error.
+  async function loadClientEditorData() {
+    await loadTargets(true);
+  }
   async function openClientModal(c) {
     if (document.body.classList.contains("readonly-mode")) {
       toast("只读用户无法执行此操作", "error");
@@ -211,8 +217,10 @@ AdminApp.register("clients", function (app) {
     var clientVersion = c ? (clientVersions[c.name] || 0) : 0;
     var version = ++clientOpenVersion;
     try {
-      await loadQuotaEditorData();
+      await loadClientEditorData();
       await loadDictOptions();
+      // A refresh that started while the dictionaries loaded must land before
+      // the pickers are filled.
       await awaitSchedulingRefresh();
     } catch (e) {
       if (version !== clientOpenVersion) return;
@@ -241,7 +249,6 @@ AdminApp.register("clients", function (app) {
       c && c.ip_address ? c.ip_address : "";
     renderClientTargetTags(c && c.allowed_targets ? c.allowed_targets : []);
     renderClientPoolTags(c && c.allowed_pools ? c.allowed_pools : []);
-    ensureClientPickerData();
     document.getElementById("clientJobLevel").innerHTML = dictOptionsHTML(
       state.jobLevels,
       c && c.job_level ? c.job_level : "",
@@ -347,6 +354,7 @@ AdminApp.register("clients", function (app) {
     (selected || []).forEach(function (p) {
       selectedSet[String(p).toLowerCase()] = true;
     });
+    var memberCount = poolMemberCounter();
     var pools = (state.pools || []).slice().sort(function (a, b) {
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
@@ -366,7 +374,7 @@ AdminApp.register("clients", function (app) {
       var tag = document.createElement("span");
       var isSelected = !!selectedSet[String(p.name).toLowerCase()];
       tag.textContent = poolDisplayName(p) +
-        (!available ? "（部署池信息不可用）" : p.missing ? "（部署池已删除）" : "（" + poolMemberCount(p.name) + "）");
+        (!available ? "（部署池信息不可用）" : p.missing ? "（部署池已删除）" : "（" + memberCount(p.name) + "）");
       tag.title = p.missing
         ? "保留已有授权，点击可移除"
         : p.description ? p.description : "部署池 " + poolDisplayName(p);
