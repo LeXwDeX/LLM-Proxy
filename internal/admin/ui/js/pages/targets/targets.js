@@ -2,6 +2,7 @@
 // Targets owns the shared page state, the scheduling refresh and the public exports.
 // Part of the targets page; shared mutable state lives in the object owned by the "targets" module.
 AdminApp.register("targets", function (app) {
+  app.requires(["targetsSave"]);
   var state = app.state;
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
