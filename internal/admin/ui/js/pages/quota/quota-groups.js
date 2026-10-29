@@ -162,7 +162,8 @@ AdminApp.register("quotaGroups", function (app) {
       : 1;
     quotaDimensions.forEach(function (dim) {
       document.getElementById("modelGroup-" + dim.key).value =
-        group && group[dim.base_field] != null ? group[dim.base_field] : "";
+        // The API omits a stored 0 (omitempty), so a missing base on an existing group means 0.
+        group ? (group[dim.base_field] != null ? group[dim.base_field] : 0) : "";
     });
     renderModelGroupBindings(group ? group.bindings : []);
     openModal("modelGroupModal");

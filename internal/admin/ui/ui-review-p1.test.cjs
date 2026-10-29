@@ -63,10 +63,10 @@ for (const mode of ["newer editor", "same editor draft"]) test(`model group save
     url === "/admin/data/model-groups/A" && options?.method === "PUT"
       ? new Promise(resolve => {release = resolve;}) : fallback(url, options)});
   const app = await h.run();
-  await app.modules.quota.openModelGroupModal({name: "A", cost_coefficient: 1, daily_usd: 0, weekly_usd: 0, monthly_usd: 0});
+  await app.modules.quota.openModelGroupModal({name: "A", cost_coefficient: 1});
   const save = h.ids.get("saveModelGroupBtn").listeners.click[0]();
   assert.ok(release);
-  if (mode === "newer editor") await app.modules.quota.openModelGroupModal({name: "B", cost_coefficient: 2, daily_usd: 0, weekly_usd: 0, monthly_usd: 0});
+  if (mode === "newer editor") await app.modules.quota.openModelGroupModal({name: "B", cost_coefficient: 2});
   h.ids.get("modelGroupCoefficient").value = "3";
   if (mode === "same editor draft") h.ids.get("modelGroupModal").listeners.input[0]();
   release(response({status: "ok"}));
@@ -85,7 +85,7 @@ test("rename binds retained draft to the saved model group", async () => {
     url === "/admin/data/model-groups/A" && options?.method === "PUT" && first
       ? (first = false, new Promise(resolve => {release = resolve;})) : fallback(url, options)});
   const app = await h.run();
-  await app.modules.quota.openModelGroupModal({name: "A", cost_coefficient: 1, daily_usd: 0, weekly_usd: 0, monthly_usd: 0});
+  await app.modules.quota.openModelGroupModal({name: "A", cost_coefficient: 1});
   h.ids.get("modelGroupName").value = "B";
   const save = h.ids.get("saveModelGroupBtn").listeners.click[0]();
   h.ids.get("modelGroupCoefficient").value = "3";
@@ -105,7 +105,7 @@ test("a pending model group save cannot reopen the same group with its old value
     url === "/admin/data/model-groups/A" && options?.method === "PUT"
       ? new Promise(resolve => {release = resolve;}) : fallback(url, options)});
   const app = await h.run();
-  const group = {name: "A", cost_coefficient: 1, daily_usd: 0, weekly_usd: 0, monthly_usd: 0};
+  const group = {name: "A", cost_coefficient: 1};
   await app.modules.quota.openModelGroupModal(group);
   const save = h.ids.get("saveModelGroupBtn").listeners.click[0]();
   app.modules.core.closeModal("modelGroupModal");

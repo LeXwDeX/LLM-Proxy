@@ -221,3 +221,21 @@ test("model labels come from an index that follows catalog changes", async () =>
   app.state.catalogAllCache = [{endpoint_type: "openai", model: "m1", display_name: "Two"}];
   assert.equal(quota.quotaModelLabel(target, "m1"), "m1 · Two");
 });
+
+test("an existing group whose stored 0 bases are omitted on the wire reopens as 0 and saves unchanged", async () => {
+  const {h, quota} = await fixture();
+  // config.ModelGroup marks the bases omitempty, so a stored 0 never appears in the response.
+  const group = {name: "wire", cost_coefficient: 1, bindings: [], daily_usd: 5};
+  await quota.openModelGroupModal(group);
+  assert.equal(String(field(h, "modelGroup-daily").value), "5");
+  assert.equal(String(field(h, "modelGroup-weekly").value), "0");
+  assert.equal(String(field(h, "modelGroup-monthly").value), "0");
+  await field(h, "saveModelGroupBtn").listeners.click[0]();
+  const puts = sent(h, "PUT", "/admin/data/model-groups/wire");
+  assert.equal(puts.length, 1);
+  assert.deepEqual(JSON.parse(puts[0].options.body),
+    {name: "wire", cost_coefficient: 1, bindings: [], daily_usd: 5, weekly_usd: 0, monthly_usd: 0});
+  // A new group still has to type every base.
+  await quota.openModelGroupModal(null);
+  assert.equal(field(h, "modelGroup-weekly").value, "");
+});
