@@ -38,6 +38,20 @@ type usageAdapterMigrationWrite struct {
 // unknown/legacy fields. Records and targets commit together. No done flag is
 // used, so a later legacy import can be converted without losing old records.
 func MigrateUsageAdapterExplicit(db *bolt.DB, logger *slog.Logger) error {
+	// Admin reads call this on every request. Plan in a read transaction first
+	// so the common no-op case never waits on bbolt's single writer or fsyncs.
+	var pending bool
+	if err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(BucketTargets))
+		if b == nil {
+			return nil
+		}
+		writes, err := planUsageAdapterMigration(b, time.Now().UTC())
+		pending = len(writes) > 0
+		return err
+	}); err != nil || !pending {
+		return err
+	}
 	var writes []usageAdapterMigrationWrite
 	err := db.Update(func(tx *bolt.Tx) error {
 		var err error
@@ -54,11 +68,27 @@ func MigrateUsageAdapterExplicit(db *bolt.DB, logger *slog.Logger) error {
 // migrateUsageAdapterTx is shared by existing-database migration and legacy
 // config import. The caller owns the transaction and logs only after commit.
 func migrateUsageAdapterTx(tx *bolt.Tx, now time.Time) ([]usageAdapterMigrationWrite, error) {
-	var writes []usageAdapterMigrationWrite
 	b := tx.Bucket([]byte(BucketTargets))
 	if b == nil {
 		return nil, nil
 	}
+	writes, err := planUsageAdapterMigration(b, now)
+	if err != nil {
+		return nil, err
+	}
+	if len(writes) == 0 {
+		return nil, nil
+	}
+	records, err := tx.CreateBucketIfNotExists([]byte(BucketUsageAdapterMigration))
+	if err != nil {
+		return nil, fmt.Errorf("create usage_adapter migration records: %w", err)
+	}
+	return applyUsageAdapterMigration(b, records, writes)
+}
+
+// planUsageAdapterMigration only reads the bucket, so it is safe inside a View.
+func planUsageAdapterMigration(b *bolt.Bucket, now time.Time) ([]usageAdapterMigrationWrite, error) {
+	var writes []usageAdapterMigrationWrite
 	if err := b.ForEach(func(k, raw []byte) error {
 		fields, closeOffset, err := rawObjectFields(raw)
 		if err != nil {
@@ -124,13 +154,10 @@ func migrateUsageAdapterTx(tx *bolt.Tx, now time.Time) ([]usageAdapterMigrationW
 	}); err != nil {
 		return nil, err
 	}
-	if len(writes) == 0 {
-		return nil, nil
-	}
-	records, err := tx.CreateBucketIfNotExists([]byte(BucketUsageAdapterMigration))
-	if err != nil {
-		return nil, fmt.Errorf("create usage_adapter migration records: %w", err)
-	}
+	return writes, nil
+}
+
+func applyUsageAdapterMigration(b, records *bolt.Bucket, writes []usageAdapterMigrationWrite) ([]usageAdapterMigrationWrite, error) {
 	for _, write := range writes {
 		if err := b.Put(write.key, write.data); err != nil {
 			return nil, fmt.Errorf("write target %q usage_adapter: %w", write.key, err)

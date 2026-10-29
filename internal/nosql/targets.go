@@ -255,6 +255,16 @@ func MigrateTargetsFromConfig(db *bolt.DB, targets []config.Target, loggers ...*
 	if len(targets) == 0 {
 		return false, nil
 	}
+	// Admin reads call this on every request while config.json still lists
+	// targets. Skip the write transaction once bbolt owns the targets.
+	var populated bool
+	if err := db.View(func(tx *bolt.Tx) error {
+		k, _ := tx.Bucket([]byte(BucketTargets)).Cursor().First()
+		populated = k != nil
+		return nil
+	}); err != nil || populated {
+		return false, err
+	}
 
 	migrated := false
 	var writes []usageAdapterMigrationWrite
