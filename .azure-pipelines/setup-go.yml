@@ -1,0 +1,28 @@
+# Installs the Go version declared in go.mod and restores module/build caches.
+steps:
+  - bash: |
+      set -euo pipefail
+      version="$(awk '$1 == "go" { print $2; exit }' go.mod)"
+      test -n "$version"
+      echo "go.mod declares Go $version"
+      echo "##vso[task.setvariable variable=GO_VERSION]$version"
+    displayName: 读取 go.mod 的 Go 版本
+
+  - task: GoTool@0
+    displayName: 安装 Go $(GO_VERSION)
+    inputs:
+      version: $(GO_VERSION)
+
+  - task: Cache@2
+    displayName: Go 模块与构建缓存
+    inputs:
+      key: 'go | "$(Agent.OS)" | "$(GO_VERSION)" | go.sum'
+      restoreKeys: |
+        go | "$(Agent.OS)" | "$(GO_VERSION)"
+      path: $(Pipeline.Workspace)/.gocache
+
+  - bash: |
+      set -euo pipefail
+      echo "##vso[task.setvariable variable=GOMODCACHE]$(Pipeline.Workspace)/.gocache/mod"
+      echo "##vso[task.setvariable variable=GOCACHE]$(Pipeline.Workspace)/.gocache/build"
+    displayName: 指定 Go 缓存目录

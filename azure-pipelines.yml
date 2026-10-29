@@ -1,0 +1,123 @@
+# Pre-merge 质量门：推送到 dev / main，以及目标为 dev / main 的 Pull Request 都必须通过。
+#
+# job 名称是分支保护的必需检查名，保持稳定：test、race、e2e、integration、admin-ui、scripts。
+# 改名或拆分 job 时须同步分支保护、AGENTS.md 与 README 中的检查列表。
+#
+# 约束：只用 Microsoft 托管的 ubuntu-latest agent，不读取任何 secret 或变量组；
+# 每个 job 的命令都可在本地以同一命令复现（Go 版本取自 go.mod）。
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  batch: true
+  branches:
+    include: [dev, main]
+
+pr:
+  autoCancel: true
+  branches:
+    include: [dev, main]
+
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+  - job: test
+    displayName: test
+    timeoutInMinutes: 30
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+      - template: .azure-pipelines/setup-go.yml
+      - bash: |
+          set -euo pipefail
+          make check-docs
+          bash -n scripts/check-agents-docs.sh
+        displayName: 文档契约校验（AGENTS.md 为规范源）
+      - bash: |
+          set -euo pipefail
+          go vet ./...
+          go vet -tags=e2e ./test/e2e/
+        displayName: go vet
+      - bash: go build ./...
+        displayName: go build
+      - bash: go test ./...
+        displayName: 单元测试
+
+  - job: race
+    displayName: race
+    timeoutInMinutes: 30
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+      - template: .azure-pipelines/setup-go.yml
+      - bash: >-
+          go test -race -count=1
+          ./internal/proxy/... ./internal/nosql/... ./internal/usage/...
+          ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
+        displayName: race 检测
+
+  - job: e2e
+    displayName: e2e
+    timeoutInMinutes: 30
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+      - template: .azure-pipelines/setup-go.yml
+      # 真实代理二进制 + 进程内 fakellm；不调用真实模型，不需要任何密钥。
+      - bash: make e2e
+        displayName: make e2e
+
+  - job: integration
+    displayName: integration
+    timeoutInMinutes: 30
+    steps:
+      # Cross-version ledger tests build fixed historical commits.
+      - checkout: self
+        fetchDepth: 0
+        persistCredentials: false
+      - template: .azure-pipelines/setup-go.yml
+      - bash: make integration
+        displayName: make integration
+
+  - job: admin_ui
+    displayName: admin-ui
+    timeoutInMinutes: 15
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+      - task: UseNode@1
+        displayName: 安装 Node 24
+        inputs:
+          version: 24.x
+      # 只用 Node 内置模块运行管理前端脚本，无需安装依赖。
+      - bash: node scripts/testing/admin_ui_test.cjs
+        displayName: 管理前端模块行为门禁
+      - bash: node --test
+        workingDirectory: internal/admin/ui
+        displayName: 管理前端独立单元测试
+
+  - job: scripts
+    displayName: scripts
+    timeoutInMinutes: 15
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+      - task: UsePythonVersion@0
+        displayName: 安装 Python 3.13
+        inputs:
+          versionSpec: "3.13"
+      # 运行仓库中受跟踪的全部 Python 脚本单测；一个都找不到时失败，避免空跑通过。
+      - bash: |
+          set -euo pipefail
+          modules=$(git ls-files 'scripts/**/test_*.py' 'scripts/test_*.py' | sort -u | sed -e 's/\.py$//' -e 's#/#.#g')
+          if [ -z "$modules" ]; then
+            echo "no Python script tests found" >&2
+            exit 1
+          fi
+          echo "$modules" | xargs python3 -m unittest -v
+        displayName: Python 脚本单测
