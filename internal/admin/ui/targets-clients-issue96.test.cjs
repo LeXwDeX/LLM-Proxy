@@ -186,6 +186,7 @@ test("P2: wake-up has a finite deadline and cannot run twice at once", async () 
 
 test("P2: the clients page does not reload targets only because there are no pools", async () => {
   const { harness, app } = await setup({ routes: { "/admin/data/clients": { clients: [{ name: "c1", access_key: "k" }] } } });
+  await app.modules.targets.loadTargets(); // roster available, just empty
   app.state.targets = [{ name: "t1" }];
   app.state.pools = [];
   harness.requests.length = 0;
@@ -224,4 +225,44 @@ test("P2: an identical refresh leaves the targets table DOM untouched", async ()
   app.state.targets[0].name = "t2";
   app.modules.targets.renderTargets();
   assert.equal(writes, 2, "changed markup is written");
+});
+
+test("review: the clients list retries the pools roster when it is unavailable", async () => {
+  const { harness, app } = await setup({ routes: { "/admin/data/clients": { clients: [] }, "/admin/data/targets": { targets: [{ name: "t1" }] } } });
+  harness.setRouteFailure("/admin/data/pools", true);
+  await app.modules.targets.loadTargets();
+  assert.equal(app.modules.targets.targetPoolsAvailable(), false);
+  harness.setRouteFailure("/admin/data/pools", false);
+  harness.requests.length = 0;
+  await app.modules.clients.loadClients();
+  assert.ok(harness.requests.some((r) => r.url === "/admin/data/pools"), "pools fetched again");
+  assert.equal(app.modules.targets.targetPoolsAvailable(), true);
+  // isolation: a failing retry must not blank the list
+  harness.setRouteFailure("/admin/data/pools", true);
+  await app.modules.clients.loadClients();
+  assert.ok(Array.isArray(app.state.clients));
+});
+
+test("review: a second wake-up says one is running; a timeout explains the server may still probe", async () => {
+  const { harness, el } = await setup();
+  const counter = { n: 0 };
+  const release = gatedFetch(harness, (url, o) => o?.method === "POST" && url === "/admin/data/targets/t1/keys/wakeup", counter);
+  const confirm = async () => {
+    dispatch(el("targetsTableBody"), clickEvent({ wakeupTarget: "t1" }));
+    el("confirmOkBtn").listeners.click[0]();
+    await sleep(0);
+  };
+  await confirm();
+  await confirm();
+  assert.match(el("toastContainer").children.at(-1).textContent, /唤醒进行中/);
+  release();
+  await sleep(10);
+  harness.context.fetch = async () => {
+    const e = new Error("请求超时（600 秒无响应）");
+    e.name = "TimeoutError";
+    throw e;
+  };
+  await confirm();
+  await sleep(10);
+  assert.match(el("toastContainer").children.at(-1).textContent, /服务端.*仍在探测.*进行中/);
 });

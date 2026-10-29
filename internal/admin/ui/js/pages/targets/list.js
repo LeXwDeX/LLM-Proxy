@@ -550,7 +550,10 @@ AdminApp.register("targetsList", function (app) {
             name +
             "」执行唤醒探测？\n将尝试恢复所有被屏蔽/超额的 Key。",
           async function () {
-            if (!beginRowAction("wakeup:" + name)) return;
+            if (!beginRowAction("wakeup:" + name)) {
+              toast("唤醒进行中", "info");
+              return;
+            }
             try {
               var result = await api(
                 "/admin/data/targets/" +
@@ -564,7 +567,9 @@ AdminApp.register("targetsList", function (app) {
               toast("唤醒完成: 恢复了 " + recovered + " 个 Key", "success");
               await loadTargets();
             } catch (e) {
-              toast("唤醒失败: " + e.message, "error");
+              toast(e && e.name === "TimeoutError"
+                ? "唤醒请求超时：服务端可能仍在探测，稍后重试可能提示「进行中」。"
+                : "唤醒失败: " + e.message, "error");
             } finally {
               endRowAction("wakeup:" + name);
             }

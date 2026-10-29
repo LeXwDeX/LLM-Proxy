@@ -59,7 +59,8 @@ AdminApp.register("clients", function (app) {
       ];
       // Targets feed the access pickers only. Prefetch when none are loaded, and
       // never let that side request fail the clients list itself.
-      if (!state.targets || !state.targets.length) {
+      // Also retry when the pools roster is unavailable (an earlier fetch failed).
+      if (!state.targets || !state.targets.length || !targetPoolsAvailable()) {
         jobs.push(loadTargets(true).catch(function () { return null; }));
       }
       var results = await Promise.all(jobs);
