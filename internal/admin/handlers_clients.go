@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
-	"github.com/go-chi/chi/v5"
 	"net/http"
 	"strings"
 )
@@ -14,6 +13,14 @@ func (h *Handler) handleListClients(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.writeInternalError(w, "failed to list clients", err)
 		return
+	}
+
+	// Plaintext access keys are admin-only; other roles (and sessionless
+	// requests) get the same masked form targets use.
+	if session, ok := SessionFromContext(r.Context()); !ok || session == nil || session.Role != RoleAdmin {
+		for i := range clients {
+			clients[i].AccessKey = maskClientKeyForViewer(clients[i].AccessKey)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -57,7 +64,7 @@ func (h *Handler) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := pathParam(r, "name")
 	if strings.TrimSpace(name) == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse("missing client name"))
 		return
@@ -99,7 +106,7 @@ func (h *Handler) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := pathParam(r, "name")
 	if strings.TrimSpace(name) == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse("missing client name"))
 		return
@@ -163,4 +170,14 @@ func (h *Handler) validateClientPoolQuotas(client *config.Client) error {
 		}
 	}
 	return nil
+}
+
+// maskClientKeyForViewer hides a client key from non-admin roles. Client keys
+// have no minimum length, so a prefix-plus-suffix mask could reveal most of a
+// short key; viewers see at most the last four characters of a long key.
+func maskClientKeyForViewer(key string) string {
+	if len(key) < 16 {
+		return "****"
+	}
+	return "****" + key[len(key)-4:]
 }
