@@ -23,14 +23,6 @@ func (h *Handler) handleListClients(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Plaintext access keys are admin-only; other roles (and sessionless
-	// requests) get the same masked form targets use.
-	if session, ok := SessionFromContext(r.Context()); !ok || session == nil || session.Role != RoleAdmin {
-		for i := range clients {
-			clients[i].AccessKey = maskKey(clients[i].AccessKey)
-		}
-	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"clients": clients,
 		"count":   len(clients),

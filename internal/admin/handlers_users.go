@@ -202,10 +202,6 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse("cannot disable your own account"))
 		return
 	}
-	if req.Disabled != nil && *req.Disabled && strings.EqualFold(session.Username, username) {
-		writeJSON(w, http.StatusBadRequest, errorResponse("cannot disable your own account"))
-		return
-	}
 	if req.Disabled != nil {
 		existing.Disabled = *req.Disabled
 	}
