@@ -1373,7 +1373,10 @@
       font-size: 11px;
     }
     .client-target-pool-tag {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      vertical-align: middle;
       max-width: 100%;
       overflow-wrap: anywhere;
       background: var(--out-soft);
@@ -1381,7 +1384,9 @@
       padding: 1px 6px;
       border-radius: 6px;
       font-size: 11px;
+      line-height: 16px;
     }
+    .client-target-pool-tag > svg { flex: none; display: block; }
     .pricing-modal .pricing-context-section > summary,
     .pricing-modal .pricing-context-rates > summary { cursor:pointer; padding:10px 0; font-weight:600; }
     .pricing-modal .pricing-context-section .pricing-help,
