@@ -3,7 +3,6 @@ package admin
 import (
 	"encoding/json"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
-	"github.com/go-chi/chi/v5"
 	"net/http"
 	"strings"
 	"time"
@@ -145,7 +144,7 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, errorResponse("admin role required"))
 		return
 	}
-	username := strings.TrimSpace(chi.URLParam(r, "username"))
+	username := strings.TrimSpace(pathParam(r, "username"))
 	if username == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse("username required"))
 		return
@@ -199,6 +198,10 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		existing.Role = role
 	}
+	if req.Disabled != nil && *req.Disabled && strings.EqualFold(session.Username, username) {
+		writeJSON(w, http.StatusBadRequest, errorResponse("cannot disable your own account"))
+		return
+	}
 	if req.Disabled != nil {
 		existing.Disabled = *req.Disabled
 	}
@@ -228,7 +231,7 @@ func (h *Handler) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, errorResponse("admin role required"))
 		return
 	}
-	username := strings.TrimSpace(chi.URLParam(r, "username"))
+	username := strings.TrimSpace(pathParam(r, "username"))
 	if username == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse("username required"))
 		return

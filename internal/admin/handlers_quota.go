@@ -6,7 +6,6 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
 	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
-	"github.com/go-chi/chi/v5"
 	"net/http"
 	"sort"
 	"strings"
@@ -17,7 +16,7 @@ import (
 //   - client 缺失返回 400 Bad Request。
 //   - 正常返回 200 + quota.QuotaStatus JSON（无论是否超限）。
 func (h *Handler) handleQuotaStatus(w http.ResponseWriter, r *http.Request) {
-	clientName := chi.URLParam(r, "client")
+	clientName := pathParam(r, "client")
 	if clientName == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse("client name required"))
 		return
@@ -121,7 +120,7 @@ func (h *Handler) handleSyncQuota(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid json body"))
 		return
 	}
-	source := chi.URLParam(r, "client")
+	source := pathParam(r, "client")
 	names, err := h.clientQuotaStore.SyncQuota(source, req)
 	if err != nil {
 		var invalid *nosql.QuotaSyncValidationError
@@ -148,7 +147,7 @@ func (h *Handler) handleSyncQuota(w http.ResponseWriter, r *http.Request) {
 // plan（模型组选择 + 个人系数）。个人日/周/月折算额度已退役（字段忽略）；
 // 身份、密钥、授权等字段一律不动，避免编辑额度时往返敏感配置。
 func (h *Handler) handleUpdateQuota(w http.ResponseWriter, r *http.Request) {
-	clientName := chi.URLParam(r, "client")
+	clientName := pathParam(r, "client")
 	if strings.TrimSpace(clientName) == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse("client name required"))
 		return
@@ -187,7 +186,7 @@ func (h *Handler) handleUpdateQuota(w http.ResponseWriter, r *http.Request) {
 // clients deleted via the admin UI — can be purged; active clients keep their
 // entry managed through PUT /quota/{client}.
 func (h *Handler) handleDeleteQuotaEntry(w http.ResponseWriter, r *http.Request) {
-	clientName := chi.URLParam(r, "client")
+	clientName := pathParam(r, "client")
 	if strings.TrimSpace(clientName) == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse("client name required"))
 		return

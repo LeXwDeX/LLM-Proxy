@@ -6,16 +6,14 @@ import (
 	"fmt"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
-	"github.com/go-chi/chi/v5"
 	"net/http"
-	"net/url"
 	"strings"
 )
 
 // ===== Pool CRUD =====
 
 func poolNameParam(r *http.Request) (string, error) {
-	name, err := url.PathUnescape(chi.URLParam(r, "name"))
+	name, err := decodedPathParam(r, "name")
 	if err != nil {
 		return "", errors.New("invalid pool name")
 	}

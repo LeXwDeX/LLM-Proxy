@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
-	"github.com/go-chi/chi/v5"
 	"net/http"
 	"strings"
 )
@@ -58,7 +57,7 @@ func (h *Handler) handleDictCreate(kind dictKindSpec) http.HandlerFunc {
 
 func (h *Handler) handleDictUpdate(kind dictKindSpec) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		name := chi.URLParam(r, "name")
+		name := pathParam(r, "name")
 		var req struct {
 			Name string `json:"name"`
 		}
@@ -84,7 +83,7 @@ func (h *Handler) handleDictUpdate(kind dictKindSpec) http.HandlerFunc {
 
 func (h *Handler) handleDictDelete(kind dictKindSpec) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		name := chi.URLParam(r, "name")
+		name := pathParam(r, "name")
 		if err := h.dictStore.Delete(kind.metaKey, name); err != nil {
 			status := http.StatusNotFound
 			writeJSON(w, status, errorResponse(err.Error()))
@@ -131,7 +130,7 @@ func (h *Handler) handleCreateJobLevel(w http.ResponseWriter, r *http.Request) {
 // handleUpdateJobLevel 更新职级系数；改名时级联更新所有绑定客户端的
 // JobLevel（同一事务），避免客户端落入「未绑职级 = 拒绝」状态。
 func (h *Handler) handleUpdateJobLevel(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := pathParam(r, "name")
 	var req config.JobLevel
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid json body"))
@@ -166,7 +165,7 @@ func (h *Handler) handleUpdateJobLevel(w http.ResponseWriter, r *http.Request) {
 // handleDeleteJobLevel 删除职级。仍被活跃客户端绑定时拒绝并列出客户端名
 // （解绑会把客户端打入「未绑职级 = 拒绝请求」状态，必须先人工改绑）。
 func (h *Handler) handleDeleteJobLevel(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := pathParam(r, "name")
 	if err := h.jobLevelStore.Delete(name); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {

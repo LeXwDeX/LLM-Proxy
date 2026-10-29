@@ -13,11 +13,23 @@ import (
 // decode %2F in path segments, so model names like "MiniMax/MiniMax-M3"
 // arrive as "MiniMax%2FMiniMax-M3".
 func pathParam(r *http.Request, name string) string {
-	raw := chi.URLParam(r, name)
-	if decoded, err := url.PathUnescape(raw); err == nil {
-		return decoded
+	value, err := decodedPathParam(r, name)
+	if err != nil {
+		return chi.URLParam(r, name)
 	}
-	return raw
+	return value
+}
+
+// decodedPathParam decodes a path parameter exactly once. chi routes on
+// RawPath, and so returns an escaped segment, only when the request needed
+// one (for example %2F); otherwise the segment is already decoded and a
+// second decode would turn a literal "a%41" into "aA".
+func decodedPathParam(r *http.Request, name string) (string, error) {
+	raw := chi.URLParam(r, name)
+	if r.URL.RawPath == "" {
+		return raw, nil
+	}
+	return url.PathUnescape(raw)
 }
 
 // pathParamLower is pathParam plus lowercase + trim normalization.
