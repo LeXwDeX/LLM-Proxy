@@ -97,9 +97,14 @@ function harness({sortButtons = [], infoButtons = [], rangeButtons = [], barButt
   }
   const core = {esc: v => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"), fmtNum: v => String(v || 0), fmtMoney: v => "$" + Number(v || 0).toFixed(2), fmtPct: v => v + "%", totalTok: d => (d.input_tokens || 0) + (d.output_tokens || 0) + (d.cached_tokens || 0) + (d.cache_creation_tokens || 0) + (d.tool_use_prompt_tokens || 0), schemaLabel: (list, value) => value, api: async (url, opts) => { calls.push({url, opts}); if (handler) return handler(url, opts); if (url.endsWith("activity")) return answer; if (url.endsWith("overview")) return overview; if (url.endsWith("/admin/metrics")) return metrics; if (url.includes("/admin/data/usage/aggregate")) return aggregateHandler ? aggregateHandler(url, opts) : aggregate; return overview; }};
   const state = {currentPage: "overview"};
-  const context = {document: doc, AbortController, Date: TestDate, Map, setTimeout: (fn, delay) => {timers.set(++nextTimer, {fn, at: now + delay}); return nextTimer;}, clearTimeout: id => timers.delete(id), setInterval: () => 1, clearInterval() {}, AdminApp: {register: (name, factory) => {module = factory({state, bind: (m, n) => core[n]}); }}};
+  const factories = []; const modules = {};
+  // Page files register several modules; initialize them in script order like AdminApp.initialize.
+  const fakeApp = {state, bind: (m, n) => m === "core" || m === "schema" ? core[n] : (...args) => modules[m][n](...args)};
+  const context = {document: doc, AbortController, Date: TestDate, Map, setTimeout: (fn, delay) => {timers.set(++nextTimer, {fn, at: now + delay}); return nextTimer;}, clearTimeout: id => timers.delete(id), setInterval: () => 1, clearInterval() {}, AdminApp: {register: (name, factory) => { factories.push({name, factory}); }}};
   if (storage !== undefined) context.localStorage = storage;
   vm.runInNewContext(pageSource("overview"), context);
+  for (const entry of factories) modules[entry.name] = entry.factory(fakeApp);
+  module = modules.overview;
   return {module, get, doc, state, calls, timers, advance, setNow: value => now = new Date(value).getTime(), setActivity: a => answer = a, setOverview: o => overview = o, setMetrics: m => metrics = m, setAggregate: a => aggregate = a, setAggregateHandler: h => aggregateHandler = h, setHandler: h => handler = h};
 }
 test("homepage requests real activity, uses provided totals, and has no audit dependency", async () => {

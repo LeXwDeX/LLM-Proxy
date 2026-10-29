@@ -486,8 +486,15 @@ async function main() {
     "catalog",
     "quota",
   ];
+  // A page split into several files registers helper modules named
+  // "<page>_<part>"; they must initialize before the page module itself.
+  const initialized = Object.keys(app.modules);
+  for (const name of initialized) {
+    const owner = expected.find((page) => name.startsWith(page + "_"));
+    if (owner) assert.ok(initialized.indexOf(name) < initialized.indexOf(owner), `${name} initializes before ${owner}`);
+  }
   assert.deepEqual(
-    Object.keys(app.modules),
+    initialized.filter((name) => !expected.some((page) => name.startsWith(page + "_"))),
     expected,
     "every registered factory initializes",
   );

@@ -17,13 +17,32 @@ const scriptMap = {
   catalog: "pages/catalog/catalog", quota: "pages/quota/quota",
 };
 
+// Folds consecutive script tags of one page directory (a page split into
+// several files) back to the single pages/<name>/<name>.js tag in the golden.
+function collapsePageScripts(html) {
+  const tag = /^(\s*)<script src="\/admin\/ui\/js\/pages\/([a-z_]+)\/[^"/]+\.js"><\/script>$/;
+  let prev = "";
+  const out = [];
+  for (const line of html.split("\n")) {
+    const m = tag.exec(line);
+    if (m) {
+      if (prev !== m[2]) out.push(`${m[1]}<script src="/admin/ui/js/pages/${m[2]}/${m[2]}.js"></script>`);
+      prev = m[2];
+      continue;
+    }
+    prev = "";
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 test("Node assembly equals the golden index.html modulo script paths", () => {
   const golden = fs.readFileSync(path.join(__dirname, "..", "testdata", "index.golden.html"), "utf8")
     .replace(/\/admin\/ui\/js\/([a-z_]+)\.js"/g, (_, name) => {
       assert.ok(scriptMap[name], `unknown script ${name}`);
       return `/admin/ui/js/${scriptMap[name]}.js"`;
     });
-  assert.equal(assembleAdminHTML(), golden);
+  assert.equal(collapsePageScripts(assembleAdminHTML()), golden);
 });
 
 test("include errors fail loudly", () => {

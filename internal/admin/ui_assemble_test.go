@@ -39,9 +39,31 @@ func TestAssembledHTMLMatchesGolden(t *testing.T) {
 		}
 		return "/admin/ui/js/" + to + `.js"`
 	})
-	if adminUIHTML != golden {
-		t.Fatalf("assembled HTML differs from golden (len %d vs %d)", len(adminUIHTML), len(golden))
+	if got := collapsePageScripts(adminUIHTML); got != golden {
+		t.Fatalf("assembled HTML differs from golden (len %d vs %d)", len(got), len(golden))
 	}
+}
+
+// collapsePageScripts folds consecutive script tags of one page directory
+// (pages/<name>/*.js, a page split into several files) back to the single
+// pages/<name>/<name>.js tag the golden records.
+func collapsePageScripts(html string) string {
+	tag := regexp.MustCompile(`^(\s*)<script src="/admin/ui/js/pages/([a-z_]+)/[^"/]+\.js"></script>$`)
+	var out []string
+	prev := ""
+	for _, line := range strings.Split(html, "\n") {
+		if m := tag.FindStringSubmatch(line); m != nil {
+			if prev == m[2] {
+				continue
+			}
+			prev = m[2]
+			out = append(out, m[1]+`<script src="/admin/ui/js/pages/`+m[2]+"/"+m[2]+`.js"></script>`)
+			continue
+		}
+		prev = ""
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 func TestAssembleAdminHTMLFailsLoudly(t *testing.T) {
