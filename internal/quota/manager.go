@@ -144,6 +144,8 @@ type Manager struct {
 	calStopped bool
 	// afterConfigRead 是测试注入点：在 evaluate 读完配置与库、写计数器之前调用。
 	afterConfigRead func(name string)
+	// afterColdConfigRead 是测试注入点：Increment 冷启动读完配置、重新加锁之前调用。
+	afterColdConfigRead func()
 	// evaluateHook 是测试注入点：非 nil 时替代 evaluate（预加载、后台刷新、请求路径校准）。
 	evaluateHook func(name string, retry bool)
 }
@@ -388,13 +390,22 @@ func (m *Manager) IncrementEvent(event usage.Event) {
 		// 重新加锁 double-check（并发 Increment/Evaluate 可能已创建）。
 		// 增量不丢失：本次 costUSD 在重新加锁后才写入计数器。
 		m.mu.Unlock()
+		gen := m.configGen.Load() // 必须先于配置读取
 		qc, err := m.findQuotaConfig(clientName)
 		if err != nil {
 			m.calibrationFailed(clientName, err)
 			return
 		}
+		if m.afterColdConfigRead != nil {
+			m.afterColdConfigRead()
+		}
 		m.mu.Lock()
 		cc = m.counters[clientName]
+		if cc == nil && m.configGen.Load() != gen {
+			// 读配置期间配置已提交：这份配置可能过期，不建计数器，交给校准路径（带代次校验）。
+			m.mu.Unlock()
+			return
+		}
 		if cc == nil {
 			cc = m.buildCountersFromClientLocked(clientName, qc)
 			if cc == nil {
@@ -529,6 +540,22 @@ func (m *Manager) evaluate(clientName string, retry bool) {
 	if m.clientStore == nil || m.usageStore == nil {
 		return
 	}
+	// 配置代次变化（管理端写入提交）时丢弃本次结果并重算。每次尝试各自持有 accounting
+	// gate，尝试之间释放并退避：重试不得整体包住 gate，否则同客户端的 RecordUsage 要等
+	// 全部重试（数倍单次耗时）。
+	for attempt := 0; attempt < maxConfigRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(configRetryBackoff(attempt))
+		}
+		if m.evaluateAttempt(clientName, retry && attempt == 0) {
+			return
+		}
+	}
+	m.configChurnExceeded(clientName)
+}
+
+// evaluateAttempt 在 accounting gate 内执行一次校准尝试；返回 false 表示配置代次变化需重算。
+func (m *Manager) evaluateAttempt(clientName string, retry bool) bool {
 	gate := m.accountingGate(clientName)
 	gate.Lock()
 	defer gate.Unlock()
@@ -542,21 +569,41 @@ func (m *Manager) evaluate(clientName string, retry bool) {
 		backedOff := failed && m.calibrationErrors[clientName] != errCalibrationTimeout.Error() && time.Now().Before(m.calibrationRetryAt[clientName])
 		m.mu.RUnlock()
 		if ready || backedOff {
-			return
+			return true
 		}
 	}
-	// 配置代次变化（管理端写入提交）时丢弃本次结果并重算；超过上限按校准失败处理，
-	// 保持 fail-closed，由退避重试或后台刷新收敛。
-	for attempt := 0; attempt < maxConfigRetries; attempt++ {
-		if m.evaluateOnce(clientName) {
-			return
-		}
+	return m.evaluateOnce(clientName)
+}
+
+// configChurnExceeded 处理重试耗尽（配置持续变化）：
+//   - 已有计数器（此前校准过）的客户端保留旧计数器、不改变准入状态——与「窗口内沿用已校准
+//     的旧计数器」一致，churn 不能把已校准客户端打成拒绝；记 Warn 并延后重新入队重算。
+//   - 冷客户端（还没有计数器）没有可沿用的状态，保持 fail-closed。
+func (m *Manager) configChurnExceeded(clientName string) {
+	m.mu.RLock()
+	warm := m.counters[clientName] != nil
+	m.mu.RUnlock()
+	if !warm {
+		m.calibrationFailed(clientName, errConfigChurn)
+		return
 	}
-	m.calibrationFailed(clientName, errConfigChurn)
+	m.logger.Warn("quota.Manager: config kept changing during calibration; keeping existing counters and rescheduling", "client", clientName, "retry_in", configChurnRescheduleDelay)
+	time.AfterFunc(configChurnRescheduleDelay, func() {
+		m.enqueueRefresh(RefreshScope{Clients: []string{clientName}})
+	})
 }
 
 // maxConfigRetries 限制 evaluate 因配置代次变化而重算的次数。
 const maxConfigRetries = 5
+
+// configRetryBackoff 是第 attempt 次（从 1 起）重算之前的退避：50ms、100ms、200ms…
+// 变量以便测试缩短。
+var configRetryBackoff = func(attempt int) time.Duration {
+	return 50 * time.Millisecond << (attempt - 1)
+}
+
+// configChurnRescheduleDelay 是 churn 耗尽后延后重新入队的间隔（变量以便测试缩短）。
+var configChurnRescheduleDelay = 2 * time.Second
 
 var errConfigChurn = errors.New("quota configuration kept changing during calibration")
 

@@ -2,6 +2,7 @@ package quota
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,8 +69,10 @@ func TestInFlightCalibrationRespectsConfigChange(t *testing.T) {
 	}
 }
 
-// 配置持续变化超过重试上限：按校准失败处理（拒绝），而不是落地旧结果。
+// 配置持续变化超过重试上限：冷客户端（没有计数器可沿用）按校准失败处理（拒绝），
+// 而不是落地旧结果。
 func TestEvaluateFailsClosedUnderConfigChurn(t *testing.T) {
+	fastChurnTiming(t)
 	m, _ := seedColdAlice(t, 100)
 	calls := 0
 	m.afterConfigRead = func(string) { calls++; m.NoteConfigChange() }
@@ -85,6 +88,113 @@ func TestEvaluateFailsClosedUnderConfigChurn(t *testing.T) {
 	m.mu.RUnlock()
 	if has {
 		t.Fatal("stale counters were written despite config churn")
+	}
+	if _, blocked := m.CheckTarget("alice", "tA", "gpt-4o"); !blocked {
+		t.Fatal("cold client must stay rejected under config churn")
+	}
+}
+
+func fastChurnTiming(t *testing.T) {
+	t.Helper()
+	oldBackoff, oldDelay := configRetryBackoff, configChurnRescheduleDelay
+	configRetryBackoff = func(int) time.Duration { return time.Millisecond }
+	configChurnRescheduleDelay = 20 * time.Millisecond
+	t.Cleanup(func() { configRetryBackoff, configChurnRescheduleDelay = oldBackoff, oldDelay })
+}
+
+// 复审复现：alice 已校准、后台刷新期间配置持续提交，连续重算被丢弃。已校准客户端必须
+// 保留旧计数器继续准入（不是被打成拒绝），churn 停止后延后重算收敛到新配置。
+func TestChurnKeepsCalibratedClientAdmittedThenConverges(t *testing.T) {
+	fastChurnTiming(t)
+	m, setLimit := seedColdAlice(t, 100)
+	m.Evaluate("alice")
+	if _, blocked := m.CheckTarget("alice", "tA", "gpt-4o"); blocked {
+		t.Fatal("fixture: calibrated alice must be admitted")
+	}
+	var churn atomic.Bool
+	churn.Store(true)
+	m.afterConfigRead = func(string) {
+		if churn.Load() {
+			m.NoteConfigChange()
+		}
+	}
+	m.Evaluate("alice")
+	if got := m.Status("alice").CalibrationError; got != "" {
+		t.Fatalf("calibrated client got calibration error %q under churn", got)
+	}
+	if _, blocked := m.CheckTarget("alice", "tA", "gpt-4o"); blocked {
+		t.Fatal("churn turned a calibrated client into a rejection")
+	}
+	setLimit(0.5)
+	churn.Store(false)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if info, blocked := m.CheckTarget("alice", "tA", "gpt-4o"); blocked && info.Limit == 0.5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("deferred recalculation did not converge to the new config")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	m.FlushRefresh()
+}
+
+// 重试不得全程持有 accounting gate：同客户端的 RecordUsage 最多等待一次尝试，而不是累加。
+func TestConfigRetryReleasesAccountingGateBetweenAttempts(t *testing.T) {
+	fastChurnTiming(t)
+	configRetryBackoff = func(int) time.Duration { return 30 * time.Millisecond }
+	m, _ := seedColdAlice(t, 100)
+	const attemptCost = 60 * time.Millisecond
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	m.afterConfigRead = func(string) { // 在 gate 内执行
+		if calls.Add(1) == 1 {
+			close(entered)
+		}
+		time.Sleep(attemptCost)
+		if calls.Load() < 4 {
+			m.NoteConfigChange()
+		}
+	}
+	done := make(chan struct{})
+	go func() { m.Evaluate("alice"); close(done) }()
+	<-entered
+	start := time.Now()
+	ev := usage.Event{RecordID: "r1", Timestamp: time.Now().UTC(), ClientName: "alice", Target: "tA", Model: "gpt-4o", EndpointType: "openai", InputTokens: 1, StatusCode: 200}
+	if err := m.RecordUsage(auditRecorderFunc(func(usage.Event) error { return nil }), ev); err != nil {
+		t.Fatal(err)
+	}
+	waited := time.Since(start)
+	<-done
+	if calls.Load() < 4 {
+		t.Fatalf("fixture: only %d attempts ran", calls.Load())
+	}
+	if limit := attemptCost + 80*time.Millisecond; waited > limit {
+		t.Fatalf("RecordUsage waited %v, want <= %v (one attempt plus margin, not the sum of all retries)", waited, limit)
+	}
+}
+
+// Increment 冷启动：读配置期间代次推进，不得用这份可能过期的配置建计数器。
+func TestIncrementColdStartSkipsStaleConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		churn    bool
+		wantCtrs bool
+	}{{"stale generation", true, false}, {"stable generation", false, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := seedColdAlice(t, 100)
+			if tc.churn {
+				m.afterColdConfigRead = func() { m.NoteConfigChange() }
+			}
+			m.Increment("alice", "openai", "gpt-4o", 100000, 0, 0, 0)
+			m.mu.RLock()
+			_, has := m.counters["alice"]
+			m.mu.RUnlock()
+			if has != tc.wantCtrs {
+				t.Fatalf("counters built = %v, want %v", has, tc.wantCtrs)
+			}
+		})
 	}
 }
 

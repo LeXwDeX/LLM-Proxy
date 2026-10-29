@@ -125,6 +125,8 @@ func (h *Handler) handleCreateJobLevel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.recordAudit(r, "job_level_create", req.Name, "success", "")
+	// 新建职级可能让「绑定了该职级名但此前不存在」的客户端从拒绝变为有额度：推进代次并排期刷新。
+	h.scheduleQuotaRefresh(quota.RefreshScope{JobLevels: []string{req.Name}})
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 }
 

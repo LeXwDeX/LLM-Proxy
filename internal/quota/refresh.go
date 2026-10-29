@@ -100,6 +100,11 @@ func (m *Manager) ScheduleRefresh(scope RefreshScope) {
 	// 先推进配置代次（调用方已提交写入）：此刻起，所有读取了旧配置的 evaluate 都会在
 	// 写计数器前发现代次变化而重算，包括「正在校准、尚无计数器」的客户端。
 	m.NoteConfigChange()
+	m.enqueueRefresh(scope)
+}
+
+// enqueueRefresh 登记去抖刷新但不推进配置代次（churn 延后重算使用：推进代次只会制造更多 churn）。
+func (m *Manager) enqueueRefresh(scope RefreshScope) {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	if m.refreshStopped {

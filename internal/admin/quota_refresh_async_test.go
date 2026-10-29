@@ -99,7 +99,7 @@ func TestAdminWritesScheduleScopedRefreshInsteadOfSyncRefreshAll(t *testing.T) {
 		want         quota.RefreshScope
 	}{
 		{http.MethodPost, "model-groups", config.ModelGroup{Name: "g1", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "target-a"}}}, quota.RefreshScope{Groups: []string{"g1"}}},
-		{http.MethodPost, "job-levels", config.JobLevel{Name: "L5"}, quota.RefreshScope{}},
+		{http.MethodPost, "job-levels", config.JobLevel{Name: "L5"}, quota.RefreshScope{JobLevels: []string{"L5"}}},
 		{http.MethodPut, "job-levels/L5", config.JobLevel{Name: "L5"}, quota.RefreshScope{JobLevels: []string{"L5", "L5"}}},
 		{http.MethodDelete, "model-groups/g1", nil, quota.RefreshScope{Groups: []string{"g1"}}},
 		{http.MethodPut, "model-costs/qwen-max", map[string]any{"input_per_1m_tokens": 1, "output_per_1m_tokens": 2}, quota.RefreshScope{All: true}},
