@@ -394,6 +394,12 @@ func usageAccountingRawProvenImpl(ctx context.Context, tx *bolt.Tx, rows []usage
 
 func decodeProofEvent(data []byte, event *usage.Event) bool {
 	proofRawParses.Add(1)
+	return decodeProofEventUncounted(data, event)
+}
+
+// decodeProofEventUncounted is decodeProofEvent without the parse counter; the
+// integrity classifier uses it so it never perturbs scan-count assertions.
+func decodeProofEventUncounted(data []byte, event *usage.Event) bool {
 	if !json.Valid(data) || !utf8.Valid(data) {
 		return false
 	}

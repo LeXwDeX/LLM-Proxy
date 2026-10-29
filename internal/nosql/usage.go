@@ -547,10 +547,11 @@ func (s *UsageStore) Aggregate(filter usage.Filter, groupBy string, costs usage.
 		if err := checkUnresolvedUsageInScope(tx, clientKey, from, to, modelKey, nil); err != nil {
 			return err
 		}
-		if err := checkDirectQuotaEvidence(tx, filter, from, to, nil, nil); err != nil {
+		ctx := integrityReadContext(context.Background(), tx, from, to)
+		if err := checkDirectQuotaEvidenceContext(ctx, tx, filter, from, to, nil, nil); err != nil {
 			return err
 		}
-		if err := checkMissingFreshRoots(tx, filter, from, to); err != nil {
+		if err := checkMissingFreshRootsContext(ctx, tx, filter, from, to); err != nil {
 			return err
 		}
 		return aggIter(tx, from, to, func(hour time.Time, et, client, model, target string, cell AggCell) error {
