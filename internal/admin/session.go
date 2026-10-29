@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -239,20 +240,61 @@ func SessionFromContext(ctx context.Context) (*Session, bool) {
 	return session, true
 }
 
+// AdminSecurityHeaders marks every /admin response as non-cacheable (it carries
+// plaintext secrets and session-dependent shells), non-sniffable and non-frameable.
+// Mount it outside SessionManager.Middleware so 302/401 responses are covered too.
+func AdminSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setHardenedHeaders(w.Header())
+		next.ServeHTTP(w, r)
+	})
+}
+
+func setHardenedHeaders(h http.Header) {
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+}
+
+// isTopLevelNavigation reports whether the request is a browser document
+// navigation. Only those may be answered with a redirect to the login page:
+// browsers store a 302 given to a script/XHR subresource and replay it later,
+// where HTML would be executed as JavaScript.
+func isTopLevelNavigation(r *http.Request) bool {
+	mode, dest := r.Header.Get("Sec-Fetch-Mode"), r.Header.Get("Sec-Fetch-Dest")
+	if mode != "" || dest != "" {
+		return strings.EqualFold(mode, "navigate") || strings.EqualFold(dest, "document")
+	}
+	return r.Method == http.MethodGet &&
+		strings.Contains(r.Header.Get("Accept"), "text/html") &&
+		!strings.HasPrefix(r.URL.Path, "/admin/ui/")
+}
+
 func (m *SessionManager) unauthorized(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	// m12：数据接口挂在 /admin/data/*，且 UI 的 fetch 只带 X-Requested-With
-	// 不带 Accept。旧判定只覆盖 /admin/api/ → 会话过期后 UI 拿到 302→登录页
-	// HTML 当成功响应，页面数据静默变空而不引导重新登录。
+	// 不带 Accept。会话过期后非导航请求必须得到 401，而不是可被缓存的 302。
 	if strings.HasPrefix(r.URL.Path, "/admin/api/") ||
 		strings.HasPrefix(r.URL.Path, "/admin/data/") ||
 		strings.Contains(r.Header.Get("Accept"), "application/json") ||
-		strings.EqualFold(r.Header.Get("X-Requested-With"), "XMLHttpRequest") {
+		strings.EqualFold(r.Header.Get("X-Requested-With"), "XMLHttpRequest") ||
+		!isTopLevelNavigation(r) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 		return
 	}
-	http.Redirect(w, r, "/login", http.StatusFound)
+	target := "/login"
+	if r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/admin/") {
+		next := r.URL.Path
+		if r.URL.RawQuery != "" {
+			next += "?" + r.URL.RawQuery
+		}
+		if sanitizeNext(next) == next {
+			target += "?next=" + url.QueryEscape(next)
+		}
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 func (m *SessionManager) sessionByID(sessionID string) (*Session, bool) {

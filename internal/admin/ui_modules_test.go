@@ -17,10 +17,18 @@ func TestUIModulesHaveExplicitStartupOrder(t *testing.T) {
 		}
 		last = pos
 	}
+	// The only inline script allowed is the dependency-free boot watchdog.
+	inline := 0
 	for _, src := range extractInlineScripts(adminUIHTML) {
 		if strings.TrimSpace(src) != "" {
-			t.Error("business JavaScript must live in responsibility-specific modules")
+			inline++
+			if !strings.Contains(src, "页面资源加载失败") || strings.Contains(src, "/admin/data/") {
+				t.Error("business JavaScript must live in responsibility-specific modules")
+			}
 		}
+	}
+	if inline != 1 {
+		t.Errorf("inline scripts = %d, want only the boot watchdog", inline)
 	}
 }
 
@@ -41,7 +49,7 @@ func TestUIClientPickerHasOneDefinition(t *testing.T) {
 func TestUIModuleManifestMatchesEmbeddedAssets(t *testing.T) {
 	sources := adminUIJSSources()
 	seen := map[string]bool{}
-	re := regexp.MustCompile(`<script\s+src="/admin/(ui/js/[^"/]+)"[^>]*></script>`)
+	re := regexp.MustCompile(`<script\s+src="/admin/(ui/js/[^"/?]+)(?:\?[^"]*)?"[^>]*></script>`)
 	for _, match := range re.FindAllStringSubmatch(adminUIHTML, -1) {
 		name := match[1]
 		if seen[name] {

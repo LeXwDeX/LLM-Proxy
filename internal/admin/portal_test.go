@@ -194,26 +194,20 @@ func TestLoginPageRedesign(t *testing.T) {
 	}
 }
 
-func TestLoginPageEscapesErrorAndPreservesNext(t *testing.T) {
+func TestLoginPagePreservesNext(t *testing.T) {
 	portal, _ := newPortalTestFixture(t)
 	next := "/admin/clients?tab=1&view=all"
-	target := "/login?next=" + url.QueryEscape(next) + "&error=" + url.QueryEscape("<script>alert(1)</script>")
-	body := renderPortalLoginPage(t, portal, target).Body.String()
-
+	body := renderPortalLoginPage(t, portal, "/login?next="+url.QueryEscape(next)).Body.String()
 	if !strings.Contains(body, `name="next" value="/admin/clients?tab=1&amp;view=all"`) {
 		t.Errorf("login page did not preserve the quoted next target: %s", body)
 	}
-	if strings.Contains(body, "<script>alert(1)</script>") {
-		t.Error("login page rendered the error without escaping")
-	}
-	if !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") {
-		t.Error("login page did not escape the query error as HTML text")
-	}
-	if !strings.Contains(body, `role="alert"`) {
-		t.Error("login page error must keep role=alert")
-	}
-	if !strings.Contains(body, `class="login-error"`) {
-		t.Error("login page error is missing its redesigned style hook")
+}
+
+func TestLoginFailureKeepsAlertMarkup(t *testing.T) {
+	portal, _ := newPortalTestFixture(t)
+	body := postLogin(t, portal, url.Values{"username": {"nobody"}, "password": {"bad"}}).Body.String()
+	if !strings.Contains(body, `role="alert"`) || !strings.Contains(body, `class="login-error"`) {
+		t.Error("login failure must keep the alert markup and style hook")
 	}
 }
 

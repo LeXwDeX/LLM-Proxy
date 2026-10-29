@@ -483,7 +483,7 @@ func TestUIUndefinedCalls(t *testing.T) {
 		"prompt": true, "document": true, "window": true, "console": true, "navigator": true,
 		"location": true, "history": true, "localStorage": true, "sessionStorage": true,
 		"FormData": true, "Blob": true, "File": true, "FileReader": true, "URL": true,
-		"URLSearchParams": true, "AbortController": true, "ResizeObserver": true, "CustomEvent": true, "Event": true,
+		"URLSearchParams": true, "AbortController": true, "ResizeObserver": true, "MutationObserver": true, "CustomEvent": true, "Event": true,
 		"crypto": true, "structuredClone": true, "queueMicrotask": true, "Symbol": true,
 		"Proxy": true, "Reflect": true, "BigInt": true, "isFinite": true,
 	}

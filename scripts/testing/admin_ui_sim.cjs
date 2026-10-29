@@ -19,7 +19,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { launch } = require("./cdp_browser.cjs");
 
-const root = path.resolve(__dirname, "../..");
+// ADMIN_SIM_ROOT lets a regression run build an older source tree (e.g. pre-fix).
+const root = process.env.ADMIN_SIM_ROOT || path.resolve(__dirname, "../..");
 const args = process.argv.slice(2);
 const keep = args.includes("--keep");
 const shotsDir = args.includes("--shots") ? path.resolve(args[args.indexOf("--shots") + 1]) : null;
@@ -101,7 +102,7 @@ async function clientCall(base, key, pathname, body) {
   return { status: r.status, text: await r.text() };
 }
 
-module.exports = { record, results, clientCall };
+module.exports = { record, results, clientCall, startStack, ADMIN_PASSWORD };
 
 async function main() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llms-ui-sim-"));

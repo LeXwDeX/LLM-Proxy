@@ -42,13 +42,14 @@ func (p *Portal) HandleLoginPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "portal unavailable", http.StatusInternalServerError)
 		return
 	}
+	setHardenedHeaders(w.Header())
 	if session, ok := p.sessions.CurrentSession(r); ok && session != nil {
-		http.Redirect(w, r, "/admin", http.StatusFound)
+		http.Redirect(w, r, sanitizeNext(r.URL.Query().Get("next")), http.StatusFound)
 		return
 	}
 	p.renderLoginPage(w, r, http.StatusOK, loginPageData{
 		Next:  strings.TrimSpace(r.URL.Query().Get("next")),
-		Error: strings.TrimSpace(r.URL.Query().Get("error")),
+		Error: loginErrorMessages[strings.TrimSpace(r.URL.Query().Get("error"))],
 	})
 }
 
@@ -58,6 +59,7 @@ func (p *Portal) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "portal unavailable", http.StatusInternalServerError)
 		return
 	}
+	setHardenedHeaders(w.Header())
 	if err := r.ParseForm(); err != nil {
 		p.renderLoginPage(w, r, http.StatusBadRequest, loginPageData{Error: "invalid login payload"})
 		return
@@ -95,6 +97,7 @@ func (p *Portal) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "portal unavailable", http.StatusInternalServerError)
 		return
 	}
+	setHardenedHeaders(w.Header())
 	if session, ok := p.sessions.CurrentSession(r); ok && session != nil {
 		p.recordAudit(r, session.Username, "logout", "success", "session destroyed")
 	}
@@ -148,6 +151,11 @@ func (p *Portal) recordAudit(r *http.Request, actor, action, result, detail stri
 		Detail:    detail,
 	})
 }
+
+// loginErrorMessages maps the only ?error= codes /login accepts to fixed text.
+// No code path redirects to /login with an error today, so the table is empty;
+// arbitrary query text must never be rendered (phishing/spoofing).
+var loginErrorMessages = map[string]string{}
 
 func sanitizeNext(next string) string {
 	next = strings.TrimSpace(next)
