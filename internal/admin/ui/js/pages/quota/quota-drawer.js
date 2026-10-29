@@ -16,6 +16,7 @@ AdminApp.register("quotaDrawer", function (app) {
   var jobLevelCoef = app.bind("quotaModel", "jobLevelCoef");
   var quotaNumber = app.bind("quotaModel", "quotaNumber");
   var loadQuotaManagement = app.bind("quotaData", "loadQuotaManagement");
+  var runGuarded = app.bind("quotaModel", "runGuarded");
   var dictOptionsHTML = app.bind("quotaLevels", "dictOptionsHTML");
   var quotaDimensions = app.modules.quotaModel.quotaDimensions;
   /* ===== Quota Edit Drawer ===== */
@@ -120,6 +121,8 @@ AdminApp.register("quotaDrawer", function (app) {
     applyReadonlyMode(editor);
   }
   function quotaEffectivePreview(group, level) {
+    // Without a bound (existing) job level the backend rejects the request, so no limit applies.
+    if (!level) return "未绑定职级或职级不存在，请求将被拒绝";
     var global = globalQuotaGroupByName(group.name) || {};
     var personal = group.coefficient == null ? 1 : Number(group.coefficient);
     var groupCoefficient = Number(
@@ -228,33 +231,36 @@ AdminApp.register("quotaDrawer", function (app) {
       state.quotaEditGroups.splice(Number(card.dataset.editGroupIndex), 1);
       renderQuotaEditGroups();
     });
+  async function saveQuotaEdit() {
+    if (isReadonlyMode() || !state.editingQuotaClient) return;
+    var groups = syncQuotaEditGroups();
+    if (groups === null) {
+      toast(
+        "个人可用额度倍率必须是 ≥0 的数字（留空 = 1；0 = 不限）",
+        "error",
+      );
+      return;
+    }
+    var payload = {
+      job_level: document.getElementById("quotaEditJobLevel").value,
+      quota_groups: groups,
+    };
+    try {
+      await api(
+        "/admin/data/quota/" + encodeURIComponent(state.editingQuotaClient),
+        { method: "PUT", body: payload },
+      );
+      closeModal("quotaEditDrawer");
+      toast("额度已更新", "success");
+      await loadQuotaManagement();
+    } catch (e) {
+      toast("保存失败: " + e.message, "error");
+    }
+  }
   document
     .getElementById("saveQuotaEditBtn")
-    .addEventListener("click", async function () {
-      if (isReadonlyMode() || !state.editingQuotaClient) return;
-      var groups = syncQuotaEditGroups();
-      if (groups === null) {
-        toast(
-          "个人可用额度倍率必须是 ≥0 的数字（留空 = 1；0 = 不限）",
-          "error",
-        );
-        return;
-      }
-      var payload = {
-        job_level: document.getElementById("quotaEditJobLevel").value,
-        quota_groups: groups,
-      };
-      try {
-        await api(
-          "/admin/data/quota/" + encodeURIComponent(state.editingQuotaClient),
-          { method: "PUT", body: payload },
-        );
-        closeModal("quotaEditDrawer");
-        toast("额度已更新", "success");
-        await loadQuotaManagement();
-      } catch (e) {
-        toast("保存失败: " + e.message, "error");
-      }
+    .addEventListener("click", function () {
+      return runGuarded("saveQuotaEdit", document.getElementById("saveQuotaEditBtn"), saveQuotaEdit);
     });
   return {
     openQuotaEditDrawer: openQuotaEditDrawer,

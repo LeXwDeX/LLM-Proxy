@@ -26,33 +26,70 @@ AdminApp.register("quotaData", function (app) {
     await Promise.all(requests);
     await awaitSchedulingRefresh();
   }
+  // Table bodies that start as "加载中..." in the page markup. A failed first load replaces them
+  // with an error row so no table stays on the placeholder; tables that already hold data keep it.
+  function showLoadFailure(id, colspan, message) {
+    document.getElementById(id).innerHTML =
+      "<tr class='empty-row'><td colspan='" + colspan + "'>加载失败: " + esc(message) + "</td></tr>";
+  }
+  function showLoadFailureIfLoading(id, colspan, message) {
+    if (/加载中/.test(document.getElementById(id).innerHTML)) showLoadFailure(id, colspan, message);
+  }
+  function renderLoadedSections() {
+    try {
+      renderQuotaSummaryFilters();
+      renderQuotaSummary();
+    } catch (e) {
+      showLoadFailure("quotaSummaryBody", quotaDimensions.length + 7, e.message);
+    }
+    try {
+      renderQuotaSyncClients();
+    } catch (e) {
+      document.getElementById("quotaSyncTargetsPanel").innerHTML =
+        "<span style='color:var(--text-muted);padding:4px 6px;display:block;'>加载失败: " +
+        esc(e.message) +
+        "</span>";
+    }
+    try {
+      renderModelGroups();
+    } catch (e) {
+      showLoadFailure("modelGroupsBody", 5, e.message);
+    }
+    try {
+      renderDictTables();
+    } catch (e) {
+      showLoadFailure("jobLevelsBody", quotaDimensions.length + 2, e.message);
+      showLoadFailure("projectGroupsBody", 2, e.message);
+    }
+  }
   async function loadQuotaManagement() {
     var version = ++shared.quotaLoadVersion;
     ++shared.dictLoadVersion;
+    // The 30-day aggregate scans many usage events and is far slower than the rest, so it is
+    // fetched in parallel but never blocks the first render.
+    var usagePromise = api(
+      "/admin/data/usage/aggregate?group_by=day&from=" +
+        encodeURIComponent(
+          new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
+        ) +
+        "&to=" +
+        encodeURIComponent(new Date().toISOString()),
+      { timeoutMs: 60000 },
+    ).then(
+      function (data) {
+        return data;
+      },
+      function () {
+        return { by_client: [], unavailable: true };
+      },
+    );
     try {
-      var usagePromise = api(
-        "/admin/data/usage/aggregate?group_by=day&from=" +
-          encodeURIComponent(
-            new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
-          ) +
-          "&to=" +
-          encodeURIComponent(new Date().toISOString()),
-        { timeoutMs: 60000 }, // 30-day aggregate scans many usage events
-      ).then(
-        function (data) {
-          return data;
-        },
-        function () {
-          return { by_client: [], unavailable: true };
-        },
-      );
       var results = await Promise.all([
         api("/admin/data/quota/summary"),
         api("/admin/data/model-groups"),
         api("/admin/data/job-levels"),
         api("/admin/data/project-groups"),
         loadQuotaEditorData(),
-        usagePromise,
       ]);
       if (version !== shared.quotaLoadVersion) return;
       if (Object.keys(shared.modelGroupNeedsRefresh).length &&
@@ -73,62 +110,33 @@ AdminApp.register("quotaData", function (app) {
       state.projectGroups = Array.isArray(results[3].project_groups)
         ? results[3].project_groups
         : [];
-      state.clientUsage30d = {};
-      state.clientUsage30dUnavailable = !!(results[5] && results[5].unavailable);
-      ((results[5] && results[5].by_client) || []).forEach(function (item) {
-        state.clientUsage30d[item.key] = item;
-      });
       state.dictsLoaded = true;
+      state.clientUsage30d = {};
+      state.clientUsage30dPending = true;
+      state.clientUsage30dUnavailable = false;
     } catch (e) {
       if (version !== shared.quotaLoadVersion) return;
-      document.getElementById("quotaSummaryBody").innerHTML =
-        "<tr class='empty-row'><td colspan='" +
-        (quotaDimensions.length + 7) +
-        "'>加载失败: " +
-        esc(e.message) +
-        "</td></tr>";
+      showLoadFailure("quotaSummaryBody", quotaDimensions.length + 7, e.message);
+      // Only tables still showing the page's initial placeholder are replaced; loaded or
+      // annotated content (e.g. 已过期 markers) stays.
+      showLoadFailureIfLoading("modelGroupsBody", 5, e.message);
+      showLoadFailureIfLoading("jobLevelsBody", quotaDimensions.length + 2, e.message);
+      showLoadFailureIfLoading("projectGroupsBody", 2, e.message);
       return;
     }
+    renderLoadedSections();
+    var usage = await usagePromise;
+    if (version !== shared.quotaLoadVersion) return;
+    state.clientUsage30d = {};
+    state.clientUsage30dPending = false;
+    state.clientUsage30dUnavailable = !!(usage && usage.unavailable);
+    ((usage && usage.by_client) || []).forEach(function (item) {
+      state.clientUsage30d[item.key] = item;
+    });
     try {
-      renderQuotaSummaryFilters();
       renderQuotaSummary();
     } catch (e) {
-      document.getElementById("quotaSummaryBody").innerHTML =
-        "<tr class='empty-row'><td colspan='" +
-        (quotaDimensions.length + 7) +
-        "'>加载失败: " +
-        esc(e.message) +
-        "</td></tr>";
-    }
-    try {
-      renderQuotaSyncClients();
-    } catch (e) {
-      document.getElementById("quotaSyncTargetsPanel").innerHTML =
-        "<span style='color:var(--text-muted);padding:4px 6px;display:block;'>加载失败: " +
-        esc(e.message) +
-        "</span>";
-    }
-    try {
-      renderModelGroups();
-    } catch (e) {
-      document.getElementById("modelGroupsBody").innerHTML =
-        "<tr class='empty-row'><td colspan='5'>加载失败: " +
-        esc(e.message) +
-        "</td></tr>";
-    }
-    try {
-      renderDictTables();
-    } catch (e) {
-      document.getElementById("jobLevelsBody").innerHTML =
-        "<tr class='empty-row'><td colspan='" +
-        (quotaDimensions.length + 2) +
-        "'>加载失败: " +
-        esc(e.message) +
-        "</td></tr>";
-      document.getElementById("projectGroupsBody").innerHTML =
-        "<tr class='empty-row'><td colspan='2'>加载失败: " +
-        esc(e.message) +
-        "</td></tr>";
+      showLoadFailure("quotaSummaryBody", quotaDimensions.length + 7, e.message);
     }
   }
   async function loadDictOptions() {

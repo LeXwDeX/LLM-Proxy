@@ -5,6 +5,8 @@ AdminApp.register("pricingRates", function (app) {
   var esc = app.bind("core", "esc");
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var clonePricingValue = app.bind("pricingShared", "clonePricingValue");
+  var pricingInputNumber = app.bind("pricingShared", "pricingInputNumber");
+  var pricingRateInputValue = app.bind("pricingShared", "pricingRateInputValue");
   var updatePricingModeUI = app.bind("pricingPeriods", "updatePricingModeUI");
   var renderPricingPeriods = app.bind("pricingPeriods", "renderPricingPeriods");
   var contextRateFields = [
@@ -19,7 +21,7 @@ AdminApp.register("pricingRates", function (app) {
     return "<div class='pricing-rate-editor'>" + contextRateFields.map(function (field) {
       var id = prefix + "-" + field[0];
       return "<div class='form-group'><label for='" + esc(id) + "'>" + field[1] + (field[2] ? "（可选）" : "") + "</label>" +
-        "<input id='" + esc(id) + "' class='form-control' type='number' min='0' step='any' " + attributes + " data-pt-context-rate='" + field[0] + "' value='" + esc(rates[field[0]] != null ? rates[field[0]] : "") + "'" +
+        "<input id='" + esc(id) + "' class='form-control' type='number' min='0' step='any' " + attributes + " data-pt-context-rate='" + field[0] + "' value='" + esc(pricingRateInputValue(rates[field[0]])) + "'" +
         (field[2] ? " placeholder='留空继承本规则同类价格；0 为免费'" : " required") + "></div>";
     }).join("") + "</div>";
   }
@@ -72,10 +74,12 @@ AdminApp.register("pricingRates", function (app) {
     if (data.ptConditionIndex !== undefined) item = conditionList(data.ptContextScope)[Number(data.ptConditionIndex)];
     else if (data.ptDateIndex !== undefined) item = (state.ptDateExceptions || [])[Number(data.ptDateIndex)];
     if (!item) return;
-    if (data.ptContextRate) { item.rates = item.rates || {}; item.rates[data.ptContextRate] = raw === "" ? null : Number(raw); }
+    // pricingInputNumber keeps unparseable text as NaN so validation rejects it instead of
+    // silently treating it as blank (null price / no bound).
+    if (data.ptContextRate) { item.rates = item.rates || {}; item.rates[data.ptContextRate] = pricingInputNumber(input); }
     else if (data.ptConditionField) {
       var field = data.ptConditionField;
-      if (field === "min_input_tokens" || field === "max_input_tokens") { if (raw === "") delete item[field]; else item[field] = Number(raw); }
+      if (field === "min_input_tokens" || field === "max_input_tokens") { var bound = pricingInputNumber(input); if (bound === null) delete item[field]; else item[field] = bound; }
       else item[field] = raw;
     } else if (data.ptDateField) item[data.ptDateField] = raw;
   }

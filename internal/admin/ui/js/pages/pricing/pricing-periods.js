@@ -5,6 +5,8 @@ AdminApp.register("pricingPeriods", function (app) {
   var esc = app.bind("core", "esc");
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var conditionsForm = app.bind("pricingRates", "conditionsForm");
+  var pricingInputNumber = app.bind("pricingShared", "pricingInputNumber");
+  var pricingRateInputValue = app.bind("pricingShared", "pricingRateInputValue");
   var PT_WEEKDAYS = app.modules.pricingShared.PT_WEEKDAYS;
   function updatePricingModeUI() {
     var schedule = document.getElementById("ptMode").value === "schedule";
@@ -49,58 +51,34 @@ AdminApp.register("pricingPeriods", function (app) {
           wd +
           "</div>" +
           "<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;'>" +
-          "<div class='form-group'><label>开始</label><input type='time' class='form-control' data-pt-start value='" +
+          "<div class='form-group'><label>开始（HH:mm）</label><input type='text' inputmode='numeric' maxlength='5' placeholder='09:00' autocomplete='off' class='form-control' data-pt-start value='" +
           esc(p.start || "") +
           "'></div>" +
-          "<div class='form-group'><label>结束</label><input type='time' class='form-control' data-pt-end value='" +
+          "<div class='form-group'><label>结束（HH:mm，24:00 = 到当日结束）</label><input type='text' inputmode='numeric' maxlength='5' placeholder='18:00 或 24:00' autocomplete='off' class='form-control' data-pt-end value='" +
           esc(p.end || "") +
           "'></div>" +
           "</div>" +
           "<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;'>" +
           "<div class='form-group'><label>输入</label><input type='number' step='any' min='0' class='form-control' data-pt-in value='" +
-          esc(
-            rate.input_per_1m_tokens != null ? rate.input_per_1m_tokens : "",
-          ) +
+          esc(pricingRateInputValue(rate.input_per_1m_tokens)) +
           "'></div>" +
           "<div class='form-group'><label>输出</label><input type='number' step='any' min='0' class='form-control' data-pt-out value='" +
-          esc(
-            rate.output_per_1m_tokens != null ? rate.output_per_1m_tokens : "",
-          ) +
+          esc(pricingRateInputValue(rate.output_per_1m_tokens)) +
           "'></div>" +
           "<div class='form-group'><label>缓存写</label><input type='number' step='any' min='0' class='form-control' data-pt-cw value='" +
-          esc(
-            rate.cache_write_per_1m_tokens != null
-              ? rate.cache_write_per_1m_tokens
-              : "",
-          ) +
+          esc(pricingRateInputValue(rate.cache_write_per_1m_tokens)) +
           "'></div>" +
           "<div class='form-group'><label>缓存读</label><input type='number' step='any' min='0' class='form-control' data-pt-cr value='" +
-          esc(
-            rate.cache_read_per_1m_tokens != null
-              ? rate.cache_read_per_1m_tokens
-              : "",
-          ) +
+          esc(pricingRateInputValue(rate.cache_read_per_1m_tokens)) +
           "'></div>" +
           "<div class='form-group'><label>显式缓存读取（可选）</label><input type='number' step='any' min='0' class='form-control' data-pt-ExplicitRead placeholder='留空继承' value='" +
-          esc(
-            rate.explicit_cache_read_per_1m_tokens != null
-              ? rate.explicit_cache_read_per_1m_tokens
-              : "",
-          ) +
+          esc(pricingRateInputValue(rate.explicit_cache_read_per_1m_tokens)) +
           "'></div>" +
           "<div class='form-group'><label>5 分钟缓存写入（可选）</label><input type='number' step='any' min='0' class='form-control' data-pt-Write5m placeholder='留空继承' value='" +
-          esc(
-            rate.cache_write_5m_per_1m_tokens != null
-              ? rate.cache_write_5m_per_1m_tokens
-              : "",
-          ) +
+          esc(pricingRateInputValue(rate.cache_write_5m_per_1m_tokens)) +
           "'></div>" +
           "<div class='form-group'><label>1 小时缓存写入（可选）</label><input type='number' step='any' min='0' class='form-control' data-pt-Write1h placeholder='留空继承' value='" +
-          esc(
-            rate.cache_write_1h_per_1m_tokens != null
-              ? rate.cache_write_1h_per_1m_tokens
-              : "",
-          ) +
+          esc(pricingRateInputValue(rate.cache_write_1h_per_1m_tokens)) +
           "'></div>" +
           imagePeriodInputs(rate) +
           "</div>" + conditionsForm("period:" + index) + "</div>"
@@ -116,12 +94,11 @@ AdminApp.register("pricingPeriods", function (app) {
       wds.push(Number(cb.dataset.ptWd));
     });
     p.weekdays = wds;
-    p.start = (card.querySelector("[data-pt-start]") || {}).value || "";
-    p.end = (card.querySelector("[data-pt-end]") || {}).value || "";
+    p.start = String((card.querySelector("[data-pt-start]") || {}).value || "").trim();
+    p.end = String((card.querySelector("[data-pt-end]") || {}).value || "").trim();
+    // NaN (unparseable text) is kept so save-time validation rejects it rather than reading null.
     var rateValue = function (selector) {
-      var input = card.querySelector(selector);
-      var raw = input ? input.value.trim() : "";
-      return raw === "" ? null : Number(raw);
+      return pricingInputNumber(card.querySelector(selector));
     };
     p.rates = {
       input_per_1m_tokens: rateValue("[data-pt-in]"),
@@ -135,6 +112,17 @@ AdminApp.register("pricingPeriods", function (app) {
       cached_image_input_per_1m_tokens: rateValue("[data-pt-CachedImageInput]"),
       image_output_per_1m_tokens: rateValue("[data-pt-ImageOutput]"),
     };
+  }
+  // Period bounds are HH:mm; only the end may be 24:00 (end of day, backend parseHM accepts it).
+  // Native <input type=time> cannot express 24:00, hence the validated text inputs.
+  var PERIOD_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+  function pricingPeriodTimeError(period, label) {
+    if (!PERIOD_TIME_RE.test(period.start || ""))
+      return label + " 的开始时间格式应为 HH:mm（00:00–23:59）";
+    if (!PERIOD_TIME_RE.test(period.end || "") && period.end !== "24:00")
+      return label + " 的结束时间格式应为 HH:mm，或 24:00 表示到当日结束";
+    if (period.start >= period.end) return label + " 开始时间必须早于结束时间";
+    return "";
   }
   function collectPricingPeriods() {
     var result = [];
@@ -154,7 +142,7 @@ AdminApp.register("pricingPeriods", function (app) {
       ["CachedImageInput", "cached_image_input_per_1m_tokens", "缓存图像输入", "留空继承图像输入价"],
       ["ImageOutput", "image_output_per_1m_tokens", "图像输出", "留空表示缺价"],
     ].map(function (field) {
-      return "<div class='form-group'><label>" + field[2] + "（可选）</label><input type='number' step='any' min='0' class='form-control' aria-label='" + field[2] + "' data-pt-" + field[0] + " placeholder='" + field[3] + "' value='" + esc(rate[field[1]] != null ? rate[field[1]] : "") + "'></div>";
+      return "<div class='form-group'><label>" + field[2] + "（可选）</label><input type='number' step='any' min='0' class='form-control' aria-label='" + field[2] + "' data-pt-" + field[0] + " placeholder='" + field[3] + "' value='" + esc(pricingRateInputValue(rate[field[1]])) + "'></div>";
     }).join("");
   }
   document
@@ -194,6 +182,7 @@ AdminApp.register("pricingPeriods", function (app) {
     renderPricingPeriods();
   });
   return {
+    pricingPeriodTimeError: pricingPeriodTimeError,
     updatePricingModeUI: updatePricingModeUI,
     renderPricingPeriods: renderPricingPeriods,
     syncPricingPeriod: syncPricingPeriod,

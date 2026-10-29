@@ -23,6 +23,28 @@ AdminApp.register("quotaModel", function (app) {
         .join(", ") || "未配置模型"
     );
   }
+  // Runs fn once at a time per key and keeps the button disabled while it is in flight.
+  var inflight = Object.create(null);
+  async function runGuarded(key, button, fn) {
+    if (inflight[key]) return;
+    inflight[key] = true;
+    var wasDisabled = button ? button.disabled : false;
+    if (button) button.disabled = true;
+    try {
+      return await fn();
+    } finally {
+      inflight[key] = false;
+      if (button) button.disabled = wasDisabled;
+    }
+  }
+  // Reads a numeric <input>: null when blank, NaN when the browser holds text it cannot parse
+  // (type=number reports value "" with validity.badInput), otherwise the number.
+  function quotaInputNumber(input) {
+    if (!input) return null;
+    if (input.validity && input.validity.badInput) return NaN;
+    var raw = String(input.value == null ? "" : input.value).trim();
+    return raw === "" ? null : Number(raw);
+  }
   function modelGroupLabel(name) {
     return name === "company_general" ? "公司通用" : name;
   }
@@ -33,14 +55,24 @@ AdminApp.register("quotaModel", function (app) {
       return String(target.name).toLowerCase() === String(name).toLowerCase();
     });
   }
+  // Display names are looked up per rendered option, so index the catalog once per cache array
+  // (rebuilt when the array object or its length changes) instead of scanning it for every call.
+  var catalogIndex = { source: null, size: -1, entries: null };
+  function catalogEntryFor(endpointType, model) {
+    var source = state.catalogAllCache || null;
+    var size = source ? source.length : 0;
+    if (catalogIndex.source !== source || catalogIndex.size !== size) {
+      var entries = Object.create(null);
+      (source || []).forEach(function (item) {
+        var key = item.endpoint_type + "\u0000" + String(item.model || "").toLowerCase();
+        if (!entries[key]) entries[key] = item;
+      });
+      catalogIndex = { source: source, size: size, entries: entries };
+    }
+    return catalogIndex.entries[endpointType + "\u0000" + String(model || "").toLowerCase()];
+  }
   function quotaModelLabel(target, model) {
-    var entry = (state.catalogAllCache || []).find(function (item) {
-      return (
-        item.endpoint_type === target.endpoint_type &&
-        String(item.model || "").toLowerCase() ===
-          String(model || "").toLowerCase()
-      );
-    });
+    var entry = catalogEntryFor(target.endpoint_type, model);
     return (
       model +
       (entry && entry.display_name && entry.display_name !== model
@@ -177,6 +209,8 @@ AdminApp.register("quotaModel", function (app) {
     jobLevelCoefText: jobLevelCoefText,
     quotaNumber: quotaNumber,
     quotaResetText: quotaResetText,
+    runGuarded: runGuarded,
+    quotaInputNumber: quotaInputNumber,
     quotaDimensions: quotaDimensions,
     shared: shared,
   };

@@ -16,6 +16,7 @@ AdminApp.register("quotaGroups", function (app) {
   var quotaModelOptions = app.bind("quotaModel", "quotaModelOptions");
   var loadQuotaEditorData = app.bind("quotaData", "loadQuotaEditorData");
   var loadQuotaManagement = app.bind("quotaData", "loadQuotaManagement");
+  var quotaInputNumber = app.bind("quotaModel", "quotaInputNumber");
   var quotaDimensions = app.modules.quotaModel.quotaDimensions;
   var shared = app.modules.quotaModel.shared;
   function renderModelGroups() {
@@ -260,10 +261,10 @@ AdminApp.register("quotaGroups", function (app) {
         return;
       }
       var name = document.getElementById("modelGroupName").value.trim(),
-        coefficient = parseFloat(
-          document.getElementById("modelGroupCoefficient").value,
+        coefficient = quotaInputNumber(
+          document.getElementById("modelGroupCoefficient"),
         );
-      if (!name || !Number.isFinite(coefficient) || coefficient < 0) {
+      if (!name || coefficient === null || !Number.isFinite(coefficient) || coefficient < 0) {
         toast("请填写有效的模型组标识和扣费折算系数（系数须 ≥0）", "error");
         return;
       }
@@ -272,16 +273,26 @@ AdminApp.register("quotaGroups", function (app) {
         cost_coefficient: coefficient,
         bindings: collectModelGroupBindings(),
       };
-      var bad = false;
+      // Base 0 means "unlimited once a job level is bound", so a blank field must never be
+      // read as 0: every base has to be typed explicitly (0 = unlimited), and text the browser
+      // cannot parse is rejected rather than collapsing to blank.
+      var bad = false, blank = [];
       quotaDimensions.forEach(function (dim) {
-        var raw = document.getElementById("modelGroup-" + dim.key).value.trim();
-        var value = raw === "" ? 0 : Number(raw);
+        var value = quotaInputNumber(document.getElementById("modelGroup-" + dim.key));
+        if (value === null) {
+          blank.push(dim.label);
+          return;
+        }
         if (!Number.isFinite(value) || value < 0) {
           bad = true;
           return;
         }
         payload[dim.base_field] = value;
       });
+      if (blank.length) {
+        toast("请填写额度基数：" + blank.join("、") + "（0 = 已绑定职级时该周期不限）", "error");
+        return;
+      }
       if (bad) {
         toast("模型组额度基数必须是 ≥0 的数字", "error");
         return;

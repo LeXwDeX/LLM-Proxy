@@ -9,6 +9,7 @@ AdminApp.register("quotaSync", function (app) {
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var jobLevelEntryName = app.bind("quotaModel", "jobLevelEntryName");
   var loadQuotaManagement = app.bind("quotaData", "loadQuotaManagement");
+  var runGuarded = app.bind("quotaModel", "runGuarded");
   function renderQuotaSyncClients() {
     var source = document.getElementById("quotaSyncSource"),
       current = source.value;
@@ -229,7 +230,8 @@ AdminApp.register("quotaSync", function (app) {
           "」的模型组选择与个人可用额度倍率同步到 " +
           describe +
           "，覆盖其现有配置（不修改职级绑定，不影响身份、密钥与授权）。确认继续？",
-        async function () {
+        function () {
+          return runGuarded("syncQuota", document.getElementById("syncQuotaBtn"), async function () {
           try {
             var res = await api(
               "/admin/data/quota/" + encodeURIComponent(source) + "/sync",
@@ -247,6 +249,7 @@ AdminApp.register("quotaSync", function (app) {
           } catch (e) {
             toast("同步失败: " + e.message, "error");
           }
+          });
         },
       );
     });

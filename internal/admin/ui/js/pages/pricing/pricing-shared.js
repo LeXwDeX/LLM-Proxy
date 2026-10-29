@@ -56,10 +56,44 @@ AdminApp.register("pricingShared", function (app) {
   function pricingIsTemplate0(t) {
     return !!t && t.mode === "flat" && !t.end && pricingStartIsZero(t.start);
   }
+  // Shows every digit that is stored: prices are saved to 6 decimals, but a value kept with
+  // more precision must not be displayed rounded.
   function pricingRate(v) {
     var n = Number(v || 0);
+    if (!Number.isFinite(n)) return "$0";
     if (Number.isInteger(n)) return "$" + n;
-    return "$" + n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+    var text = String(n);
+    var exp = /^-?(\d+)(?:\.(\d+))?e([+-]\d+)$/i.exec(text);
+    var decimals = exp
+      ? Math.max(0, (exp[2] ? exp[2].length : 0) - Number(exp[3]))
+      : (text.split(".")[1] || "").length;
+    return "$" + n.toFixed(Math.min(20, Math.max(6, decimals))).replace(/0+$/, "").replace(/\.$/, "");
+  }
+  // Reads a numeric <input>: null when blank, NaN when the browser holds text it cannot parse
+  // (type=number reports value "" with validity.badInput), otherwise the number.
+  function pricingInputNumber(input) {
+    if (!input) return null;
+    if (input.validity && input.validity.badInput) return NaN;
+    var raw = String(input.value == null ? "" : input.value).trim();
+    return raw === "" ? null : Number(raw);
+  }
+  // Text for a number input's value attribute; never renders NaN/Infinity.
+  function pricingRateInputValue(v) {
+    return v == null || !Number.isFinite(Number(v)) ? "" : String(v);
+  }
+  // Runs fn once at a time per key and keeps the button disabled while it is in flight.
+  var inflight = Object.create(null);
+  async function runGuarded(key, button, fn) {
+    if (inflight[key]) return;
+    inflight[key] = true;
+    var wasDisabled = button ? button.disabled : false;
+    if (button) button.disabled = true;
+    try {
+      return await fn();
+    } finally {
+      inflight[key] = false;
+      if (button) button.disabled = wasDisabled;
+    }
   }
   function pricingWeekdays(wds) {
     if (!wds || !wds.length)
@@ -141,6 +175,7 @@ AdminApp.register("pricingShared", function (app) {
       (t.end ? fmtTime(t.end) : "至今")
     );
   }
+  // datetime-local value (step=1) that keeps seconds and milliseconds when present.
   function toLocalInputValue(iso) {
     if (!iso) return "";
     var d = new Date(iso);
@@ -148,17 +183,12 @@ AdminApp.register("pricingShared", function (app) {
     var pad = function (n) {
       return (n < 10 ? "0" : "") + n;
     };
-    return (
-      d.getFullYear() +
-      "-" +
-      pad(d.getMonth() + 1) +
-      "-" +
-      pad(d.getDate()) +
-      "T" +
-      pad(d.getHours()) +
-      ":" +
-      pad(d.getMinutes())
-    );
+    var text =
+      d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+      "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+    if (d.getSeconds() || d.getMilliseconds()) text += ":" + pad(d.getSeconds());
+    if (d.getMilliseconds()) text += "." + ("00" + d.getMilliseconds()).slice(-3);
+    return text;
   }
   function pricingTargetExists(name) {
     return (state.targets || []).some(function (target) {
@@ -206,6 +236,9 @@ AdminApp.register("pricingShared", function (app) {
     pricingStartIsZero: pricingStartIsZero,
     pricingIsTemplate0: pricingIsTemplate0,
     pricingRate: pricingRate,
+    pricingInputNumber: pricingInputNumber,
+    pricingRateInputValue: pricingRateInputValue,
+    runGuarded: runGuarded,
     pricingWeekdays: pricingWeekdays,
     pricingRatesHtml: pricingRatesHtml,
     pricingRateGridHtml: pricingRateGridHtml,

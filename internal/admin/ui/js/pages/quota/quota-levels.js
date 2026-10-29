@@ -13,6 +13,8 @@ AdminApp.register("quotaLevels", function (app) {
   var jobLevelByName = app.bind("quotaModel", "jobLevelByName");
   var jobLevelCoefText = app.bind("quotaModel", "jobLevelCoefText");
   var loadQuotaManagement = app.bind("quotaData", "loadQuotaManagement");
+  var runGuarded = app.bind("quotaModel", "runGuarded");
+  var quotaInputNumber = app.bind("quotaModel", "quotaInputNumber");
   var loadDictOptions = app.bind("quotaData", "loadDictOptions");
   var quotaDimensions = app.modules.quotaModel.quotaDimensions;
   var dictKinds = {
@@ -28,7 +30,17 @@ AdminApp.register("quotaLevels", function (app) {
       var name = jobLevelEntryName(v);
       if (name) values[name] = true;
     });
-    if (current && !values[current]) values[current] = true;
+    // Names are matched case-insensitively (the backend resolves them that way): a stored
+    // "lead" selects the existing "Lead" option instead of adding a second entry.
+    var selected = current;
+    if (current) {
+      var folded = String(current).toLowerCase();
+      var existing = Object.keys(values).filter(function (name) {
+        return name.toLowerCase() === folded;
+      })[0];
+      if (existing) selected = existing;
+      else values[current] = true;
+    }
     return (
       "<option value=''>" +
       esc(emptyLabel) +
@@ -40,7 +52,7 @@ AdminApp.register("quotaLevels", function (app) {
             "<option value='" +
             esc(v) +
             "'" +
-            (v === current ? " selected" : "") +
+            (v === selected ? " selected" : "") +
             ">" +
             esc(v) +
             "</option>"
@@ -125,52 +137,55 @@ AdminApp.register("quotaLevels", function (app) {
     });
     openModal("jobLevelModal");
   }
+  async function saveJobLevel() {
+    if (isReadonlyMode()) return;
+    var name = document.getElementById("jobLevelName").value.trim();
+    if (!name) {
+      toast("职级名称不能为空", "error");
+      return;
+    }
+    var payload = { name: name };
+    var bad = false;
+    quotaDimensions.forEach(function (dim) {
+      // Blank keeps the field unset (×1); text the browser cannot parse must not collapse to blank.
+      var v = quotaInputNumber(document.getElementById("jobLevel-" + dim.key));
+      if (v === null) return;
+      if (!Number.isFinite(v) || v < 0) {
+        bad = true;
+        return;
+      }
+      payload[dim.job_coefficient_field] = v;
+    });
+    if (bad) {
+      toast("职级可用额度倍率必须是 ≥0 的数字（0 = 不限）", "error");
+      return;
+    }
+    var current = state.editingJobLevel;
+    var currentName = current ? jobLevelEntryName(current) : "";
+    try {
+      var res = await api(
+        current
+          ? "/admin/data/job-levels/" + encodeURIComponent(currentName)
+          : "/admin/data/job-levels",
+        { method: current ? "PUT" : "POST", body: payload },
+      );
+      closeModal("jobLevelModal");
+      var renamed = (res && res.renamed_clients) || [];
+      toast(
+        renamed.length
+          ? "职级已保存，" + renamed.length + " 个客户端已跟随改名"
+          : "职级已保存",
+        "success",
+      );
+      await loadQuotaManagement();
+    } catch (e) {
+      toast("保存失败: " + e.message, "error");
+    }
+  }
   document
     .getElementById("saveJobLevelBtn")
-    .addEventListener("click", async function () {
-      if (isReadonlyMode()) return;
-      var name = document.getElementById("jobLevelName").value.trim();
-      if (!name) {
-        toast("职级名称不能为空", "error");
-        return;
-      }
-      var payload = { name: name };
-      var bad = false;
-      quotaDimensions.forEach(function (dim) {
-        var raw = document.getElementById("jobLevel-" + dim.key).value;
-        if (raw === "" || raw == null) return;
-        var v = parseFloat(raw);
-        if (!Number.isFinite(v) || v < 0) {
-          bad = true;
-          return;
-        }
-        payload[dim.job_coefficient_field] = v;
-      });
-      if (bad) {
-        toast("职级可用额度倍率必须是 ≥0 的数字（0 = 不限）", "error");
-        return;
-      }
-      var current = state.editingJobLevel;
-      var currentName = current ? jobLevelEntryName(current) : "";
-      try {
-        var res = await api(
-          current
-            ? "/admin/data/job-levels/" + encodeURIComponent(currentName)
-            : "/admin/data/job-levels",
-          { method: current ? "PUT" : "POST", body: payload },
-        );
-        closeModal("jobLevelModal");
-        var renamed = (res && res.renamed_clients) || [];
-        toast(
-          renamed.length
-            ? "职级已保存，" + renamed.length + " 个客户端已跟随改名"
-            : "职级已保存",
-          "success",
-        );
-        await loadQuotaManagement();
-      } catch (e) {
-        toast("保存失败: " + e.message, "error");
-      }
+    .addEventListener("click", function () {
+      return runGuarded("saveJobLevel", document.getElementById("saveJobLevelBtn"), saveJobLevel);
     });
   document
     .getElementById("jobLevelsBody")
@@ -227,31 +242,34 @@ AdminApp.register("quotaLevels", function (app) {
     .addEventListener("click", function () {
       openDictModal("project", null);
     });
+  async function saveDictEntry() {
+    if (isReadonlyMode()) return;
+    var ed = state.editingDict;
+    if (!ed) return;
+    var meta = dictKinds[ed.kind];
+    var name = document.getElementById("dictEntryName").value.trim();
+    if (!name) {
+      toast("名称不能为空", "error");
+      return;
+    }
+    try {
+      await api(
+        ed.entry
+          ? "/admin/data/" + meta.path + "/" + encodeURIComponent(ed.entry)
+          : "/admin/data/" + meta.path,
+        { method: ed.entry ? "PUT" : "POST", body: { name: name } },
+      );
+      closeModal("dictModal");
+      toast(meta.label + "已保存", "success");
+      await loadQuotaManagement();
+    } catch (e) {
+      toast("保存失败: " + e.message, "error");
+    }
+  }
   document
     .getElementById("saveDictEntryBtn")
-    .addEventListener("click", async function () {
-      if (isReadonlyMode()) return;
-      var ed = state.editingDict;
-      if (!ed) return;
-      var meta = dictKinds[ed.kind];
-      var name = document.getElementById("dictEntryName").value.trim();
-      if (!name) {
-        toast("名称不能为空", "error");
-        return;
-      }
-      try {
-        await api(
-          ed.entry
-            ? "/admin/data/" + meta.path + "/" + encodeURIComponent(ed.entry)
-            : "/admin/data/" + meta.path,
-          { method: ed.entry ? "PUT" : "POST", body: { name: name } },
-        );
-        closeModal("dictModal");
-        toast(meta.label + "已保存", "success");
-        await loadQuotaManagement();
-      } catch (e) {
-        toast("保存失败: " + e.message, "error");
-      }
+    .addEventListener("click", function () {
+      return runGuarded("saveDictEntry", document.getElementById("saveDictEntryBtn"), saveDictEntry);
     });
   document
     .getElementById("projectGroupsBody")

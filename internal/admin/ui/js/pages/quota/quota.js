@@ -35,8 +35,8 @@ AdminApp.register("quota", function (app) {
             "</label><input class='form-control readonly-disable' id='" +
             esc(spec[1] + "-" + dim.key) +
             "' type='number' min='0' step='0.01' placeholder='" +
-            (spec[1] === "jobLevel" ? "留空 = 1" : "留空 = 0（已绑定职级时该周期上限不限）") +
-            "'></div>"
+            (spec[1] === "jobLevel" ? "留空 = 1；0 = 不限" : "必填；0 = 已绑定职级时该周期不限") +
+            "'" + (spec[1] === "modelGroup" ? " required" : "") + "></div>"
           );
         })
         .join("");

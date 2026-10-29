@@ -56,9 +56,11 @@ AdminApp.register("users", function (app) {
       document.getElementById("cpConfirmPassword").value = "";
       openModal("changePasswordModal");
     });
+  var savingPassword = false;
   document
     .getElementById("savePasswordBtn")
     .addEventListener("click", async function () {
+      if (savingPassword) return;
       var oldPw = document.getElementById("cpOldPassword").value;
       var newPw = document.getElementById("cpNewPassword").value;
       var confirmPw = document.getElementById("cpConfirmPassword").value;
@@ -78,6 +80,9 @@ AdminApp.register("users", function (app) {
         toast("两次输入的新密码不一致", "error");
         return;
       }
+      var button = document.getElementById("savePasswordBtn");
+      savingPassword = true;
+      button.disabled = true;
       try {
         await api("/admin/api/change-password", {
           method: "POST",
@@ -87,6 +92,9 @@ AdminApp.register("users", function (app) {
         closeModal("changePasswordModal");
       } catch (e) {
         toast("修改失败: " + e.message, "error");
+      } finally {
+        savingPassword = false;
+        button.disabled = false;
       }
     });
 
@@ -216,23 +224,39 @@ AdminApp.register("users", function (app) {
       toast("用户不存在", "error");
       return;
     }
-    var action = u.disabled ? "启用" : "禁用";
-    if (!u.disabled) {
+    // The state this action was requested for; re-checked against the latest list on apply.
+    var wantDisabled = !u.disabled;
+    if (wantDisabled) {
       showConfirm(
         "确认禁用用户「" + username + "」？其全部会话将被立即吊销。",
         function () {
-          applyUserDisabled(u, username, action);
+          return applyUserDisabled(username, wantDisabled);
         },
       );
       return;
     }
-    return applyUserDisabled(u, username, action);
+    return applyUserDisabled(username, wantDisabled);
   }
-  async function applyUserDisabled(u, username, action) {
+  var togglingUsers = Object.create(null);
+  async function applyUserDisabled(username, wantDisabled) {
+    if (togglingUsers[username]) return;
+    var action = wantDisabled ? "禁用" : "启用";
+    // The list may have refreshed while the confirmation was open; never flip a user that
+    // is already in the requested state, and never decide from a stale snapshot.
+    var fresh = findCachedUser(username);
+    if (!fresh) {
+      toast("用户不存在", "error");
+      return;
+    }
+    if (!!fresh.disabled === wantDisabled) {
+      toast("用户「" + username + "」状态已变化，未执行" + action, "error");
+      return;
+    }
+    togglingUsers[username] = true;
     try {
       await api("/admin/data/users/" + encodeURIComponent(username), {
         method: "PUT",
-        body: { disabled: !u.disabled },
+        body: { disabled: wantDisabled },
       });
       toast(
         "已" +
@@ -240,12 +264,14 @@ AdminApp.register("users", function (app) {
           "用户「" +
           username +
           "」" +
-          (u.disabled ? "" : "（其会话将被吊销）"),
+          (wantDisabled ? "（其会话将被吊销）" : ""),
         "success",
       );
-      loadUsers();
+      await loadUsers();
     } catch (e) {
       toast(action + "失败: " + e.message, "error");
+    } finally {
+      togglingUsers[username] = false;
     }
   }
   function deleteUser(username) {

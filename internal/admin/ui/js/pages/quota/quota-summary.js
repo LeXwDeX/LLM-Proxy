@@ -275,6 +275,15 @@ AdminApp.register("quotaSummary", function (app) {
     return typeof value === "number" && isFinite(value) ? value : null;
   }
   function quotaUsageStats(name) {
+    if (state.clientUsage30dPending)
+      return {
+        tokens: null,
+        cost: null,
+        unavailable: false,
+        pending: true,
+        usageIncomplete: 0,
+        costIncomplete: 0,
+      };
     if (state.clientUsage30dUnavailable)
       return {
         tokens: null,
@@ -304,6 +313,7 @@ AdminApp.register("quotaSummary", function (app) {
     };
   }
   function quotaTokenCell(stats) {
+    if (stats.pending) return "<span class='quota-usage-unavailable'>加载中…</span>";
     if (stats.tokens === null)
       return (
         "<span class='quota-usage-unavailable'>不可用</span>" +
@@ -322,6 +332,7 @@ AdminApp.register("quotaSummary", function (app) {
     return html;
   }
   function quotaCostCell(stats) {
+    if (stats.pending) return "<span class='quota-usage-unavailable'>加载中…</span>";
     if (stats.cost === null) {
       return (
         "<span class='quota-usage-unavailable'>不可用</span><small class='quota-cost-note'>" +
@@ -365,7 +376,7 @@ AdminApp.register("quotaSummary", function (app) {
         )
           return false;
         if (project && (c.project_group || "未分组") !== project) return false;
-        if (job && c.job_level !== job) return false;
+        if (job && String(c.job_level || "").toLowerCase() !== job.toLowerCase()) return false;
         return true;
       });
   }
@@ -511,9 +522,15 @@ AdminApp.register("quotaSummary", function (app) {
         (quotaDimensions.length + 7) +
         "'>暂无客户端</td></tr>";
   }
-  document
-    .getElementById("quotaSearch")
-    .addEventListener("input", renderQuotaSummary);
+  // Typing re-renders the whole table, so wait for a short pause instead of every keystroke.
+  var searchTimer = null;
+  document.getElementById("quotaSearch").addEventListener("input", function () {
+    if (searchTimer !== null) clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () {
+      searchTimer = null;
+      renderQuotaSummary();
+    }, 200);
+  });
   document
     .getElementById("quotaSummaryProjectFilter")
     .addEventListener("change", renderQuotaSummary);

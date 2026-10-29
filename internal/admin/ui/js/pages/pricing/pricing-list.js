@@ -200,7 +200,9 @@ AdminApp.register("pricingList", function (app) {
     }
     return "目标不存在或已删除 · 旧模板不再生效";
   }
+  var pricingLoadVersion = 0;
   async function loadPricingTemplates() {
+    var version = ++pricingLoadVersion;
     try {
       if (!state.targets || !state.targets.length) {
         try {
@@ -210,12 +212,18 @@ AdminApp.register("pricingList", function (app) {
         }
       }
       var data = await api("/admin/data/pricing-templates");
+      if (version !== pricingLoadVersion) return;
       state.pricingTemplates = Array.isArray(data.templates)
         ? data.templates
         : [];
       renderPricingTemplates();
     } catch (e) {
+      if (version !== pricingLoadVersion) return;
       toast("加载模型计费失败: " + e.message, "error");
+      // Never leave the initial "加载中" row behind; keep an earlier successful table as is.
+      if (!Array.isArray(state.pricingTemplates))
+        document.getElementById("modelCostsTableBody").innerHTML =
+          "<tr class='empty-row'><td colspan='6'>加载失败: " + esc(e.message) + "，请点击刷新重试</td></tr>";
     }
   }
   function deletePricingTemplate(id) {

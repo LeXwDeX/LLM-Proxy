@@ -1464,6 +1464,7 @@ async function main() {
   await extendedApp.modules.quota.openModelGroupModal(null);
   extended.ids.get("modelGroupName").value = "saved-extended";
   extended.ids.get("modelGroup-yearly").value = "321";
+  for (const dim of ["daily", "weekly", "monthly"]) extended.ids.get("modelGroup-" + dim).value = "0"; // bases must be explicit
   await extended.ids.get("saveModelGroupBtn").listeners.click[0]();
   const groupWrite = extended.requests.find(
     (request) =>

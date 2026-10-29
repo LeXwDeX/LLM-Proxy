@@ -13,7 +13,7 @@ test("zero is displayed as a base value with a clear unlimited-period explanatio
   assert.match(row, /Schema日 \$0\.00（已绑定职级时该周期上限不限）/);
   assert.match(row, /Schema周 \$50\.00/);
   assert.doesNotMatch(row, /Schema周 \$50\.00（已绑定职级时该周期上限不限）/);
-  assert.match(harness.ids.get("modelGroupDimensions").innerHTML, /留空 = 0（已绑定职级时该周期上限不限）/);
+  assert.match(harness.ids.get("modelGroupDimensions").innerHTML, /必填；0 = 已绑定职级时该周期不限/);
   const detail = app.modules.quota.quotaConvertedDetail({groups: {shared: {
     in_plan: true, base_limits: {daily: 0, weekly: 50, monthly: 200},
     quotas: {daily: {used: 2, limit: 0}, weekly: {used: 2, limit: 0}},

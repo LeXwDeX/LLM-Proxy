@@ -9,7 +9,7 @@ const routes = () => ({"/admin/data/targets": {targets: []}, "/admin/data/pools"
 test("failed post-save quota refresh cannot reopen an old model-group coefficient", async () => {
   const h = createHarness({routes: routes()});
   const app = await h.run();
-  const group = {name: "A", cost_coefficient: 1, bindings: []};
+  const group = {name: "A", cost_coefficient: 1, bindings: [], daily_usd: 0, weekly_usd: 0, monthly_usd: 0};
   app.state.modelGroups = [group];
   h.setRouteFailure("/admin/data/quota/summary", true);
   await app.modules.quota.openModelGroupModal(group);
@@ -33,7 +33,7 @@ test("failed post-save quota refresh cannot reopen an old model-group coefficien
     await app.modules.quota.loadQuotaManagement();
     await app.modules.quota.openModelGroupModal(group);
     assert.equal(h.ids.get("modelGroupModal").classList.contains("open"), false, "malformed refresh cannot authorize the old row");
-    h.setRoute("/admin/data/model-groups", {model_groups: [{name: "A", cost_coefficient: "2", bindings: []}]});
+    h.setRoute("/admin/data/model-groups", {model_groups: [{name: "A", cost_coefficient: "2", bindings: [], daily_usd: 0, weekly_usd: 0, monthly_usd: 0}]});
     h.setRoute("/admin/data/job-levels", {job_levels: []});
     h.setRoute("/admin/data/project-groups", {project_groups: []});
     await app.modules.quota.loadQuotaManagement();
@@ -55,7 +55,7 @@ test("a changed model-group draft remains saveable after its earlier PUT and fai
     return fallback(url, options);
   }});
   const app = await h.run();
-  const group = {name: "A", cost_coefficient: 1, bindings: []};
+  const group = {name: "A", cost_coefficient: 1, bindings: [], daily_usd: 0, weekly_usd: 0, monthly_usd: 0};
   app.state.modelGroups = [group];
   h.setRouteFailure("/admin/data/quota/summary", true);
   await app.modules.quota.openModelGroupModal(group);
@@ -77,7 +77,7 @@ test("a late open of the old group cannot survive a successful rename and refres
   let releaseOld, delay = false;
   const r = routes();
   r["/admin/data/quota/summary"] = {clients: []};
-  r["/admin/data/model-groups"] = {model_groups: [{name: "B", cost_coefficient: 2}]};
+  r["/admin/data/model-groups"] = {model_groups: [{name: "B", cost_coefficient: 2, daily_usd: 0, weekly_usd: 0, monthly_usd: 0}]};
   r["/admin/data/job-levels"] = {job_levels: []};
   r["/admin/data/project-groups"] = {project_groups: []};
   const h = createHarness({routes: r, fetch: (url, options, fallback) => {
@@ -88,7 +88,7 @@ test("a late open of the old group cannot survive a successful rename and refres
     return fallback(url, options);
   }});
   const app = await h.run();
-  const old = {name: "A", cost_coefficient: 1, bindings: []};
+  const old = {name: "A", cost_coefficient: 1, bindings: [], daily_usd: 0, weekly_usd: 0, monthly_usd: 0};
   app.state.modelGroups = [old];
   await app.modules.quota.openModelGroupModal(old);
   delay = true;

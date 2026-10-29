@@ -23,6 +23,9 @@ AdminApp.register("pricingModal", function (app) {
   var pricingTargetOptions = app.bind("pricingShared", "pricingTargetOptions");
   var pricingModelLabel = app.bind("pricingShared", "pricingModelLabel");
   var clonePricingValue = app.bind("pricingShared", "clonePricingValue");
+  var pricingInputNumber = app.bind("pricingShared", "pricingInputNumber");
+  var runGuarded = app.bind("pricingShared", "runGuarded");
+  var pricingPeriodTimeError = app.bind("pricingPeriods", "pricingPeriodTimeError");
   var renderPricingContext = app.bind("pricingRates", "renderPricingContext");
   var syncPricingContextInput = app.bind("pricingRates", "syncPricingContextInput");
   var validatePricingContext = app.bind("pricingRates", "validatePricingContext");
@@ -141,14 +144,18 @@ AdminApp.register("pricingModal", function (app) {
     pricingSelectValues("ptModel", selectedModels);
     sel.disabled = !targetNames.length;
   }
+  var pricingOpenVersion = 0;
   async function openPricingModal(template, prefillGroup, copyMode) {
     if (document.body.classList.contains("readonly-mode")) {
       toast("只读用户无法执行此操作", "error");
       return;
     }
+    var openVersion = ++pricingOpenVersion;
     try {
       await loadQuotaEditorData();
     } catch (e) {}
+    // A newer open (or the same slow load finishing late) must not overwrite the latest form.
+    if (openVersion !== pricingOpenVersion) return;
     state.editingPricingTemplate = copyMode ? null : template || null;
     state.copyingPricingTemplate = copyMode ? template : null;
     document.getElementById("modelCostModalTitle").textContent = copyMode
@@ -215,6 +222,12 @@ AdminApp.register("pricingModal", function (app) {
         : "";
     document.getElementById("ptEnd").value =
       template && template.end ? toLocalInputValue(template.end) : "";
+    // Remember the stored instants: an unchanged field is submitted verbatim, so an unrelated
+    // edit never truncates seconds or sub-second digits through the local input round-trip.
+    state.ptTimeOrigin = {
+      start: template && !is0 && template.start ? { local: document.getElementById("ptStart").value, iso: template.start } : null,
+      end: template && template.end ? { local: document.getElementById("ptEnd").value, iso: template.end } : null,
+    };
     document.getElementById("ptTimezone").value =
       (template && template.timezone) || state.schema.defaults.pricing_timezone;
     state.ptPeriods = template && Array.isArray(template.periods) ? clonePricingValue(template.periods) : [];
@@ -294,7 +307,10 @@ AdminApp.register("pricingModal", function (app) {
     });
   document
     .getElementById("saveModelCostBtn")
-    .addEventListener("click", async function () {
+    .addEventListener("click", function () {
+      return runGuarded("saveModelCost", document.getElementById("saveModelCostBtn"), savePricingTemplate);
+    });
+  async function savePricingTemplate() {
       if (isReadonlyMode()) return;
       var targets = pricingSelected("ptTarget"), models = pricingSelected("ptModel");
       var mode = document.getElementById("ptMode").value;
@@ -310,12 +326,11 @@ AdminApp.register("pricingModal", function (app) {
         return;
       }
       var readRate = function (id, label) {
-        var raw = document.getElementById(id).value.trim();
-        if (raw === "") {
+        var value = pricingInputNumber(document.getElementById(id));
+        if (value === null) {
           toast("请填写" + label + "价格", "error");
           return null;
         }
-        var value = Number(raw);
         if (!Number.isFinite(value) || value < 0) {
           toast(label + "价格必须是非负数字", "error");
           return null;
@@ -343,8 +358,8 @@ AdminApp.register("pricingModal", function (app) {
         ["ptImageOutput", "image_output_per_1m_tokens"],
       ];
       for (var optional of optionalRates) {
-        var raw = document.getElementById(optional[0]).value.trim();
-        var value = raw === "" ? null : Number(raw);
+        // Blank means "not set" (null → fall back); text the browser cannot parse is NaN and rejected.
+        var value = pricingInputNumber(document.getElementById(optional[0]));
         if (value !== null && (!Number.isFinite(value) || value < 0)) {
           toast("可选价格必须是非负数字", "error");
           return;
@@ -373,19 +388,20 @@ AdminApp.register("pricingModal", function (app) {
         base_rates: baseRates,
       };
       if (!isTemplate0) {
+        var origin = state.ptTimeOrigin || {};
         var sd = new Date(startInput);
         if (isNaN(sd.getTime())) {
           toast("请填写有效的生效开始时间", "error");
           return;
         }
-        payload.start = sd.toISOString();
+        payload.start = origin.start && origin.start.local === startInput ? origin.start.iso : sd.toISOString();
         if (endInput) {
           var ed = new Date(endInput);
           if (isNaN(ed.getTime())) {
             toast("请填写有效的生效结束时间", "error");
             return;
           }
-          payload.end = ed.toISOString();
+          payload.end = origin.end && origin.end.local === endInput ? origin.end.iso : ed.toISOString();
         }
       }
       try {
@@ -407,8 +423,9 @@ AdminApp.register("pricingModal", function (app) {
             toast("时段 " + (i + 1) + " 未选择星期", "error");
             return;
           }
-          if (!p.start || !p.end) {
-            toast("时段 " + (i + 1) + " 缺少开始或结束时间", "error");
+          var timeError = pricingPeriodTimeError(p, "时段 " + (i + 1));
+          if (timeError) {
+            toast(timeError, "error");
             return;
           }
           if (
@@ -425,10 +442,6 @@ AdminApp.register("pricingModal", function (app) {
             })
           ) {
             toast("可选价格必须是非负数字", "error");
-            return;
-          }
-          if (p.start >= p.end) {
-            toast("时段 " + (i + 1) + " 开始时间必须早于结束时间", "error");
             return;
           }
           if (
@@ -483,7 +496,7 @@ AdminApp.register("pricingModal", function (app) {
       } catch (e) {
         toast("保存失败: " + e.message, "error");
       }
-    });
+  }
   return {
     filterPricingChoices: filterPricingChoices,
     renderPricingChoices: renderPricingChoices,
