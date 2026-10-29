@@ -178,21 +178,40 @@ func (s *TargetStore) Create(target config.Target) error {
 
 // Update updates one target by name.
 func (s *TargetStore) Update(name string, target config.Target) error {
+	_, err := s.update(name, target, nil)
+	return err
+}
+
+// UpdateIfMatch 仅当目标当前存储字节的 ETag 等于 etag 时更新（同一写事务内重新计算并比较），
+// 返回新 ETag；不匹配或目标不存在返回 ErrTargetETagConflict 且库内容不变。
+// 有意冗余：admin handler 的预检（resolveIfMatch）只用于快速失败，最终裁决在此写事务内完成。
+func (s *TargetStore) UpdateIfMatch(name string, target config.Target, etag string) (string, error) {
+	return s.update(name, target, &etag)
+}
+
+func (s *TargetStore) update(name string, target config.Target, expected *string) (string, error) {
 	if err := validateTarget(target); err != nil {
-		return err
+		return "", err
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return errors.New("name must not be empty")
+		return "", errors.New("name must not be empty")
 	}
 	oldKey := strings.ToLower(name)
 	next := normalizeTarget(target)
 	newKey := strings.ToLower(next.Name)
 
-	return s.db.Update(func(tx *bolt.Tx) error {
+	var newETag string
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(BucketTargets))
 		if b.Get([]byte(oldKey)) == nil {
+			if expected != nil {
+				return ErrTargetETagConflict
+			}
 			return fmt.Errorf("target %q not found", name)
+		}
+		if expected != nil && targetETagTx(tx, []byte(oldKey)) != *expected {
+			return ErrTargetETagConflict
 		}
 		if newKey != oldKey && b.Get([]byte(newKey)) != nil {
 			return fmt.Errorf("target %q already exists", next.Name)
@@ -205,6 +224,7 @@ func (s *TargetStore) Update(name string, target config.Target) error {
 		if err := putTarget(b, newKey, next); err != nil {
 			return err
 		}
+		newETag = targetETagOf(b.Get([]byte(newKey)))
 		return updateTargetOrder(tx, func(order []string) []string {
 			replaced := false
 			for i, key := range order {
@@ -219,10 +239,23 @@ func (s *TargetStore) Update(name string, target config.Target) error {
 			return dedupeTargetOrder(order)
 		})
 	})
+	if err != nil {
+		return "", err
+	}
+	return newETag, nil
 }
 
 // Delete removes one target by name.
 func (s *TargetStore) Delete(name string) error {
+	return s.deleteTarget(name, nil)
+}
+
+// DeleteIfMatch 仅当目标当前存储字节的 ETag 等于 etag 时删除；不匹配或不存在返回 ErrTargetETagConflict。
+func (s *TargetStore) DeleteIfMatch(name string, etag string) error {
+	return s.deleteTarget(name, &etag)
+}
+
+func (s *TargetStore) deleteTarget(name string, expected *string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("name must not be empty")
@@ -232,7 +265,13 @@ func (s *TargetStore) Delete(name string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(BucketTargets))
 		if b.Get([]byte(key)) == nil {
+			if expected != nil {
+				return ErrTargetETagConflict
+			}
 			return fmt.Errorf("target %q not found", name)
+		}
+		if expected != nil && targetETagTx(tx, []byte(key)) != *expected {
+			return ErrTargetETagConflict
 		}
 		if err := b.Delete([]byte(key)); err != nil {
 			return err

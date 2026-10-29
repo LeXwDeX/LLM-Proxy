@@ -48,6 +48,15 @@ type Handler struct {
 	configMu               sync.Mutex
 	keySnapshotSecret      [32]byte
 	keySnapshotSecretReady bool
+
+	// keyIDMu 保护 keyIDSecretCache：稳定 key ID 的派生密钥，持久化在 bbolt meta 中，首次读取后缓存。
+	keyIDMu          sync.Mutex
+	keyIDSecretCache []byte
+	// keyIDSecretLoader / authApply 是测试注入点；nil 时分别使用 targetStore.KeyIDSecret 与 authStore。
+	keyIDSecretLoader func() ([]byte, error)
+	authApply         func(clients []config.Client, targets []config.Target) error
+	// clientQuotaEvaluateHook 是测试注入点：客户端写入释放 configMu 之后、配额评估之前调用。
+	clientQuotaEvaluateHook func(name string)
 }
 
 // NewHandler constructs an HTTP router exposing admin endpoints.

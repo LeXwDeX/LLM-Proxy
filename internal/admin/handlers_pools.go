@@ -91,24 +91,20 @@ func (h *Handler) handleCreatePool(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.Pools = append(cfg.Pools, pool)
 
-	if err := h.applyConfigRuntime(cfg); err != nil {
-		h.writeInternalError(w, "failed to apply config", err)
-		return
-	}
-
 	poolStore := h.poolStore()
 	if poolStore == nil {
 		h.writeInternalError(w, "failed to persist pool", errors.New("pool store unavailable"))
 		return
 	}
-	if err := poolStore.Create(pool); err != nil {
-		h.writeInternalError(w, "failed to persist pool", err)
+	warning, ok := h.commitConfigChange(w, cfg, "failed to persist pool", func() error {
+		return poolStore.Create(pool)
+	})
+	if !ok {
 		return
 	}
-	h.configManager.Replace(cfg)
 
 	h.recordAudit(r, "pool_create", name, "success", "")
-	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "name": name})
+	writeJSON(w, http.StatusCreated, withWarning(map[string]any{"ok": true, "name": name}, warning))
 }
 
 func (h *Handler) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
@@ -171,24 +167,20 @@ func (h *Handler) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.applyConfigRuntime(cfg); err != nil {
-		h.writeInternalError(w, "failed to apply config", err)
-		return
-	}
-
 	poolStore := h.poolStore()
 	if poolStore == nil {
 		h.writeInternalError(w, "failed to persist pool", errors.New("pool store unavailable"))
 		return
 	}
-	if err := poolStore.Update(name, updatedPool); err != nil {
-		h.writeInternalError(w, "failed to persist pool", err)
+	warning, ok := h.commitConfigChange(w, cfg, "failed to persist pool", func() error {
+		return poolStore.Update(name, updatedPool)
+	})
+	if !ok {
 		return
 	}
-	h.configManager.Replace(cfg)
 
 	h.recordAudit(r, "pool_update", name, "success", "")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": updatedPool.Name, "paused": updatedPool.Paused})
+	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": updatedPool.Name, "paused": updatedPool.Paused}, warning))
 }
 
 func (h *Handler) handleDeletePool(w http.ResponseWriter, r *http.Request) {
@@ -234,24 +226,20 @@ func (h *Handler) handleDeletePool(w http.ResponseWriter, r *http.Request) {
 
 	cfg.Pools = next
 
-	if err := h.applyConfigRuntime(cfg); err != nil {
-		h.writeInternalError(w, "failed to apply config", err)
-		return
-	}
-
 	poolStore := h.poolStore()
 	if poolStore == nil {
 		h.writeInternalError(w, "failed to persist pool deletion", errors.New("pool store unavailable"))
 		return
 	}
-	if err := poolStore.Delete(name); err != nil {
-		h.writeInternalError(w, "failed to persist pool deletion", err)
+	warning, ok := h.commitConfigChange(w, cfg, "failed to persist pool deletion", func() error {
+		return poolStore.Delete(name)
+	})
+	if !ok {
 		return
 	}
-	h.configManager.Replace(cfg)
 
 	h.recordAudit(r, "pool_delete", name, "success", "")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true}, warning))
 }
 
 func (h *Handler) handlePausePool(w http.ResponseWriter, r *http.Request) {
@@ -292,27 +280,24 @@ func (h *Handler) handleSetPoolPaused(w http.ResponseWriter, r *http.Request, pa
 		return
 	}
 
-	if err := h.applyConfigRuntime(cfg); err != nil {
-		h.writeInternalError(w, "failed to apply config", err)
-		return
-	}
 	poolStore := h.poolStore()
 	if poolStore == nil {
 		h.writeInternalError(w, "failed to persist pool", errors.New("pool store unavailable"))
 		return
 	}
-	if err := poolStore.Update(name, updatedPool); err != nil {
-		h.writeInternalError(w, "failed to persist pool", err)
+	warning, ok := h.commitConfigChange(w, cfg, "failed to persist pool", func() error {
+		return poolStore.Update(name, updatedPool)
+	})
+	if !ok {
 		return
 	}
-	h.configManager.Replace(cfg)
 
 	action := "pool_resume"
 	if paused {
 		action = "pool_pause"
 	}
 	h.recordAudit(r, action, name, "success", "")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": updatedPool.Name, "paused": paused})
+	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": updatedPool.Name, "paused": paused}, warning))
 }
 
 // poolStore returns the deployment-pool store view sharing the target store's

@@ -163,6 +163,9 @@ func TestMigrationCursorRewindIndistinguishableFromAtomicReindex(t *testing.T) {
 		if bucket == BucketMeta {
 			delete(a, "request_stats_since")
 			delete(b, "request_stats_since")
+			// Per-database random key material is not migration state.
+			delete(a, string(keyIDSecretKey))
+			delete(b, string(keyIDSecretKey))
 			// Compare all v1-visible metadata; v2 intentionally distinguishes these states.
 			delete(a, indexProgressV2)
 			delete(b, indexProgressV2)

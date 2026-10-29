@@ -109,34 +109,6 @@ func (h *Handler) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (h *Handler) applyConfigRuntime(cfg *config.Config) error {
-	return h.applyConfigRuntimeIfTargetRevision(cfg, 0)
-}
-
-func (h *Handler) applyConfigRuntimeIfTargetRevision(cfg *config.Config, revision uint64) error {
-	clients, err := h.clientStore.List()
-	if err != nil {
-		return fmt.Errorf("load clients: %w", err)
-	}
-
-	if revision != 0 {
-		err = h.proxyService.ApplyConfigIfTargetRevision(cfg, revision)
-	} else {
-		err = h.proxyService.ApplyConfig(cfg)
-	}
-	if err != nil {
-		return fmt.Errorf("apply proxy config: %w", err)
-	}
-
-	// allowed_pools 按当前 targets 的池归属展开成成员目标集，
-	// 因此 target 池归属变化后权限即时刷新。
-	if err := h.authStore.LoadFromConfigWithPools(clients, cfg.Targets); err != nil {
-		return fmt.Errorf("apply auth config: %w", err)
-	}
-
-	return nil
-}
-
 func (h *Handler) currentConfig() (*config.Config, error) {
 	cfg, err := h.configManager.Current()
 	if err != nil {

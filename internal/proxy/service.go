@@ -421,9 +421,19 @@ func (s *Service) ApplyConfigIfTargetRevision(cfg *config.Config, revision uint6
 	return s.applyConfig(cfg, revision)
 }
 
-func (s *Service) applyConfig(cfg *config.Config, revision uint64) error {
+// PreparedConfig 是 PrepareConfig 构建好、尚未发布的运行时配置。
+// 它只能由 PrepareConfig 产生，并只应提交一次。
+type PreparedConfig struct {
+	parsed  map[string]*targetState
+	order   []*targetState
+	timeout time.Duration
+}
+
+// PrepareConfig 校验并构建新配置的运行时状态（物化池暂停、解析目标、请求超时），
+// 纯计算：不加锁，不改变正在服务的运行时。管理端先用它校验、落库，再用 CommitPrepared 发布。
+func (s *Service) PrepareConfig(cfg *config.Config) (*PreparedConfig, error) {
 	if cfg == nil {
-		return errors.New("proxy: config must not be nil")
+		return nil, errors.New("proxy: config must not be nil")
 	}
 
 	// 物化池暂停：池 Paused 折叠进成员 target.Paused，复用全部现有
@@ -435,20 +445,42 @@ func (s *Service) applyConfig(cfg *config.Config, revision uint64) error {
 
 	parsed, order, err := buildTargetStates(effective, s.logger)
 	if err != nil {
+		return nil, err
+	}
+	return &PreparedConfig{
+		parsed:  parsed,
+		order:   order,
+		timeout: time.Duration(cfg.Server.RequestTimeoutSeconds) * time.Second,
+	}, nil
+}
+
+// CommitPrepared 发布 PrepareConfig 的结果，不返回错误；与 ApplyConfig 等价。
+func (s *Service) CommitPrepared(p *PreparedConfig) {
+	if p == nil {
+		return
+	}
+	s.mu.Lock()
+	s.replaceTargetsLocked(p.parsed, p.order)
+	s.mu.Unlock()
+
+	s.setRequestTimeout(p.timeout)
+}
+
+func (s *Service) applyConfig(cfg *config.Config, revision uint64) error {
+	prepared, err := s.PrepareConfig(cfg)
+	if err != nil {
 		return err
 	}
-
-	timeout := time.Duration(cfg.Server.RequestTimeoutSeconds) * time.Second
 
 	s.mu.Lock()
 	if revision != 0 && revision != s.targetRevision {
 		s.mu.Unlock()
 		return ErrTargetSnapshotChanged
 	}
-	s.replaceTargetsLocked(parsed, order)
+	s.replaceTargetsLocked(prepared.parsed, prepared.order)
 	s.mu.Unlock()
 
-	s.setRequestTimeout(timeout)
+	s.setRequestTimeout(prepared.timeout)
 	return nil
 }
 
@@ -1819,6 +1851,47 @@ func (s *Service) BlockKey(targetName string, index int) error {
 // UnblockKey manually unblocks a specific key in the target's key pool.
 func (s *Service) UnblockKey(targetName string, index int) error {
 	return s.setKeyBlocked(targetName, index, false, 0)
+}
+
+// SetKeyBlockedByValue 按密钥值（及其在密钥池中的第 occurrence 个同值条目）封禁/解封，
+// 在 s.mu 内定位条目下标后操作。它不依赖也不推进全局运行时 revision：封禁不改变槽位映射，
+// 因此不使仍持有旧快照的客户端失效。运行时密钥池按值去重（mergeTargetKeys），
+// 同值最多一个条目，故目前只有 occurrence 0 有效。
+func (s *Service) SetKeyBlockedByValue(targetName, key string, occurrence int, blocked bool) error {
+	s.mu.Lock()
+	state := s.targetsByName[strings.ToLower(strings.TrimSpace(targetName))]
+	if state == nil || state.keyPool == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("target %q not found or has no key pool", targetName)
+	}
+	index := -1
+	if occurrence >= 0 {
+		seen := 0
+		for i, entry := range state.keyPool.entries {
+			if entry.key != key {
+				continue
+			}
+			if seen == occurrence {
+				index = i
+				break
+			}
+			seen++
+		}
+	}
+	if index < 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("key occurrence %d not found in target %q", occurrence, targetName)
+	}
+	if blocked {
+		state.keyPool.blockKey(index)
+	} else {
+		state.keyPool.unblockKey(index)
+	}
+	s.mu.Unlock()
+	if blocked && s.responsesWS != nil {
+		s.responsesWS.invalidate(false)
+	}
+	return nil
 }
 
 // WakeUpKeys triggers the wake-up model for a target's key pool.

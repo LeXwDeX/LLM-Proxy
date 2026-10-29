@@ -41,6 +41,16 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var etags map[string]string
+	if h.targetStore != nil {
+		if etags, err = h.targetStore.ETags(); err != nil {
+			h.configMu.Unlock()
+			h.writeInternalError(w, "failed to load target etags", err)
+			return
+		}
+	}
+	keyIDSecret := h.keyIDSecret()
+
 	targets := make([]map[string]any, len(cfg.Targets))
 	for i, t := range cfg.Targets {
 		epType := config.NormalizeEndpointType(t.EndpointType)
@@ -82,6 +92,10 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 			"custom_body":                     t.CustomBody,
 			"pool":                            t.Pool,
 			"max_concurrency":                 t.MaxConcurrency,
+			// 内容 ETag（存储字节的哈希）与稳定 key ID：重启后不变，不随别的目标或封禁变化。
+			// key ID 密钥不可用时 key_ids 为 null。
+			"etag":    etags[strings.ToLower(strings.TrimSpace(t.Name))],
+			"key_ids": targetKeyIDs(keyIDSecret, t),
 		}
 		if !admin {
 			// Paths and custom field names may also contain credentials.
@@ -262,22 +276,15 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	newTarget = config.NormalizeTargetForCompatibility(newTarget)
 	cfg.Targets = append(cfg.Targets, newTarget)
 
-	if err := h.applyConfigRuntime(cfg); err != nil {
-		h.writeInternalError(w, "failed to apply config", err)
+	warning, ok := h.commitConfigChange(w, cfg, "failed to persist target", func() error {
+		return h.targetStore.Create(newTarget)
+	})
+	if !ok {
 		return
-	}
-
-	if err := h.targetStore.Create(newTarget); err != nil {
-		h.writeInternalError(w, "failed to persist target", err)
-		return
-	}
-	h.configManager.Replace(cfg)
-	if h.costCache != nil {
-		h.costCache.Invalidate()
 	}
 
 	h.recordAudit(r, "create_target", name, "success", "")
-	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "name": name})
+	writeJSON(w, http.StatusCreated, withWarning(map[string]any{"ok": true, "name": name, "etag": h.targetETag(name)}, warning))
 }
 
 func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +293,12 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	name, err := targetNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
+		return
+	}
+
+	im, ifMatchErr := parseIfMatch(r)
+	if ifMatchErr != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse(ifMatchErr.Error()))
 		return
 	}
 
@@ -366,20 +379,29 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	condition := r.Header.Values(targetKeySnapshotHeader)
-	var revision uint64
+	keyIDSecret := h.keyIDSecret()
+	var matchedETag string
 	found := false
 	for i := range cfg.Targets {
 		if strings.EqualFold(cfg.Targets[i].Name, name) {
 			t := &cfg.Targets[i]
+			if im.present {
+				var ok bool
+				if matchedETag, ok = h.resolveIfMatch(w, name, im); !ok {
+					return
+				}
+			}
 			if len(condition) > 0 {
-				var token string
-				token, revision, _, _ = h.targetKeySnapshot(*t)
+				// 旧路径：快照绑定进程内存 revision。全部运行时变更都在 configMu 下，
+				// 校验通过后到提交之间不会变化，所以无需在提交时再比对。
+				token, _, _, _ := h.targetKeySnapshot(*t)
 				if len(condition) != 1 || token == "" || !hmac.Equal([]byte(token), []byte(condition[0])) {
 					writeJSON(w, http.StatusConflict, errorResponse("target key snapshot changed; refresh targets"))
 					return
 				}
 			}
 			existingKeys := existingTargetKeys(*t)
+			storedTarget := *t
 			if body.EndpointType != "" {
 				epType := config.NormalizeEndpointType(body.EndpointType)
 				if !config.IsValidEndpointType(epType) {
@@ -392,7 +414,7 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 				t.Endpoint = strings.TrimSpace(body.Endpoint)
 			}
 			if body.APIKey != nil {
-				resolved, err := resolveSubmittedTargetKey(*body.APIKey, existingKeys, len(condition) > 0)
+				resolved, err := resolveSubmittedTargetKeyRef(*body.APIKey, existingKeys, len(condition) > 0, keyIDSecret, storedTarget)
 				if err != nil {
 					writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
 					return
@@ -418,7 +440,7 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 			if body.APIKeys != nil {
 				resolvedKeys := make([]string, 0, len(*body.APIKeys))
 				for _, k := range *body.APIKeys {
-					resolved, err := resolveSubmittedTargetKey(k, existingKeys, len(condition) > 0)
+					resolved, err := resolveSubmittedTargetKeyRef(k, existingKeys, len(condition) > 0, keyIDSecret, storedTarget)
 					if err != nil {
 						writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
 						return
@@ -495,20 +517,15 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !found {
-		if len(condition) > 0 {
-			writeJSON(w, http.StatusConflict, errorResponse("target key snapshot changed; refresh targets"))
+		if len(condition) > 0 || im.present {
+			if im.present {
+				writeTargetRevisionConflict(w)
+			} else {
+				writeJSON(w, http.StatusConflict, errorResponse("target key snapshot changed; refresh targets"))
+			}
 			return
 		}
 		writeJSON(w, http.StatusNotFound, errorResponse(fmt.Sprintf("target %q not found", name)))
-		return
-	}
-
-	if err := h.applyConfigRuntimeIfTargetRevision(cfg, revision); err != nil {
-		if errors.Is(err, proxy.ErrTargetSnapshotChanged) {
-			writeJSON(w, http.StatusConflict, errorResponse("target key snapshot changed; refresh targets"))
-			return
-		}
-		h.writeInternalError(w, "failed to apply config", err)
 		return
 	}
 
@@ -519,17 +536,19 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if err := h.targetStore.Update(name, updatedTarget); err != nil {
-		h.writeInternalError(w, "failed to persist target", err)
+	warning, ok := h.commitConfigChange(w, cfg, "failed to persist target", func() error {
+		if im.present {
+			_, err := h.targetStore.UpdateIfMatch(name, updatedTarget, matchedETag)
+			return err
+		}
+		return h.targetStore.Update(name, updatedTarget)
+	})
+	if !ok {
 		return
-	}
-	h.configManager.Replace(cfg)
-	if h.costCache != nil {
-		h.costCache.Invalidate()
 	}
 
 	h.recordAudit(r, "update_target", name, "success", "")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
+	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": name, "etag": h.targetETag(name)}, warning))
 }
 
 const existingTargetKeyRefPrefix = "__existing_key_index__:"
@@ -616,6 +635,11 @@ func (h *Handler) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
 		return
 	}
+	im, ifMatchErr := parseIfMatch(r)
+	if ifMatchErr != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse(ifMatchErr.Error()))
+		return
+	}
 
 	cfg, err := h.currentConfig()
 	if err != nil {
@@ -634,24 +658,31 @@ func (h *Handler) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !found {
+		if im.present {
+			writeTargetRevisionConflict(w)
+			return
+		}
 		writeJSON(w, http.StatusNotFound, errorResponse(fmt.Sprintf("target %q not found", name)))
 		return
+	}
+	var matchedETag string
+	if im.present {
+		var ok bool
+		if matchedETag, ok = h.resolveIfMatch(w, name, im); !ok {
+			return
+		}
 	}
 
 	cfg.Targets = next
 
-	if err := h.applyConfigRuntime(cfg); err != nil {
-		h.writeInternalError(w, "failed to apply config", err)
+	warning, ok := h.commitConfigChange(w, cfg, "failed to persist target deletion", func() error {
+		if im.present {
+			return h.targetStore.DeleteIfMatch(name, matchedETag)
+		}
+		return h.targetStore.Delete(name)
+	})
+	if !ok {
 		return
-	}
-
-	if err := h.targetStore.Delete(name); err != nil {
-		h.writeInternalError(w, "failed to persist target deletion", err)
-		return
-	}
-	h.configManager.Replace(cfg)
-	if h.costCache != nil {
-		h.costCache.Invalidate()
 	}
 
 	// Target deletion invalidates model-group bindings that reference it:
@@ -662,7 +693,7 @@ func (h *Handler) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.recordAudit(r, "delete_target", name, "success", "")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true}, warning))
 }
 
 func (h *Handler) handlePauseTarget(w http.ResponseWriter, r *http.Request) {
@@ -708,6 +739,11 @@ func (h *Handler) handleSetTargetPaused(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
 		return
 	}
+	im, ifMatchErr := parseIfMatch(r)
+	if ifMatchErr != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse(ifMatchErr.Error()))
+		return
+	}
 
 	cfg, err := h.currentConfig()
 	if err != nil {
@@ -726,26 +762,38 @@ func (h *Handler) handleSetTargetPaused(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	if !found {
+		if im.present {
+			writeTargetRevisionConflict(w)
+			return
+		}
 		writeJSON(w, http.StatusNotFound, errorResponse(fmt.Sprintf("target %q not found", name)))
 		return
 	}
+	var matchedETag string
+	if im.present {
+		var ok bool
+		if matchedETag, ok = h.resolveIfMatch(w, name, im); !ok {
+			return
+		}
+	}
 
-	if err := h.applyConfigRuntime(cfg); err != nil {
-		h.writeInternalError(w, "failed to apply config", err)
+	warning, ok := h.commitConfigChange(w, cfg, "failed to persist target", func() error {
+		if im.present {
+			_, err := h.targetStore.UpdateIfMatch(name, updatedTarget, matchedETag)
+			return err
+		}
+		return h.targetStore.Update(name, updatedTarget)
+	})
+	if !ok {
 		return
 	}
-	if err := h.targetStore.Update(name, updatedTarget); err != nil {
-		h.writeInternalError(w, "failed to persist target", err)
-		return
-	}
-	h.configManager.Replace(cfg)
 
 	action := "resume_target"
 	if paused {
 		action = "pause_target"
 	}
 	h.recordAudit(r, action, name, "success", "")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": updatedTarget.Name, "paused": paused})
+	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": updatedTarget.Name, "paused": paused, "etag": h.targetETag(updatedTarget.Name)}, warning))
 }
 
 func (h *Handler) handleBlockTargetKey(w http.ResponseWriter, r *http.Request) {
