@@ -444,6 +444,49 @@ func writeUsageReceipt(tx *bolt.Tx, key []byte, digest string) error {
 	return bucket.Put(key, data)
 }
 
+// clientIndexReferencesKey reports whether any usage_events_by_client entry
+// points at the raw key. Index keys are hex(client)|timestamp|rawKey and the
+// timestamp is recoverable from the raw key, so for each client prefix at most
+// one exact key can match; probing it costs O(clients * log n) instead of a
+// scan of every retained event. Anything that does not have the canonical
+// shape (unparseable stamp, index key without a client separator) falls back to
+// the exhaustive scan, so the answer is the same as scanning every value.
+func clientIndexReferencesKey(index *bolt.Bucket, key []byte) (bool, error) {
+	stamp, _, found := strings.Cut(string(key), "_")
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	if !found || err != nil || at.UTC().Format(time.RFC3339Nano) != stamp {
+		return clientIndexScanReferencesKey(index, key), nil
+	}
+	suffix := []byte(at.UTC().Format(clientIndexTimeLayout) + "|" + string(key))
+	cursor := index.Cursor()
+	for k, _ := cursor.First(); k != nil; {
+		sep := bytes.IndexByte(k, '|')
+		if sep < 0 {
+			return clientIndexScanReferencesKey(index, key), nil
+		}
+		probe := make([]byte, 0, sep+1+len(suffix))
+		probe = append(append(probe, k[:sep+1]...), suffix...)
+		if bytes.Equal(index.Get(probe), key) {
+			return true, nil
+		}
+		// '}' follows '|', so this jumps past every entry of this client.
+		next := append(append([]byte(nil), k[:sep]...), '}')
+		k, _ = cursor.Seek(next)
+	}
+	return false, nil
+}
+
+func clientIndexScanReferencesKey(index *bolt.Bucket, key []byte) bool {
+	referenced := false
+	_ = index.ForEach(func(_, value []byte) error {
+		if bytes.Equal(value, key) {
+			referenced = true
+		}
+		return nil
+	})
+	return referenced
+}
+
 // lookupUsageIdentity verifies one row against raw detail, a receipt, or both.
 // Raw row bytes are returned so a hit can repair the client index with the
 // originally stored bytes instead of a freshly repriced event.
@@ -478,13 +521,12 @@ func lookupUsageIdentity(tx *bolt.Tx, key, digest []byte) (receiptState, usage.E
 			return identityNew, usage.Event{}, nil, fmt.Errorf("%w: %w", ErrUsageIdentityUnverified, errRawOwnerOrphan)
 		}
 		if index := tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil {
-			if err := index.ForEach(func(_, value []byte) error {
-				if bytes.Equal(value, key) {
-					return fmt.Errorf("%w: retained index refers to absent identity", ErrUsageIdentityUnverified)
-				}
-				return nil
-			}); err != nil {
+			referenced, err := clientIndexReferencesKey(index, key)
+			if err != nil {
 				return identityNew, usage.Event{}, nil, err
+			}
+			if referenced {
+				return identityNew, usage.Event{}, nil, fmt.Errorf("%w: retained index refers to absent identity", ErrUsageIdentityUnverified)
 			}
 		}
 		return identityNew, usage.Event{}, nil, nil

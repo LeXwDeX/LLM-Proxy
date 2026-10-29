@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/maphash"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,9 +58,11 @@ var proofScanCache = struct {
 	sync.RWMutex
 	decodeFailed map[proofRawDigest]struct{}
 	scopes       map[proofRawDigest]proofRawScope
+	canonical    map[proofRawDigest]struct{}
 }{
 	decodeFailed: make(map[proofRawDigest]struct{}),
 	scopes:       make(map[proofRawDigest]proofRawScope),
+	canonical:    make(map[proofRawDigest]struct{}),
 }
 
 // decodeProofEventCached is decodeProofEvent for full raw-bucket scans. Only
@@ -83,6 +86,69 @@ func decodeProofEventCached(data []byte, event *usage.Event) bool {
 	}
 	proofScanCache.Unlock()
 	return false
+}
+
+func proofRowDigest(key, data []byte) proofRawDigest {
+	var sum proofRawDigest
+	for i := range sum {
+		var h maphash.Hash
+		h.SetSeed(proofDigestSeeds[i])
+		h.Write(key)
+		h.WriteByte(0)
+		h.Write(data)
+		sum[i] = h.Sum64()
+	}
+	return sum
+}
+
+// canonicalRawRowCached reports decodeProofEvent(data) && usageKey(event)==key.
+// Only positive results are memoized, keyed by the digest of key and bytes, so
+// a rewritten row or a different key is classified again.
+func canonicalRawRowCached(key, data []byte) bool {
+	sum := proofRowDigest(key, data)
+	proofScanCache.RLock()
+	_, ok := proofScanCache.canonical[sum]
+	proofScanCache.RUnlock()
+	if ok {
+		return true
+	}
+	var event usage.Event
+	// The failure memo keeps legacy rows from being parsed again on every scan.
+	if !decodeProofEventCached(data, &event) || usageKey(event.Timestamp, event.RecordID) != string(key) {
+		return false
+	}
+	proofScanCache.Lock()
+	if len(proofScanCache.canonical) < proofScanCacheMaxEntries {
+		proofScanCache.canonical[sum] = struct{}{}
+	} else {
+		defer warnProofScanCacheFull()
+	}
+	proofScanCache.Unlock()
+	return true
+}
+
+// proofScopeSkipEnabled lets differential tests run the exhaustive pre-#120
+// scans as the reference for the scoped skip below.
+var proofScopeSkipEnabled = true
+
+// keyHourOutside reports whether the key carries a parseable timestamp stamp
+// whose hour is not in hours.
+func keyHourOutside(key []byte, hours map[time.Time]bool) bool {
+	if !proofScopeSkipEnabled {
+		return false
+	}
+	stamp, _, found := strings.Cut(string(key), "_")
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	return found && err == nil && !hours[at.UTC().Truncate(time.Hour)]
+}
+
+// canonicalRowOutsideHours is true for a canonical raw row whose own hour is
+// not in hours. Such a row can neither match a cell of those hours nor an
+// index/aggregate expectation for them, so a scan may skip it. Canonical rows
+// have key == usageKey(event.Timestamp, ...), hence the key stamp is the
+// event's own instant.
+func canonicalRowOutsideHours(key, data []byte, hours map[time.Time]bool) bool {
+	return keyHourOutside(key, hours) && canonicalRawRowCached(key, data)
 }
 
 // backfillRawScopeCached returns the fields of backfillRawScope used by the
@@ -147,4 +213,20 @@ func WarmUsageProofScanCache(db *bolt.DB) (int, error) {
 		})
 	})
 	return visited, err
+}
+
+// warmCanonicalRawRows classifies raw rows in a read transaction, so the
+// retention writer finds them already memoized and only the rows of the
+// relevant hours are decoded under the bbolt write lock.
+func warmCanonicalRawRows(db *bolt.DB) error {
+	return db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		if raw == nil {
+			return nil
+		}
+		return raw.ForEach(func(k, v []byte) error {
+			canonicalRawRowCached(k, v)
+			return nil
+		})
+	})
 }

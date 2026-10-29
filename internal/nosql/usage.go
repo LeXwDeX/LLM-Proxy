@@ -686,6 +686,15 @@ func (s *UsageStore) summaryReadContext(ctx context.Context, now time.Time, cost
 	return result, nil
 }
 
+// pruneTxBudget bounds how long one retention transaction may hold the bbolt
+// writer. The budget is checked after each event, so one transaction handles
+// at least one event; the remaining candidates go to the next transaction.
+var pruneTxBudget = 200 * time.Millisecond
+
+// pruneYield is the pause between budget-limited transactions that lets
+// queued writers (admin saves, usage batches) take the write lock.
+var pruneYield = time.Millisecond
+
 // PruneEventsBefore deletes usage_events strictly older than cutoff, in bounded
 // per-transaction batches so the global bbolt write lock is never held long.
 // Returns the number of deleted events. The hourly agg bucket is intentionally
@@ -703,6 +712,9 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 	if batchSize <= 0 {
 		batchSize = 5000
 	}
+	if err := warmCanonicalRawRows(s.db); err != nil {
+		return 0, err
+	}
 	// 截止前缀回退 1s，与 List 同理由（RFC3339Nano 同秒内序不稳）：宁可少删
 	// 一秒，绝不误删 cutoff 之后的事件。
 	cutoffPrefix := cutoff.UTC().Add(-time.Second).Format(time.RFC3339Nano)
@@ -710,6 +722,7 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 	for {
 		deleted := 0
 		quarantined := 0
+		limited := false
 		err := s.db.Update(func(tx *bolt.Tx) error {
 			if _, err := rollupProofSource(tx); err != nil {
 				return err
@@ -733,7 +746,14 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 			}
 			proofCache := make(map[string]bool)
 			refs := &indexRawReferences{tx: tx}
+			started := time.Now()
+			processed := 0
 			for _, k := range keys {
+				if processed > 0 && pruneTxBudget > 0 && time.Since(started) >= pruneTxBudget {
+					limited = true
+					break
+				}
+				processed++
 				data := b.Get(k)
 				var event usage.Event
 				decodeErr := json.Unmarshal(data, &event)
@@ -779,7 +799,7 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 					return err
 				}
 			}
-			deleted = len(keys)
+			deleted = processed
 			return nil
 		})
 		if err != nil {
@@ -791,6 +811,10 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 			slog.Warn("usage retention quarantined corrupt events; indexed history unavailable until evidence is reconciled", "quarantined", quarantined)
 		}
 		total += deleted
+		if limited {
+			time.Sleep(pruneYield)
+			continue
+		}
 		if deleted < batchSize {
 			return total, nil
 		}

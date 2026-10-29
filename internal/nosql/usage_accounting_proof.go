@@ -291,7 +291,7 @@ func usageAccountingRawProvenImpl(ctx context.Context, tx *bolt.Tx, rows []usage
 		if err := proofScanStep(ctx, true); err != nil {
 			return err
 		}
-		if !receiptMayOverlap(tx, k, owners, hours) {
+		if keyHourOutside(k, hours) || !receiptMayOverlap(tx, k, owners, hours) {
 			return nil
 		}
 		usageKey, quotaKey, ok := readReceiptCells(tx, k)
@@ -310,6 +310,9 @@ func usageAccountingRawProvenImpl(ctx context.Context, tx *bolt.Tx, rows []usage
 	if err := raw.ForEach(func(k, data []byte) error {
 		if err := proofScanStep(ctx, false); err != nil {
 			return err
+		}
+		if canonicalRowOutsideHours(k, data, hours) {
+			return nil
 		}
 		var event usage.Event
 		if !decodeProofEventCached(data, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {

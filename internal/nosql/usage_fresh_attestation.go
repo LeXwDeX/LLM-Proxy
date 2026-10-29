@@ -144,6 +144,9 @@ func freshScopeProvenContext(ctx context.Context, tx *bolt.Tx, rows []usage.Even
 		if err := proofScanStep(ctx, false); err != nil {
 			return err
 		}
+		if canonicalRowOutsideHours(k, v, hours) {
+			return nil
+		}
 		var e usage.Event
 		if !decodeProofEventCached(v, &e) || usageKey(e.Timestamp, e.RecordID) != string(k) {
 			if !proofRawMayOverlap(tx, k, v, owners, hours) {
@@ -162,7 +165,7 @@ func freshScopeProvenContext(ctx context.Context, tx *bolt.Tx, rows []usage.Even
 		if err := proofScanStep(ctx, true); err != nil {
 			return err
 		}
-		if receiptMayOverlap(tx, k, owners, hours) {
+		if !keyHourOutside(k, hours) && receiptMayOverlap(tx, k, owners, hours) {
 			return ErrUsageHistoryIncomplete
 		}
 		return nil

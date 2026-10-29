@@ -118,6 +118,9 @@ func currentRollupIdentitiesContext(ctx context.Context, tx *bolt.Tx, source str
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if canonicalRowOutsideHours(k, data, hours) {
+			return nil
+		}
 		var event usage.Event
 		if !decodeProofEventCached(data, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
 			if !proofRawMayOverlap(tx, k, data, owners, hours) {
@@ -164,7 +167,7 @@ func currentRollupIdentitiesContext(ctx context.Context, tx *bolt.Tx, source str
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !receiptMayOverlap(tx, k, owners, hours) {
+		if keyHourOutside(k, hours) || !receiptMayOverlap(tx, k, owners, hours) {
 			return nil
 		}
 		u, q, ok := readReceiptCells(tx, k)
