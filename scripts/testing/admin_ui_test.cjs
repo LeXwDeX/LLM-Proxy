@@ -28,6 +28,9 @@ class Element {
     this._html = "";
     this.textContent = "";
     this.style = {};
+    // Inline display (e.g. the role-gated nav entries) is part of the shell contract.
+    const inlineDisplay = /(?:^|;)\s*display\s*:\s*([\w-]+)/.exec(attrs.style || "");
+    if (inlineDisplay) this.style.display = inlineDisplay[1];
     this.listeners = {};
     this.disabled = false;
     this.hidden = false;
@@ -96,6 +99,9 @@ class Element {
   }
   getAttribute(name) {
     return this.attrs[name] ?? null;
+  }
+  removeAttribute(name) {
+    delete this.attrs[name];
   }
   querySelectorAll(selector) {
     const dataSelector = selector.match(/^([a-z][\w-]*)?\[data-([\w-]+)\]$/i);
@@ -245,7 +251,12 @@ function createHarness({
   fetch: fetchOverride = null,
   timers = null,
   location = {},
+  // Script names (e.g. "pages/users/users.js") that fail to load, to model a 404/SyntaxError.
+  omitScripts = [],
+  history = undefined,
 } = {}) {
+  const windowListeners = {};
+  const harnessScripts = scripts.filter((script) => !omitScripts.includes(script.name));
   const elements = [],
     ids = new Map(),
     requests = [],
@@ -319,7 +330,10 @@ function createHarness({
     setInterval: () => 1,
     clearInterval() {},
     navigator: { clipboard: { writeText: async () => {} } },
-    addEventListener() {},
+    addEventListener(type, fn) {
+      (windowListeners[type] = windowListeners[type] || []).push(fn);
+    },
+    history,
     location,
     requestAnimationFrame: (fn) => fn(),
     fetch: (url, options) => {
@@ -385,6 +399,7 @@ function createHarness({
   return {
     context,
     document,
+    windowListeners,
     ids,
     requests,
     setFailure: (value) => {
@@ -404,12 +419,12 @@ function createHarness({
     },
     // start() runs the scripts without waiting for boot, for hung-transport tests.
     start: () => {
-      for (const script of scripts)
+      for (const script of harnessScripts)
         vm.runInContext(script.source, context, { filename: script.name });
       return context.AdminApp;
     },
     run: async () => {
-      for (const script of scripts)
+      for (const script of harnessScripts)
         vm.runInContext(script.source, context, { filename: script.name });
       if (context.AdminApp?.bootPromise) await context.AdminApp.bootPromise;
       return context.AdminApp;
@@ -1507,7 +1522,7 @@ async function main() {
   assert.equal(readonlyApp.modules.users.isReadonlyMode(), true);
   assert.equal(
     readonly.ids.get("nav-users").style.display,
-    undefined,
+    "none",
     "admin menu remains hidden",
   );
   await readonlyApp.modules.targets.openTargetModal(null);

@@ -181,6 +181,9 @@
     var TEXT = "页面资源加载失败";
     function render() {
       var status = document.getElementById("adminBootStatus");
+      // bootstrap.js reports its own, more specific failure (e.g. which module
+      // is missing): yield to it instead of overwriting.
+      if (status && status.getAttribute("data-boot-error")) return;
       var message = document.getElementById("adminBootMessage");
       var retry = document.getElementById("adminBootRetry");
       if (message && message.textContent !== TEXT) message.textContent = TEXT;
