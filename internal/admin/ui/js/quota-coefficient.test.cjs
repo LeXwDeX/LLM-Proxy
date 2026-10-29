@@ -54,8 +54,8 @@ test("actual model-group save preserves zero coefficient and rejects negative co
   const field = id => harness.ids.get(id);
   field("modelGroupName").value = "shared";
   field("modelGroup-daily").value = "10";
-  field("modelGroup-weekly").value = "";
-  field("modelGroup-monthly").value = "";
+  field("modelGroup-weekly").value = "0"; // bases need an explicit value; 0 = unlimited once a job level is bound
+  field("modelGroup-monthly").value = "0";
   field("modelGroupCoefficient").value = "0";
   await field("saveModelGroupBtn").listeners.click[0]();
   const writes = () => harness.requests.filter(r => r.url === "/admin/data/model-groups" && r.options?.method === "POST");
