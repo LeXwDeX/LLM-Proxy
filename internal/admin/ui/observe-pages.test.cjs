@@ -13,9 +13,10 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 async function settle() { for (let i = 0; i < 8; i++) await tick(); }
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return {promise, resolve}; }
 
-async function traceHarness(pages) {
+async function traceHarness(pages, stats = {enabled: true, stats: {}}) {
   const requests = [];
   const h = createHarness({fetch: async (url, options, fallback) => {
+    if (url === "/admin/data/trace/stats") return json(stats);
     if (url.startsWith("/admin/data/trace?")) { requests.push(url); const page = pages(url); return page instanceof Promise ? page : json(page); }
     return fallback(url, options);
   }});
@@ -115,7 +116,7 @@ test("braille spinner never leaks intervals and detail labels count real bytes",
 });
 
 test("trace probe honours enabled=false from the server", async () => {
-  const t = await traceHarness(() => ({records: [], count: 0, limit: 1, offset: 0, stats: {total_records: 0}, enabled: false}));
+  const t = await traceHarness(() => ({}), {enabled: false});
   await t.trace.checkTraceEnabled();
   assert.equal(t.h.document.getElementById("nav-trace").style.display, "none", "a disabled trace store keeps the nav entry hidden");
 });
