@@ -107,7 +107,7 @@ AdminApp.register("overviewActivity", function (app) {
       });
     });
   }
-  function loadActivity() {
+  function loadActivity(background) {
     if (!visible()) return Promise.resolve();
     if (S.activityFlight) return S.activityFlight;
     if (S.snapshot) {
@@ -123,7 +123,7 @@ AdminApp.register("overviewActivity", function (app) {
     if (!S.snapshot) text("activityStatus", "正在加载实时活动…");
     var flight = (async function () {
       try {
-        var data = await request("/admin/api/activity", controller);
+        var data = await request("/admin/api/activity", controller, undefined, background);
         if (epoch !== S.generation || controller.signal.aborted || !visible()) return;
         if (!validSnapshot(data)) throw new Error("实时活动数据格式无效");
         // A response from an older sample must never rewind the displayed window.
