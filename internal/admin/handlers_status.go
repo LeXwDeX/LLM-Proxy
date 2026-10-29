@@ -2,6 +2,7 @@ package admin
 
 import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/proxy"
+	"github.com/LeXwDeX/LLM-Proxy/internal/version"
 	"net/http"
 	"time"
 )
@@ -140,6 +141,7 @@ func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
 			"username":      session.Username,
 			"role":          session.Role,
 			"expires_at":    session.ExpiresAt,
+			"version":       version.Version,
 		})
 		return
 	}
