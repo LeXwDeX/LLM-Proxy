@@ -625,6 +625,9 @@ func BackfillUsageAgg(db *bolt.DB) error {
 }
 
 func backfillUsageAgg(db *bolt.DB, afterBatch func(int64) error) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	// Already done?
 	var done bool
 	err := db.View(func(tx *bolt.Tx) error {
@@ -702,6 +705,9 @@ func BackfillQuotaUsageAgg(db *bolt.DB) error {
 }
 
 func backfillQuotaUsageAgg(db *bolt.DB, afterBatch func(int64) error) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	var done bool
 	err := db.View(func(tx *bolt.Tx) error {
 		if b := tx.Bucket([]byte(BucketMeta)); b != nil {

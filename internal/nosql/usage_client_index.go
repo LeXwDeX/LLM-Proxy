@@ -232,6 +232,8 @@ func ReindexUsageEvent(tx *bolt.Tx, rawKey, before, after []byte) error {
 	if err := addClientEventIndex(tx, event, rawKey, after); err != nil {
 		return err
 	}
+	// Issue #125: an offline rewrite may move the row to another hour.
+	integrityMarkTx(tx)
 	return bumpRawRevision(tx)
 }
 

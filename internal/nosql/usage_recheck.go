@@ -105,6 +105,9 @@ func (s *UsageStore) RecheckUsage(req UsageRecheckRequest) (UsageRecheckResult, 
 }
 
 func (s *UsageStore) recheckUsage(req UsageRecheckRequest, recordAudit func(*bolt.Tx, AuditEvent) error) (UsageRecheckResult, error) {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	var result UsageRecheckResult
 	if s == nil || s.db == nil || len(req.EvidenceID) != 64 || len(req.Version) != 64 || strings.TrimSpace(req.Actor) == "" || req.Actor != strings.TrimSpace(req.Actor) {
 		return result, errors.New("invalid usage recheck request")

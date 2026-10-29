@@ -167,6 +167,9 @@ func CheckMmapHeadroom(path string, logger *slog.Logger) bool {
 
 // OpenDB opens a bbolt database and creates all required buckets.
 func OpenDB(path string) (*bolt.DB, error) {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	db, err := openBolt(path)
 	if err != nil {
 		return nil, fmt.Errorf("open bolt db: %w", err)

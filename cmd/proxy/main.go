@@ -464,6 +464,13 @@ func run(args []string) int {
 	defer stopCancel()
 	stopUsageIndexMigration := startUsageClientIndexMigration(stopCtx, db, appLogger, nosql.MigrateUsageClientIndex)
 	defer stopUsageIndexMigration()
+	// Issue #125: the windowed integrity reads need an anomalous-object
+	// classification. It starts only now, after the startup migrations,
+	// WarmUsageProofScanCache and the journal replay; until the first build
+	// completes, and whenever a maintenance write invalidates it, integrity
+	// reads stay exhaustive.
+	stopUsageIntegrity := nosql.StartUsageIntegrityClassification(stopCtx, db, usageIntegrityIntervalFromEnvironment(appLogger), appLogger)
+	defer stopUsageIntegrity()
 	usageJournal.Start(stopCtx, func(clientNames []string) {
 		if quotaMgr == nil {
 			return
@@ -486,6 +493,7 @@ func run(args []string) int {
 	finishShutdown(appLogger, func() {
 		stopCancel()
 		stopUsageIndexMigration()
+		stopUsageIntegrity()
 	}, proxyService.Close, func() {
 		persistence.drain(func(recoveredClients []string) {
 			if quotaMgr == nil {

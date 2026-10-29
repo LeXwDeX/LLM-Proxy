@@ -80,6 +80,9 @@ type legacyConsumerGroup struct {
 // are read-only inputs and are never mutated or deleted (rollback window).
 // logger may be nil.
 func MigrateBillingData(db *bolt.DB, logger *slog.Logger) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	var done bool
 	if err := db.View(func(tx *bolt.Tx) error {
 		if b := tx.Bucket([]byte(BucketMeta)); b != nil {

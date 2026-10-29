@@ -106,6 +106,20 @@ func shutdownGraceFromEnvironment(logger *slog.Logger) time.Duration {
 	return shutdownGrace
 }
 
+// Issue #125：用量完整性分类巡检间隔，默认 5 分钟，可用
+// USAGE_INTEGRITY_CLASSIFICATION_INTERVAL_SECONDS 覆盖（正整数秒）。
+func usageIntegrityIntervalFromEnvironment(logger *slog.Logger) time.Duration {
+	interval := nosql.UsageIntegrityClassificationInterval
+	if env := strings.TrimSpace(os.Getenv("USAGE_INTEGRITY_CLASSIFICATION_INTERVAL_SECONDS")); env != "" {
+		if v, err := strconv.Atoi(env); err == nil && v > 0 {
+			interval = time.Duration(v) * time.Second
+		} else {
+			logger.Warn("invalid USAGE_INTEGRITY_CLASSIFICATION_INTERVAL_SECONDS, using default", "value", env)
+		}
+	}
+	return interval
+}
+
 // P9：usage_events 保留期自动清理 —— 明细每请求一条且 bbolt 文件不缩容，
 // 无清理则 DB 单调膨胀。默认保留 90 天，USAGE_RETENTION_DAYS 覆盖（0 = 关闭，
 // 低于月度额度窗口时提升到最低值）。小时聚合格保留（体积小，供长期统计）。

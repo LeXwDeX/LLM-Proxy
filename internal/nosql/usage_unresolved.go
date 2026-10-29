@@ -282,6 +282,9 @@ func resolveUnresolvedUsage(tx *bolt.Tx, event usage.Event) error {
 
 // RegisterUnresolvedUsage preserves the original journal line before it can be removed.
 func (s *UsageStore) RegisterUnresolvedUsage(event usage.Event, original []byte) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	if s == nil || s.db == nil {
 		return errors.New("usage unresolved: store not initialized")
 	}

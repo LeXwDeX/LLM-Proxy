@@ -89,7 +89,14 @@ func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
 	// 不会双计。
 	added := false
 	var rejection error
+	var integrityTxs []*bolt.Tx
+	defer func() {
+		for _, tx := range integrityTxs {
+			integrityFinishTx(tx)
+		}
+	}()
 	err = s.db.Batch(func(tx *bolt.Tx) error {
+		integrityTxs = append(integrityTxs, tx)
 		// bbolt may retry this callback after a different batch member fails.
 		added = false
 		rejection = nil
@@ -185,7 +192,9 @@ func (s *UsageStore) recordBatchContext(ctx context.Context, events []usage.Even
 		return migrationErr
 	}
 	var rejection error
+	var integrityTx *bolt.Tx
 	err := s.db.Update(func(tx *bolt.Tx) error {
+		integrityTx = tx
 		committedRows := make([]bool, len(bundles))
 		inspectionErrors := make([]error, len(bundles))
 		type seenIdentity struct{ digest, bundle string }
@@ -273,6 +282,7 @@ func (s *UsageStore) recordBatchContext(ctx context.Context, events []usage.Even
 		}
 		return nil
 	})
+	integrityFinishTx(integrityTx)
 	if err != nil {
 		saveErr := s.db.Update(func(tx *bolt.Tx) error {
 			for _, bundle := range bundles {
@@ -712,6 +722,9 @@ var pruneBetweenTx func()
 // losslessly to quarantine instead of blocking subsequent batches. Their unknown
 // ownership invalidates indexed reads globally.
 func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, error) {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	if err := s.EnsureUsageReceipts(); err != nil {
 		return 0, err
 	}
