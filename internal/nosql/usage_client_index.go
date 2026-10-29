@@ -127,6 +127,9 @@ func addClientEventIndex(tx *bolt.Tx, event usage.Event, rawKey, data []byte) er
 	if err := b.Put(key, rawKey); err != nil {
 		return err
 	}
+	if err := registerClientIndexException(tx, key, rawKey); err != nil {
+		return err
+	}
 	return updateClientHour(tx, event, rawKey, data, false)
 }
 
@@ -153,6 +156,9 @@ func removeClientEventIndex(tx *bolt.Tx, rawKey, data []byte) error {
 		return ErrUsageClientIndexIncomplete
 	}
 	if err := b.Delete(key); err != nil {
+		return err
+	}
+	if err := unregisterClientIndexException(tx, key, rawKey); err != nil {
 		return err
 	}
 	return updateClientHour(tx, event, rawKey, data, true)

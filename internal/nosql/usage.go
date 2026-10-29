@@ -243,8 +243,10 @@ func (s *UsageStore) recordBatchContext(ctx context.Context, events []usage.Even
 		}
 		fresh := make([]bool, len(bundles))
 		memo := freshScopeMemo{cells: make(map[string]bool), scopes: make(map[string]continuationProof)}
+		// The proofs below run before this transaction writes any raw row.
+		proofCtx := withTxScopeSummary(ctx, tx)
 		for i, bundle := range bundles {
-			fresh[i] = memo.proven(ctx, tx, bundle.rows)
+			fresh[i] = memo.proven(proofCtx, tx, bundle.rows)
 		}
 		for i, bundle := range bundles {
 			added, err := recordUsageBundleTx(tx, bundle.rows, bundle.keys, migrationErr)
@@ -686,6 +688,18 @@ func (s *UsageStore) summaryReadContext(ctx context.Context, now time.Time, cost
 	return result, nil
 }
 
+// pruneTxBudget bounds how long one retention transaction may hold the bbolt
+// writer. The budget is checked after each event, so one transaction handles
+// at least one event; the remaining candidates go to the next transaction.
+var pruneTxBudget = 200 * time.Millisecond
+
+// pruneYield is the pause between budget-limited transactions that lets
+// queued writers (admin saves, usage batches) take the write lock.
+var pruneYield = time.Millisecond
+
+// pruneBetweenTx, when set by a test, runs between budget-limited transactions.
+var pruneBetweenTx func()
+
 // PruneEventsBefore deletes usage_events strictly older than cutoff, in bounded
 // per-transaction batches so the global bbolt write lock is never held long.
 // Returns the number of deleted events. The hourly agg bucket is intentionally
@@ -703,17 +717,32 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 	if batchSize <= 0 {
 		batchSize = 5000
 	}
+	if err := warmCanonicalRawRows(s.db); err != nil {
+		return 0, err
+	}
 	// 截止前缀回退 1s，与 List 同理由（RFC3339Nano 同秒内序不稳）：宁可少删
 	// 一秒，绝不误删 cutoff 之后的事件。
 	cutoffPrefix := cutoff.UTC().Add(-time.Second).Format(time.RFC3339Nano)
 	total := 0
+	// Rollup proof verdicts are reused across the budget-limited transactions
+	// of this call. They hold while the raw revision is the one this call left
+	// behind; any other writer advances it and the verdicts are dropped.
+	proofCache := make(map[string]bool)
+	var proofRevision uint64
+	proofRevisionKnown := false
 	for {
 		deleted := 0
 		quarantined := 0
+		limited := false
+		var removed [][]byte
 		err := s.db.Update(func(tx *bolt.Tx) error {
 			if _, err := rollupProofSource(tx); err != nil {
 				return err
 			}
+			if !proofRevisionKnown || rawRevision(tx) != proofRevision {
+				clear(proofCache)
+			}
+			proofRevisionKnown = false
 			progress, err := loadIndexProgressState(tx, false)
 			if err != nil {
 				return err
@@ -731,9 +760,15 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 				}
 				keys = append(keys, append([]byte(nil), k...))
 			}
-			proofCache := make(map[string]bool)
 			refs := &indexRawReferences{tx: tx}
+			started := time.Now()
+			processed := 0
 			for _, k := range keys {
+				if processed > 0 && pruneTxBudget > 0 && time.Since(started) >= pruneTxBudget {
+					limited = true
+					break
+				}
+				processed++
 				data := b.Get(k)
 				var event usage.Event
 				decodeErr := json.Unmarshal(data, &event)
@@ -778,19 +813,29 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 				if err := bumpRawRevision(tx); err != nil {
 					return err
 				}
+				removed = append(removed, k)
 			}
-			deleted = len(keys)
+			deleted = processed
+			proofRevision, proofRevisionKnown = rawRevision(tx), true
 			return nil
 		})
 		if err != nil {
 			return total, err
 		}
+		forgetCanonicalRows(removed)
 		if quarantined > 0 {
 			// Only log after the transaction commits, and never log raw bytes,
 			// record keys or a decoder error that could include event content.
 			slog.Warn("usage retention quarantined corrupt events; indexed history unavailable until evidence is reconciled", "quarantined", quarantined)
 		}
 		total += deleted
+		if limited {
+			time.Sleep(pruneYield)
+			if pruneBetweenTx != nil {
+				pruneBetweenTx()
+			}
+			continue
+		}
 		if deleted < batchSize {
 			return total, nil
 		}

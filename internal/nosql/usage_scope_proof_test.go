@@ -236,8 +236,11 @@ func TestContinuationMulticellScanBudget(t *testing.T) {
 					t.Fatalf("cost %s: units=%+v err=%v", e.RecordID, result.units, err)
 				}
 			}
-			if raw != 4*(history+cells) || receipts != 6 {
-				t.Fatalf("proof scan raw=%d receipts=%d, want raw=%d receipts=6", raw, receipts, 4*(history+cells))
+			// Four proof passes, each reaching only the rows of the hours being
+			// proven: retained history and the receipts outside those hours are
+			// not visited, and the pass count does not grow with the cell count.
+			if raw != 4*cells || receipts != 0 {
+				t.Fatalf("proof scan raw=%d receipts=%d, want raw=%d receipts=0 (history of %d rows is out of scope)", raw, receipts, 4*cells, history)
 			}
 		})
 	}

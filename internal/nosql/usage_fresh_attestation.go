@@ -140,9 +140,12 @@ func freshScopeProvenContext(ctx context.Context, tx *bolt.Tx, rows []usage.Even
 	if !quarantineOutsideProof(tx, owners, hours) {
 		return false
 	}
-	if err := raw.ForEach(func(k, v []byte) error {
+	if err := forEachRawInHours(ctx, tx, raw, hours, func(k, v []byte) error {
 		if err := proofScanStep(ctx, false); err != nil {
 			return err
+		}
+		if canonicalRowOutsideHours(k, v, hours) {
+			return nil
 		}
 		var e usage.Event
 		if !decodeProofEventCached(v, &e) || usageKey(e.Timestamp, e.RecordID) != string(k) {
@@ -158,11 +161,11 @@ func freshScopeProvenContext(ctx context.Context, tx *bolt.Tx, rows []usage.Even
 	}); err != nil {
 		return false
 	}
-	if err := receipts.ForEach(func(k, _ []byte) error {
+	if err := forEachReceiptInHours(ctx, tx, receipts, hours, func(k, _ []byte) error {
 		if err := proofScanStep(ctx, true); err != nil {
 			return err
 		}
-		if receiptMayOverlap(tx, k, owners, hours) {
+		if !keyHourOutside(k, hours) && receiptMayOverlap(tx, k, owners, hours) {
 			return ErrUsageHistoryIncomplete
 		}
 		return nil
@@ -257,9 +260,13 @@ func proveContinuationScope(ctx context.Context, tx *bolt.Tx, raw *bolt.Bucket, 
 	var anchors []anchor
 	var allRows []usage.Event
 	var allKeys []string
-	if err := raw.ForEach(func(k, value []byte) error {
+	if err := forEachRawInHours(ctx, tx, raw, hours, func(k, value []byte) error {
 		if err := proofScanStep(ctx, false); err != nil {
 			return err
+		}
+		// A canonical row of another hour is outside every scope below.
+		if canonicalRowOutsideHours(k, value, hours) {
+			return nil
 		}
 		var event usage.Event
 		if !decodeProofEventCached(value, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
@@ -375,11 +382,11 @@ func unoccupiedContinuationCellContext(ctx context.Context, tx *bolt.Tx, row usa
 	}
 	owners := map[string]bool{receiptClientHash(row.ClientName): true}
 	hours := map[time.Time]bool{row.Timestamp.UTC().Truncate(time.Hour): true}
-	return receipts.ForEach(func(key, _ []byte) error {
+	return forEachReceiptInHours(ctx, tx, receipts, hours, func(key, _ []byte) error {
 		if err := proofScanStep(ctx, true); err != nil {
 			return err
 		}
-		if !receiptMayOverlap(tx, key, owners, hours) {
+		if keyHourOutside(key, hours) || !receiptMayOverlap(tx, key, owners, hours) {
 			return nil
 		}
 		u, q, ok := readReceiptCells(tx, key)

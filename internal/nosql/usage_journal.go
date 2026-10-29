@@ -66,8 +66,8 @@ type UsageJournal struct {
 	// the writer committed whose lines may still be in the file; foreign means
 	// the file may hold events nobody owns (left by a previous process, a
 	// failed commit or the synchronous failure path) that only Replay drains.
-	owned     map[string]string   // original line -> client name
-	committed map[string]struct{} // original lines committed by the writer
+	owned     map[string]ownedLine // original line -> metadata
+	committed map[string]struct{}  // original lines committed by the writer
 	foreign   bool
 	dirSynced bool
 	// ownedByClient counts owned events per client; ownedCond (on mu) is
@@ -123,7 +123,7 @@ func NewUsageJournal(primary usage.Recorder, path string, logger *slog.Logger) (
 		primary:       primary,
 		path:          absolutePath,
 		logger:        logger,
-		owned:         make(map[string]string),
+		owned:         make(map[string]ownedLine),
 		committed:     make(map[string]struct{}),
 		ownedByClient: make(map[string]int),
 		drainWait:     defaultUsageJournalDrainWait,
@@ -399,7 +399,10 @@ func (j *UsageJournal) drainClient(clientName string, window *usageDrainWindow) 
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if j.asyncOn && !j.foreign && window == nil {
+	// With the writer running and no foreign lines, every line in the file is
+	// committed or owned, so the in-memory view is the file's content and
+	// the lock is not held across a file read and decode.
+	if j.asyncOn && !j.foreign {
 		if j.relevantOwnedLocked(clientName, window) > 0 {
 			return errors.New("usage journal still has pending records for client")
 		}
@@ -442,14 +445,26 @@ func (j *UsageJournal) relevantOwnedLocked(client string, window *usageDrainWind
 	if window == nil {
 		return j.ownedByClient[client]
 	}
+	// The metadata was taken from the event when it was appended, so this
+	// filter never decodes a journal line while the lock is held.
 	count := 0
-	for line, owner := range j.owned {
-		var event usage.Event
-		if json.Unmarshal([]byte(line), &event) != nil || strings.TrimSpace(event.ClientName) != owner || journalEventInDrain(event, client, window) {
+	for _, owned := range j.owned {
+		if !owned.consistent || journalEventInDrain(owned.event, client, window) {
 			count++
 		}
 	}
 	return count
+}
+
+// ownedLine is what the drain filter needs to know about a line the writer
+// owns. event carries only ClientName and Timestamp, exactly as a decode of
+// the line would yield them; consistent is false when that client differs from
+// the one the line was counted under, which the filter treats as relevant to
+// every drain.
+type ownedLine struct {
+	client     string
+	event      usage.Event
+	consistent bool
 }
 
 func (j *UsageJournal) replay(clientName *string, skipOwned bool) ([]string, error) {
