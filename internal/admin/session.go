@@ -26,6 +26,9 @@ const (
 
 type sessionContextKey struct{}
 
+// backgroundHeader marks requests made by UI polling rather than the user.
+const backgroundHeader = "X-Admin-Background"
+
 // Session represents a signed admin login session.
 type Session struct {
 	ID        string    `json:"id"`
@@ -192,7 +195,11 @@ func (m *SessionManager) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if updated, ok := m.touch(session.ID); ok {
+		// Background polls (X-Admin-Background: 1) only observe the session: they
+		// must not slide its expiry, or an unattended tab never logs out.
+		if r.Header.Get(backgroundHeader) == "1" {
+			r = r.WithContext(ContextWithSession(r.Context(), session))
+		} else if updated, ok := m.touch(session.ID); ok {
 			http.SetCookie(w, m.newCookie(updated.ID, updated.ExpiresAt))
 			r = r.WithContext(ContextWithSession(r.Context(), updated))
 		} else {
