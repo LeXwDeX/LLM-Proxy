@@ -195,7 +195,7 @@ AdminApp.register("overview", function (app) {
     S.historyFetchedAt = Date.now();
     var flight = (async function () {
       try {
-        var data = await request("/admin/api/overview", controller);
+        var data = await request("/admin/api/overview", controller, multiDayTimeoutMs);
         if (epoch === S.generation && !controller.signal.aborted && visible()) {
           S.historySnapshot = isObject(data) ? data : {};
           S.historyError = "";

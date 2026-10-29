@@ -128,9 +128,9 @@ AdminApp.register("audit_trace", function (app) {
 
   async function checkTraceEnabled() {
     try {
-      var data = await api("/admin/data/trace?limit=1");
-      // The server reports enabled explicitly; a disabled store still returns zeroed stats.
-      if (data && data.stats && data.enabled !== false) {
+      var data = await api("/admin/data/trace/stats");
+      // Lightweight probe: the server reports enabled explicitly.
+      if (data && data.enabled === true) {
         traceEnabled = true;
         document.getElementById("nav-trace").style.display = "";
       } else {

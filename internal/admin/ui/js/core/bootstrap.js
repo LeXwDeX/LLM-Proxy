@@ -83,9 +83,7 @@
         if (app.state.currentPage === "overview")
           app.modules.overview.startOverviewAutoRefresh();
         // Trace is optional and must not delay readiness: an unreachable probe
-        // leaves its page hidden. TODO: switch to the lightweight
-        // /admin/data/trace/stats probe once that endpoint exists (the probe
-        // URL lives in audit_trace.checkTraceEnabled).
+        // leaves its page hidden.
         var probeSettled = false;
         function probeDone() {
           probeSettled = true;

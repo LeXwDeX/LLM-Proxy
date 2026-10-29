@@ -416,13 +416,23 @@ test("manual refresh works after timeout; cancelling hidden requests reports no 
 });
 test("history has an independent deadline and retries while activity polling continues", async () => {
   const h = harness(); h.setHandler(url => url.endsWith("overview") ? new Promise(() => {}) : Promise.resolve(activity()));
-  h.module.startOverviewAutoRefresh(); const hung = h.module.loadOverview(true); await h.advance(12000);
+  h.module.startOverviewAutoRefresh(); const hung = h.module.loadOverview(true); await h.advance(45000);
   assert.match(h.get("activityHistoryState").textContent, /超时/); assert.equal(h.get("activityTotalTokens").textContent, "42");
-  assert.equal(h.calls.filter(c => c.url.endsWith("activity")).length, 3);
+  assert.ok(h.calls.filter(c => c.url.endsWith("activity")).length >= 3);
   assert.equal(h.calls.filter(c => c.url.endsWith("overview")).length, 1); await hung;
   h.setHandler(url => Promise.resolve(url.endsWith("overview") ? {request_stats_72h: {available: true, total: 4, success_rate: 100, record_failures: 0}} : activity()));
   await h.module.loadOverview(true); assert.equal(h.get("ovTotalReqs").textContent, "4");
   assert.equal(h.get("activityHistoryState").textContent, ""); h.module.stopOverviewAutoRefresh();
+});
+test("the 30-day history request gets the long deadline, not the 12s default", async () => {
+  const h = harness(); h.setHandler(url => url.endsWith("overview") ? new Promise(() => {}) : Promise.resolve(activity()));
+  const hung = h.module.loadOverview(true);
+  const request = h.calls.filter(c => c.url.endsWith("overview")).at(-1);
+  await h.advance(12000);
+  assert.equal(request.opts.signal.aborted, false, "still waiting after 12s");
+  await h.advance(33000);
+  assert.equal(request.opts.signal.aborted, true, "aborted at 45s");
+  assert.match(h.get("activityHistoryState").textContent, /超时/); await hung;
 });
 test("axes use useful headroom and nice ticks for zero, small and large peaks", async () => {
   for (const [peak, maximum] of [[0, 4], [1, 2], [10, 12], [12, 15], [36000, 40000], [9000000, 10000000]]) {
@@ -458,7 +468,7 @@ test("history timeout preserves completed statistics and fees from the last succ
   const h = harness(); h.setOverview({request_stats_72h: {available: true, total: 4, success_rate: 100, record_failures: 0}, usage_summary: {today: {estimated_cost: 2}}});
   await h.module.loadOverview(true); const fees = h.get("overviewUsageSummary").innerHTML;
   h.setHandler(url => url.endsWith("overview") ? new Promise(() => {}) : Promise.resolve(activity()));
-  const hung = h.module.loadOverview(true); await h.advance(12000); await hung;
+  const hung = h.module.loadOverview(true); await h.advance(45000); await hung;
   assert.equal(h.get("ovTotalReqs").textContent, "4"); assert.equal(h.get("overviewUsageSummary").innerHTML, fees);
   assert.match(h.get("ovRequestStatsStatus").textContent, /超时.*上次数据/);
 });

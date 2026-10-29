@@ -141,7 +141,7 @@ test("a timed-out /admin/api/me is retried and the role still applies", async ()
 });
 
 test("a hung trace probe only disables the optional trace page", async () => {
-  const TRACE = "/admin/data/trace?limit=1";
+  const TRACE = "/admin/data/trace/stats";
   const {app, clock, ids, count} = boot({
     fetch: (url, options, fixture) => (url === TRACE ? hang() : fixture(url, options)),
   });
@@ -161,7 +161,7 @@ test("overview and the trace probe start without waiting for /api/me; the layout
   });
   await clock.advance(100);
   assert.ok(count(ACTIVITY) >= 1, "overview loads while /api/me is pending");
-  assert.ok(count("/admin/data/trace?limit=1") >= 1, "trace probe runs in parallel with /api/me");
+  assert.ok(count("/admin/data/trace/stats") >= 1, "trace probe runs in parallel with /api/me");
   assert.equal(app.state.ready, false);
   assert.equal(harness.document.querySelector(".layout").inert, true, "no control is reachable before the role is known");
   assert.equal(harness.document.body.classList.contains("readonly-mode"), true, "readonly until proven admin");
@@ -170,7 +170,7 @@ test("overview and the trace probe start without waiting for /api/me; the layout
 
 test("a hung trace probe does not delay ready", async () => {
   const {app, clock} = boot({
-    fetch: (url, options, fixture) => (url === "/admin/data/trace?limit=1" ? hang() : fixture(url, options)),
+    fetch: (url, options, fixture) => (url === "/admin/data/trace/stats" ? hang() : fixture(url, options)),
   });
   await clock.advance(100);
   assert.equal(app.state.ready, true);

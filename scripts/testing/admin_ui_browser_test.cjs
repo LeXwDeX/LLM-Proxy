@@ -198,6 +198,7 @@ async function main() {
         rows: [],
       },
       "/admin/data/audit": { events: [] },
+      "/admin/data/trace/stats": { enabled: true, stats: {} },
       "/admin/data/trace": { stats: {}, records: [] },
       "/admin/data/users": {
         users: [{ username: "fixture-admin", role: "admin" }],
