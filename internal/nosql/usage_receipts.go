@@ -444,21 +444,22 @@ func writeUsageReceipt(tx *bolt.Tx, key []byte, digest string) error {
 	return bucket.Put(key, data)
 }
 
-// clientIndexReferencesKey reports whether any usage_events_by_client entry
-// points at the raw key. Index keys are hex(client)|timestamp|rawKey and the
-// timestamp is recoverable from the raw key, so for each client prefix at most
-// one exact key can match; probing it costs O(clients * log n) instead of a
-// scan of every retained event.
+// clientIndexReferencesKey probes for a canonical index entry that points at
+// the raw key. Index keys are hex(client)|timestamp|rawKey and the timestamp is
+// recoverable from the raw key, so for each client prefix at most one exact key
+// can match; probing it costs O(clients * log n) instead of a scan of every
+// retained event.
 //
-// The probe answers like a scan of every value only while every index entry
-// has the canonical shape (clientIndexEntryCanonical). Normal writes produce
-// nothing else; WarmUsageProofScanCache persists a marker at startup when it
-// finds an entry that is not canonical, and lookupUsageIdentity then scans
-// instead of probing. A key that is itself not canonical also scans.
+// It is equivalent to a scan of every value only for canonical entries
+// (clientIndexEntryCanonical); entries without a client separator are skipped.
+// Non-canonical entries are the exception set's job: lookupUsageIdentity
+// consults clientIndexExceptionReferences after this probe. A raw key that is
+// itself not canonical cannot be probed and scans.
 func clientIndexReferencesKey(index *bolt.Bucket, key []byte) (bool, error) {
 	stamp, _, found := strings.Cut(string(key), "_")
 	at, err := time.Parse(time.RFC3339Nano, stamp)
 	if !found || err != nil || at.UTC().Format(time.RFC3339Nano) != stamp {
+		clientIndexFullScans.Add(1)
 		return clientIndexScanReferencesKey(index, key), nil
 	}
 	suffix := []byte(at.UTC().Format(clientIndexTimeLayout) + "|" + string(key))
@@ -466,7 +467,8 @@ func clientIndexReferencesKey(index *bolt.Bucket, key []byte) (bool, error) {
 	for k, _ := cursor.First(); k != nil; {
 		sep := bytes.IndexByte(k, '|')
 		if sep < 0 {
-			return clientIndexScanReferencesKey(index, key), nil
+			k, _ = cursor.Next()
+			continue
 		}
 		probe := make([]byte, 0, sep+1+len(suffix))
 		probe = append(append(probe, k[:sep+1]...), suffix...)
@@ -525,14 +527,18 @@ func lookupUsageIdentity(tx *bolt.Tx, key, digest []byte) (receiptState, usage.E
 			return identityNew, usage.Event{}, nil, fmt.Errorf("%w: %w", ErrUsageIdentityUnverified, errRawOwnerOrphan)
 		}
 		if index := tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil {
-			var referenced bool
-			if clientIndexNonCanonicalMarked(tx) {
-				referenced = clientIndexScanReferencesKey(index, key)
-			} else {
-				var err error
-				if referenced, err = clientIndexReferencesKey(index, key); err != nil {
-					return identityNew, usage.Event{}, nil, err
+			referenced, err := clientIndexReferencesKey(index, key)
+			if err != nil {
+				return identityNew, usage.Event{}, nil, err
+			}
+			if !referenced {
+				hit, overflow := clientIndexExceptionReferences(tx, key)
+				if overflow {
+					warnClientIndexScan()
+					clientIndexFullScans.Add(1)
+					hit = clientIndexScanReferencesKey(index, key)
 				}
+				referenced = hit
 			}
 			if referenced {
 				return identityNew, usage.Event{}, nil, fmt.Errorf("%w: retained index refers to absent identity", ErrUsageIdentityUnverified)

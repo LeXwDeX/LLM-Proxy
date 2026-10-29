@@ -100,10 +100,13 @@ func walkScoped(bucket *bolt.Bucket, prefixes []string, odd [][]byte, fn func(k,
 		}
 	}
 	next := 0
+	cursor := bucket.Cursor()
+	// A nested bucket is a key with a nil value, and ForEach hands it to the
+	// callback as such; Get would hide it, so existence is decided by a seek.
 	visitPoints := func(before string, bounded bool) error {
 		for next < len(points) && (!bounded || string(points[next]) < before) {
-			if v := bucket.Get(points[next]); v != nil {
-				if err := fn(points[next], v); err != nil {
+			if k, v := cursor.Seek(points[next]); k != nil && bytes.Equal(k, points[next]) {
+				if err := fn(k, v); err != nil {
 					return err
 				}
 			}
@@ -111,15 +114,11 @@ func walkScoped(bucket *bolt.Bucket, prefixes []string, odd [][]byte, fn func(k,
 		}
 		return nil
 	}
-	cursor := bucket.Cursor()
 	for _, prefix := range prefixes {
 		if err := visitPoints(prefix, true); err != nil {
 			return err
 		}
 		for k, v := cursor.Seek([]byte(prefix)); k != nil && bytes.HasPrefix(k, []byte(prefix)); k, v = cursor.Next() {
-			if v == nil {
-				continue
-			}
 			if err := fn(k, v); err != nil {
 				return err
 			}

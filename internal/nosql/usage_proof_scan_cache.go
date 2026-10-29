@@ -205,20 +205,16 @@ func receiptClientHashIfNamed(name string) string {
 // holds the bbolt writer. Databases tracked since creation never run the
 // legacy scans and are skipped. It returns the number of rows visited.
 //
-// It also checks the shape of every client index entry and persists a marker
-// when one is not canonical (see clientIndexReferencesKey), for tracked
-// databases too.
+// It also rebuilds the set of non-canonical client index entries
+// (usage_client_index_exceptions.go) for tracked databases too, which is how
+// out-of-band index damage becomes visible to identity lookups.
 func WarmUsageProofScanCache(db *bolt.DB) (int, error) {
 	visited := 0
-	nonCanonical := false
 	err := db.View(func(tx *bolt.Tx) error {
 		meta := tx.Bucket([]byte(BucketMeta))
 		raw := tx.Bucket([]byte(BucketUsageEvents))
 		if meta == nil || raw == nil {
 			return fmt.Errorf("usage proof cache warm-up: buckets missing")
-		}
-		if index := tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil {
-			nonCanonical = !clientIndexAllCanonical(index)
 		}
 		if string(meta.Get([]byte(usageAccountingProofTrackedKey))) == "1" {
 			return nil
@@ -232,8 +228,8 @@ func WarmUsageProofScanCache(db *bolt.DB) (int, error) {
 			return nil
 		})
 	})
-	if err == nil && nonCanonical {
-		err = markClientIndexNonCanonical(db)
+	if err == nil {
+		err = rebuildClientIndexExceptions(db)
 	}
 	return visited, err
 }

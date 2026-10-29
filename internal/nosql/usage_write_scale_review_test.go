@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,10 +26,25 @@ func quotaCellValue(db *bolt.DB, e usage.Event) string {
 	return out
 }
 
-func clientIndexMarked(db *bolt.DB) bool {
-	marked := false
-	_ = db.View(func(tx *bolt.Tx) error { marked = clientIndexNonCanonicalMarked(tx); return nil })
-	return marked
+// clientIndexExceptionMembers lists the registered set (without the counter).
+func clientIndexExceptionMembers(t testing.TB, db *bolt.DB) int {
+	t.Helper()
+	n := 0
+	_ = db.View(func(tx *bolt.Tx) error {
+		if b := tx.Bucket([]byte(bucketUsageClientIndexExceptions)); b != nil {
+			_ = b.ForEach(func(k, _ []byte) error {
+				if string(k) != string(exceptionCountKey) {
+					n++
+				}
+				return nil
+			})
+			if c := exceptionCount(b); c != uint64(n) {
+				t.Fatalf("exception counter %d != members %d", c, n)
+			}
+		}
+		return nil
+	})
+	return n
 }
 
 // 带外删除 raw 与 owner 后，索引项残留。规范形态由前缀探测发现；非规范形态
@@ -62,8 +80,8 @@ func TestClientIndexResidueRejectsDuplicateAfterWarmup(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if clientIndexMarked(db) {
-				t.Fatal("marker set before any startup scan")
+			if clientIndexExceptionMembers(t, db) > 0 {
+				t.Fatal("exception set populated before any startup scan")
 			}
 			if _, err := WarmUsageProofScanCache(db); err != nil {
 				t.Fatal(err)
@@ -71,8 +89,8 @@ func TestClientIndexResidueRejectsDuplicateAfterWarmup(t *testing.T) {
 			if _, err := WarmUsageProofScanCache(db); err != nil { // repeatable
 				t.Fatal(err)
 			}
-			if want := variant != "canonical"; clientIndexMarked(db) != want {
-				t.Fatalf("marker = %v, want %v", clientIndexMarked(db), want)
+			if want := variant != "canonical"; (clientIndexExceptionMembers(t, db) > 0) != want {
+				t.Fatalf("exception set non-empty = %v, want %v", (clientIndexExceptionMembers(t, db) > 0), want)
 			}
 			err := store.RecordBatch([]usage.Event{e})
 			if !errors.Is(err, ErrUsageIdentityUnverified) {
@@ -117,8 +135,8 @@ func TestClientIndexOutOfBandCorruptionIsFoundByNextWarmup(t *testing.T) {
 	if _, err := WarmUsageProofScanCache(db); err != nil {
 		t.Fatal(err)
 	}
-	if !clientIndexMarked(db) {
-		t.Fatal("warm-up did not mark the non-canonical index entry")
+	if !(clientIndexExceptionMembers(t, db) > 0) {
+		t.Fatal("warm-up did not register the non-canonical index entry")
 	}
 }
 
@@ -145,8 +163,8 @@ func TestClientIndexEntryCanonicalShapes(t *testing.T) {
 	}
 }
 
-// 索引里存在没有客户端分隔符的项时，探测必须退回扫描并命中它。
-func TestClientIndexProbeFallsBackOnEntryWithoutSeparator(t *testing.T) {
+// 没有客户端分隔符的项探测看不到：它是非规范项，由异常集合接住；集合在预热时重建。
+func TestClientIndexEntryWithoutSeparatorIsFoundThroughExceptionSet(t *testing.T) {
 	db := testDB(t)
 	at := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	raw := []byte(usageKey(at, "id-1"))
@@ -159,23 +177,30 @@ func TestClientIndexProbeFallsBackOnEntryWithoutSeparator(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_ = db.View(func(tx *bolt.Tx) error {
-		idx := tx.Bucket([]byte(BucketUsageEventsByClient))
-		got, err := clientIndexReferencesKey(idx, raw)
-		if err != nil || !got {
-			t.Fatalf("probe = %v, %v; want a hit through the scan fallback", got, err)
-		}
-		return nil
-	})
+	lookup := func() (probe, set bool) {
+		_ = db.View(func(tx *bolt.Tx) error {
+			probe, _ = clientIndexReferencesKey(tx.Bucket([]byte(BucketUsageEventsByClient)), raw)
+			set, _ = clientIndexExceptionReferences(tx, raw)
+			return nil
+		})
+		return
+	}
+	if probe, set := lookup(); probe || set {
+		t.Fatalf("out-of-band entry visible before warm-up: probe=%v set=%v", probe, set)
+	}
+	if _, err := WarmUsageProofScanCache(db); err != nil {
+		t.Fatal(err)
+	}
+	if probe, set := lookup(); probe || !set {
+		t.Fatalf("after warm-up: probe=%v set=%v, want set only", probe, set)
+	}
 }
 
 // 摘要必须是单射：key 与 data 的拼接相同但切分不同，不能共用记忆项。
 func TestProofRowDigestIsInjective(t *testing.T) {
-	data1 := []byte(`{"a":1}`)
-	key1 := []byte("k\x00y")
-	key2 := []byte("k")
-	data2 := append([]byte("y\x00"), data1...)
-	if proofRowDigest(key1, data1) == proofRowDigest(key2, data2) {
+	// Same concatenation "abc", different split: only the length prefix
+	// tells them apart.
+	if proofRowDigest([]byte("ab"), []byte("c")) == proofRowDigest([]byte("a"), []byte("bc")) {
 		t.Fatal("digest collides for different (key, data) splits")
 	}
 }
@@ -682,6 +707,38 @@ func TestUpgradedProofScansMatchExhaustiveScans(t *testing.T) {
 		if fmt.Sprint(ref) != fmt.Sprint(skipOnly) || fmt.Sprint(ref) != fmt.Sprint(scoped) {
 			t.Fatalf("round %d: scans disagree\nexhaustive=%v\nskip=%v\nscoped=%v", round, ref, skipOnly, scoped)
 		}
+		// Nested buckets inside the proven hours: ForEach hands them to the
+		// callback with a nil value, so a scoped walk that skips them (or
+		// point-reads them with Get) diverges. Odd-keyed ones are reached as
+		// points, canonical-keyed ones through the hour prefix. Injected after
+		// the comparison above so they cannot mask its positive verdicts;
+		// even rounds add only the odd-keyed pair, so that path is judged on
+		// its own.
+		if err := db.Update(func(tx *bolt.Tx) error {
+			raw, receipts := tx.Bucket([]byte(BucketUsageEvents)), tx.Bucket([]byte(BucketUsageReceipts))
+			if round%2 == 1 {
+				nestedAt := base.Add(3 * time.Second)
+				if _, err := raw.CreateBucket([]byte(usageKey(nestedAt, "nested-raw"))); err != nil {
+					return err
+				}
+				if _, err := receipts.CreateBucket([]byte(nestedAt.Format(time.RFC3339Nano) + "_nested-receipt")); err != nil {
+					return err
+				}
+			}
+			if _, err := raw.CreateBucket([]byte("odd-nested-raw")); err != nil {
+				return err
+			}
+			_, err := receipts.CreateBucket([]byte("odd-nested-receipt"))
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		ref, _ = evaluate(false, false)
+		skipOnly, _ = evaluate(true, false)
+		scoped, _ = evaluate(true, true)
+		if fmt.Sprint(ref) != fmt.Sprint(skipOnly) || fmt.Sprint(ref) != fmt.Sprint(scoped) {
+			t.Fatalf("round %d (nested buckets): scans disagree\nexhaustive=%v\nskip=%v\nscoped=%v", round, ref, skipOnly, scoped)
+		}
 	}
 	t.Logf("true verdicts across rounds: %d", trueCount)
 	if trueCount == 0 {
@@ -798,5 +855,179 @@ func TestSingleRecordProofDecodesOnlyRelevantRangeOnUpgradedLedger(t *testing.T)
 	t.Logf("single Record proof decodes: 3k retained=%d, 12k retained=%d", small, large)
 	if large > small+small/2+200 {
 		t.Fatalf("single-record proof decodes scale with retained history: %d -> %d", small, large)
+	}
+}
+
+func warmedStoreWithOneEvent(t *testing.T, seed int) (*bolt.DB, *UsageStore, usage.Event, []byte) {
+	t.Helper()
+	db := testDB(t)
+	store := NewUsageStore(db)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	e := scaleEvent(seed, base)
+	if err := store.RecordBatch([]usage.Event{e}); err != nil {
+		t.Fatal(err)
+	}
+	return db, store, e, []byte(usageKey(e.Timestamp, e.RecordID))
+}
+
+// 受支持的维护 API 改写时间戳会产生非规范项：它在同一事务内登记到集合，身份判定
+// 仍精确命中，且不退化为全量扫描。
+func TestReindexUsageEventKeepsIdentityExactWithoutFullScan(t *testing.T) {
+	db, store, e, key := warmedStoreWithOneEvent(t, 31)
+	if _, err := WarmUsageProofScanCache(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		before := append([]byte(nil), raw.Get(key)...)
+		moved := e
+		moved.Timestamp = e.Timestamp.Add(time.Nanosecond)
+		after, _ := json.Marshal(moved)
+		if err := ReindexUsageEvent(tx, key, before, after); err != nil {
+			return err
+		}
+		return raw.Put(key, after)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n := clientIndexExceptionMembers(t, db); n != 1 {
+		t.Fatalf("reindex registered %d exceptions, want 1", n)
+	}
+	// Remove raw and owner out of band so only the index still names the key.
+	_ = db.Update(func(tx *bolt.Tx) error {
+		_ = tx.Bucket([]byte(BucketUsageEvents)).Delete(key)
+		return tx.Bucket([]byte(rawOwnerBucket)).Delete(key)
+	})
+	scans := clientIndexFullScans.Load()
+	err := store.RecordBatch([]usage.Event{e})
+	if !errors.Is(err, ErrUsageIdentityUnverified) {
+		t.Fatalf("re-recording = %v, want ErrUsageIdentityUnverified", err)
+	}
+	if got := clientIndexFullScans.Load() - scans; got != 0 {
+		t.Fatalf("identity lookup fell back to %d full index scans", got)
+	}
+}
+
+// 清理删除相关行后，集合在同一事务内同步清空。
+func TestPruneRemovesIndexExceptions(t *testing.T) {
+	db, store, e, key := warmedStoreWithOneEvent(t, 32)
+	if err := db.Update(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		before := append([]byte(nil), raw.Get(key)...)
+		moved := e
+		moved.Timestamp = e.Timestamp.Add(time.Nanosecond)
+		after, _ := json.Marshal(moved)
+		if err := ReindexUsageEvent(tx, key, before, after); err != nil {
+			return err
+		}
+		return raw.Put(key, after)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if clientIndexExceptionMembers(t, db) != 1 {
+		t.Fatal("setup: exception not registered")
+	}
+	n, err := store.PruneEventsBefore(e.Timestamp.Add(time.Hour), 1000)
+	if err != nil || n == 0 {
+		t.Fatalf("prune = %d, %v", n, err)
+	}
+	if got := clientIndexExceptionMembers(t, db); got != 0 {
+		t.Fatalf("exception set kept %d entries after the rows were pruned", got)
+	}
+}
+
+// 预热时没有非规范项则集合为空；旧标记被移除；重复预热幂等。
+func TestWarmupLeavesEmptySetAndDropsLegacyMarker(t *testing.T) {
+	db, _, _, _ := warmedStoreWithOneEvent(t, 33)
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketMeta)).Put([]byte(usageClientIndexNonCanonicalKey), []byte("1"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := WarmUsageProofScanCache(db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if clientIndexExceptionMembers(t, db) != 0 {
+		t.Fatal("clean index produced exceptions")
+	}
+	_ = db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket([]byte(BucketMeta)).Get([]byte(usageClientIndexNonCanonicalKey)) != nil {
+			t.Fatal("legacy marker was not removed")
+		}
+		return nil
+	})
+}
+
+// 集合超过上限时退回全量扫描并仍然命中。
+func TestExceptionSetOverflowFallsBackToScan(t *testing.T) {
+	db, _, _, _ := warmedStoreWithOneEvent(t, 34)
+	at := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	target := []byte(usageKey(at, "target"))
+	if err := db.Update(func(tx *bolt.Tx) error {
+		idx := tx.Bucket([]byte(BucketUsageEventsByClient))
+		for i := 0; i <= clientIndexExceptionLimit; i++ {
+			if err := idx.Put([]byte(fmt.Sprintf("zz%06d", i)), []byte(fmt.Sprintf("v%d", i))); err != nil {
+				return err
+			}
+		}
+		return idx.Put([]byte("zz-target"), target)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WarmUsageProofScanCache(db); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.View(func(tx *bolt.Tx) error {
+		if _, overflow := clientIndexExceptionReferences(tx, target); !overflow {
+			t.Fatal("set did not report overflow")
+		}
+		return nil
+	})
+	_ = db.Update(func(tx *bolt.Tx) error {
+		_, _, _, err := lookupUsageIdentity(tx, target, []byte("d"))
+		if !errors.Is(err, ErrUsageIdentityUnverified) {
+			t.Fatalf("lookup = %v, want ErrUsageIdentityUnverified through the scan", err)
+		}
+		return nil
+	})
+}
+
+// 穷举索引的写入点与删除点：只有 usage_client_index.go 里的 add/remove 与异常集合
+// 文件可以直接引用索引 bucket 的名字并写入；其他文件新增引用需要先评审是否要同步
+// 异常集合，并更新这里的名单。
+func TestClientIndexWritersAreEnumerated(t *testing.T) {
+	readers := map[string]bool{
+		"db.go": true, "usage_accounting_proof.go": true, "usage_client_index.go": true,
+		"usage_client_index_migration.go": true, "usage_client_index_v2.go": true,
+		"usage_costs.go": true, "usage_fresh_attestation.go": true, "usage_proof_scan_cache.go": true,
+		"usage_receipts.go": true, "usage_rollup_proof.go": true, "usage_client_index_exceptions.go": true,
+	}
+	files, _ := filepath.Glob("*.go")
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(src)
+		if strings.Contains(text, "BucketUsageEventsByClient") && !readers[f] {
+			t.Errorf("%s references the client index bucket; review whether it writes or deletes entries and must maintain the exception set", f)
+		}
+		// Direct writes to index entries are only allowed through
+		// addClientEventIndex / removeClientEventIndex.
+		if f != "usage_client_index.go" && (strings.Contains(text, "clientEventIndexKey(") && regexp.MustCompile(`\.(Put|Delete)\(\s*clientEventIndexKey\(`).MatchString(text)) {
+			t.Errorf("%s writes a client index entry outside addClientEventIndex/removeClientEventIndex", f)
+		}
+	}
+	src, _ := os.ReadFile("usage_client_index.go")
+	if n := strings.Count(string(src), "b.Put(key, rawKey)") + strings.Count(string(src), "b.Delete(key)"); n != 2 {
+		t.Errorf("usage_client_index.go has %d direct index writes, want exactly the add and remove ones", n)
+	}
+	if !strings.Contains(string(src), "registerClientIndexException(tx, key, rawKey)") || !strings.Contains(string(src), "unregisterClientIndexException(tx, key, rawKey)") {
+		t.Error("add/remove no longer maintain the exception set")
 	}
 }
