@@ -186,6 +186,14 @@ func run(args []string) int {
 	if err := usageStore.EnsureUsageReceipts(); err != nil {
 		appLogger.Error("usage receipt migration failed; explicit usage writes stay queued in the recovery journal until a retry succeeds", "error", err)
 	}
+	// Warm the legacy-row proof cache before the writer starts, so the first
+	// usage batch does not parse the whole history inside a write transaction.
+	warmStarted := time.Now()
+	if rows, err := nosql.WarmUsageProofScanCache(db); err != nil {
+		appLogger.Warn("usage proof cache warm-up failed; first usage writes may be slow", "error", err)
+	} else if rows > 0 {
+		appLogger.Info("usage proof cache warmed", "rows", rows, "duration", time.Since(warmStarted).String())
+	}
 
 	if recoveredClients, err := usageJournal.Replay(); err != nil {
 		// Individual records that keep failing transiently must not take the

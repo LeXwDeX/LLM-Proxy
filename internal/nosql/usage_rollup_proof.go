@@ -119,16 +119,17 @@ func currentRollupIdentitiesContext(ctx context.Context, tx *bolt.Tx, source str
 			return err
 		}
 		var event usage.Event
-		if !decodeProofEvent(data, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
+		if !decodeProofEventCached(data, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
 			if !proofRawMayOverlap(tx, k, data, owners, hours) {
 				return nil
 			}
-			corrupt, ambiguous := backfillRawScope(data)
+			corrupt := backfillRawScopeCached(data)
+			ambiguous := corrupt.ambiguous
 			owner, known, ownerErr := readRawOwner(tx, k)
-			if ownerErr != nil || (known && !ambiguous && corrupt.ClientName != "" && receiptClientHash(corrupt.ClientName) != owner.Client) {
+			if ownerErr != nil || (known && !ambiguous && corrupt.clientName != "" && corrupt.clientHash != owner.Client) {
 				return ErrUsageHistoryIncomplete
 			}
-			if !known && !ambiguous && corrupt.Model != "" && scope.Model != "" && corrupt.Model != scope.Model {
+			if !known && !ambiguous && corrupt.model != "" && scope.Model != "" && corrupt.model != scope.Model {
 				return nil
 			}
 			return ErrUsageHistoryIncomplete
@@ -316,8 +317,9 @@ func quotaProofBatchInScopeContext(ctx context.Context, tx *bolt.Tx, filter usag
 			return err
 		}
 		var event usage.Event
-		if !decodeProofEvent(data, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
-			corrupt, ambiguous := backfillRawScope(data)
+		if !decodeProofEventCached(data, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
+			corrupt := backfillRawScopeCached(data)
+			ambiguous := corrupt.ambiguous
 			owner, known, ownerErr := readRawOwner(tx, k)
 			for _, cell := range cells {
 				if err := ctx.Err(); err != nil {
@@ -331,7 +333,7 @@ func quotaProofBatchInScopeContext(ctx context.Context, tx *bolt.Tx, filter usag
 				if !proofRawMayOverlap(tx, k, data, owners, hours) {
 					continue
 				}
-				if ownerErr == nil && !(known && !ambiguous && corrupt.ClientName != "" && receiptClientHash(corrupt.ClientName) != owner.Client) && !known && !ambiguous && corrupt.Model != "" && cell.scope.Model != "" && corrupt.Model != cell.scope.Model {
+				if ownerErr == nil && !(known && !ambiguous && corrupt.clientName != "" && corrupt.clientHash != owner.Client) && !known && !ambiguous && corrupt.model != "" && cell.scope.Model != "" && corrupt.model != cell.scope.Model {
 					continue
 				}
 				cell.invalid = true

@@ -182,21 +182,22 @@ func usageAccountingRowsProvenContext(ctx context.Context, tx *bolt.Tx, rows []u
 
 func proofRawMayOverlap(tx *bolt.Tx, key, data []byte, owners map[string]bool, hours map[time.Time]bool) bool {
 	owner, known, err := readRawOwner(tx, key)
-	scope, ambiguous := backfillRawScope(data)
-	if err != nil || (ambiguous && json.Valid(data)) || (known && !ambiguous && scope.ClientName != "" && receiptClientHash(scope.ClientName) != owner.Client) {
+	scope := backfillRawScopeCached(data)
+	ambiguous := scope.ambiguous
+	if err != nil || (ambiguous && scope.valid) || (known && !ambiguous && scope.clientName != "" && scope.clientHash != owner.Client) {
 		return true
 	}
 	if err == nil && known && !owners[owner.Client] {
 		return false
 	}
-	if !known && !ambiguous && scope.ClientName != "" && !owners[receiptClientHash(scope.ClientName)] {
+	if !known && !ambiguous && scope.clientName != "" && !owners[scope.clientHash] {
 		return false
 	}
 	stamp, _, found := strings.Cut(string(key), "_")
 	at, err := time.Parse(time.RFC3339Nano, stamp)
 	if !found || err != nil {
-		if !ambiguous && !scope.Timestamp.IsZero() {
-			at, found, err = scope.Timestamp, true, nil
+		if !ambiguous && !scope.timestamp.IsZero() {
+			at, found, err = scope.timestamp, true, nil
 		}
 	}
 	if found && err == nil && !hours[at.UTC().Truncate(time.Hour)] {
@@ -311,7 +312,7 @@ func usageAccountingRawProvenImpl(ctx context.Context, tx *bolt.Tx, rows []usage
 			return err
 		}
 		var event usage.Event
-		if !decodeProofEvent(data, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
+		if !decodeProofEventCached(data, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
 			if !proofRawMayOverlap(tx, k, data, owners, hours) {
 				return nil
 			}
@@ -389,6 +390,7 @@ func usageAccountingRawProvenImpl(ctx context.Context, tx *bolt.Tx, rows []usage
 }
 
 func decodeProofEvent(data []byte, event *usage.Event) bool {
+	proofRawParses.Add(1)
 	if !json.Valid(data) || !utf8.Valid(data) {
 		return false
 	}

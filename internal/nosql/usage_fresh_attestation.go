@@ -145,7 +145,7 @@ func freshScopeProvenContext(ctx context.Context, tx *bolt.Tx, rows []usage.Even
 			return err
 		}
 		var e usage.Event
-		if !decodeProofEvent(v, &e) || usageKey(e.Timestamp, e.RecordID) != string(k) {
+		if !decodeProofEventCached(v, &e) || usageKey(e.Timestamp, e.RecordID) != string(k) {
 			if !proofRawMayOverlap(tx, k, v, owners, hours) {
 				return nil
 			}
@@ -262,7 +262,7 @@ func proveContinuationScope(ctx context.Context, tx *bolt.Tx, raw *bolt.Bucket, 
 			return err
 		}
 		var event usage.Event
-		if !decodeProofEvent(value, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
+		if !decodeProofEventCached(value, &event) || usageKey(event.Timestamp, event.RecordID) != string(k) {
 			if !proofRawMayOverlap(tx, k, value, owners, hours) {
 				return nil
 			}
