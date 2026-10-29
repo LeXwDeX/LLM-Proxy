@@ -131,8 +131,8 @@ test("a retained created-target draft cannot accept an unsaveable new key or pos
   assert.equal(h.requests.filter(r => r.url === "/admin/data/targets" && r.options?.method === "POST").length, 1);
 });
 
-test("opening a new target cannot unlock the retained draft until its editor is ready", async () => {
-  let releaseSave, releaseCatalog;
+test("opening a new target replaces the retained created-target draft", async () => {
+  let releaseSave;
   const h = createHarness({routes: routes(), fetch: (url, options, fallback) =>
     url === "/admin/data/targets" && options?.method === "POST"
       ? new Promise(resolve => {releaseSave = resolve;}) : fallback(url, options)});
@@ -146,16 +146,9 @@ test("opening a new target cannot unlock the retained draft until its editor is 
   h.ids.get("targetModal").listeners.input[0]();
   releaseSave(response({status: "ok"}));
   await save;
-  app.state.catalogAllCache = null;
-  const fetch = h.context.fetch;
-  h.context.fetch = (url, options) => url === "/admin/data/catalog"
-    ? new Promise(resolve => {releaseCatalog = resolve;}) : fetch(url, options);
-  const opening = app.modules.targets.openTargetModal(null);
-  assert.ok(releaseCatalog);
-  assert.equal(h.ids.get("tgtNewKeyInput").disabled, true);
-  assert.equal(h.ids.get("addKeyBtn").disabled, true);
-  assert.equal(h.ids.get("tgtEndpoint").value, "https://draft.invalid");
-  releaseCatalog(response({models: []}));
-  await opening;
+  assert.equal(h.ids.get("tgtNewKeyInput").disabled, true, "retained draft stays locked until reopened");
+  app.modules.targets.openTargetModal(null);
   assert.equal(h.ids.get("tgtNewKeyInput").disabled, false);
+  assert.equal(h.ids.get("addKeyBtn").disabled, false);
+  assert.equal(h.ids.get("tgtEndpoint").value, "", "the new editor starts from a clean form");
 });

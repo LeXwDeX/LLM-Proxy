@@ -9,12 +9,14 @@ const os = require("node:os");
 const path = require("node:path");
 const { assembleAdminHTML } = require("../../../scripts/testing/assemble_admin_html.cjs");
 
+// Old script name -> ordered list of new paths (one golden tag expands to one tag per path).
 const scriptMap = {
-  core: "core/core", schema: "core/schema", navigation: "core/navigation", bootstrap: "core/bootstrap",
-  overview: "pages/overview/overview", targets: "pages/targets/targets", pools: "pages/pools/pools",
-  clients: "pages/clients/clients", pricing: "pages/pricing/pricing", usage: "pages/usage/usage",
-  audit_trace: "pages/audit_trace/audit_trace", users: "pages/users/users",
-  catalog: "pages/catalog/catalog", quota: "pages/quota/quota",
+  core: ["core/core"], schema: ["core/schema"], navigation: ["core/navigation"], bootstrap: ["core/bootstrap"],
+  overview: ["pages/overview/overview"],
+  targets: ["targets", "health", "detail", "key-list", "model-mappings", "edit-modal", "save", "list"].map((n) => `pages/targets/${n}`),
+  pools: ["pages/pools/pools"], clients: ["pages/clients/clients"], pricing: ["pages/pricing/pricing"], usage: ["pages/usage/usage"],
+  audit_trace: ["pages/audit_trace/audit_trace"], users: ["pages/users/users"],
+  catalog: ["pages/catalog/catalog"], quota: ["pages/quota/quota"],
 };
 
 // Folds consecutive script tags of one page directory (a page split into
@@ -40,7 +42,7 @@ test("Node assembly equals the golden index.html modulo script paths", () => {
   const golden = fs.readFileSync(path.join(__dirname, "..", "testdata", "index.golden.html"), "utf8")
     .replace(/\/admin\/ui\/js\/([a-z_]+)\.js"/g, (_, name) => {
       assert.ok(scriptMap[name], `unknown script ${name}`);
-      return `/admin/ui/js/${scriptMap[name]}.js"`;
+      return `/admin/ui/js/${scriptMap[name].join('.js"></script>\n  <script src="/admin/ui/js/')}.js"`;
     });
   assert.equal(collapsePageScripts(assembleAdminHTML()), golden);
 });

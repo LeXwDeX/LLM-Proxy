@@ -49,7 +49,7 @@ func TestUILongAdminQueriesDeclareTimeout(t *testing.T) {
 		`tracePath(`:                   "timeoutMs: 60000", // builds /admin/data/trace?limit=…&offset=…&view=summary
 		`"/sync"`:                      "timeoutMs: 60000",
 		`"/test-model"`:                "timeoutMs: 0",
-		`"/keys/wakeup"`:               "timeoutMs: 0",
+		`"/keys/wakeup"`:               "timeoutMs: WAKEUP_TIMEOUT_MS",
 	}
 	call := regexp.MustCompile(`(?s)api\((.*?)\)\s*(?:;|\.then|,\s*$|\n\s*\.then)`)
 	seen := map[string]int{}
