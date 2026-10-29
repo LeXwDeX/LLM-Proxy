@@ -131,11 +131,14 @@ AdminApp.register("users", function (app) {
               "<button class='btn btn-sm' data-edit-user='" +
               esc(u.username) +
               "'>编辑</button>" +
-              "<button class='btn btn-sm' data-toggle-user='" +
-              esc(u.username) +
-              "'>" +
-              (u.disabled ? "启用" : "禁用") +
-              "</button>" +
+              // 禁止自禁用：自己的行不提供启用/禁用开关（后端亦拒绝）
+              (u.username === state.currentUser
+                ? ""
+                : "<button class='btn btn-sm' data-toggle-user='" +
+                  esc(u.username) +
+                  "'>" +
+                  (u.disabled ? "启用" : "禁用") +
+                  "</button>") +
               "<button class='btn btn-danger btn-sm' data-del-user='" +
               esc(u.username) +
               "'>删除</button>" +
@@ -214,6 +217,18 @@ AdminApp.register("users", function (app) {
       return;
     }
     var action = u.disabled ? "启用" : "禁用";
+    if (!u.disabled) {
+      showConfirm(
+        "确认禁用用户「" + username + "」？其全部会话将被立即吊销。",
+        function () {
+          applyUserDisabled(u, username, action);
+        },
+      );
+      return;
+    }
+    return applyUserDisabled(u, username, action);
+  }
+  async function applyUserDisabled(u, username, action) {
     try {
       await api("/admin/data/users/" + encodeURIComponent(username), {
         method: "PUT",

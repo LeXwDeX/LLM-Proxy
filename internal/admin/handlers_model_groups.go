@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
-	"github.com/go-chi/chi/v5"
 	"net/http"
 	"strings"
 )
@@ -14,7 +13,7 @@ import (
 // groupNameParam extracts and validates the {name} path param for group
 // routes (mirrors poolNameParam).
 func groupNameParam(r *http.Request) (string, error) {
-	name := strings.TrimSpace(chi.URLParam(r, "name"))
+	name := strings.TrimSpace(pathParam(r, "name"))
 	if name == "" {
 		return "", errors.New("group name must not be empty")
 	}
@@ -52,7 +51,7 @@ func (h *Handler) handleCreateModelGroup(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) handleUpdateModelGroup(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := pathParam(r, "name")
 	var req config.ModelGroup
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid json body"))
@@ -85,7 +84,7 @@ func (h *Handler) handleUpdateModelGroup(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) handleDeleteModelGroup(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "name")
+	name := pathParam(r, "name")
 	removedClients, err := h.modelGroupStore.Delete(name)
 	if err != nil {
 		status := http.StatusBadRequest
