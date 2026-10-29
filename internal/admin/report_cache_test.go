@@ -269,3 +269,104 @@ func TestReportCacheLeaderAbortDoesNotFailWaiters(t *testing.T) {
 		t.Fatal("waiter hung after leader abort")
 	}
 }
+
+// When every leader keeps aborting, waiters must not each fall back to an
+// uncached scan: underlying reads are bounded by the attempt cap, independent
+// of the number of waiters, and the survivors get a retryable 503.
+func TestReportCacheSustainedAbortBoundsReadsAndReturns503(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1000, 0)}
+	h, reads := newCountingHandler(clock)
+	var mu sync.Mutex
+	cancels := map[string]context.CancelFunc{}
+	release := make(chan struct{})
+	wrapped := h.cachedReport(func(w http.ResponseWriter, r *http.Request) {
+		n := reads.Add(1)
+		if n == 1 {
+			<-release // let every caller join the first flight
+		} else {
+			time.Sleep(50 * time.Millisecond) // let survivors rejoin this round
+		}
+		mu.Lock()
+		cancel := cancels[r.Header.Get("X-ID")]
+		mu.Unlock()
+		cancel() // this leader's own client leaves mid-scan
+		<-r.Context().Done()
+	})
+
+	const callers = 20
+	recs := make([]*httptest.ResponseRecorder, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		id := string(rune('A' + i))
+		mu.Lock()
+		cancels[id] = cancel
+		mu.Unlock()
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer cancel()
+			req := httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(ctx)
+			req.Header.Set("X-ID", id)
+			recs[i] = httptest.NewRecorder()
+			wrapped(recs[i], req)
+		}(i)
+	}
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("callers hung")
+	}
+	if got := reads.Load(); got > int64(reportFlightAttempts) {
+		t.Fatalf("underlying reads = %d with %d callers, want <= %d", got, callers, reportFlightAttempts)
+	}
+	var shed int
+	for _, rec := range recs {
+		if rec.Code == http.StatusServiceUnavailable {
+			shed++
+			if rec.Header().Get("Retry-After") == "" {
+				t.Fatal("503 without Retry-After")
+			}
+		}
+	}
+	if shed != callers-reportFlightAttempts {
+		t.Fatalf("503 count = %d, want %d", shed, callers-reportFlightAttempts)
+	}
+}
+
+func TestReportCacheByteBudgetAndOversize(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(1000, 0)}
+	c := newReportCache(5 * time.Second)
+	c.now = clock.Now
+	c.maxBytes, c.maxEntryBytes = 100, 40
+	body := func(n int) reportEntry { return reportEntry{status: http.StatusOK, body: make([]byte, n)} }
+
+	c.store("big", body(41)) // over the per-entry cap: not retained
+	if _, ok := c.lookup("big"); ok || c.bytes != 0 {
+		t.Fatalf("oversized entry retained (bytes=%d)", c.bytes)
+	}
+	c.store("a", body(40))
+	c.store("b", body(40))
+	c.store("c", body(40)) // 120 > 100: something live must be evicted
+	if c.bytes > c.maxBytes {
+		t.Fatalf("bytes = %d, over budget %d", c.bytes, c.maxBytes)
+	}
+	if _, ok := c.lookup("c"); !ok {
+		t.Fatal("newest entry missing")
+	}
+	// Expired entries are released on the next insert, without the cache being full.
+	clock.Advance(6 * time.Second)
+	c.store("d", body(10))
+	if len(c.entries) != 1 || c.bytes != 10 {
+		t.Fatalf("expired entries not swept: entries=%d bytes=%d", len(c.entries), c.bytes)
+	}
+	// Replacing a key does not double count.
+	c.store("d", body(20))
+	if c.bytes != 20 {
+		t.Fatalf("bytes after replace = %d, want 20", c.bytes)
+	}
+}

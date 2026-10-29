@@ -19,6 +19,14 @@ const defaultReportCacheTTL = 5 * time.Second
 // client-controlled, so unbounded keys must not grow memory.
 const reportCacheMaxEntries = 256
 
+// reportCacheMaxBytes bounds the total cached body bytes; reportCacheMaxEntryBytes
+// is the largest single response worth caching (an eighth of the budget), so one
+// huge report cannot evict everything else or pin memory.
+const (
+	reportCacheMaxBytes      = 32 << 20
+	reportCacheMaxEntryBytes = 4 << 20
+)
+
 type reportEntry struct {
 	status  int
 	header  http.Header
@@ -37,13 +45,22 @@ type reportCache struct {
 	ttl time.Duration
 	now func() time.Time // replaceable in tests
 
+	// Limits default to the package constants; tests shrink them.
+	maxEntries    int
+	maxBytes      int
+	maxEntryBytes int
+
 	mu      sync.Mutex
 	entries map[string]reportEntry
+	bytes   int
 	flight  singleflight.Group
 }
 
 func newReportCache(ttl time.Duration) *reportCache {
-	return &reportCache{ttl: ttl, now: time.Now, entries: make(map[string]reportEntry)}
+	return &reportCache{
+		ttl: ttl, now: time.Now, entries: make(map[string]reportEntry),
+		maxEntries: reportCacheMaxEntries, maxBytes: reportCacheMaxBytes, maxEntryBytes: reportCacheMaxEntryBytes,
+	}
 }
 
 // do returns the cached entry for key, or runs build once for all concurrent
@@ -77,21 +94,37 @@ func (c *reportCache) lookup(key string) (reportEntry, bool) {
 }
 
 func (c *reportCache) store(key string, e reportEntry) {
+	size := len(e.body)
+	if size > c.maxEntryBytes {
+		return // shared with the in-flight callers, but not retained
+	}
 	now := c.now()
 	e.expires = now.Add(c.ttl)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.entries) >= reportCacheMaxEntries {
-		for k, old := range c.entries {
-			if !now.Before(old.expires) {
-				delete(c.entries, k)
-			}
-		}
-		if len(c.entries) >= reportCacheMaxEntries {
-			c.entries = make(map[string]reportEntry)
+	if old, ok := c.entries[key]; ok {
+		c.bytes -= len(old.body)
+		delete(c.entries, key)
+	}
+	// Every insert sweeps expired entries, so stale bodies never wait for the
+	// cache to fill before being released.
+	for k, old := range c.entries {
+		if !now.Before(old.expires) {
+			c.bytes -= len(old.body)
+			delete(c.entries, k)
 		}
 	}
+	// Still over a limit with only live entries: drop arbitrary ones until the
+	// new entry fits (display cache; a miss only costs one recompute).
+	for k, old := range c.entries {
+		if len(c.entries) < c.maxEntries && c.bytes+size <= c.maxBytes {
+			break
+		}
+		c.bytes -= len(old.body)
+		delete(c.entries, k)
+	}
 	c.entries[key] = e
+	c.bytes += size
 }
 
 // bufferedResponse captures a handler's response so it can be shared.
@@ -126,7 +159,8 @@ func reportCacheKey(r *http.Request) string {
 }
 
 // reportFlightAttempts bounds how often a live caller re-joins a flight whose
-// leader's client went away.
+// leader's client went away. Each round is one singleflight, so at most this
+// many scans run per burst regardless of how many callers are waiting.
 const reportFlightAttempts = 3
 
 // cachedReport wraps a read-only report handler with the short-TTL cache. The
@@ -172,6 +206,9 @@ func (h *Handler) cachedReport(next http.HandlerFunc) http.HandlerFunc {
 			_, _ = w.Write(entry.body)
 			return
 		}
-		next(w, r)
+		// Leaders kept aborting. Running next here would multiply into one
+		// uncached full scan per waiter, so shed load instead; the UI retries.
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse("report temporarily unavailable, retry"))
 	}
 }
