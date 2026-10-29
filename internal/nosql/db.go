@@ -1,7 +1,12 @@
 package nosql
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"strconv"
+	"syscall"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -39,9 +44,64 @@ var allBuckets = []string{
 // write lock and fsyncs, so later callers keep piling into the next batch).
 const dbMaxBatchDelay = 2 * time.Millisecond
 
+const (
+	// mmapGranularity rounds InitialMmapSize up so the value is stable across restarts.
+	mmapGranularity = 64 << 20
+	// mmapFloor64 is the minimum reserved mapping on 64-bit platforms. A bbolt
+	// remap waits for every in-flight read transaction, and while it waits all new
+	// read and write transactions block; reports hold read transactions for
+	// seconds, so growth beyond the mapping stalled writers for that long.
+	// Reserving 1 GiB keeps a database under ~512 MiB (2x doubling) clear of
+	// remaps. 32-bit processes have scarce address space and use a smaller floor.
+	mmapFloor64 = 1 << 30
+	mmapFloor32 = 128 << 20
+)
+
+// initialMmapSize returns bbolt's InitialMmapSize for a database file:
+// max(2x current size, floor), rounded up to mmapGranularity. It only reserves
+// virtual address space: no physical memory is used and the file is not grown
+// (it still extends on demand), so the headroom is free.
+func initialMmapSize(fileSize int64) int {
+	floor := int64(mmapFloor64)
+	if strconv.IntSize == 32 {
+		floor = mmapFloor32
+	}
+	want := fileSize * 2
+	if want < floor {
+		want = floor
+	}
+	if maxInt := int64(^uint(0) >> 1); want > maxInt/2 || want < 0 {
+		// Leave room for bbolt's own rounding.
+		want = maxInt / 2
+	}
+	want = (want + mmapGranularity - 1) / mmapGranularity * mmapGranularity
+	return int(want)
+}
+
+// boltOpen is replaceable in tests to exercise the mmap fallback.
+var boltOpen = bolt.Open
+
+// openBolt opens the file with a reserved mapping. When the OS refuses the
+// reservation (restricted address space, ulimit -v, containers) it logs a
+// warning and retries without InitialMmapSize, restoring the previous behavior.
+func openBolt(path string) (*bolt.DB, error) {
+	var size int64
+	if fi, err := os.Stat(path); err == nil {
+		size = fi.Size()
+	}
+	opts := &bolt.Options{Timeout: 1 * time.Second, InitialMmapSize: initialMmapSize(size)}
+	db, err := boltOpen(path, 0o600, opts)
+	if err != nil && errors.Is(err, syscall.ENOMEM) {
+		slog.Warn("bbolt: reserving initial mmap failed; opening without it (database growth may briefly block while reports run)",
+			"initial_mmap_bytes", opts.InitialMmapSize, "error", err)
+		return boltOpen(path, 0o600, &bolt.Options{Timeout: 1 * time.Second})
+	}
+	return db, err
+}
+
 // OpenDB opens a bbolt database and creates all required buckets.
 func OpenDB(path string) (*bolt.DB, error) {
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 1 * time.Second})
+	db, err := openBolt(path)
 	if err != nil {
 		return nil, fmt.Errorf("open bolt db: %w", err)
 	}
