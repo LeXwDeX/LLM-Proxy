@@ -1,58 +1,35 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
 
-// uiScriptPathMap maps the pre-split flat script URLs (as recorded in
-// testdata/index.golden.html) to the current layout.
-// A page split into several files lists them in load order.
-var uiScriptPathMap = map[string][]string{
-	"core": {"core/core"}, "schema": {"core/schema"}, "navigation": {"core/navigation"}, "bootstrap": {"core/bootstrap"},
-	"overview": {"pages/overview/overview_state", "pages/overview/overview_util", "pages/overview/overview_range", "pages/overview/overview_trends", "pages/overview/overview_health", "pages/overview/overview_activity", "pages/overview/overview"},
-	"targets": {"pages/targets/targets", "pages/targets/health", "pages/targets/detail", "pages/targets/key-list",
-		"pages/targets/model-mappings", "pages/targets/edit-modal", "pages/targets/save", "pages/targets/list"},
-	"pools": {"pages/pools/pools"}, "clients": {"pages/clients/clients"},
-	"usage": {"pages/usage/usage_state", "pages/usage/usage_range", "pages/usage/usage_filters", "pages/usage/usage_tables", "pages/usage/usage_chart", "pages/usage/usage"},
-	"pricing": {"pages/pricing/pricing-shared", "pages/pricing/pricing-rates", "pages/pricing/pricing-periods",
-		"pages/pricing/pricing-list", "pages/pricing/pricing-modal", "pages/pricing/pricing"},
-	"audit_trace": {"pages/audit_trace/audit_trace"}, "users": {"pages/users/users"},
-	"catalog": {"pages/catalog/catalog"},
-	"quota": {"pages/quota/quota-model", "pages/quota/quota-data", "pages/quota/quota-groups", "pages/quota/quota-levels",
-		"pages/quota/quota-summary", "pages/quota/quota-drawer", "pages/quota/quota-sync", "pages/quota/quota"},
-}
-
-// TestAssembledHTMLMatchesGolden pins the split layout to the original single
-// file: apart from the script src paths the assembly is byte-for-byte equal.
-// The golden is a transitional guard and can be dropped once the layout settles.
-func TestAssembledHTMLMatchesGolden(t *testing.T) {
-	raw, err := os.ReadFile("testdata/index.golden.html")
+// TestAssembledHTMLMatchesNodeAssembly keeps the Go and Node include
+// implementations identical; Node tests rely on the latter.
+func TestAssembledHTMLMatchesNodeAssembly(t *testing.T) {
+	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Fatal(err)
+		t.Skip("node not available")
 	}
-	re := regexp.MustCompile(`<script src="/admin/ui/js/([a-z_]+)\.js"></script>`)
-	golden := re.ReplaceAllStringFunc(string(raw), func(m string) string {
-		name := re.FindStringSubmatch(m)[1]
-		to, ok := uiScriptPathMap[name]
-		if !ok {
-			t.Fatalf("golden references unknown script %s", name)
-		}
-		tags := make([]string, len(to))
-		for i, rel := range to {
-			tags[i] = `<script src="/admin/ui/js/` + rel + `.js"></script>`
-		}
-		return strings.Join(tags, "\n  ")
-	})
-	if got := adminUIHTML; got != golden {
-		t.Fatalf("assembled HTML differs from golden (len %d vs %d)", len(got), len(golden))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, node, "-e",
+		`process.stdout.write(require("../../scripts/testing/assemble_admin_html.cjs").assembleAdminHTML())`).Output()
+	if err != nil {
+		t.Fatalf("node assembly failed: %v", err)
+	}
+	if got := adminUIHTML; got != string(out) {
+		t.Fatalf("Go and Node assembly differ (len %d vs %d)", len(got), len(out))
 	}
 }
 

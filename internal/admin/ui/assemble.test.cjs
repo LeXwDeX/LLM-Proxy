@@ -1,7 +1,6 @@
 "use strict";
 // The Node include helper must produce the same HTML as the Go assembly
-// (ui_assemble.go). Go pins its output to testdata/index.golden.html; this test
-// pins the Node output to the same golden with the same script-path mapping.
+// (ui_assemble.go); Go compares its output against this helper directly.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -9,28 +8,22 @@ const os = require("node:os");
 const path = require("node:path");
 const { assembleAdminHTML } = require("../../../scripts/testing/assemble_admin_html.cjs");
 
-// A page split into several files lists them in load order.
-const scriptMap = {
-  core: ["core/core"], schema: ["core/schema"], navigation: ["core/navigation"], bootstrap: ["core/bootstrap"],
-  overview: ["overview_state", "overview_util", "overview_range", "overview_trends", "overview_health", "overview_activity", "overview"].map((n) => `pages/overview/${n}`),
-  targets: ["targets", "health", "detail", "key-list", "model-mappings", "edit-modal", "save", "list"].map((n) => `pages/targets/${n}`),
-  pools: ["pages/pools/pools"], clients: ["pages/clients/clients"],
-  usage: ["usage_state", "usage_range", "usage_filters", "usage_tables", "usage_chart", "usage"].map((n) => `pages/usage/${n}`),
-  pricing: ["pages/pricing/pricing-shared", "pages/pricing/pricing-rates", "pages/pricing/pricing-periods",
-    "pages/pricing/pricing-list", "pages/pricing/pricing-modal", "pages/pricing/pricing"],
-  audit_trace: ["pages/audit_trace/audit_trace"], users: ["pages/users/users"],
-  catalog: ["pages/catalog/catalog"],
-  quota: ["pages/quota/quota-model", "pages/quota/quota-data", "pages/quota/quota-groups", "pages/quota/quota-levels",
-    "pages/quota/quota-summary", "pages/quota/quota-drawer", "pages/quota/quota-sync", "pages/quota/quota"],
-};
-
-test("Node assembly equals the golden index.html modulo script paths", () => {
-  const golden = fs.readFileSync(path.join(__dirname, "..", "testdata", "index.golden.html"), "utf8")
-    .replace(/<script src="\/admin\/ui\/js\/([a-z_]+)\.js"><\/script>/g, (_, name) => {
-      assert.ok(scriptMap[name], `unknown script ${name}`);
-      return scriptMap[name].map((rel) => `<script src="/admin/ui/js/${rel}.js"></script>`).join("\n  ");
+test("Node assembly leaves no include marker and references every script exactly once", () => {
+  const html = assembleAdminHTML();
+  assert.ok(!html.includes("@include"), "leftover include marker");
+  const jsRoot = path.join(__dirname, "js");
+  const files = [];
+  for (const dir of ["core", "pages"]) {
+    const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).forEach((e) => {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.name.endsWith(".js") && !e.name.endsWith(".test.js")) files.push(path.relative(jsRoot, full).split(path.sep).join("/"));
     });
-  assert.equal(assembleAdminHTML(), golden);
+    walk(path.join(jsRoot, dir));
+  }
+  const tags = [...html.matchAll(/<script src="\/admin\/ui\/js\/([^"]+)"><\/script>/g)].map((m) => m[1]);
+  assert.deepEqual([...tags].sort(), files.sort());
+  assert.equal(new Set(tags).size, tags.length, "duplicate script tag");
 });
 
 test("include errors fail loudly", () => {

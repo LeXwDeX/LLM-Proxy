@@ -253,6 +253,9 @@ function createHarness({
   location = {},
   // Script names (e.g. "pages/users/users.js") that fail to load, to model a 404/SyntaxError.
   omitScripts = [],
+  // Failed-script paths recorded by the index.html boot listener; omitted
+  // scripts are added automatically, as the browser's error event would.
+  bootFailures = [],
   history = undefined,
 } = {}) {
   const windowListeners = {};
@@ -395,6 +398,8 @@ function createHarness({
     return { ok: true, status: 200, text: async () => JSON.stringify(data) };
   }
   sandbox.window = sandbox;
+  const recorded = bootFailures.concat(omitScripts.map((name) => "/admin/ui/js/" + name));
+  if (recorded.length) sandbox.__adminBootFailures = recorded;
   const context = vm.createContext(sandbox);
   return {
     context,

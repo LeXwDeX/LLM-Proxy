@@ -18,7 +18,6 @@
 | `ui/css/admin.css` | 全部样式，由 `index.html` 的 `<style>` 内 include 引入 |
 | `ui/partials/pages/<page>.html` / `ui/partials/modals/<kebab-id>.html` | 每页一个 `div.page`；每个 body 级弹层（`.modal-overlay` / `.quota-drawer-overlay`）一个文件，各含其前导注释行 |
 | `ui/js/core/`、`ui/js/pages/<name>/` | 脚本：`core`、`schema`、`navigation`、`bootstrap` 在 `core/`；功能模块在 `pages/<name>/<name>.js`。`*.test.cjs` 不被 embed |
-| `internal/admin/testdata/index.golden.html` | 拆分前 `index.html` 的快照；`TestAssembledHTMLMatchesGolden` 校验装配结果逐字节一致（仅脚本路径映射除外）。过渡性守卫，布局稳定后可删除 |
 
 ## 🚨 会话与角色守卫（安全边界，禁止绕过）
 
@@ -37,7 +36,7 @@
 - **后台轮询不续期**：`api(url, {background: true})` 发送 `X-Admin-Background: 1`，`SessionManager.Middleware` 对该请求不滑动会话、不重发 Cookie。页面的纯轮询应逐步改用此选项。会话绝对上限当前无配置项，暂未实现。
 - **部署过期提示**：`/admin/api/me` 返回 `version`；core 记录首次版本，之后每 5 分钟及标签页恢复可见时后台复查，变化则显示“后台已更新，请刷新页面”。
 - **启动顺序**：schema 成功并 `initialize()` 后立即加载总览；`/api/me` 与 trace 探测并行，布局保持 `inert`、body 保持 `readonly-mode` 直到角色确认。`ready` 不等待 trace 探测。缺失模块（脚本加载失败）在启动横幅点名。
-- **深链**：`#<page>` 选择页面；用户点击导航用 `pushState`（Back 可用），启动与纠正用 `replaceState`；`hashchange` 在白名单与可达性内切换页面，不可达（如只读用户的 `#users`）则纠正为当前页。非总览深链等角色确认后才加载，保证页面以正确的只读状态渲染。登录页脚本把 URL hash 带入 `next`。缺失模块的启动横幅会点名模块与应定义它的脚本，boot watchdog 在 `data-boot-error` 存在时不再覆盖。
+- **深链**：`#<page>` 选择页面；用户点击导航用 `pushState`（Back 可用），启动与纠正用 `replaceState`；`hashchange` 在白名单与可达性内切换页面，不可达（如只读用户的 `#users`）则纠正为当前页。非总览深链等角色确认后才加载，保证页面以正确的只读状态渲染。登录页脚本把 URL hash 带入 `next`。缺失模块的启动横幅会点名模块及 watchdog 记录的失败脚本路径，boot watchdog 在 `data-boot-error` 存在时不再覆盖。
 
 ## CRUD 接口约定
 
@@ -57,13 +56,20 @@
 ## UI 文件布局与 include 机制
 
 - `ui/index.html` 中独占一行的 `<!-- @include 相对路径 -->`（可带缩进，路径相对 `ui/`）整行（含换行）被所引文件内容逐字替换，不重排缩进；被引文件必须以换行结尾，可嵌套。目标缺失、循环引用或残留 `@include` 标记会使包初始化 panic，测试同样覆盖。
-- Go 在 `ui_assemble.go` 装配；Node 测试统一经 `scripts/testing/assemble_admin_html.cjs`（规则一致，`ui/assemble.test.cjs` 与 Go 测试都对照同一份 golden），不得再直接读取 `index.html` 当完整页面。
+- Go 在 `ui_assemble.go` 装配；Node 测试统一经 `scripts/testing/assemble_admin_html.cjs`（规则与 Go 一致，`TestAssembledHTMLMatchesNodeAssembly` 与 `ui/assemble.test.cjs` 守卫），不得再直接读取 `index.html` 当完整页面。
 - 新增页面：在 `ui/partials/pages/` 新建文件（内含该页的前导注释行与唯一的 `div.page`），在 `index.html` 对应位置加 include 行。新增弹层：在 `ui/partials/modals/` 新建文件（恰好一个 body 级弹层），在 `index.html` 的弹层区加 include 行。`TestModalPartialsHoldExactlyOneOverlay` 与 `TestPagePartialsHoldExactlyOnePage` 强制这两条。
 - 脚本落点：页面脚本放 `ui/js/pages/<name>/*.js`（仅一层目录，由 `ui_embed.go` 的 `pages/*/*.js` 模式 embed；更深层级不会被 embed）；`core/` 同理只含 `*.js`。页面拆成多个文件时的硬性规则：由页面的一个模块持有共享可变状态，经明确的对象或访问器暴露，不保留过期副本；页面对外 API（其他页面 `bind` 的名称）保持在页面主模块名下（必要时用门面模块）；跨模块访问只用 `app.bind` / `initializeModule`；加载顺序即 `index.html` 脚本清单顺序；文件放在 `js/pages/<page>/`。拆分出的新文件必须按依赖顺序加入 `index.html` 脚本清单：清单中每个标签必须解析到 embed 文件，每个 embed 的 `.js` 恰好被一个标签加载，文件名可含字母、数字、`_`、`-`、`.`（`TestUIModuleManifestMatchesEmbeddedAssets` 强制）。`core/core.js` 必须第一个、`core/bootstrap.js` 最后一个加载。
 - `fake-clock.cjs` 及其他 `*.cjs`（含 `*.test.cjs`、`*.browser.cjs`）不会被 embed，也不属于脚本清单。
 - 针对某页面脚本的检查使用 `adminUIPageScripts(t, "<page>")`（Go）或 `scripts/testing/admin_ui_scripts.cjs` 的 `pageSource("<page>")`（Node），它们拼接该目录下全部文件，目录为空或内容为空时失败；不要把测试写死到单个文件路径。脚本清单（Go：`adminUIScriptManifest()`，Node：`manifest()`）从装配后的 HTML 推导，不要再维护硬编码列表。
 - 装配拒绝：同一 partial 被 include 两次（会产生重复 DOM id）、任何被引文件含 UTF-8 BOM。
-- 样式写入 `ui/css/admin.css`；`index.html` 内除 boot watchdog 外不得新增内联脚本。
+- 样式写入 `ui/css/admin.css`；`index.html` 内除 boot watchdog 外不得新增内联脚本；watchdog 位于 `<head>`、早于全部 `/admin/ui/js/` 脚本，并以捕获阶段 `error` 监听把加载失败或加载期报错的脚本路径记入 `window.__adminBootFailures`，`bootstrap.js` 的启动横幅据此列出“以下脚本加载失败”，不得按模块名猜测路径。
+
+## 拆分约定（硬性规则）
+
+- 页面文件放在 `ui/js/pages/<page>/`；主模块文件 `<page>.js` 注册 `<page>`；部件模块注册 camelCase 的 `<page><Part>`（如 `targetsSave`、`overviewState`），文件名可与模块名不同。
+- 其他页面只 `app.bind` 某页面的主模块（`ui/page-boundaries.test.cjs` 强制）；跨页通用的辅助函数放入 `core`。
+- 没有任何模块 `app.bind` 的部件，须由所属页面主模块用 `app.requires([...])` 声明，使启动检查能发现其加载失败。
+- `index.html` 加载顺序：状态与辅助模块先于页面主模块。
 
 ## UI 弹层统一规范（强制）
 

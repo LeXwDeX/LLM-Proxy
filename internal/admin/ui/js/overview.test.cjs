@@ -259,6 +259,21 @@ test("client selection changes both charts only; rows, search, and bucket focus 
   assert.match(h.get("activityTokenReadout").textContent, /20/);
   await h.get("activityResetScope").fire("click"); assert.equal(h.get("activityChartScope").textContent, "全站");
 });
+test("timer-driven polls are background requests; entry and manual loads are foreground", async () => {
+  const h = harness(); h.module.startOverviewAutoRefresh(); await h.advance(0);
+  const isBackground = c => c.opts && c.opts.background === true;
+  assert.ok(h.calls.length >= 4 && h.calls.every(c => !isBackground(c)), "page entry stays foreground");
+  const before = h.calls.length;
+  await h.advance(5000);
+  const polled = h.calls.slice(before);
+  assert.ok(polled.some(c => c.url === "/admin/api/activity"), "the timer re-polls activity");
+  assert.ok(polled.every(isBackground), "every timer-driven request is a background request");
+  const afterPoll = h.calls.length;
+  await h.module.loadOverview(true);
+  const manual = h.calls.slice(afterPoll);
+  assert.ok(manual.length >= 4 && manual.every(c => !isBackground(c)), "manual refresh is foreground");
+  h.module.stopOverviewAutoRefresh();
+});
 test("hidden pages abort polling and visible homepage resumes immediately", async () => {
   const h = harness(); h.module.startOverviewAutoRefresh(); await h.module.loadOverview(); const before = h.calls.length;
   h.doc.hidden = true; h.doc.listeners.visibilitychange(); assert.equal(h.timers.size, 0);

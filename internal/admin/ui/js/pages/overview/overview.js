@@ -33,12 +33,13 @@ AdminApp.register("overview", function (app) {
     S.timer = null;
     if (S.enabled && visible()) S.timer = setTimeout(function () {
       S.timer = null;
-      loadOverview();
+      loadOverview(false, true);
     }, backoffDelay(S.pollFailures));
   }
   // Each page-owned request settles even if the transport ignores cancellation.
   // Abort also releases the real fetch before another poll can start.
-  function request(path, controller, timeoutMs) {
+  // background: timer-driven polls must not slide the admin session.
+  function request(path, controller, timeoutMs, background) {
     var timeout, onAbort;
     var expired = false;
     return new Promise(function (resolve, reject) {
@@ -50,7 +51,7 @@ AdminApp.register("overview", function (app) {
       controller.signal.addEventListener("abort", onAbort, {once: true});
       timeout = setTimeout(function () { expired = true; controller.abort(); }, timeoutMs || requestTimeoutMs);
       // timeoutMs: 0 turns off the core api default so requestTimeoutMs is the only deadline.
-      Promise.resolve(api(path, {signal: controller.signal, timeoutMs: 0})).then(resolve, reject);
+      Promise.resolve(api(path, background === true ? {signal: controller.signal, timeoutMs: 0, background: true} : {signal: controller.signal, timeoutMs: 0})).then(resolve, reject);
     }).finally(function () {
       clearTimeout(timeout);
       controller.signal.removeEventListener("abort", onAbort);
@@ -84,7 +85,7 @@ AdminApp.register("overview", function (app) {
       button.setAttribute("aria-pressed", button.dataset.overviewRange === S.selectedRange ? "true" : "false");
     });
   }
-  function loadMetrics(force) {
+  function loadMetrics(force, background) {
     if (!visible()) return Promise.resolve();
     if (S.metricsFlight) return S.metricsFlight;
     if (!force && S.metricsFetchedAt && Date.now() - S.metricsFetchedAt < 60000) return Promise.resolve();
@@ -94,7 +95,7 @@ AdminApp.register("overview", function (app) {
     S.metricsController = controller;
     var flight = (async function () {
       try {
-        var data = await request("/admin/metrics", controller);
+        var data = await request("/admin/metrics", controller, undefined, background);
         if (epoch !== S.generation || controller.signal.aborted || !visible()) return;
         if (!isObject(data)) throw new Error("指标数据格式无效");
         S.metricsSnapshot = data;
@@ -115,7 +116,7 @@ AdminApp.register("overview", function (app) {
     S.metricsFlight = flight;
     return flight;
   }
-  function loadAggregate(force) {
+  function loadAggregate(force, background) {
     if (!visible()) return Promise.resolve();
     if (S.aggregateFlight) return S.aggregateFlight;
     if (!force && S.aggregateFetchedAt && Date.now() - S.aggregateFetchedAt < 60000) return Promise.resolve();
@@ -132,7 +133,7 @@ AdminApp.register("overview", function (app) {
     }
     var flight = (async function () {
       try {
-        var data = await request(aggregatePath(window), controller, window.granularity === "day" ? multiDayTimeoutMs : requestTimeoutMs);
+        var data = await request(aggregatePath(window), controller, window.granularity === "day" ? multiDayTimeoutMs : requestTimeoutMs, background);
         if (epoch !== S.aggregateGeneration || controller.signal.aborted || !visible()) return;
         if (!isObject(data) || !isObject(data.totals)) throw new Error("聚合数据格式无效");
         S.aggregateSnapshot = data;
@@ -184,7 +185,7 @@ AdminApp.register("overview", function (app) {
     renderRangePanels();
     if (visible()) loadAggregate(true);
   }
-  function loadHistory(force) {
+  function loadHistory(force, background) {
     if (!visible()) return Promise.resolve();
     if (S.historyFlight) return S.historyFlight;
     if (!force && S.historyFetchedAt && Date.now() - S.historyFetchedAt < 60000) return Promise.resolve();
@@ -195,7 +196,7 @@ AdminApp.register("overview", function (app) {
     S.historyFetchedAt = Date.now();
     var flight = (async function () {
       try {
-        var data = await request("/admin/api/overview", controller, multiDayTimeoutMs);
+        var data = await request("/admin/api/overview", controller, multiDayTimeoutMs, background);
         if (epoch === S.generation && !controller.signal.aborted && visible()) {
           S.historySnapshot = isObject(data) ? data : {};
           S.historyError = "";
@@ -226,9 +227,10 @@ AdminApp.register("overview", function (app) {
     S.historyFlight = flight;
     return flight;
   }
-  function loadOverview(forceHistory) {
+  function loadOverview(forceHistory, background) {
     if (forceHistory === true) S.pollFailures = 0;
-    return Promise.all([loadActivity(), loadHistory(forceHistory === true), loadMetrics(forceHistory === true), loadAggregate(forceHistory === true)]);
+    var bg = background === true;
+    return Promise.all([loadActivity(bg), loadHistory(forceHistory === true, bg), loadMetrics(forceHistory === true, bg), loadAggregate(forceHistory === true, bg)]);
   }
   function startOverviewAutoRefresh() {
     S.enabled = true;
