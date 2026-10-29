@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -15,7 +16,7 @@ import (
 // uiScriptSrcRe matches the module <script> tags in index.html. The served URL
 // gets ?v=<version>-<nonce> so no browser cache entry (including a stale 302
 // stored while logged out) can be reused for a new page load.
-var uiScriptSrcRe = regexp.MustCompile(`(<script src="/admin/ui/js/[A-Za-z0-9_]+\.js)("></script>)`)
+var uiScriptSrcRe = regexp.MustCompile(`(<script src="/admin/ui/js/[A-Za-z0-9_./-]+\.js)("></script>)`)
 
 func versionScriptURLs(html string) string {
 	buf := make([]byte, 8)
@@ -24,8 +25,12 @@ func versionScriptURLs(html string) string {
 		// nonce (the version suffix and no-store headers still apply).
 		buf = make([]byte, 8)
 	}
-	suffix := "?v=" + version.Version + "-" + hex.EncodeToString(buf)
-	return uiScriptSrcRe.ReplaceAllString(html, "${1}"+suffix+"${2}")
+	// The version comes from build flags; escape it for the URL and append it
+	// literally so neither the attribute nor the replacement template expands it.
+	suffix := "?v=" + url.QueryEscape(version.Version) + "-" + hex.EncodeToString(buf)
+	return uiScriptSrcRe.ReplaceAllStringFunc(html, func(tag string) string {
+		return strings.TrimSuffix(tag, `"></script>`) + suffix + `"></script>`
+	})
 }
 
 func (h *Handler) handleUI(w http.ResponseWriter, r *http.Request) {
