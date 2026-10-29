@@ -48,6 +48,7 @@ func (h *Handler) targetStatusesForSession(r *http.Request, now time.Time) []pro
 func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	metrics := h.proxyService.MetricsSnapshot()
+	statuses := h.proxyService.TargetStatuses(now)
 	uptime := now.Sub(metrics.StartTime)
 	if uptime < 0 {
 		uptime = 0
@@ -82,7 +83,7 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		GeneratedAt:       now,
 		UptimeSeconds:     uptime.Seconds(),
 		ActiveRequests:    metrics.ActiveRequests,
-		Targets:           len(h.proxyService.TargetStatuses(now)),
+		Targets:           len(statuses),
 		ResponsesWS:       metrics.ResponsesWS,
 		Persistence:       h.proxyService.PersistenceMetrics(),
 		ObservationBudget: h.proxyService.ObservationBudgetMetrics(),
@@ -100,7 +101,7 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	response.Requests.ClientCanceled = metrics.TotalClientCanceled
 
 	// S5 调度可观测（议题 #18）：每节点运行态含派生调度相位与亲和/熔断计数。
-	for _, ts := range h.proxyService.TargetStatuses(now) {
+	for _, ts := range statuses {
 		response.TargetsRuntime = append(response.TargetsRuntime, metricsTargetRuntime{
 			Name:           ts.Name,
 			InFlight:       ts.InFlight,
