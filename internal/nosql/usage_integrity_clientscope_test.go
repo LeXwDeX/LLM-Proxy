@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -121,6 +122,14 @@ func clientScopeFullReference(t *testing.T, db *bolt.DB, filter usage.Filter, re
 // any ForgetUsageIntegrityClassification call, which drops the classification
 // the probe needs.
 //
+// The helper only applies to a scopeEligible shape: a non-empty client, an
+// empty model, hooks.windowKeys and a nil allow, exactly the read shape
+// readClientScopeUnits builds. It also needs a live classification on a
+// store without the index damage that makes classification unavailable;
+// integrityFastFrom then returns nil, probeClientScopedRead returns nil at
+// once, and the decline assertion would pass vacuously. The nil check after
+// the transaction fails loudly instead of reporting that empty pass.
+//
 // A declined read normally counts exactly one client_scope fallback, but so
 // does a scoped attempt that fails during its walks: the caller discards it,
 // counts a fallback and replays the exhaustive read. The counter alone
@@ -130,16 +139,27 @@ func clientScopeProbeDeclines(t *testing.T, db *bolt.DB, client string, from, to
 	t.Helper()
 	start, end := from.Truncate(time.Hour), to.Truncate(time.Hour).Add(time.Hour)
 	declined := false
+	var fast *integrityFast
 	if err := db.View(func(tx *bolt.Tx) error {
 		ctx := integrityReadContext(context.Background(), tx, from, to)
 		progress, err := loadIndexProgress(tx)
 		if err != nil {
 			return err
 		}
-		declined = probeClientScopedRead(ctx, tx, client, start, end, progress, integrityFastFrom(ctx, tx)) == nil
+		// Report a missing classification after the transaction closes: calling
+		// t.Fatalf inside the View callback would unwind through bbolt's
+		// transaction handling instead of releasing it normally.
+		fast = integrityFastFrom(ctx, tx)
+		if fast == nil {
+			return nil
+		}
+		declined = probeClientScopedRead(ctx, tx, client, start, end, progress, fast) == nil
 		return nil
 	}); err != nil {
 		t.Fatalf("probe %s: %v", client, err)
+	}
+	if fast == nil {
+		t.Fatalf("probe %s: no usable classification (integrityFastFrom returned nil), so the probe returns nil immediately and this shape assertion would pass vacuously: the shape assertion needs a usable classification, and this helper only applies to a scopeEligible shape (client set, empty model, windowKeys, nil allow) on a classified store", client)
 	}
 	return declined
 }
@@ -763,18 +783,43 @@ func TestClientScopedQuotaReadFallbacks(t *testing.T) {
 // errCallContext reports context.Canceled from the from-th Err call on, so a
 // test can cancel a read at an exact check without racing a goroutine. Calls
 // before that point see the parent's result, and Done/Value pass through.
+// sites names the function of every Err call: the cancellation test asserts
+// which check it canceled at, so an Err call added ahead of the probe turns
+// into a clear failure instead of silently moving the cancellation earlier.
 type errCallContext struct {
 	context.Context
 	from  int
 	calls int
+	sites []string
 }
 
 func (c *errCallContext) Err() error {
 	c.calls++
+	c.sites = append(c.sites, errCallSite())
 	if c.from > 0 && c.calls >= c.from {
 		return context.Canceled
 	}
 	return c.Context.Err()
+}
+
+// errCallSite names the innermost function that made the ctx.Err() call.
+// Frames are expanded, so a call inlined into its caller still reports the
+// logical function that contains it; runtime.FuncForPC would report only the
+// enclosing physical function.
+func errCallSite() string {
+	var pcs [16]uintptr
+	n := runtime.Callers(2, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		fn := frame.Function
+		if fn != "" && !strings.Contains(fn, "errCallContext") && !strings.HasSuffix(fn, "errCallSite") {
+			return fn
+		}
+		if !more {
+			return ""
+		}
+	}
 }
 
 // TestClientScopedQuotaReadCancellationIsNotAFallback proves a canceled read
@@ -785,9 +830,13 @@ func (c *errCallContext) Err() error {
 // The probe is canceled deterministically mid-flight. The read's first Err
 // call is the entry precheck (readCostUnitsInScope); the probe's first hourly
 // check is the second (integrityFastFrom, integrityReadContext,
-// missingUsageAggregateSources and loadIndexProgress do not call Err). With
-// the wrapper canceling from the second call on, the probe declines, and the
-// following exhaustive walks return context.Canceled.
+// missingUsageAggregateSources and loadIndexProgress do not call Err). The
+// test pins that sequence via errCallContext.sites: the second call must come
+// from probeClientScopedRead. With the wrapper canceling from the second call
+// on, the probe declines, and the following exhaustive walks return
+// context.Canceled. An Err call added ahead of the probe would make the test
+// cancel before the probe and stop covering the counted path; the site
+// assertion fails with that reason instead of letting the case pass.
 func TestClientScopedQuotaReadCancellationIsNotAFallback(t *testing.T) {
 	productionIntegrityMode(t)
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
@@ -800,18 +849,31 @@ func TestClientScopedQuotaReadCancellationIsNotAFallback(t *testing.T) {
 	filter := usage.Filter{ClientName: "alice", From: &from, To: &now}
 	resolver := exactCostTable{replayCosts}
 	// The control is the same read on the same healthy, classified store
-	// without cancellation: it takes the scoped enumeration and succeeds
-	// without counting a fallback.
-	units, err := store.readCostUnitsInScope(context.Background(), filter, resolver, true, nil, costReadHooks{windowKeys: true}, nil)
+	// without cancellation: it must take the scoped enumeration (no legacy
+	// scan) and succeed without counting a fallback.
+	visits, units, err := readClientScopeUnits(store, "alice", from, now, false)
 	if err != nil {
 		t.Fatalf("control read: %v", err)
 	}
-	if len(units.units) != 10 {
-		t.Fatalf("control read returned %d units, want 10", len(units.units))
+	if len(units) != 10 {
+		t.Fatalf("control read returned %d units, want 10", len(units))
+	}
+	if !visits.scopedIndexRead() {
+		t.Fatalf("control read did not use the scoped index block: %+v", visits)
 	}
 	before := clientScopeFallbacks(db)
-	if _, err := store.readCostUnitsInScope(&errCallContext{Context: context.Background(), from: 2}, filter, resolver, true, nil, costReadHooks{windowKeys: true}, nil); !errors.Is(err, context.Canceled) {
+	cancelCtx := &errCallContext{Context: context.Background(), from: 2}
+	if _, err := store.readCostUnitsInScope(cancelCtx, filter, resolver, true, nil, costReadHooks{windowKeys: true}, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled read returned %v, want context.Canceled", err)
+	}
+	// The second Err call must come from the probe; otherwise the cancellation
+	// lands before the probe and this case no longer covers the count path
+	// after the probe declines.
+	if len(cancelCtx.sites) < 2 {
+		t.Fatalf("canceled read made %d Err calls, want at least 2; the second Err call must come from probeClientScopedRead, otherwise the cancellation lands before the probe and this case cannot cover the counted path after the probe declines (sites: %v)", len(cancelCtx.sites), cancelCtx.sites)
+	}
+	if site := cancelCtx.sites[1]; !strings.HasSuffix(site, ".probeClientScopedRead") {
+		t.Fatalf("second Err call came from %q, want probeClientScopedRead: the second Err call must come from the probe, otherwise the cancellation lands before the probe and this case cannot cover the counted path after the probe declines (sites: %v)", site, cancelCtx.sites)
 	}
 	if got := clientScopeFallbacks(db) - before; got != 0 {
 		t.Fatalf("canceled read counted %d client_scope fallbacks, want 0: cancellation is not a scope decline", got)
@@ -902,7 +964,10 @@ type clientScopeShape struct {
 	wantScoped bool
 	// requireProbeDecline asserts the probe itself declines, not merely that
 	// the counter moved: a scoped attempt failing after attachment also counts
-	// a fallback through its replay (see clientScopeProbeDeclines).
+	// a fallback through its replay (see clientScopeProbeDeclines). Shapes
+	// using it must stay scopeEligible (client set, empty model, windowKeys,
+	// nil allow) on a classified store; otherwise the helper fails instead of
+	// passing vacuously.
 	requireProbeDecline bool
 	// v1Only builds the client index as a completed v1-only migration (done
 	// marker, no v2 anchors) instead of running the v2 migration.
