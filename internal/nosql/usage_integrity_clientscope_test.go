@@ -51,7 +51,12 @@ const clientScopeFallbackReason = "client_scope_fallback"
 
 type clientScopeVisits struct {
 	raw, receipt, quota, evidence int
-	indexScan, legacyScan         bool
+	// Probe enumeration over the window's hours: one hour-state read and one
+	// index range seek per client prefix (filter client and empty client), and
+	// one decode per empty-client row. These grow with the window hours rather
+	// than with the visited objects, so the scaling guards watch them too.
+	hourStates, seeks, emptyDecoded int
+	indexScan, legacyScan           bool
 }
 
 // scopedIndexRead reports whether this run took the index path to a result
@@ -76,6 +81,13 @@ func readClientScopeUnitsOpt(store *UsageStore, filter usage.Filter, resolver us
 	}
 	defer integrityForceFast.Store(saved)
 	var visits clientScopeVisits
+	savedHour, savedSeek, savedDecoded := clientScopeProbeHourState, clientScopeProbeRangeSeek, clientScopeProbeDecoded
+	clientScopeProbeHourState = func() { visits.hourStates++ }
+	clientScopeProbeRangeSeek = func() { visits.seeks++ }
+	clientScopeProbeDecoded = func() { visits.emptyDecoded++ }
+	defer func() {
+		clientScopeProbeHourState, clientScopeProbeRangeSeek, clientScopeProbeDecoded = savedHour, savedSeek, savedDecoded
+	}()
 	result, err := store.readCostUnitsInScope(context.Background(), filter, resolver, precise, nil, costReadHooks{
 		windowKeys:  true,
 		forceLegacy: opts.forceLegacy,
@@ -585,6 +597,12 @@ func buildClientScopeFuzzDB(t *testing.T, rng *rand.Rand, damage int) *integrity
 	// Record leaves the v1 index populated but unproven for v2; one completed
 	// migration is what requireClientIndex and the proof checks need.
 	migrateClientIndex(t, db)
+	// Issue #114: the persistent odd-row classification lets a proof reach odd
+	// raw rows by hour instead of scanning them all. Without building it here,
+	// the differential harness never exercises that proof path.
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 2); err != nil {
+		f.note("proof odd index: %v", err)
+	}
 	for i := 0; i < damage; i++ {
 		applyIntegrityDamage(t, rng, f)
 	}
@@ -1170,6 +1188,226 @@ func TestClientScopedQuotaReadEqualsFullShapes(t *testing.T) {
 	}
 }
 
+// TestClientScopedQuotaReadForeignProofUnknownScope pins the Issue #125 P2
+// divergence a readable index proof introduces when its client field does not
+// name a single client. A duplicate entry under bob's prefix points at a row
+// whose event and proof name "unknown" (or the empty client): checkOrphans
+// evaluates the proof's original scope with unresolvedScopeInRange, which
+// treats an empty or "unknown" owner as relevant to every client, so the
+// exhaustive read fails closed for alice. A byte comparison of the proof's
+// client prefix against alice's prefix never matches, so the probe used to
+// attach a scope and the scoped read reported the row as absent. The probe
+// must decline, and the scoped read must reproduce the exhaustive verdict.
+func TestClientScopedQuotaReadForeignProofUnknownScope(t *testing.T) {
+	productionIntegrityMode(t)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	from := now.Add(-24 * time.Hour)
+	for _, name := range []string{"unknown", ""} {
+		name := name
+		t.Run(fmt.Sprintf("proof client %q", name), func(t *testing.T) {
+			store, db := buildClientScopeStore(t, now, map[string]int{"alice": 6, "bob": 6, "carol": 6})
+			migrateClientIndex(t, db)
+			at := now.Add(-2 * time.Hour).Truncate(time.Hour).Add(15 * time.Minute)
+			rawKey := []byte(usageKey(at, "foreign-scope-1"))
+			clientScopeWriteIndexedRow(t, db, rawKey, clientScopeSyntheticEvent(at, name, "foreign-scope-1"), true)
+			if err := db.Update(func(tx *bolt.Tx) error {
+				return tx.Bucket([]byte(BucketUsageEventsByClient)).Put(clientScopeIndexKey("bob", at, rawKey), rawKey)
+			}); err != nil {
+				t.Fatalf("duplicate foreign index entry: %v", err)
+			}
+			if err := RunClassificationOnce(context.Background(), db); err != nil {
+				t.Fatalf("classify: %v", err)
+			}
+			if !clientScopeProbeDeclines(t, db, "alice", from, now) {
+				t.Fatalf("probe attached a scope for alice although the foreign proof names client %q, which checkOrphans treats as relevant to every client", name)
+			}
+			before := clientScopeFallbacks(db)
+			_, units, err := readClientScopeUnits(store, "alice", from, now, false)
+			if !errors.Is(err, ErrUsageHistoryIncomplete) {
+				t.Fatalf("scoped read of alice returned %v (%d units), want ErrUsageHistoryIncomplete as the exhaustive read does", err, len(units))
+			}
+			if got := clientScopeFallbacks(db) - before; got != 1 {
+				t.Fatalf("client_scope fallback counted %d times, want exactly once", got)
+			}
+			filter := usage.Filter{ClientName: "alice", From: &from, To: &now}
+			clientScopeAssertSameVerdict(t, "alice", units, err, func() ([]CostUnit, error) {
+				return clientScopeFullReference(t, db, filter, exactCostTable{replayCosts}, true)
+			})
+		})
+	}
+}
+
+// TestForeignProofsBoundedDedup pins the bounded collection behind the probe:
+// repeated proofs cost one map entry, and the set turns into an unconditional
+// decline once distinct proofs exceed the limit instead of growing with the
+// damage.
+func TestForeignProofsBoundedDedup(t *testing.T) {
+	var f foreignProofSet
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	scope := unresolvedScope{ClientName: "bob", Timestamp: now}
+	for i := 0; i < 4*integrityForeignProofLimit; i++ {
+		f.addScope(scope)
+		f.addPrefix([]byte(clientIndexPrefix("bob")))
+	}
+	if f.closed {
+		t.Fatalf("duplicate proofs closed the set")
+	}
+	if len(f.scopes) != 1 || len(f.prefixes) != 1 {
+		t.Fatalf("duplicate proofs stored %d scopes and %d prefixes, want 1 and 1", len(f.scopes), len(f.prefixes))
+	}
+	if f.relevant("alice", now.Add(-time.Hour), now.Add(time.Hour)) {
+		t.Fatalf("a bob-only scope is relevant to alice")
+	}
+	for i := 0; i < integrityForeignProofLimit-2; i++ {
+		f.addScope(unresolvedScope{ClientName: fmt.Sprintf("client-%03d", i), Timestamp: now})
+	}
+	if f.closed {
+		t.Fatalf("exactly %d distinct proofs closed the set", integrityForeignProofLimit)
+	}
+	f.addScope(unresolvedScope{ClientName: "one-more", Timestamp: now})
+	if !f.closed {
+		t.Fatalf("%d distinct proofs did not close the set", integrityForeignProofLimit+1)
+	}
+	if len(f.scopes) != 0 || len(f.prefixes) != 0 {
+		t.Fatalf("closed set kept %d scopes and %d prefixes, want an empty set", len(f.scopes), len(f.prefixes))
+	}
+	if !f.relevant("alice", now.Add(-time.Hour), now.Add(time.Hour)) {
+		t.Fatalf("a closed set must decline every client")
+	}
+}
+
+// TestClientScopedQuotaReadForeignProofOverflow proves the overflow is visible
+// to the probe: more distinct foreign proofs than the limit must decline every
+// client and fall back to the exhaustive verdict.
+func TestClientScopedQuotaReadForeignProofOverflow(t *testing.T) {
+	productionIntegrityMode(t)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	from := now.Add(-24 * time.Hour)
+	store, db := buildClientScopeStore(t, now, map[string]int{"alice": 6, "bob": 6, "carol": 6})
+	migrateClientIndex(t, db)
+	base := now.Add(-2 * time.Hour).Truncate(time.Hour)
+	rawKeys := make([][]byte, 0, integrityForeignProofLimit+1)
+	for i := 0; i <= integrityForeignProofLimit; i++ {
+		at := base.Add(time.Duration(i+1) * time.Minute)
+		client := fmt.Sprintf("overflow-%03d", i)
+		rawKey := []byte(usageKey(at, fmt.Sprintf("overflow-%03d", i)))
+		clientScopeWriteIndexedRow(t, db, rawKey, clientScopeSyntheticEvent(at, client, fmt.Sprintf("overflow-%03d", i)), true)
+		rawKeys = append(rawKeys, rawKey)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		index := tx.Bucket([]byte(BucketUsageEventsByClient))
+		for i, rawKey := range rawKeys {
+			at := base.Add(time.Duration(i+1) * time.Minute)
+			if err := index.Put(clientScopeIndexKey("bob", at, rawKey), rawKey); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("duplicate foreign index entries: %v", err)
+	}
+	if err := RunClassificationOnce(context.Background(), db); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if !clientScopeProbeDeclines(t, db, "alice", from, now) {
+		t.Fatalf("probe attached a scope for alice although %d distinct foreign proofs exceeded the limit", integrityForeignProofLimit+1)
+	}
+	before := clientScopeFallbacks(db)
+	_, units, err := readClientScopeUnits(store, "alice", from, now, false)
+	if got := clientScopeFallbacks(db) - before; got != 1 {
+		t.Fatalf("client_scope fallback counted %d times, want exactly once", got)
+	}
+	filter := usage.Filter{ClientName: "alice", From: &from, To: &now}
+	clientScopeAssertSameVerdict(t, "alice", units, err, func() ([]CostUnit, error) {
+		return clientScopeFullReference(t, db, filter, exactCostTable{replayCosts}, true)
+	})
+}
+
+// TestClassifyIndexEntryDecodesOncePerEntry pins the P2 reuse contract: the
+// foreign-scope check consumes the proof the entry classifier already read, so
+// a healthy snapshot decodes one proof per window-exempt entry instead of two.
+func TestClassifyIndexEntryDecodesOncePerEntry(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	_, db := buildClientScopeStore(t, now, map[string]int{"alice": 6, "bob": 6, "carol": 6})
+	migrateClientIndex(t, db)
+	entries := 0
+	if err := db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketUsageEventsByClient)).ForEach(func(_, _ []byte) error {
+			entries++
+			return nil
+		})
+	}); err != nil {
+		t.Fatalf("count index entries: %v", err)
+	}
+	before := integrityIndexProofDecodes.Load()
+	if err := RunClassificationOnce(context.Background(), db); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if delta := integrityIndexProofDecodes.Load() - before; delta != int64(entries) {
+		t.Fatalf("classification decoded %d index proofs for %d window-exempt entries; the foreign-scope check must reuse the entry classifier's proof", delta, entries)
+	}
+}
+
+// TestClientScopedQuotaReadProbeHourCostScales records the probe's window-hour
+// enumeration, which the object-visit counters cannot see. The probe reads one
+// hour state and seeks one index range per client prefix (the filter client and
+// the empty client) per window hour, so its cost grows with the window hours.
+func TestClientScopedQuotaReadProbeHourCostScales(t *testing.T) {
+	productionIntegrityMode(t)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	for _, hours := range []int{24, 30 * 24} {
+		from := now.Add(-time.Duration(hours) * time.Hour)
+		store, db := buildClientScopeStore(t, now, map[string]int{"alice": 6, "bob": 6})
+		migrateClientIndex(t, db)
+		if err := RunClassificationOnce(context.Background(), db); err != nil {
+			t.Fatalf("hours=%d classify: %v", hours, err)
+		}
+		visits, units, err := readClientScopeUnits(store, "alice", from, now, false)
+		if err != nil {
+			t.Fatalf("hours=%d read: %v", hours, err)
+		}
+		if len(units) == 0 || !visits.scopedIndexRead() {
+			t.Fatalf("hours=%d: read did not use the scoped index block: %+v", hours, visits)
+		}
+		// The read window includes both hour bounds, so an N-hour span covers
+		// N+1 window hours.
+		if want := 2 * (hours + 1); visits.hourStates != want || visits.seeks != want {
+			t.Fatalf("hours=%d: probe read %d hour states and %d ranges, want %d each (two client prefixes per window hour)", hours, visits.hourStates, visits.seeks, want)
+		}
+		if visits.emptyDecoded != 0 {
+			t.Fatalf("hours=%d: probe decoded %d empty-client rows, want 0", hours, visits.emptyDecoded)
+		}
+	}
+}
+
+// TestClientScopedQuotaReadProbeCountsEmptyClientRows pins the empty-client
+// decode counter: the probe enumerates the empty prefix too, so its rows are
+// decoded even though the filter client is alice. The empty-owner quota cell
+// inside the window fails every client-filtered read, which is the verdict the
+// scoped attempt must hand back through its replay.
+func TestClientScopedQuotaReadProbeCountsEmptyClientRows(t *testing.T) {
+	productionIntegrityMode(t)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	from := now.Add(-2 * time.Hour)
+	store, db := buildClientScopeStore(t, now, map[string]int{"alice": 6, "bob": 6})
+	migrateClientIndex(t, db)
+	at := now.Add(-time.Hour)
+	clientScopeWriteIndexedRow(t, db, []byte(usageKey(at, "empty-probe-1")), clientScopeSyntheticEvent(at, "", "empty-probe-1"), true)
+	if err := RunClassificationOnce(context.Background(), db); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	visits, _, err := readClientScopeUnits(store, "alice", from, now, false)
+	if !errors.Is(err, ErrUsageHistoryIncomplete) {
+		t.Fatalf("read returned %v, want ErrUsageHistoryIncomplete for the empty-owner row in the window", err)
+	}
+	if visits.emptyDecoded != 1 {
+		t.Fatalf("probe decoded %d empty-client rows, want 1", visits.emptyDecoded)
+	}
+	if want := 3 * 2; visits.hourStates != want || visits.seeks != want {
+		t.Fatalf("probe read %d hour states and %d ranges, want %d each for three window hours", visits.hourStates, visits.seeks, want)
+	}
+}
+
 // TestClientScopedQuotaReadCalibrationScales models the hourly calibration:
 // calibrateAll reads the month window once per client through
 // ReadQuotaCostUnits. The total visited raw, receipt and quota objects must
@@ -1210,4 +1448,67 @@ func TestClientScopedQuotaReadCalibrationScales(t *testing.T) {
 	if totals[1] > 6*max(totals[0], 1) {
 		t.Fatalf("calibration work grew from %d to %d for four times the rows: the per-client read is still scanning the window", totals[0], totals[1])
 	}
+}
+
+// TestClientScopedProbeRequiresClassifiedIndex pins the probe's fast-usability
+// guard. checkOrphans abandons the fast index walk when the classification did
+// not classify the index or was built under a different v2 progress than the
+// read's. The probe trusts rawUnindexed and foreignProofs, which only that
+// classification fills, so it must decline in the same situations and let the
+// exhaustive read decide instead of attaching a scope it cannot prove.
+func TestClientScopedProbeRequiresClassifiedIndex(t *testing.T) {
+	productionIntegrityMode(t)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	from := now.Add(-24 * time.Hour)
+	_, db := buildClientScopeStore(t, now, map[string]int{"alice": 6, "bob": 6})
+	migrateClientIndex(t, db)
+	start, end := from.Truncate(time.Hour), now.Truncate(time.Hour).Add(time.Hour)
+	probe := func(t *testing.T, class func(progress *indexProgress) *integrityClassification) *clientScopedRead {
+		t.Helper()
+		var scoped *clientScopedRead
+		if err := db.View(func(tx *bolt.Tx) error {
+			progress, err := loadIndexProgress(tx)
+			if err != nil {
+				return err
+			}
+			if progress == nil || progress.Phase != "complete" {
+				return fmt.Errorf("migrated index has progress %+v", progress)
+			}
+			fast := newIntegrityFast(class(progress), start, end)
+			if fast.empty {
+				return fmt.Errorf("constructed fast window is empty")
+			}
+			scoped = probeClientScopedRead(context.Background(), tx, "alice", start, end, progress, fast)
+			return nil
+		}); err != nil {
+			t.Fatalf("probe: %v", err)
+		}
+		return scoped
+	}
+	t.Run("index not classified", func(t *testing.T) {
+		scoped := probe(t, func(*indexProgress) *integrityClassification {
+			return &integrityClassification{}
+		})
+		if scoped != nil {
+			t.Fatalf("probe attached a scope although the classification did not classify the index; checkOrphans abandons the fast walk in that case")
+		}
+	})
+	t.Run("stale progress", func(t *testing.T) {
+		scoped := probe(t, func(progress *indexProgress) *integrityClassification {
+			stale := *progress
+			stale.Generation += "-stale"
+			return &integrityClassification{indexClassified: true, indexProgress: &stale}
+		})
+		if scoped != nil {
+			t.Fatalf("probe attached a scope although the classification was built under a different v2 progress than the read's")
+		}
+	})
+	t.Run("matching progress", func(t *testing.T) {
+		scoped := probe(t, func(progress *indexProgress) *integrityClassification {
+			return &integrityClassification{indexClassified: true, indexProgress: progress}
+		})
+		if scoped == nil {
+			t.Fatalf("probe declined a classification built under the read's own v2 progress")
+		}
+	})
 }

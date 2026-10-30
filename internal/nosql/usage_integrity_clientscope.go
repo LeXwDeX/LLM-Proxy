@@ -100,43 +100,25 @@ func staleForeignProof(tx *bolt.Tx, p *indexProgress, key []byte, event usage.Ev
 	return bytes.Clone(proof.IndexKey[:i+1]), true
 }
 
-// foreignIndexProofPrefix reports the client prefix of a readable index proof
-// on a window-exempt index entry whose IndexKey names a different client than
-// the entry's own prefix. The exhaustive checkOrphans walk evaluates the
-// entry's proof scope (inOriginal) and fails closed for the client it names
-// when the entry's hour is in the read window; a client-scoped walk skips an
-// entry of another client, so the probe declines for that client. Normal
-// writers derive the proof from the entry's own event, so this is empty unless
-// the proof was rewritten with a foreign key.
-func foreignIndexProofPrefix(tx *bolt.Tx, p *indexProgress, indexKey []byte) ([]byte, bool) {
-	i := bytes.IndexByte(indexKey, '|')
-	if i < 0 || p == nil {
-		return nil, false
-	}
-	own := indexKey[:i+1]
-	parts := strings.SplitN(string(indexKey), "|", 3)
-	if len(parts) != 3 || parts[2] == "" {
-		return nil, false
-	}
-	proofs := tx.Bucket([]byte(indexProofsV2))
-	if proofs == nil {
-		return nil, false
-	}
-	proof, err := readIndexProof(proofs, p, []byte(parts[2]))
-	if err != nil || bytes.HasPrefix(proof.IndexKey, own) {
-		return nil, false
-	}
-	j := bytes.IndexByte(proof.IndexKey, '|')
-	if j < 0 {
-		return nil, false
-	}
-	return bytes.Clone(proof.IndexKey[:j+1]), true
-}
+// Client-scope probe instrumentation. The probe enumerates the filter client
+// and the empty client for every window hour: one hour-state read and one
+// index range seek per prefix, plus one decode per empty-client row. The
+// extensibility guards count these through the hooks so the
+// O(clients × window hours) enumeration is visible next to the object visits;
+// production leaves them nil.
+var (
+	clientScopeProbeHourState func()
+	clientScopeProbeRangeSeek func()
+	clientScopeProbeDecoded   func()
+)
 
 // probeClientScopedRead enumerates one client's window through the client
 // index. Nil means the scope cannot be proven complete and the caller counts
 // a fallback before replaying the exhaustive read:
 //
+//   - the classification must have classified the client index under the
+//     read's own v2 progress; checkOrphans abandons its fast index walk
+//     otherwise, so the foreign-proof fields would not describe this read;
 //   - fast must carry hour-prefix bounds (a comparable window), and
 //     requireClientIndex must pass (done marker, both index buckets, no
 //     quarantined rows): without it the index block would fall back anyway;
@@ -149,8 +131,12 @@ func foreignIndexProofPrefix(tx *bolt.Tx, p *indexProgress, indexKey []byte) ([]
 //     decodable anomalous raw row in the window's textual range cannot be
 //     reproduced by the scoped path: the skipped cost evidence scan judges
 //     both (direct evidence, proof identity, parity), so the scope declines;
-//   - a stale proof naming this client's index space (foreignProofs) makes
-//     the exhaustive evidence scan fail closed for this client;
+//   - a readable proof that the exhaustive walks judge relevant to this client
+//     (foreignProofs) makes the read fail closed or take a different first
+//     error there; the scoped walk skips the object, so the probe declines.
+//     The scopes are evaluated with unresolvedScopeInRange, the same predicate
+//     checkOrphans uses, so an empty or "unknown" owner declines for every
+//     client. A bounded overflow of distinct proofs declines unconditionally;
 //   - an hour whose index state count or digest does not match the entries
 //     prevents both enumeration and the index block;
 //   - a row whose enumerated hour (its index entry's event hour) differs from
@@ -163,6 +149,13 @@ func foreignIndexProofPrefix(tx *bolt.Tx, p *indexProgress, indexKey []byte) ([]
 // verification, so a disagreement replays instead of reporting.
 func probeClientScopedRead(ctx context.Context, tx *bolt.Tx, client string, start, end time.Time, progress *indexProgress, fast *integrityFast) *clientScopedRead {
 	if fast == nil || fast.empty || fast.scope != nil {
+		return nil
+	}
+	// checkOrphans abandons the fast index walk in these two situations, so the
+	// classification's index fields were never filled or describe a different
+	// v2 progress than the read's. The probe trusts rawUnindexed and
+	// foreignProofs, so it must decline here and let the exhaustive read decide.
+	if !fast.class.indexClassified || !sameIndexProgress(fast.class.indexProgress, progress) {
 		return nil
 	}
 	if fast.lo == nil || fast.hi == nil {
@@ -180,14 +173,16 @@ func probeClientScopedRead(ctx context.Context, tx *bolt.Tx, client string, star
 	if receiptsInHourRange(tx, start, end) {
 		return nil
 	}
-	if len(fast.class.rawUnindexed) != 0 {
+	if fast.class.rawUnindexed {
 		return nil
 	}
-	prefix := []byte(clientIndexPrefix(strings.TrimSpace(client)))
-	for _, foreign := range fast.class.foreignProofs {
-		if bytes.Equal(foreign, prefix) {
-			return nil
-		}
+	// checkOrphans compares unresolvedScopeInRange against [from, to] as the
+	// cost read's hour bounds, while start/end span [from, to] plus the final
+	// hour; end minus one hour restores the comparable upper bound. The shape
+	// probeClientScopedRead serves fixes model to "" and allow to nil, so the
+	// call is the same one checkOrphans makes for this read.
+	if fast.class.foreignProofs.relevant(client, start, end.Add(-time.Hour)) {
+		return nil
 	}
 	// The exhaustive index block precedes its evidence scan; that scan runs
 	// over every decodable raw row of the window in key-text range and judges
@@ -224,9 +219,20 @@ func probeClientScopedRead(ctx context.Context, tx *bolt.Tx, client string, star
 			return nil
 		}
 		for _, c := range []string{client, ""} {
+			if clientScopeProbeHourState != nil {
+				clientScopeProbeHourState()
+			}
+			if clientScopeProbeRangeSeek != nil {
+				clientScopeProbeRangeSeek()
+			}
 			rows, err := readClientHourRowsInTx(ctx, tx, c, hour, nil, nil)
 			if err != nil {
 				return nil
+			}
+			if c == "" && clientScopeProbeDecoded != nil {
+				for range rows {
+					clientScopeProbeDecoded()
+				}
 			}
 			for _, row := range rows {
 				// An index entry carries the row's event hour, while the raw key

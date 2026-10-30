@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -50,24 +51,108 @@ type integrityClassification struct {
 	// and the index walk then stays exhaustive.
 	indexProgress   *indexProgress
 	indexClassified bool
-	// rawUnindexed holds window-exempt raw rows of a completed client index
-	// that its own client entry does not point back at (Issue #125 P2). A
-	// client-scoped walk cannot enumerate such a row, so the scope declines
-	// while the set is non-empty. It is not part of A: the exhaustive windowed
-	// walk may still skip these rows (their own hour is outside every window
-	// without it), and only the scoped enumeration needs them.
-	rawUnindexed [][]byte
-	// foreignProofs holds the index-key prefix (client field and delimiter) of
-	// every window-exempt raw row whose readable index proof names a different
-	// client's index space than the row's own (Issue #125 P2). The exhaustive
-	// cost evidence scan fails such a row closed for the client the proof
-	// names; a client-scoped read never evaluates the row, so the probe
-	// declines for exactly that client prefix. Normal writers derive the proof
-	// key from the row's own event, so this set is empty unless the proof was
-	// rewritten with a foreign key.
-	foreignProofs [][]byte
+	// rawUnindexed is set when a completed client index has a window-exempt
+	// raw row that its own client entry does not point back at (Issue #125
+	// P2). A client-scoped walk cannot enumerate such a row, so the scope
+	// declines while the flag is set. It is not part of A: the exhaustive
+	// windowed walk may still skip these rows (their own hour is outside every
+	// window without it), and only the scoped enumeration needs them.
+	rawUnindexed bool
+	// foreignProofs holds the readable index proofs on window-exempt objects
+	// whose object the exhaustive walks may judge relevant to a client filter
+	// although a client-scoped walk skips it (Issue #125 P2). Index-entry
+	// proofs are kept as their decoded original scope, which the probe
+	// evaluates with unresolvedScopeInRange, the predicate checkOrphans uses;
+	// raw-row proofs keep the client-prefix predicate of the cost evidence
+	// scan. Both sets deduplicate and are bounded; once closed is set the
+	// probe declines for every client, because the exhaustive read is always
+	// the correct fallback. Normal writers derive each proof from its own
+	// event, so the sets stay empty unless a proof was rewritten.
+	foreignProofs foreignProofSet
 	anomalous     int
 	duration      time.Duration
+}
+
+// integrityForeignProofLimit bounds the distinct readable proofs a scoped
+// probe remembers. The sets are only populated by proofs that disagree with
+// their object, so healthy snapshots keep them empty.
+const integrityForeignProofLimit = 64
+
+// foreignProofSet is the bounded, deduplicated collection described on
+// integrityClassification.foreignProofs. close drops the contents so a
+// damaged snapshot cannot grow the classification linearly with its proof
+// damage.
+type foreignProofSet struct {
+	scopes   map[unresolvedScope]struct{}
+	prefixes map[string]struct{}
+	closed   bool
+}
+
+// addScope records one index-entry proof scope. Duplicates are free; a new
+// distinct entry beyond the limit turns the whole probe into a decline.
+func (f *foreignProofSet) addScope(scope unresolvedScope) {
+	if f.closed {
+		return
+	}
+	if _, ok := f.scopes[scope]; ok {
+		return
+	}
+	if len(f.scopes)+len(f.prefixes) >= integrityForeignProofLimit {
+		f.close()
+		return
+	}
+	if f.scopes == nil {
+		f.scopes = make(map[unresolvedScope]struct{})
+	}
+	f.scopes[scope] = struct{}{}
+}
+
+// addPrefix records one raw-row proof prefix (client field and delimiter).
+func (f *foreignProofSet) addPrefix(prefix []byte) {
+	if f.closed {
+		return
+	}
+	if _, ok := f.prefixes[string(prefix)]; ok {
+		return
+	}
+	if len(f.scopes)+len(f.prefixes) >= integrityForeignProofLimit {
+		f.close()
+		return
+	}
+	if f.prefixes == nil {
+		f.prefixes = make(map[string]struct{})
+	}
+	f.prefixes[string(prefix)] = struct{}{}
+}
+
+func (f *foreignProofSet) close() {
+	f.scopes, f.prefixes = nil, nil
+	f.closed = true
+}
+
+// relevant reports whether the exhaustive walks would fail a client-filtered
+// read closed because of one of the remembered proofs. The scope predicate is
+// the exact call checkOrphans makes for an in-shape scoped read: the client
+// name is trimmed, model is empty and allow is nil. The prefix predicate is
+// the byte comparison the cost evidence scan makes against the filter
+// client's index prefix.
+func (f *foreignProofSet) relevant(client string, from, to time.Time) bool {
+	if f.closed {
+		return true
+	}
+	client = strings.TrimSpace(client)
+	for scope := range f.scopes {
+		if inside, _ := unresolvedScopeInRange(scope, client, from, to, "", nil); inside {
+			return true
+		}
+	}
+	prefix := clientIndexPrefix(client)
+	for candidate := range f.prefixes {
+		if candidate == prefix {
+			return true
+		}
+	}
+	return false
 }
 
 // canonicalEventKeyStamp returns the instant encoded by a raw-identity key
@@ -153,7 +238,7 @@ func quotaKeyOwnerWindowNeutral(key []byte) bool {
 //     scope matters.
 //   - malformed rows (checkMalformedIndexScope) never reach this predicate.
 //   - checkOrphans and the client index are keyed by event client and time plus
-//     the raw key, not by record_id; indexEntryWindowExempt classifies each
+//     the raw key, not by record_id; classifyIndexEntry classifies each
 //     entry from its own proof, so this relaxation cannot skip an entry whose
 //     branch depends on the raw body.
 func rawRowWindowExempt(tx *bolt.Tx, key, value []byte) bool {
@@ -224,9 +309,29 @@ func eventKeyWindowExempt(tx *bolt.Tx, key []byte) bool {
 	return true
 }
 
-// indexEntryWindowExempt reports whether a client index entry is inert in
+// classifiedIndexEntry is one client index entry's window-exemption result.
+// The readable proof travels with the verdict, so the caller can judge its
+// original scope without decoding the same object a second time (Issue #125
+// P2).
+type classifiedIndexEntry struct {
+	exempt bool
+	// matchedRaw reports that the entry is exactly the client index key of its
+	// own raw row. checkOrphans then returns after indexProofForRaw unless that
+	// proof is invalid.
+	matchedRaw bool
+	// invalid reports a readable proof that does not match the raw row (wrong
+	// digest or IndexKey). It is only meaningful with matchedRaw.
+	invalid bool
+	// proof is the decoded proof; proofOK reports that decoding succeeded.
+	proof   indexProof
+	proofOK bool
+}
+
+// classifyIndexEntry reports whether a client index entry is inert in
 // checkOrphans for every window excluding its hour H, and whether a windowed
-// walk may skip it without changing the reference map (see contains).
+// walk may skip it without changing the reference map (see contains). It also
+// returns the decoded proof so a caller can classify the proof's scope without
+// reading it again.
 //
 //   - identity parts and pointer: a malformed identity errors at any hour, and a
 //     pointer other than the third part adds a reference for another key.
@@ -242,26 +347,28 @@ func eventKeyWindowExempt(tx *bolt.Tx, key []byte) bool {
 //   - an entry without a matching raw row is only inert with a trusted proof
 //     whose original scope has hour H; the owner shortcuts depend on the
 //     client filter and the fallback errors whenever no client is filtered.
-func indexEntryWindowExempt(tx *bolt.Tx, p *indexProgress, indexKey, pointer []byte, anomalous func([]byte) bool) bool {
+func classifyIndexEntry(tx *bolt.Tx, p *indexProgress, indexKey, pointer []byte, anomalous func([]byte) bool) classifiedIndexEntry {
 	if pointer == nil || p == nil {
-		return false
+		return classifiedIndexEntry{}
 	}
 	parts := strings.SplitN(string(indexKey), "|", 3)
 	if len(parts) != 3 || parts[2] == "" {
-		return false
+		return classifiedIndexEntry{}
 	}
 	key := []byte(parts[2])
 	if !bytes.Equal(pointer, key) {
-		return false
+		return classifiedIndexEntry{}
 	}
 	hour, ok := canonicalEventKeyHour(key)
 	if !ok || anomalous(key) {
-		return false
+		return classifiedIndexEntry{}
 	}
 	current, valid := indexProofScope(indexKey, key)
 	if !valid || !current.Timestamp.UTC().Truncate(time.Hour).Equal(hour) {
-		return false
+		return classifiedIndexEntry{}
 	}
+	proofs := tx.Bucket([]byte(indexProofsV2))
+	encoded := proofs != nil && proofs.Get(key) != nil
 	raw := tx.Bucket([]byte(BucketUsageEvents))
 	var data []byte
 	if raw != nil {
@@ -273,27 +380,72 @@ func indexEntryWindowExempt(tx *bolt.Tx, p *indexProgress, indexKey, pointer []b
 		probe := &indexRawReferences{tx: tx, probe: &consulted}
 		proof, attributable, invalid, owned, err := indexProofForRaw(context.Background(), tx, probe, p, key, data, event)
 		if err != nil || consulted {
-			return false
+			return classifiedIndexEntry{}
+		}
+		if encoded {
+			integrityIndexProofDecodes.Add(1)
 		}
 		if !invalid {
-			return true
+			return classifiedIndexEntry{exempt: true, matchedRaw: true, proof: proof, proofOK: attributable}
 		}
 		if attributable {
 			original, valid := indexProofScope(proof.IndexKey, key)
-			return valid && original.Timestamp.UTC().Truncate(time.Hour).Equal(hour)
+			return classifiedIndexEntry{exempt: valid && original.Timestamp.UTC().Truncate(time.Hour).Equal(hour), matchedRaw: true, invalid: true, proof: proof, proofOK: true}
 		}
-		return owned
+		return classifiedIndexEntry{exempt: owned, matchedRaw: true, invalid: true}
 	}
-	proofs := tx.Bucket([]byte(indexProofsV2))
 	if proofs == nil {
-		return false
+		return classifiedIndexEntry{}
 	}
 	proof, err := readIndexProof(proofs, p, key)
+	integrityIndexProofDecodes.Add(1)
 	if err != nil || !(proof.Origin == "atomic" || (len(p.Through) != 0 && bytes.Compare(key, p.Through) <= 0)) {
-		return false
+		return classifiedIndexEntry{}
 	}
 	original, valid := indexProofScope(proof.IndexKey, key)
-	return valid && original.Timestamp.UTC().Truncate(time.Hour).Equal(hour)
+	return classifiedIndexEntry{exempt: valid && original.Timestamp.UTC().Truncate(time.Hour).Equal(hour), proof: proof, proofOK: err == nil}
+}
+
+// integrityIndexProofDecodes counts the index proofs the classifier decodes
+// (directly, or through indexProofForRaw when a proof blob exists). Tests
+// assert it stays within one decode per window-exempt entry: the foreign-scope
+// check reuses the classifier's proof instead of reading the object twice.
+var integrityIndexProofDecodes atomic.Int64
+
+// noteForeignScopes records the proof scopes the exhaustive checkOrphans walk
+// would evaluate for a window-exempt index entry although a client-scoped walk
+// skips it (Issue #125 P2). checkOrphans evaluates up to two scopes:
+//
+//   - the current scope from the entry's own index key, unless the entry
+//     matches its raw row with a trusted proof (checkOrphans returns first);
+//   - the original scope from the readable proof, when the entry has no
+//     matching raw row, or when its matching proof is invalid but readable.
+//
+// unresolvedScopeInRange is the authoritative predicate for both, including
+// the empty and "unknown" owners it treats as relevant to every client. The
+// probe reuses exactly these scopes; a matching entry with a trusted proof
+// names its own client and needs no decline.
+func (class *integrityClassification) noteForeignScopes(entry classifiedIndexEntry, indexKey []byte) {
+	parts := strings.SplitN(string(indexKey), "|", 3)
+	if len(parts) != 3 || parts[2] == "" {
+		return
+	}
+	key := []byte(parts[2])
+	invalid := entry.matchedRaw && entry.invalid
+	if current, ok := indexProofScope(indexKey, key); ok && strings.EqualFold(current.ClientName, "unknown") && (!entry.matchedRaw || invalid) {
+		// A non-empty unknown owner never equals a known filter client, so a
+		// skipped entry with this current scope fails checkOrphans closed for
+		// every client. The empty owner is not recorded: the empty prefix is
+		// enumerated by the scoped index walk, which reaches the same error.
+		class.foreignProofs.addScope(current)
+	}
+	if !entry.matchedRaw || invalid {
+		if entry.proofOK {
+			if scope, ok := indexProofScope(entry.proof.IndexKey, key); ok {
+				class.foreignProofs.addScope(scope)
+			}
+		}
+	}
 }
 
 // classificationIndexProgress mirrors how readCostUnitsInScope obtains the
@@ -417,10 +569,10 @@ func classifyUsageIntegrity(ctx context.Context, tx *bolt.Tx) (*integrityClassif
 		}
 		if indexComplete {
 			if !bytes.Equal(index.Get(clientEventIndexKey(event, k)), k) {
-				class.rawUnindexed = append(class.rawUnindexed, bytes.Clone(k))
+				class.rawUnindexed = true
 			}
 			if prefix, ok := staleForeignProof(tx, progress, k, event); ok {
-				class.foreignProofs = append(class.foreignProofs, prefix)
+				class.foreignProofs.addPrefix(prefix)
 			}
 		}
 		return true
@@ -461,21 +613,20 @@ func classifyUsageIntegrity(ctx context.Context, tx *bolt.Tx) (*integrityClassif
 			anomalous := func(key []byte) bool { return class.eventSet[string(key)] }
 			c := index.Cursor()
 			for k, v := c.First(); k != nil && !overflow && step(); k, v = c.Next() {
-				if !indexEntryWindowExempt(tx, progress, k, v, anomalous) {
+				entry := classifyIndexEntry(tx, progress, k, v, anomalous)
+				if !entry.exempt {
 					class.index = append(class.index, bytes.Clone(k))
 					class.anomalous++
 					overflow = class.anomalous > integrityAnomalyLimit
 					continue
 				}
 				// Issue #125 P2: a window-exempt entry is skipped by a
-				// client-scoped walk. If its readable proof names a different
-				// client, the exhaustive checkOrphans branch would fail closed
-				// for the client the proof names (inOriginal), so the scoped
-				// probe must decline for that client instead. Entries whose own
-				// key is anomalous are in A above and are evaluated normally.
-				if prefix, ok := foreignIndexProofPrefix(tx, progress, k); ok {
-					class.foreignProofs = append(class.foreignProofs, prefix)
-				}
+				// client-scoped walk. If its readable proof names a client that
+				// checkOrphans fails closed for, the scoped probe must decline
+				// for that client instead. Scopes are judged with
+				// unresolvedScopeInRange, so empty and "unknown" owners, which
+				// are relevant to every client, decline too.
+				class.noteForeignScopes(entry, k)
 			}
 		}
 	}
@@ -522,7 +673,7 @@ func integrityRealtimeRowAnomalous(tx *bolt.Tx, event usage.Event, key []byte) b
 		// fails before it), so the entry cannot be skipped wrongly.
 		return false
 	}
-	return !indexEntryWindowExempt(tx, p, indexKey, pointer, func(k []byte) bool { return !exempt(k) })
+	return !classifyIndexEntry(tx, p, indexKey, pointer, func(k []byte) bool { return !exempt(k) }).exempt
 }
 
 // integrityNoteRealtimeRow marks tx when a realtime row is anomalous.

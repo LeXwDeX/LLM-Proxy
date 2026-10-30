@@ -263,8 +263,8 @@ func (refs *indexRawReferences) checkOrphans(ctx context.Context, p *indexProgre
 	keys := make(map[string]bool)
 	// Issue #125 (v3 item 3): with a classification made under the same
 	// progress, walk only the window's entries plus anomalous ones. A skipped
-	// entry satisfies indexEntryWindowExempt and returns nil below; the keys it
-	// would have added are recovered on demand by containsExhaustive.
+	// entry is window-exempt per classifyIndexEntry and returns nil below; the
+	// keys it would have added are recovered on demand by containsExhaustive.
 	fast := integrityFastFrom(ctx, refs.tx)
 	if fast != nil && (!fast.class.indexClassified || !sameIndexProgress(fast.class.indexProgress, p)) {
 		fast = nil
