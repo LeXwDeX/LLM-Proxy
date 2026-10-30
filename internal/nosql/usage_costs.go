@@ -274,6 +274,17 @@ func readCostRollups(ctx context.Context, tx *bolt.Tx, filter usage.Filter, from
 	return result, nil
 }
 
+// sortedCostKeys orders mismatch reporting so identical damage reports the
+// same first error regardless of map iteration order.
+func sortedCostKeys(counts map[string]int64) []string {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // assembleCostUnits preserves bidirectional record-count parity (legacy cells
 // use Requests). Supplementary rows contribute records but no requests to this
 // contract. Even events outside precise bounds count towards boundary-hour
@@ -312,7 +323,9 @@ func assembleCostUnits(ctx context.Context, cells []TargetModelCell, events []us
 			Hour: event.Timestamp.UTC().Truncate(time.Hour), Client: strings.TrimSpace(event.ClientName), Target: strings.ToLower(strings.TrimSpace(event.Target)), Model: strings.ToLower(event.Model), AggCell: eventAggCell(event),
 		}, At: event.Timestamp, EventPriced: true, Event: &event})
 	}
-	for key, count := range expected {
+	// Walk the mismatch checks in key order so the first report is deterministic.
+	for _, key := range sortedCostKeys(expected) {
+		count := expected[key]
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -320,7 +333,8 @@ func assembleCostUnits(ctx context.Context, cells []TargetModelCell, events []us
 			return nil, fmt.Errorf("%w: raw record count %d differs from rollup count %d", ErrUsageHistoryIncomplete, observed[key], count)
 		}
 	}
-	for key, count := range observed {
+	for _, key := range sortedCostKeys(observed) {
+		count := observed[key]
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
