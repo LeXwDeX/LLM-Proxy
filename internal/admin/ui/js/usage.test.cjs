@@ -975,3 +975,25 @@ test("daily chart rolls hourly buckets into exactly seven local days in a wester
   assert.deepEqual(values, ["3", "4", "0", "0", "0", "0", "8"], "UTC hours after local midnight stay on the correct local day");
   assert.match(chart.innerHTML, /本地 2026-10-24 日/);
 }));
+
+test("daily chart keeps late buckets on their real local date beyond 800 days", () => withTZ("Asia/Shanghai", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  const chart = h.document.getElementById("dailyChart");
+  // 810 local days: 2023-01-01 through 2025-03-20 (UTC+8). A late bucket must
+  // not be folded into the old 800-day cutoff (2025-03-10).
+  app.modules.usage.renderDailyChart([
+    {bucket_start: "2025-03-20T01:00:00Z", input_tokens: 100, estimated_cost: 0},
+  ], "day", {from: "2022-12-31T16:00:00Z", to: "2025-03-20T15:59:59Z"}, "hour");
+  const bars = chart.innerHTML.split("<div class='chart-bar-group'").slice(1);
+  assert.equal(
+    bars.filter(bar => bar.includes("本地 2025-03-10 日") && /chart-value'>100</.test(bar)).length,
+    0,
+    "late usage is not folded into the 800th day"
+  );
+  const late = bars.filter(bar => bar.includes("本地 2025-03-20 日"));
+  assert.equal(late.length, 1, "the late bucket keeps its own local date");
+  assert.match(late[0], /chart-value'>100</, "the late bucket stays on the last day");
+  app.modules.usageChart.setUsageChartNote("day", "custom", {from: "2022-12-31T16:00:00Z", to: "2025-03-20T15:59:59Z"});
+  assert.match(h.document.getElementById("usageChartNote").textContent, /仅绘制有数据的本地日/, "long ranges disclose that empty days are omitted");
+}));

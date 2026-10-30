@@ -10,6 +10,18 @@ AdminApp.register("usageChart", function (app) {
   var usageNumber = app.bind("usageTables", "usageNumber");
   var usageTokensAvailable = app.bind("usageTables", "usageTokensAvailable");
   function pad2(value) { return String(value).padStart(2, "0"); }
+  var localDayFillMax = 800;
+  function localDayStart(ms) {
+    var at = new Date(ms);
+    return new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime();
+  }
+  function localDaySpan(fromMs, toMs) {
+    if (!isFinite(fromMs) || !isFinite(toMs) || toMs < fromMs) return 0;
+    var from = new Date(fromMs), to = new Date(toMs);
+    var fromDay = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+    var toDay = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+    return Math.round((toDay - fromDay) / 86400000) + 1;
+  }
   function localHourStamp(ms) {
     var at = new Date(ms);
     return (
@@ -37,6 +49,13 @@ AdminApp.register("usageChart", function (app) {
         "「近1小时」为滚动查询窗口；服务端按整点小时桶统计" +
         (coverage ? "，" + coverage : "") +
         "，边界桶可能包含所选 1 小时窗口外的记录。横轴小时按浏览器本地时间标注，标题保留对应 UTC 小时。";
+      return;
+    }
+    if (groupBy !== "hour" && localDaySpan(range && Date.parse(range.from), range && Date.parse(range.to)) > localDayFillMax) {
+      note.textContent =
+        "按查询时的时间范围和筛选 · 服务端返回 UTC 整点小时桶，图表按浏览器本地日重新汇总；区间超过 " +
+        localDayFillMax +
+        " 个本地日，仅绘制有数据的本地日，不补齐空白日。今日/昨日/近 7/30 天范围按浏览器本地时间选取，横轴按本地日标注。";
       return;
     }
     note.textContent =
@@ -126,7 +145,7 @@ AdminApp.register("usageChart", function (app) {
   function localDaySlots(fromMs, toMs) {
     var slots = [];
     var cursor = new Date(fromMs);
-    for (var i = 0; i < 800; i++) {
+    for (var i = 0; i < localDayFillMax; i++) {
       var start = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate());
       if (start.getTime() > toMs) break;
       slots.push({start: start, at: start.getTime(), totals: {}});
@@ -136,7 +155,9 @@ AdminApp.register("usageChart", function (app) {
   }
   // rollupLocalDays folds UTC hour buckets into browser-local days. Buckets that
   // start before the first slot (UTC truncation in half-hour zones) stay in the
-  // first slot instead of creating an extra bar outside the queried range.
+  // first slot instead of creating an extra bar outside the queried range. Ranges
+  // longer than localDayFillMax skip the zero-filled calendar and keep one slot
+  // per day that actually has buckets, so late usage never folds into day 800.
   function rollupLocalDays(buckets, range) {
     var from = range && Date.parse(range.from), to = range && Date.parse(range.to);
     if (!isFinite(from) || !isFinite(to) || to < from) {
@@ -149,28 +170,41 @@ AdminApp.register("usageChart", function (app) {
       from = Math.min.apply(null, times);
       to = Math.max.apply(null, times);
     }
-    var slots = localDaySlots(from, to);
-    if (!slots.length) return [];
-    buckets.forEach(function (bucket) {
-      var started = Date.parse(bucket && bucket.bucket_start);
-      var index = 0;
-      if (isFinite(started)) {
-        var moment = Math.max(started, slots[0].at);
-        for (var i = slots.length - 1; i >= 0; i--) {
-          if (slots[i].at <= moment) { index = i; break; }
-        }
+    var fill = localDaySpan(from, to) <= localDayFillMax ? localDaySlots(from, to) : [];
+    var byDay = Object.create(null);
+    var slots = [];
+    fill.forEach(function (slot) {
+      byDay[slot.at] = slot;
+      slots.push(slot);
+    });
+    var firstDay = localDayStart(from);
+    function slotFor(moment) {
+      var dayAt = localDayStart(isFinite(moment) ? Math.max(moment, firstDay) : firstDay);
+      var slot = byDay[dayAt];
+      if (!slot) {
+        slot = {start: new Date(dayAt), at: dayAt, totals: {}};
+        byDay[dayAt] = slot;
+        slots.push(slot);
       }
-      slots[index].seen = true;
-      addRolledBucket(slots[index].totals, bucket || {});
+      return slot;
+    }
+    buckets.forEach(function (bucket) {
+      var slot = slotFor(Date.parse(bucket && bucket.bucket_start));
+      slot.seen = true;
+      addRolledBucket(slot.totals, bucket || {});
     });
-    return slots.map(function (slot) {
-      var out = {bucket_start: slot.start.toISOString()};
-      Object.keys(slot.totals).forEach(function (key) {
-        if (key !== "costMissing") out[key] = slot.totals[key];
+    return slots
+      .sort(function (a, b) {
+        return a.at - b.at;
+      })
+      .map(function (slot) {
+        var out = {bucket_start: slot.start.toISOString()};
+        Object.keys(slot.totals).forEach(function (key) {
+          if (key !== "costMissing") out[key] = slot.totals[key];
+        });
+        if (!slot.seen) out.zeroFilled = true;
+        return out;
       });
-      if (!slot.seen) out.zeroFilled = true;
-      return out;
-    });
   }
   function usageChartValue(bucket, metric) {
     if (metric === "cost") return usageNumber(bucket.estimated_cost);
