@@ -41,9 +41,13 @@ type UsageStore struct {
 	receiptBackoff time.Duration
 	// receiptScans counts migration attempts that read the database.
 	receiptScans atomic.Int64
-	// now overrides the clock for receipt retry backoff and Count warning
-	// rate limiting in tests.
+	// now overrides the clock for receipt retry backoff, Count warning rate
+	// limiting and retention snapshot freshness in tests.
 	now func() time.Time
+
+	// retention caches the read-only retention snapshot served by
+	// /admin/metrics and refreshes it lazily in a short-lived goroutine.
+	retention usageRetentionCache
 
 	// countWarnMu guards Count's skipped-cell WARN rate limit: at most one
 	// WARN per countWarnInterval, carrying the number of suppressed ones.

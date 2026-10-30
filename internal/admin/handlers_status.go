@@ -87,6 +87,9 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		// 用量完整性分类（Issue #125）：快速路径是否可用、代次、异常对象数、
 		// 最近一次分类耗时与按原因的回退计数；不含任何键或存储字节。
 		UsageIntegrity *nosql.UsageIntegrityMetrics `json:"usage_integrity,omitempty"`
+		// 用量保留桶只读观测（Issue #146）：缓存的快照，不含键、客户端/模型名
+		// 或存储字节；首次快照未就绪时 available 为 false。
+		UsageRetention *nosql.UsageRetentionStats `json:"usage_retention,omitempty"`
 	}{
 		GeneratedAt:       now,
 		UptimeSeconds:     uptime.Seconds(),
@@ -103,6 +106,10 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if h.usageStore != nil {
 		st := h.usageStore.IntegrityStats()
 		response.UsageIntegrity = &st
+		// The retention snapshot is cached inside the store: this call never
+		// waits for the database and only triggers a lazy background refresh.
+		retention := h.usageStore.UsageRetentionSnapshot()
+		response.UsageRetention = &retention
 	}
 	response.Requests.Total = metrics.TotalRequests
 	response.Requests.Success = metrics.TotalSuccess
