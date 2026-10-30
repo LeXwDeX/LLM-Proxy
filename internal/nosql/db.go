@@ -38,6 +38,7 @@ var allBuckets = []string{
 	BucketJobLevels,
 	BucketUsageEventsByClient, BucketUsageClientHours,
 	BucketUsageEventsQuarantine, BucketUsageReceipts,
+	bucketUsageProofOdd,
 }
 
 // dbMaxBatchDelay bounds how long a lone db.Batch caller waits for company
@@ -178,6 +179,7 @@ func OpenDB(path string) (*bolt.DB, error) {
 	err = db.Update(func(tx *bolt.Tx) error {
 		indexSchemaMissing := tx.Bucket([]byte(BucketUsageEventsByClient)) == nil || tx.Bucket([]byte(BucketUsageClientHours)) == nil
 		receiptsMissing := tx.Bucket([]byte(BucketUsageReceipts)) == nil
+		proofOddMissing := tx.Bucket([]byte(bucketUsageProofOdd)) == nil
 		oldMeta := tx.Bucket([]byte(BucketMeta))
 		indexInitialized := false
 		if oldMeta != nil {
@@ -201,7 +203,7 @@ func OpenDB(path string) (*bolt.DB, error) {
 			}
 		}
 		freshUsage := oldMeta == nil
-		for _, name := range []string{BucketUsageEvents, BucketUsageAggHourly, BucketQuotaUsageAggHourly, BucketUsageReceipts, receiptOwnersBucket, rawOwnerBucket, freshAttestationBucket, "usage_rollup_proofs_v1", rollupProofBucket, BucketUsageEventsQuarantine, BucketUsageEventsByClient, BucketUsageClientHours, unresolvedBucket, usageBackfillSnapshotBucket} {
+		for _, name := range []string{BucketUsageEvents, BucketUsageAggHourly, BucketQuotaUsageAggHourly, BucketUsageReceipts, receiptOwnersBucket, rawOwnerBucket, freshAttestationBucket, "usage_rollup_proofs_v1", rollupProofBucket, BucketUsageEventsQuarantine, BucketUsageEventsByClient, BucketUsageClientHours, unresolvedBucket, usageBackfillSnapshotBucket, bucketUsageProofOdd} {
 			if bucket := tx.Bucket([]byte(name)); bucket != nil {
 				if key, _ := bucket.Cursor().First(); key != nil {
 					freshUsage = false
@@ -216,6 +218,18 @@ func OpenDB(path string) (*bolt.DB, error) {
 			}
 		}
 		meta := tx.Bucket([]byte(BucketMeta))
+		if proofOddMissing || receiptsMissing {
+			// Recreating the derived bucket or losing the receipt source makes
+			// the persisted classification untrustworthy. Drop it and let the
+			// next migration rebuild; proofs fall back to full scans meanwhile.
+			if err := tx.DeleteBucket([]byte(bucketUsageProofOdd)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+				return fmt.Errorf("reset usage proof odd index: %w", err)
+			}
+			if _, err := tx.CreateBucketIfNotExists([]byte(bucketUsageProofOdd)); err != nil {
+				return fmt.Errorf("recreate usage proof odd index: %w", err)
+			}
+			proofOddInvalidate(tx)
+		}
 		// 稳定 key ID 的派生密钥：只生成一次，重复打开不变。
 		if _, err := ensureKeyIDSecret(tx); err != nil {
 			return err

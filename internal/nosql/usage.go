@@ -814,6 +814,9 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 				if err := b.Delete(k); err != nil {
 					return err
 				}
+				if err := proofOddRemoveRaw(tx, k); err != nil {
+					return err
+				}
 				if err := bumpRawRevision(tx); err != nil {
 					return err
 				}
