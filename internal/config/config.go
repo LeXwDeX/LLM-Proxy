@@ -273,10 +273,26 @@ type Target struct {
 	CustomHeaders map[string]string `json:"custom_headers,omitempty"`
 	// CustomBody 自定义请求体 JSON 顶层字段，每个请求合并到 body。
 	// 受安全黑名单保护，不可覆盖 model/messages/stream/n。
+	// JSON 边界以 json.RawMessage 保存每个值，避免大整数经 float64 往返丢失精度。
 	CustomBody map[string]any `json:"custom_body,omitempty"`
 	// Immutable file-input provenance for field-level migration auditing. It
 	// is not serialized and is never used for runtime adapter selection.
 	usageAdapterInput *usageAdapterInput
+}
+
+// CustomBodyFromRaw builds the internal custom_body representation from a JSON
+// object's values. Keeping each value as json.RawMessage preserves its original
+// JSON text (notably integers beyond 2^53) through config load, bbolt storage,
+// the admin list response and proxy injection.
+func CustomBodyFromRaw(raw map[string]json.RawMessage) map[string]any {
+	if raw == nil {
+		return nil
+	}
+	body := make(map[string]any, len(raw))
+	for key, value := range raw {
+		body[key] = append(json.RawMessage(nil), value...)
+	}
+	return body
 }
 
 // PoolQuota 是客户端在一个部署池（渠道商）上的分层限额。
@@ -623,7 +639,8 @@ func parse(data []byte) (*Config, error) {
 	// values. A plain string cannot distinguish missing from explicit empty.
 	var input struct {
 		Targets []struct {
-			UsageAdapter json.RawMessage `json:"usage_adapter"`
+			UsageAdapter json.RawMessage            `json:"usage_adapter"`
+			CustomBody   map[string]json.RawMessage `json:"custom_body"`
 		} `json:"targets"`
 	}
 	if err := json.Unmarshal(data, &input); err != nil {
@@ -637,6 +654,11 @@ func parse(data []byte) (*Config, error) {
 			}
 		}
 		cfg.Targets[i].usageAdapterInput = &usageAdapterInput{value: value, present: target.UsageAdapter != nil}
+		// The first decode turned numbers into float64. Re-read custom_body from
+		// the same bytes so values keep their exact JSON text.
+		if target.CustomBody != nil {
+			cfg.Targets[i].CustomBody = CustomBodyFromRaw(target.CustomBody)
+		}
 	}
 
 	return &cfg, nil
