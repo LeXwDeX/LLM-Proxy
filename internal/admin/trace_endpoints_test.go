@@ -109,15 +109,18 @@ func TestTraceListReportsEffectiveLimitAndOffset(t *testing.T) {
 		if records, ok := body["records"].([]any); !ok || len(records) != 0 {
 			t.Errorf("%q: records = %#v, want empty array", tc.query, body["records"])
 		}
-		if body["view"] == "summary" {
-			t.Errorf("%q: default view must stay full", tc.query)
+		if body["view"] != "summary" {
+			t.Errorf("%q: sessionless default view = %v, want summary", tc.query, body["view"])
 		}
 	}
-	rec := traceGet(h, "/data/trace?view=summary", true)
+	rec := traceGet(h, "/data/trace?view=full", true)
 	var body map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if body["view"] != "summary" {
-		t.Errorf("view=summary not echoed: %s", rec.Body.String())
+	if _, ok := body["view"]; ok {
+		t.Errorf("view=full must not echo a summary view: %s", rec.Body.String())
+	}
+	if records, ok := body["records"].([]any); !ok || len(records) != 0 {
+		t.Errorf("view=full records = %#v, want empty array", body["records"])
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
 	"github.com/LeXwDeX/LLM-Proxy/internal/tracestore"
 )
 
@@ -49,6 +50,13 @@ func (h *Handler) handleGetTrace(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorResponse("trace not found"))
 		return
 	}
+	// Stored client-key masks may predate the suffix-only policy. Non-admin
+	// readers get the viewer-safe form: the current 8-byte "****"+suffix mask is
+	// kept, while legacy, raw-looking and unknown values are fully hidden. Copy
+	// first: the record may still be owned by the in-memory ring buffer.
+	if !isAdminSession(r) {
+		record = redactTraceRecordForViewer(record)
+	}
 
 	writeJSON(w, http.StatusOK, record)
 }
@@ -80,7 +88,15 @@ func (h *Handler) handleListTrace(w http.ResponseWriter, r *http.Request) {
 	stats := h.proxyService.TraceStats()
 
 	// limit/offset 回显服务端实际采用的值（非法或超限的 limit 回落到默认值），
-	// 前端据此翻页。view=summary 返回不含 body/header 的列表投影；默认保持完整记录。
+	// 前端据此翻页。view=summary 返回不含 body/header 的列表投影；默认保持完整记录，
+	// 但非管理员默认使用 summary，避免完整记录随列表下发。显式 view=full 仍允许，
+	// 但非管理员的客户端密钥字段使用查看者安全形式：当前 "****"+后 4 位保留，
+	// 遗留、原始与未知形态完全隐藏（旧遮罩无法证明原密钥长度）。
+	view := r.URL.Query().Get("view")
+	summary := view == "summary"
+	if view == "" && !isAdminSession(r) {
+		summary = true
+	}
 	response := map[string]any{
 		"enabled": h.proxyService.TraceEnabled(),
 		"count":   len(records),
@@ -88,15 +104,43 @@ func (h *Handler) handleListTrace(w http.ResponseWriter, r *http.Request) {
 		"offset":  offset,
 		"stats":   stats,
 	}
-	if r.URL.Query().Get("view") == "summary" {
+	if summary {
 		response["view"] = "summary"
 		response["records"] = tracestore.Summaries(records)
-	} else if records == nil {
-		response["records"] = []*tracestore.TraceRecord{}
 	} else {
-		response["records"] = records
+		if !isAdminSession(r) {
+			records = redactTraceRecordsForViewer(records)
+		}
+		if records == nil {
+			response["records"] = []*tracestore.TraceRecord{}
+		} else {
+			response["records"] = records
+		}
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// redactTraceRecordForViewer copies a record and normalizes its client-key
+// mask. Trace records may be owned by the store's ring buffer, so the caller's
+// view must never mutate the original.
+func redactTraceRecordForViewer(record *tracestore.TraceRecord) *tracestore.TraceRecord {
+	if record == nil {
+		return nil
+	}
+	clone := *record
+	clone.ClientAccessKey = auth.NormalizeClientKeyMask(record.ClientAccessKey)
+	return &clone
+}
+
+func redactTraceRecordsForViewer(records []*tracestore.TraceRecord) []*tracestore.TraceRecord {
+	if records == nil {
+		return nil
+	}
+	out := make([]*tracestore.TraceRecord, len(records))
+	for i, record := range records {
+		out[i] = redactTraceRecordForViewer(record)
+	}
+	return out
 }
 
 // isAdminUIRequest 检查请求是否来自 Admin UI。
