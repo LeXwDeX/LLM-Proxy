@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -140,27 +141,21 @@ func integrityReadContext(ctx context.Context, tx *bolt.Tx, from, to time.Time) 
 
 type keyRange struct{ lo, hi []byte } // hi nil: unbounded
 
-func (r keyRange) contains(key []byte) bool {
-	return bytes.Compare(key, r.lo) >= 0 && (r.hi == nil || bytes.Compare(key, r.hi) < 0)
-}
-
-// walkRanges visits, in key order, every key of the sorted disjoint ranges plus
-// the sorted points outside all of them. A nested bucket is visited with a nil
+// walkRanges visits, in key order, every key of the sorted ranges plus the
+// sorted points outside all of them. A nested bucket is visited with a nil
 // value, as ForEach does.
+//
+// Preconditions: ranges is ordered by lower bound (sortKeyRanges) and points is
+// ordered ascending; every caller passes sorted classification slices, sorted
+// client-scope slices, or mergeSorted output. Range bounds follow keyRange:
+// lo is inclusive, hi is exclusive, and a nil lo or hi is unbounded on that
+// side. Ranges may overlap: the walk stays range-major, so a key covered by
+// several ranges is visited once per covering range, as before. Points may
+// repeat, and each occurrence is visited once when its key exists; a point
+// inside any range is not visited by the point pass, only through the range(s)
+// that cover it.
 func walkRanges(bucket *bolt.Bucket, ranges []keyRange, points [][]byte, fn func(k, v []byte) error) error {
-	var outside [][]byte
-	for _, point := range points {
-		covered := false
-		for _, r := range ranges {
-			if r.contains(point) {
-				covered = true
-				break
-			}
-		}
-		if !covered {
-			outside = append(outside, point)
-		}
-	}
+	outside := pointsOutsideRanges(ranges, points)
 	cursor := bucket.Cursor()
 	next := 0
 	visitPoints := func(before []byte) error {
@@ -187,6 +182,58 @@ func walkRanges(bucket *bolt.Bucket, ranges []keyRange, points [][]byte, fn func
 	return visitPoints(nil)
 }
 
+// pointsOutsideRanges returns the points no range contains, preserving order
+// and duplicates. Both slices are sorted (ranges by lower bound), so one pass
+// suffices: after consuming every range whose lower bound is <= point, the
+// point is covered exactly when the largest upper bound seen so far is greater
+// than it, with a nil upper bound meaning unbounded. Consuming each range once
+// makes the filter O(len(points)+len(ranges)) even when ranges overlap; the
+// former nested loop was O(len(points)*len(ranges)).
+func pointsOutsideRanges(ranges []keyRange, points [][]byte) [][]byte {
+	if len(ranges) == 0 {
+		return points
+	}
+	compare := bytes.Compare
+	if walkRangeCompareTracing.Load() {
+		compare = walkRangesCountedCompare
+	}
+	outside := make([][]byte, 0, len(points))
+	next := 0
+	unbounded := false
+	var maxHi []byte
+	for _, point := range points {
+		for next < len(ranges) && compare(ranges[next].lo, point) <= 0 {
+			r := ranges[next]
+			if r.hi == nil {
+				unbounded = true
+			} else if !unbounded && compare(r.hi, maxHi) > 0 {
+				maxHi = r.hi
+			}
+			next++
+		}
+		if !unbounded && compare(maxHi, point) <= 0 {
+			outside = append(outside, point)
+		}
+	}
+	return outside
+}
+
+// walkRangeCompareTracing is set only by this package's tests: the lookup then
+// counts its key comparisons so a test can pin its complexity. Production never
+// sets it and pays one atomic load per lookup.
+var walkRangeCompareTracing atomic.Bool
+
+// walkRangeCompares is meaningful while walkRangeCompareTracing is set. The
+// counter is atomic because integrity reads may run on concurrent goroutines.
+var walkRangeCompares atomic.Int64
+
+// walkRangesCountedCompare is the instrumented ordering used while a test
+// enabled walkRangeCompareTracing.
+func walkRangesCountedCompare(a, b []byte) int {
+	walkRangeCompares.Add(1)
+	return bytes.Compare(a, b)
+}
+
 func (f *integrityFast) hourRange(prefix []byte, end []byte) []keyRange {
 	if f.empty {
 		return nil
@@ -199,7 +246,8 @@ func (f *integrityFast) hourRange(prefix []byte, end []byte) []keyRange {
 	return []keyRange{{lo: lo, hi: hi}}
 }
 
-// sortKeyRanges orders ranges by lower bound for walkRanges' single cursor.
+// sortKeyRanges orders ranges by lower bound, the precondition of walkRanges'
+// single-cursor traversal and its point lookup.
 func sortKeyRanges(ranges []keyRange) []keyRange {
 	sort.Slice(ranges, func(i, j int) bool { return bytes.Compare(ranges[i].lo, ranges[j].lo) < 0 })
 	return ranges
