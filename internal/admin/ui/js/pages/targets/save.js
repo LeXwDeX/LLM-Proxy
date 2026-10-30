@@ -8,7 +8,7 @@ AdminApp.register("targetsSave", function (app) {
   var api = app.bind("core", "api");
   var closeModal = app.bind("core", "closeModal");
   var epMeta = app.bind("schema", "epMeta");
-  var collectCustomBody = app.bind("targetsMappings", "collectCustomBody");
+  var collectCustomBodyRaw = app.bind("targetsMappings", "collectCustomBodyRaw");
   var collectCustomHeaders = app.bind("targetsMappings", "collectCustomHeaders");
   var collectModelMappings = app.bind("targetsMappings", "collectModelMappings");
   var loadTargets = app.bind("targets", "loadTargets");
@@ -36,7 +36,8 @@ AdminApp.register("targetsSave", function (app) {
         document.getElementById("tgtPreferWS").checked;
       var modelMappings = collectModelMappings();
       var customHeaders = collectCustomHeaders();
-      var customBody = collectCustomBody();
+      // Raw JSON text, never a parsed value: JSON.parse would round large integers.
+      var customBodyRaw = collectCustomBodyRaw();
       // 统一 keypool：从卡片列表读取，第一个为 api_key，其余为 api_keys。
       // 已保存的空主密钥槽位保持为空，不让第一个附加密钥顶替主密钥。
       var emptyPrimary = !!(ts.tgtKeyList[0] && ts.tgtKeyList[0].emptyPrimary);
@@ -116,7 +117,7 @@ AdminApp.register("targetsSave", function (app) {
             model_mappings: modelMappings,
             model_prefix: document.getElementById("tgtModelPrefix").value,
             custom_headers: customHeaders,
-            custom_body: customBody,
+            custom_body_raw: customBodyRaw,
             key_reset_time: keyResetTime,
             pool: pool,
           },
@@ -147,7 +148,7 @@ AdminApp.register("targetsSave", function (app) {
             model_mappings: modelMappings,
             model_prefix: document.getElementById("tgtModelPrefix").value,
             custom_headers: customHeaders,
-            custom_body: customBody,
+            custom_body_raw: customBodyRaw,
             api_keys: apiKeys,
             key_reset_time: keyResetTime,
             pool: pool,
@@ -227,6 +228,7 @@ AdminApp.register("targetsSave", function (app) {
     "endpoint_type", "endpoint", "paused", "allow_bearer_passthrough", "auth_mode", "usage_adapter",
     "image_operation", "prefer_websocket", "openai_prefix", "anthropic_prefix", "supports_responses",
     "request_stream_usage_if_missing", "model_mappings", "model_prefix", "custom_headers", "custom_body",
+    "custom_body_raw",
     "key_reset_time", "pool",
   ];
   // Stable form with the server's own normalisation applied and "empty" values dropped,

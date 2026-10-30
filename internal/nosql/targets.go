@@ -76,10 +76,16 @@ func (s *TargetStore) List() ([]config.Target, error) {
 		}
 		return b.ForEach(func(k, v []byte) error {
 			key := string(k)
-			var target config.Target
-			if err := json.Unmarshal(v, &target); err != nil {
+			// The explicit field shadows Target.CustomBody for this decode, so the
+			// custom body arrives as raw JSON text instead of float64 values.
+			var record struct {
+				config.Target
+				RawCustomBody map[string]json.RawMessage `json:"custom_body"`
+			}
+			if err := json.Unmarshal(v, &record); err != nil {
 				return fmt.Errorf("decode target %q: %w", key, err)
 			}
+			target := record.Target
 			if !config.IsValidUsageAdapter(target.UsageAdapter) {
 				// Do not infer by host or fall back to standard on residual data.
 				s.logger.Error("skipping target with invalid usage_adapter", "target", target.Name, "target_key", key)
@@ -102,6 +108,9 @@ func (s *TargetStore) List() ([]config.Target, error) {
 					target.ModelMappings = append(target.ModelMappings, config.ModelMapping{Upstream: m})
 				}
 				migrated = true
+			}
+			if record.RawCustomBody != nil {
+				target.CustomBody = config.CustomBodyFromRaw(record.RawCustomBody)
 			}
 			normalized := normalizeTarget(target)
 			if migrated || targetJSONChanged(target, normalized) {

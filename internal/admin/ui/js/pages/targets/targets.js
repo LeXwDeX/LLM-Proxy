@@ -205,6 +205,7 @@ AdminApp.register("targets", function (app) {
     collectCustomHeaders: app.bind("targetsMappings", "collectCustomHeaders"),
     addCustomBodyRow: app.bind("targetsMappings", "addCustomBodyRow"),
     collectCustomBody: app.bind("targetsMappings", "collectCustomBody"),
+    collectCustomBodyRaw: app.bind("targetsMappings", "collectCustomBodyRaw"),
     openTargetModal: app.bind("targetsModal", "openTargetModal"),
     renderTargetPoolOptions: app.bind("targetsModal", "renderTargetPoolOptions"),
   };

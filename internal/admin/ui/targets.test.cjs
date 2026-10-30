@@ -1097,3 +1097,80 @@ test("unconfirmed: a definite 4xx on a row action is still a red failure", async
   await confirmation();
   assert.ok(f.messages.some((m) => m.msg === "暂停失败: nope" && m.kind === "error"), JSON.stringify(f.messages));
 });
+
+// The harness resolves document.querySelectorAll against a flat element list,
+// so the real DOM's "#custom-body-container > div" needs an explicit shim.
+function useCustomBodyRows(f) {
+  const document = f.harness.context.document;
+  const original = document.querySelectorAll.bind(document);
+  document.querySelectorAll = (selector) =>
+    selector === "#custom-body-container > div"
+      ? f.harness.ids.get("custom-body-container").children
+      : original(selector);
+}
+
+// Issue #112: the custom body editor must not round-trip JSON values through
+// JavaScript numbers. A value above Number.MAX_SAFE_INTEGER changes digits
+// during JSON.parse/JSON.stringify even when the operator edits nothing.
+test("unmodified custom body rows save their original JSON text byte for byte", async () => {
+  const originalRaw = {
+    seed: "12345678901234567890",
+    temperature: "0.7",
+    label: "\"ok\"",
+    nested: "{\"id\":9007199254740993}",
+    enabled: "true",
+    empty: "null",
+  };
+  // custom_body is what JSON.parse (and therefore the old editor) sees: the
+  // large integers are already rounded. custom_body_raw is the exact text.
+  const rawTargets = JSON.stringify({
+    targets: [target({
+      custom_body: {
+        seed: 12345678901234567000,
+        temperature: 0.7,
+        label: "ok",
+        nested: { id: 9007199254740992 },
+        enabled: true,
+        empty: null,
+      },
+      custom_body_raw: originalRaw,
+    })],
+    count: 1,
+  });
+  const f = await setup(target(), (url, opts, fallback) =>
+    url === "/admin/data/targets" && !opts?.method
+      ? Promise.resolve({ ok: true, status: 200, text: async () => rawTargets })
+      : fallback(url, opts));
+  useCustomBodyRows(f);
+  await f.edit();
+  const rows = f.harness.ids.get("custom-body-container").children;
+  const values = Object.fromEntries(rows.map((row) => [row.children[0].value, row.children[1].value]));
+  assert.deepEqual(values, originalRaw, "opening the editor shows the exact stored JSON text");
+  await f.save();
+  const update = f.puts()[0];
+  assert.ok(update, "the unmodified target was saved");
+  const body = putBody(update);
+  assert.deepEqual(body.custom_body_raw, originalRaw, "the save request carries every value verbatim");
+  assert.equal("custom_body" in body, false, "the lossy parsed representation is not sent");
+  assert.match(update.options.body, /12345678901234567890/);
+  assert.match(update.options.body, /9007199254740993/);
+  assert.doesNotMatch(update.options.body, /12345678901234567000|9007199254740992/,
+    "no value was re-serialized from a JavaScript number");
+});
+
+test("edited custom body rows are syntax-checked without re-serializing valid JSON", async () => {
+  const f = await setup(target());
+  useCustomBodyRows(f);
+  await f.edit();
+  f.app.modules.targets.addCustomBodyRow("seed", "9007199254740993");
+  f.app.modules.targets.addCustomBodyRow("enabled", "false");
+  f.app.modules.targets.addCustomBodyRow("plain", "hello");
+  await f.save();
+  const body = putBody(f.puts()[0]);
+  assert.deepEqual(body.custom_body_raw, {
+    seed: "9007199254740993",
+    enabled: "false",
+    plain: "\"hello\"",
+  });
+  assert.equal("custom_body" in body, false);
+});
