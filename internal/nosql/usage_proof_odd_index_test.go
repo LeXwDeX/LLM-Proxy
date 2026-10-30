@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -231,6 +232,78 @@ func TestProofOddIndexMigrationResumes(t *testing.T) {
 	}
 	if !proofOddReadyNow(t, db) {
 		t.Fatal("migration did not finish")
+	}
+	requireProofOddIndexMatches(t, db)
+}
+
+// countingErrContext makes the cancellation point deterministic: the migration
+// loop's own check consumes the first Err call, and the next one, made inside
+// the verification pass, reports cancellation. Verification runs in one write
+// transaction that bbolt cannot interrupt, so this pins the interior check that
+// keeps a large index from outliving the startup budget.
+type countingErrContext struct {
+	context.Context
+	calls int
+	limit int
+}
+
+func (c *countingErrContext) Err() error {
+	c.calls++
+	if c.calls > c.limit {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestProofOddIndexVerificationObservesCancellation(t *testing.T) {
+	db := testDB(t)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-9 * time.Hour)
+	// More odd rows than one verification checkpoint, so the pass reaches an
+	// interior check rather than finishing first.
+	const history = 600
+	if err := db.Update(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		for i := 0; i < history; i++ {
+			e := scaleEvent(740000+i, base.Add(time.Duration(i)*time.Minute))
+			// Legacy-shaped row: no record id, so it is an odd row.
+			legacy := e
+			legacy.RecordID = ""
+			data, err := json.Marshal(legacy)
+			if err != nil {
+				return err
+			}
+			if err := raw.Put([]byte(usageKey(e.Timestamp, fmt.Sprintf("legacy-%d", i))), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 50); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not finish")
+	}
+
+	ctx := &countingErrContext{Context: context.Background(), limit: 1}
+	if err := MigrateUsageProofOddIndex(ctx, db, 50); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled verification returned %v, want context.Canceled", err)
+	}
+	// The interrupted pass must roll back instead of discarding a sound index.
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("cancelled verification discarded the completed index")
+	}
+	requireProofOddIndexMatches(t, db)
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 50); err != nil {
+		t.Fatalf("later start could not verify the index: %v", err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("later start discarded the completed index")
 	}
 	requireProofOddIndexMatches(t, db)
 }

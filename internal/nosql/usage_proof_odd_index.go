@@ -683,52 +683,67 @@ func proofOddLoadHour(tx *bolt.Tx, kind byte, hour string, data *bolt.Bucket) ([
 	return keys, true
 }
 
+// proofOddVerifyCheckEvery bounds how long the verification below can run
+// without observing cancellation. The pass holds one write transaction, which
+// bbolt cannot interrupt, so the startup budget's context is checked every this
+// many index entries; a cancelled pass returns the context error and the
+// transaction rolls back, leaving the untouched index for the next start.
+const proofOddVerifyCheckEvery = 1024
+
 // proofOddVerifyCounts re-derives every per-kind count from the bucket and
 // checks that every location entry still owns its pointer. It is O(index
 // entries), so it runs only when a startup migration would otherwise trust a
 // completed index; a fresh proof instead reconciles the counts of the hours it
 // loads. A mismatch means an entry was added or removed out of band, which the
-// markers alone cannot see.
-func proofOddVerifyCounts(tx *bolt.Tx) bool {
+// markers alone cannot see. A non-nil error means the pass was interrupted and
+// proves nothing; the caller must not treat it as a mismatch.
+func proofOddVerifyCounts(ctx context.Context, tx *bolt.Tx) (bool, error) {
 	index := proofOddBucket(tx)
 	if index == nil || index.Get(proofOddCountsMarkerKey) == nil {
-		return false
+		return false, nil
 	}
 	rawData := tx.Bucket([]byte(BucketUsageEvents))
 	receiptData := tx.Bucket([]byte(BucketUsageReceipts))
 	actual := make(map[string]uint64)
 	declared := make(map[string]struct{})
 	cursor := index.Cursor()
+	checked := 0
 	for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+		checked++
+		if checked%proofOddVerifyCheckEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+		}
 		if len(k) == 0 {
-			return false
+			return false, nil
 		}
 		switch k[0] {
 		case proofOddRawGlobal, proofOddReceiptGlobal:
 			key := k[1:]
 			if !proofOddEntryMatches(proofOddDataBucket(k[0], rawData, receiptData), key, v) {
-				return false
+				return false, nil
 			}
 			if !bytes.Equal(index.Get(proofOddPointerKey(proofOddPointerFor(k[0]), key)), proofOddPointerValue(k[0], "")) {
-				return false
+				return false, nil
 			}
 			actual[string(proofOddCountKey(k[0], ""))]++
 		case proofOddRawHour, proofOddReceiptHour:
 			if len(k) < 1+len(hourLayout) {
-				return false
+				return false, nil
 			}
 			hour := string(k[1 : 1+len(hourLayout)])
 			key := k[1+len(hourLayout):]
 			if !proofOddEntryMatches(proofOddDataBucket(k[0], rawData, receiptData), key, v) {
-				return false
+				return false, nil
 			}
 			if !bytes.Equal(index.Get(proofOddPointerKey(proofOddPointerFor(k[0]), key)), proofOddPointerValue(k[0], hour)) {
-				return false
+				return false, nil
 			}
 			actual[string(proofOddCountKey(k[0], hour))]++
 		case proofOddCountPrefix:
 			if len(v) != 8 {
-				return false
+				return false, nil
 			}
 			declared[string(k)] = struct{}{}
 		case proofOddRawPointer, proofOddReceiptPointer, 'm':
@@ -742,10 +757,10 @@ func proofOddVerifyCounts(tx *bolt.Tx) bool {
 	for key, count := range actual {
 		v := index.Get([]byte(key))
 		if len(v) != 8 || binary.BigEndian.Uint64(v) != count {
-			return false
+			return false, nil
 		}
 	}
-	return len(actual) == len(declared)
+	return len(actual) == len(declared), nil
 }
 
 // MigrateUsageProofOddIndex builds or resumes the persisted classification in
@@ -777,7 +792,11 @@ func MigrateUsageProofOddIndex(ctx context.Context, db *bolt.DB, batchSize int) 
 				// an entry deleted out of band, so re-derive the counts and the
 				// pointer set before trusting it; a mismatch discards the index
 				// instead of leaving proofs on a permanent full-scan fallback.
-				if proofOddVerifyCounts(tx) {
+				verified, err := proofOddVerifyCounts(ctx, tx)
+				if err != nil {
+					return err
+				}
+				if verified {
 					done = true
 					return nil
 				}
