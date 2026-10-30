@@ -118,7 +118,8 @@ func sameStringMap(a, b map[string]string) bool {
 
 // sameAnyMap 按 JSON 语义比较自定义请求体，而不是比较 json.RawMessage 的字节。
 // 等价边界：对象键顺序无关；数组顺序有关；字符串按解码后的值比较（转义拼写
-// 无关，包括 HTML 转义）；数字按精确十进制值比较（不经过 float64，0.7 与 0.70、
+// 无关，包括 HTML 转义；非法 UTF-8 与未配对代理项按 encoding/json 的行为解码
+// 为 U+FFFD 后比较）；数字按精确十进制值比较（不经过 float64，0.7 与 0.70、
 // 1e2 与 100 等价，任意精度整数不丢位）；重复键按 encoding/json 的后者覆盖前者
 // 处理。无法编码或不是合法 JSON 的值退回 reflect.DeepEqual，保持原来的严格性。
 func sameAnyMap(a, b map[string]any) bool {
@@ -153,7 +154,9 @@ func canonicalJSONValue(value any) (string, bool) {
 
 // canonicalJSONBytes 用 UseNumber 解析后生成规范形式，保证数字 token 不经过
 // float64。json.Marshal 已会压缩空白并做 HTML 转义，这里再统一字符串转义与
-// 对象键顺序，避免持久化、配置来源或编码器差异被误判为身份变化。
+// 对象键顺序，避免持久化、配置来源或编码器差异被误判为身份变化。解码时
+// encoding/json 会把非法 UTF-8 与未配对代理项替换为 U+FFFD，对象重复键由 map
+// 保留最后一个；这些也属于本比较的等价边界。
 func canonicalJSONBytes(data []byte) (string, bool) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()

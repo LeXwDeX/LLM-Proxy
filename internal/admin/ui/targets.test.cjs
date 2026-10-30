@@ -1238,3 +1238,68 @@ test("unconfirmed: a different custom body number is not mistaken for the submit
   assert.ok(!f.messages.some((m) => m.msg === "已保存"), messageTexts(f).join("|"));
   assert.match(f.harness.ids.get("keyCardList").innerHTML, /该目标已被修改，请重新加载后再保存/);
 });
+
+// JSON.parse creates a normal own data property for "__proto__"; constructing
+// these fixtures with object literals would invoke the prototype setter and
+// drop the member before the page ever sees it.
+const protoMap = (value) => JSON.parse('{"__proto__":' + JSON.stringify(value) + '}');
+
+test("custom body __proto__ field survives save and unconfirmed reconciliation", async () => {
+  const submittedBody = protoMap({ nested: 1 });
+  const submittedRaw = protoMap('{"nested":1}');
+  const f = await setup(target({
+    custom_body: submittedBody,
+    custom_body_raw: submittedRaw,
+  }), (url, opts, fallback) => {
+    if (isTargetPut(url, opts)) {
+      f.harness.setRoute("/admin/data/targets", { targets: [target({
+        etag: "t1-6",
+        endpoint: "https://draft.invalid",
+        custom_body: submittedBody,
+        custom_body_raw: submittedRaw,
+      })] });
+      return Promise.resolve(htmlResponse(504));
+    }
+    return fallback(url, opts);
+  });
+  useCustomBodyRows(f);
+  await f.edit();
+  f.harness.ids.get("tgtEndpoint").value = "https://draft.invalid";
+  await f.save();
+  const update = f.puts()[0];
+  assert.ok(update, "custom body __proto__ target was saved");
+  const body = putBody(update);
+  assert.equal(Object.prototype.hasOwnProperty.call(body.custom_body_raw, "__proto__"), true,
+    "save request keeps the __proto__ field");
+  assert.equal(body.custom_body_raw["__proto__"], '{"nested":1}');
+  assert.ok(f.messages.some((m) => m.msg === "已保存" && m.kind === "success"), messageTexts(f).join("|"));
+  assert.ok(!messageTexts(f).some((m) => /已被修改|保存失败/.test(m)), messageTexts(f).join("|"));
+});
+
+test("unconfirmed: a different custom body __proto__ value is not mistaken for the submitted one", async () => {
+  const submittedBody = protoMap({ nested: 1 });
+  const submittedRaw = protoMap('{"nested":1}');
+  const storedBody = protoMap({ nested: 2 });
+  const storedRaw = protoMap('{"nested":2}');
+  const f = await setup(target({
+    custom_body: submittedBody,
+    custom_body_raw: submittedRaw,
+  }), (url, opts, fallback) => {
+    if (isTargetPut(url, opts)) {
+      f.harness.setRoute("/admin/data/targets", { targets: [target({
+        etag: "t1-6",
+        endpoint: "https://draft.invalid",
+        custom_body: storedBody,
+        custom_body_raw: storedRaw,
+      })] });
+      return Promise.resolve(htmlResponse(504));
+    }
+    return fallback(url, opts);
+  });
+  useCustomBodyRows(f);
+  await f.edit();
+  f.harness.ids.get("tgtEndpoint").value = "https://draft.invalid";
+  await f.save();
+  assert.ok(!f.messages.some((m) => m.msg === "已保存"), messageTexts(f).join("|"));
+  assert.match(f.harness.ids.get("keyCardList").innerHTML, /该目标已被修改，请重新加载后再保存/);
+});

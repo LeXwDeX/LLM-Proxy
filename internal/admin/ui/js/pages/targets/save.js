@@ -239,7 +239,8 @@ AdminApp.register("targetsSave", function (app) {
       return items.length ? items : undefined;
     }
     if (value && typeof value === "object") {
-      var out = {};
+      // Null-prototype map: keys such as "__proto__" are JSON data, not setters.
+      var out = Object.create(null);
       Object.keys(value).sort().forEach(function (k) {
         var c = canonical(value[k]);
         if (c !== undefined) out[k] = c;
@@ -372,12 +373,13 @@ AdminApp.register("targetsSave", function (app) {
     return parsed;
   }
   function comparableFields(source, sent) {
-    var picked = {};
+    // Null-prototype maps keep arbitrary JSON keys, including "__proto__".
+    var picked = Object.create(null);
     COMPARED_FIELDS.forEach(function (field) {
       if (sent && !Object.prototype.hasOwnProperty.call(sent, field)) return;
       var v = source[field];
       if (field === "custom_body_raw" && v && typeof v === "object" && !Array.isArray(v)) {
-        var raw = {};
+        var raw = Object.create(null);
         Object.keys(v).forEach(function (key) {
           raw[key] = canonicalCustomBodyRaw(v[key]);
         });

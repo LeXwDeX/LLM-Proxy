@@ -239,7 +239,8 @@ AdminApp.register("targetsMappings", function (app) {
       addCustomHeaderRow("", "");
     });
   function collectCustomHeaders() {
-    var headers = {};
+    // Null-prototype map: a field named "__proto__" must remain a data member.
+    var headers = Object.create(null);
     document
       .querySelectorAll("#custom-headers-container > div")
       .forEach(function (row) {
@@ -263,7 +264,8 @@ AdminApp.register("targetsMappings", function (app) {
       addCustomBodyRow("", "");
     });
   function collectCustomBody() {
-    var body = {};
+    // Null-prototype map: a field named "__proto__" must remain a data member.
+    var body = Object.create(null);
     document
       .querySelectorAll("#custom-body-container > div")
       .forEach(function (row) {
@@ -285,7 +287,8 @@ AdminApp.register("targetsMappings", function (app) {
   // 不能使用 JSON.parse 的结果：超过 Number.MAX_SAFE_INTEGER 的整数会丢失精度。
   // 无效 JSON 维持旧行为，按普通字符串提交。
   function collectCustomBodyRaw() {
-    var body = {};
+    // Null-prototype map: a field named "__proto__" must remain a data member.
+    var body = Object.create(null);
     document
       .querySelectorAll("#custom-body-container > div")
       .forEach(function (row) {
