@@ -202,6 +202,11 @@ func walkScoped(bucket *bolt.Bucket, prefixes []string, odd [][]byte, fn func(k,
 			points = append(points, key)
 		}
 	}
+	// The odd lists arrive in persisted-index order: global entries first, then
+	// one list per requested hour appended by iterating a map. Sorting here is
+	// what makes the walk visit every key in key order, as documented, instead
+	// of letting the hour map decide the order of the odd points.
+	sort.Slice(points, func(i, j int) bool { return bytes.Compare(points[i], points[j]) < 0 })
 	next := 0
 	cursor := bucket.Cursor()
 	// A nested bucket is a key with a nil value, and ForEach hands it to the
