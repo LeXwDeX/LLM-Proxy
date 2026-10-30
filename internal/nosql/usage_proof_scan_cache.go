@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -205,6 +206,12 @@ func receiptClientHashIfNamed(name string) string {
 // holds the bbolt writer. Databases tracked since creation never run the
 // legacy scans and are skipped. It returns the number of rows visited.
 //
+// Issue #114: once the persistent odd-row classification is ready, the only
+// rows a scoped proof can still decode are the global odd rows (unparseable
+// key stamps and always-overlapping rows); odd rows keyed by hour are reached
+// only when their hour is proved, which is already O(scope). Warm-up therefore
+// visits just the global set. A damaged index falls back to the full scan.
+//
 // It also rebuilds the set of non-canonical client index entries
 // (usage_client_index_exceptions.go) for tracked databases too, which is how
 // out-of-band index damage becomes visible to identity lookups.
@@ -218,6 +225,23 @@ func WarmUsageProofScanCache(db *bolt.DB) (int, error) {
 		}
 		if string(meta.Get([]byte(usageAccountingProofTrackedKey))) == "1" {
 			return nil
+		}
+		if proofOddIndexReady(tx) {
+			if keys, ok := proofOddLoadGlobal(tx, proofOddRawGlobal, raw); ok {
+				cursor := raw.Cursor()
+				for _, key := range keys {
+					actualKey, value := cursor.Seek(key)
+					if actualKey == nil || !bytes.Equal(actualKey, key) {
+						break
+					}
+					visited++
+					var event usage.Event
+					if !decodeProofEventCached(value, &event) || usageKey(event.Timestamp, event.RecordID) != string(actualKey) {
+						backfillRawScopeCached(value)
+					}
+				}
+				return nil
+			}
 		}
 		return raw.ForEach(func(k, v []byte) error {
 			visited++

@@ -232,6 +232,9 @@ func ReindexUsageEvent(tx *bolt.Tx, rawKey, before, after []byte) error {
 	if err := addClientEventIndex(tx, event, rawKey, after); err != nil {
 		return err
 	}
+	if err := proofOddNoteRaw(tx, rawKey, after); err != nil {
+		return err
+	}
 	// Issue #125: an offline rewrite may move the row to another hour.
 	integrityMarkTx(tx)
 	return bumpRawRevision(tx)
@@ -246,9 +249,17 @@ func rawRevision(tx *bolt.Tx) uint64 {
 }
 
 func bumpRawRevision(tx *bolt.Tx) error {
+	revision := rawRevision(tx) + 1
 	var data [8]byte
-	binary.BigEndian.PutUint64(data[:], rawRevision(tx)+1)
-	return tx.Bucket([]byte(BucketMeta)).Put([]byte(usageRawRevisionKey), data[:])
+	binary.BigEndian.PutUint64(data[:], revision)
+	if err := tx.Bucket([]byte(BucketMeta)).Put([]byte(usageRawRevisionKey), data[:]); err != nil {
+		return err
+	}
+	// Issue #114: keep the proof classification bound to the raw data it was
+	// built from. A writer that does not call this function (an older binary)
+	// advances the revision alone, so the persisted index reads as stale and
+	// proofs fall back instead of trusting a classification it did not update.
+	return proofOddFollowRawRevision(tx, revision)
 }
 
 func clientIndexBatchSize(size int) int {

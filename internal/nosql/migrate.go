@@ -279,6 +279,9 @@ func migrateUsageEvents(db *bolt.DB, path string) {
 				if err := b.Put([]byte(key), data); err != nil {
 					return err
 				}
+				if err := proofOddNoteRawEvent(tx, []byte(key), data, evt); err != nil {
+					return err
+				}
 				if err := addClientEventIndex(tx, evt, []byte(key), data); err != nil {
 					return err
 				}
