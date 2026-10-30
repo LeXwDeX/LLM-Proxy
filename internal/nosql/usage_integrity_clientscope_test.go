@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -113,6 +114,34 @@ func clientScopeFullReference(t *testing.T, db *bolt.DB, filter usage.Filter, re
 	store := NewUsageStore(db)
 	result, err := store.readCostUnitsInScope(context.Background(), filter, resolver, precise, nil, costReadHooks{windowKeys: true}, nil)
 	return result.units, err
+}
+
+// clientScopeProbeDeclines reports whether the scope probe declines for
+// client over [from, to] under the current classification. It must run before
+// any ForgetUsageIntegrityClassification call, which drops the classification
+// the probe needs.
+//
+// A declined read normally counts exactly one client_scope fallback, but so
+// does a scoped attempt that fails during its walks: the caller discards it,
+// counts a fallback and replays the exhaustive read. The counter alone
+// therefore cannot prove that the probe itself declined; a shape whose only
+// damage is visible to the probe asserts the probe directly.
+func clientScopeProbeDeclines(t *testing.T, db *bolt.DB, client string, from, to time.Time) bool {
+	t.Helper()
+	start, end := from.Truncate(time.Hour), to.Truncate(time.Hour).Add(time.Hour)
+	declined := false
+	if err := db.View(func(tx *bolt.Tx) error {
+		ctx := integrityReadContext(context.Background(), tx, from, to)
+		progress, err := loadIndexProgress(tx)
+		if err != nil {
+			return err
+		}
+		declined = probeClientScopedRead(ctx, tx, client, start, end, progress, integrityFastFrom(ctx, tx)) == nil
+		return nil
+	}); err != nil {
+		t.Fatalf("probe %s: %v", client, err)
+	}
+	return declined
 }
 
 // clientScopeAssertSameVerdict compares the scoped read with the exhaustive
@@ -304,11 +333,41 @@ func clientScopeMoveRowIntoWindow(t *testing.T, db *bolt.DB, now time.Time, with
 	event := sibling
 	event.Timestamp = inWindow
 	event.RecordID = ""
+	clientScopeWriteIndexedRow(t, db, []byte(usageKey(now.AddDate(0, 0, -40), "")), event, withProof)
+}
+
+// clientScopeMoveEmptyClientRowIntoWindow is the empty-client counterpart of
+// clientScopeMoveRowIntoWindow: the client index enumerates empty-client rows
+// under the empty prefix, and the probe's hour check must reject a moved row
+// there too, not only under the filter client's prefix. The row's event hour,
+// index entry, hour state and rollups lie inside the read window while its key
+// hour lies 40 days before now, so the skipped evidence scan cannot account
+// for it.
+//
+// withSibling also writes an ordinary in-window empty-client row through the
+// same full path, so the in-window hour state and digest cover two rows. The
+// probe then declines only because of the moved row's key hour; without the
+// sibling the hour has a single, equally moved row.
+func clientScopeMoveEmptyClientRowIntoWindow(t *testing.T, db *bolt.DB, now time.Time, withProof, withSibling bool) {
+	t.Helper()
+	at := now.Add(-12 * time.Hour).Add(30 * time.Minute)
+	if withSibling {
+		clientScopeWriteIndexedRow(t, db, []byte(usageKey(at, "empty-sibling")), clientScopeSyntheticEvent(at, "", "empty-sibling"), withProof)
+	}
+	eventAt := at.Truncate(time.Hour).Add(time.Minute)
+	clientScopeWriteIndexedRow(t, db, []byte(usageKey(now.AddDate(0, 0, -40), "")), clientScopeSyntheticEvent(eventAt, "", ""), withProof)
+}
+
+// clientScopeWriteIndexedRow writes one raw row together with the derived
+// state a consistent writer creates in the same transaction: client index
+// entry, client/hour state, both rollup cells and, when withProof, the v2
+// atomic proof.
+func clientScopeWriteIndexedRow(t *testing.T, db *bolt.DB, key []byte, event usage.Event, withProof bool) {
+	t.Helper()
 	data, err := json.Marshal(event)
 	if err != nil {
-		t.Fatalf("marshal moved event: %v", err)
+		t.Fatalf("marshal event: %v", err)
 	}
-	key := []byte(usageKey(now.AddDate(0, 0, -40), ""))
 	if err := db.Update(func(tx *bolt.Tx) error {
 		raw := tx.Bucket([]byte(BucketUsageEvents))
 		if raw.Get(key) != nil {
@@ -338,7 +397,7 @@ func clientScopeMoveRowIntoWindow(t *testing.T, db *bolt.DB, now time.Time, with
 		}
 		return writeIndexProof(tx, p, key, data, event, "atomic")
 	}); err != nil {
-		t.Fatalf("move row into window: %v", err)
+		t.Fatalf("write indexed row %q: %v", key, err)
 	}
 }
 
@@ -701,6 +760,64 @@ func TestClientScopedQuotaReadFallbacks(t *testing.T) {
 	})
 }
 
+// errCallContext reports context.Canceled from the from-th Err call on, so a
+// test can cancel a read at an exact check without racing a goroutine. Calls
+// before that point see the parent's result, and Done/Value pass through.
+type errCallContext struct {
+	context.Context
+	from  int
+	calls int
+}
+
+func (c *errCallContext) Err() error {
+	c.calls++
+	if c.from > 0 && c.calls >= c.from {
+		return context.Canceled
+	}
+	return c.Context.Err()
+}
+
+// TestClientScopedQuotaReadCancellationIsNotAFallback proves a canceled read
+// is not counted as a client_scope fallback: cancellation is not a scope
+// decline, and the read returns the cancellation without data, so counting it
+// would inflate the metric with reads that never fell back.
+//
+// The probe is canceled deterministically mid-flight. The read's first Err
+// call is the entry precheck (readCostUnitsInScope); the probe's first hourly
+// check is the second (integrityFastFrom, integrityReadContext,
+// missingUsageAggregateSources and loadIndexProgress do not call Err). With
+// the wrapper canceling from the second call on, the probe declines, and the
+// following exhaustive walks return context.Canceled.
+func TestClientScopedQuotaReadCancellationIsNotAFallback(t *testing.T) {
+	productionIntegrityMode(t)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	from := now.Add(-24 * time.Hour)
+	store, db := buildClientScopeStore(t, now, map[string]int{"alice": 10})
+	migrateClientIndex(t, db)
+	if err := RunClassificationOnce(context.Background(), db); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	filter := usage.Filter{ClientName: "alice", From: &from, To: &now}
+	resolver := exactCostTable{replayCosts}
+	// The control is the same read on the same healthy, classified store
+	// without cancellation: it takes the scoped enumeration and succeeds
+	// without counting a fallback.
+	units, err := store.readCostUnitsInScope(context.Background(), filter, resolver, true, nil, costReadHooks{windowKeys: true}, nil)
+	if err != nil {
+		t.Fatalf("control read: %v", err)
+	}
+	if len(units.units) != 10 {
+		t.Fatalf("control read returned %d units, want 10", len(units.units))
+	}
+	before := clientScopeFallbacks(db)
+	if _, err := store.readCostUnitsInScope(&errCallContext{Context: context.Background(), from: 2}, filter, resolver, true, nil, costReadHooks{windowKeys: true}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled read returned %v, want context.Canceled", err)
+	}
+	if got := clientScopeFallbacks(db) - before; got != 0 {
+		t.Fatalf("canceled read counted %d client_scope fallbacks, want 0: cancellation is not a scope decline", got)
+	}
+}
+
 // TestClientScopedQuotaReadNotEligible pins the read shapes that never attach
 // a client scope: an empty client, a model filter, stable pricing and an
 // explicit legacy scan. None of them is a fallback, so no reason is counted,
@@ -783,6 +900,10 @@ type clientScopeShape struct {
 	wantDelta  int
 	wantUnits  int // -1: not asserted
 	wantScoped bool
+	// requireProbeDecline asserts the probe itself declines, not merely that
+	// the counter moved: a scoped attempt failing after attachment also counts
+	// a fallback through its replay (see clientScopeProbeDeclines).
+	requireProbeDecline bool
 	// v1Only builds the client index as a completed v1-only migration (done
 	// marker, no v2 anchors) instead of running the v2 migration.
 	v1Only bool
@@ -855,6 +976,30 @@ func TestClientScopedQuotaReadEqualsFullShapes(t *testing.T) {
 			name: "cross-hour raw key outside window v2 proof", clients: []string{"alice"}, wantDelta: 1, wantUnits: -1,
 			damage: func(t *testing.T, db *bolt.DB, now time.Time) {
 				clientScopeMoveRowIntoWindow(t, db, now, true)
+			},
+		},
+		{
+			// The probe enumerates []string{client, ""}: empty-client rows are
+			// indexed under the empty prefix and poison every client-filtered
+			// read inside the window. A moved empty-client row must decline the
+			// scope exactly like a moved filter-client row; checking only the
+			// filter client's rows would attach a scope the empty-client walk
+			// cannot vouch for.
+			name: "empty client cross-hour raw key outside window v2 proof", clients: []string{"alice"}, wantDelta: 1, wantUnits: -1, requireProbeDecline: true,
+			damage: func(t *testing.T, db *bolt.DB, now time.Time) {
+				clientScopeMoveEmptyClientRowIntoWindow(t, db, now, true, true)
+			},
+		},
+		{
+			name: "empty client cross-hour raw key outside window without sibling v2 proof", clients: []string{"alice"}, wantDelta: 1, wantUnits: -1, requireProbeDecline: true,
+			damage: func(t *testing.T, db *bolt.DB, now time.Time) {
+				clientScopeMoveEmptyClientRowIntoWindow(t, db, now, true, false)
+			},
+		},
+		{
+			name: "empty client cross-hour raw key outside window v1-only", clients: []string{"alice"}, v1Only: true, wantDelta: 1, wantUnits: -1, requireProbeDecline: true,
+			damage: func(t *testing.T, db *bolt.DB, now time.Time) {
+				clientScopeMoveEmptyClientRowIntoWindow(t, db, now, false, true)
 			},
 		},
 		{
@@ -931,6 +1076,9 @@ func TestClientScopedQuotaReadEqualsFullShapes(t *testing.T) {
 				before := clientScopeFallbacks(db)
 				visits, units, err := readClientScopeUnits(store, client, from, now, false)
 				outcomes[client] = outcome{visits: visits, units: units, err: err, delta: clientScopeFallbacks(db) - before}
+				if shape.requireProbeDecline && !clientScopeProbeDeclines(t, db, client, from, now) {
+					t.Fatalf("read of %s attached a client scope; this shape must be declined by the probe", client)
+				}
 			}
 			for _, client := range shape.clients {
 				got := outcomes[client]

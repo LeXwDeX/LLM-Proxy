@@ -427,7 +427,10 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 					if scoped = probeClientScopedRead(ctx, tx, filter.ClientName, start, end, progress, fast); scoped != nil {
 						ctx = withIntegrityClientScope(ctx, tx, scoped.scope)
 						scopedApplied = true
-					} else {
+					} else if ctx.Err() == nil {
+						// A probe that saw the cancellation declined without
+						// proving anything: the read returns ctx.Err() without
+						// data and never falls back, so it does not count.
 						integrityNoteFallback(integrityFallbackClientScope)
 					}
 				}
