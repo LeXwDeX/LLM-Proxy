@@ -167,6 +167,15 @@ func probeClientScopedRead(ctx context.Context, tx *bolt.Tx, client string, star
 	if err := requireClientIndex(tx); err != nil {
 		return nil
 	}
+	// A done marker next to a migration cursor is the state the exhaustive
+	// evidence scan rejects (validateCostRawHourEvidence fails closed on any
+	// cursor once the done marker exists). A completed v2 progress implies no
+	// cursor and a v1-only completion has no progress at all, so the probe must
+	// decline here instead of attaching a scope that returns units the
+	// exhaustive read refuses to produce.
+	if meta := tx.Bucket([]byte(BucketMeta)); meta != nil && meta.Get([]byte(usageClientIndexCursor)) != nil {
+		return nil
+	}
 	if progress != nil && progress.Phase != "complete" {
 		return nil
 	}
@@ -275,9 +284,9 @@ func probeClientScopedRead(ctx context.Context, tx *bolt.Tx, client string, star
 // The client field of a quota aggregation key is delimited, so the prefix scan
 // visits exactly the cells quotaKeyInScope accepts for that client (other
 // clients' cells answer false before any cell is decoded). Empty-owner cells
-// are not part of this client's prefix; they error in the earlier quota-key
-// visit, which is why the classification keeps them out of the neutral set
-// and the scope walks their range too.
+// are not part of this client's prefix; the classification marks them neutral
+// outside the window, and the scope walks their per-hour range so an in-window
+// empty-owner cell still errors in the earlier quota-key visit.
 func readCostRollupsClientHour(ctx context.Context, tx *bolt.Tx, filter usage.Filter, hour time.Time, allow costPairFilter) ([]TargetModelCell, error) {
 	b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
 	if b == nil {

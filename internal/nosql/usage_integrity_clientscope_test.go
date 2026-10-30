@@ -718,6 +718,44 @@ func TestClientScopedQuotaReadFallbacks(t *testing.T) {
 		}
 	})
 
+	t.Run("v1 done with cursor stays exhaustive", func(t *testing.T) {
+		store, db := buildClientScopeStore(t, now, map[string]int{"alice": 10, "bob": 10})
+		markClientIndexV1Done(t, db)
+		// The cursor is a valid raw key; only its coexistence with the done
+		// marker makes the state unprovable. The exhaustive evidence scan
+		// rejects it, so the probe must not attach a scope that returns units.
+		var cursor []byte
+		if err := db.View(func(tx *bolt.Tx) error {
+			k, _ := tx.Bucket([]byte(BucketUsageEvents)).Cursor().First()
+			cursor = bytes.Clone(k)
+			return nil
+		}); err != nil {
+			t.Fatalf("read raw cursor: %v", err)
+		}
+		if len(cursor) == 0 {
+			t.Fatal("store has no raw rows")
+		}
+		if err := db.Update(func(tx *bolt.Tx) error {
+			return tx.Bucket([]byte(BucketMeta)).Put([]byte(usageClientIndexCursor), cursor)
+		}); err != nil {
+			t.Fatalf("inject migration cursor: %v", err)
+		}
+		if err := RunClassificationOnce(context.Background(), db); err != nil {
+			t.Fatalf("classify: %v", err)
+		}
+		if !clientScopeProbeDeclines(t, db, "alice", from, now) {
+			t.Fatalf("probe attached a scope while the done marker coexists with a migration cursor")
+		}
+		before := clientScopeFallbacks(db)
+		_, units, err := readClientScopeUnits(store, "alice", from, now, false)
+		if got := clientScopeFallbacks(db) - before; got != 1 {
+			t.Fatalf("v1 done+cursor: client_scope fallback counted %d times, want exactly once", got)
+		}
+		clientScopeAssertSameVerdict(t, "v1 done+cursor", units, err, func() ([]CostUnit, error) {
+			return clientScopeFullReference(t, db, usage.Filter{ClientName: "alice", From: &from, To: &now}, exactCostTable{replayCosts}, true)
+		})
+	})
+
 	t.Run("anomalous overflow stays exhaustive", func(t *testing.T) {
 		store, db := buildClientScopeStore(t, now, map[string]int{"alice": 10})
 		migrateClientIndex(t, db)
