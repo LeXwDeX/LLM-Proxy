@@ -3,6 +3,9 @@ package nosql
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"sort"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -18,6 +21,68 @@ type integrityFast struct {
 	from, to time.Time // UTC hours, inclusive
 	lo, hi   []byte    // hour-prefix bounds; nil means unbounded
 	empty    bool
+	// scope replaces the window hour ranges with the filter client's own
+	// objects (Issue #125 P2). It is set only after a client-scoped read has
+	// enumerated the client index for the window, so every skipped object is
+	// one whose callbacks are neutral for this client filter (see each walk).
+	scope *integrityClientScope
+}
+
+// integrityClientScope is the union of one client's current-window objects
+// with what the client index cannot enumerate for that client:
+//
+//   - rawKeys: the raw-identity keys the index returned for the filter client
+//     and for the empty client in the window hours. Empty-client rows have an
+//     unknown quota owner, which fails every client-filtered read, so they
+//     always take part.
+//   - quotaRanges: per window hour, the quota aggregation range of the filter
+//     client and the range of empty-owner keys. Empty-owner keys are neutral
+//     outside the window but error inside it for every client filter.
+//
+// The classification's anomalous keys are added by each walk; they are the
+// objects whose key hour cannot prove them outside any window.
+type integrityClientScope struct {
+	client      string
+	rawKeys     [][]byte
+	quotaRanges []keyRange
+}
+
+// withIntegrityClientScope attaches scope to the classification window of tx.
+func withIntegrityClientScope(ctx context.Context, tx *bolt.Tx, scope *integrityClientScope) context.Context {
+	value, ok := ctx.Value(integrityFastKey{}).(integrityFastValue)
+	if !ok || value.tx != tx || value.fast == nil {
+		return ctx
+	}
+	next := *value.fast
+	next.scope = scope
+	return context.WithValue(ctx, integrityFastKey{}, integrityFastValue{tx: tx, fast: &next})
+}
+
+// mergeSorted returns the union of two sorted key slices, in key order.
+func mergeSorted(a, b [][]byte) [][]byte {
+	out := make([][]byte, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) || j < len(b) {
+		switch {
+		case i == len(a):
+			out = append(out, b[j])
+			j++
+		case j == len(b):
+			out = append(out, a[i])
+			i++
+		case bytes.Compare(a[i], b[j]) < 0:
+			out = append(out, a[i])
+			i++
+		case bytes.Compare(a[i], b[j]) > 0:
+			out = append(out, b[j])
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	return out
 }
 
 type integrityFastKey struct{}
@@ -61,7 +126,9 @@ func integrityReadContext(ctx context.Context, tx *bolt.Tx, from, to time.Time) 
 		if value.fast == nil {
 			return ctx
 		}
-		return context.WithValue(ctx, integrityFastKey{}, integrityFastValue{tx: tx, fast: newIntegrityFast(value.fast.class, from, to)})
+		next := newIntegrityFast(value.fast.class, from, to)
+		next.scope = value.fast.scope
+		return context.WithValue(ctx, integrityFastKey{}, integrityFastValue{tx: tx, fast: next})
 	}
 	class := integrityClassFor(tx)
 	var fast *integrityFast
@@ -132,19 +199,70 @@ func (f *integrityFast) hourRange(prefix []byte, end []byte) []keyRange {
 	return []keyRange{{lo: lo, hi: hi}}
 }
 
+// sortKeyRanges orders ranges by lower bound for walkRanges' single cursor.
+func sortKeyRanges(ranges []keyRange) []keyRange {
+	sort.Slice(ranges, func(i, j int) bool { return bytes.Compare(ranges[i].lo, ranges[j].lo) < 0 })
+	return ranges
+}
+
 // eachEvent walks a bucket keyed by raw identity keys.
 func (f *integrityFast) eachEvent(b *bolt.Bucket, fn func(k, v []byte) error) error {
+	if f.scope != nil {
+		return walkRanges(b, nil, mergeSorted(f.scope.rawKeys, f.class.events), fn)
+	}
 	return walkRanges(b, f.hourRange(nil, nil), f.class.events, fn)
 }
 
 // eachQuota walks the quota aggregation bucket.
 func (f *integrityFast) eachQuota(b *bolt.Bucket, fn func(k, v []byte) error) error {
+	if f.scope != nil {
+		return walkRanges(b, f.scope.quotaRanges, f.class.quota, fn)
+	}
 	return walkRanges(b, f.hourRange(nil, nil), f.class.quota, fn)
+}
+
+// eachQuotaWindowKeys walks the quota bucket the way the calibration read's
+// final quota visit does: every key whose text lies in [lo, end], not every
+// key of the window's hours. With a scope, keys of other clients are skipped
+// (quotaKeyInScope answers (false, nil) for a known different owner) and the
+// scope's own ranges are visited instead; an anomalous key inside the textual
+// range is still visited, because the exhaustive visit runs its callbacks on
+// it. Keys outside the range stay untouched even if anomalous: the
+// calibration path never visits them.
+func (f *integrityFast) eachQuotaWindowKeys(b *bolt.Bucket, lo, end string, fn func(k, v []byte) error) error {
+	if f.scope == nil {
+		c := b.Cursor()
+		for k, v := c.Seek([]byte(lo)); k != nil && string(k) <= end; k, v = c.Next() {
+			if err := fn(k, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var points [][]byte
+	for _, key := range f.class.quota {
+		if string(key) >= lo && string(key) <= end {
+			points = append(points, key)
+		}
+	}
+	return walkRanges(b, f.scope.quotaRanges, points, fn)
 }
 
 // eachQuotaProof walks the quota-source keys of the rollup proof bucket; prefix
 // is the source name followed by NUL.
 func (f *integrityFast) eachQuotaProof(b *bolt.Bucket, prefix []byte, fn func(k, v []byte) error) error {
+	if f.scope != nil {
+		ranges := make([]keyRange, 0, len(f.scope.quotaRanges))
+		for _, r := range f.scope.quotaRanges {
+			ranges = append(ranges, keyRange{lo: append(bytes.Clone(prefix), r.lo...), hi: append(bytes.Clone(prefix), r.hi...)})
+		}
+		return walkRanges(b, sortKeyRanges(ranges), f.class.proofs, func(k, v []byte) error {
+			if !bytes.HasPrefix(k, prefix) {
+				return nil
+			}
+			return fn(k, v)
+		})
+	}
 	end := append(bytes.Clone(prefix[:len(prefix)-1]), 1)
 	return walkRanges(b, f.hourRange(prefix, end), f.class.proofs, func(k, v []byte) error {
 		if !bytes.HasPrefix(k, prefix) {
@@ -157,6 +275,16 @@ func (f *integrityFast) eachQuotaProof(b *bolt.Bucket, prefix []byte, fn func(k,
 // eachIndex walks the client index: per client prefix, the entries of the
 // window's hours, plus anomalous entries.
 func (f *integrityFast) eachIndex(index *bolt.Bucket, fn func(k, v []byte) error) error {
+	if f.scope != nil {
+		var ranges []keyRange
+		for _, client := range []string{f.scope.client, ""} {
+			hexClient := hex.EncodeToString([]byte(strings.TrimSpace(client)))
+			end := []byte(hexClient + "}")
+			prefix := []byte(hexClient + "|")
+			ranges = append(ranges, f.hourRange(prefix, end)...)
+		}
+		return walkRanges(index, sortKeyRanges(ranges), f.class.index, fn)
+	}
 	var ranges []keyRange
 	if !f.empty {
 		c := index.Cursor()

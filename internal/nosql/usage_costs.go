@@ -369,6 +369,11 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 	filter.From, filter.To = &from, &to
 	start, end := from.Truncate(time.Hour), to.Truncate(time.Hour).Add(time.Hour)
 	result := costReadResult{}
+	// scopedApplied records that this attempt attached a client scope. Any
+	// error then replays the read without it (Issue #125 P2): the scoped walks
+	// may have reached a different first error than the exhaustive ones, and
+	// only the replay has the authoritative verdict.
+	scopedApplied := false
 	useIndex := needsExact && strings.TrimSpace(filter.ClientName) != "" && !from.IsZero() && !hooks.forceLegacy && (rawFrom != nil || strings.TrimSpace(filter.Model) == "" || usage.RequiresEventTimestampsForModel(resolver, filter.Model))
 	err := s.db.View(func(tx *bolt.Tx) error {
 		// Issue #125: decide the fast path once, after the transaction began.
@@ -398,6 +403,7 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 			}
 		}
 		var progress *indexProgress
+		var scoped *clientScopedRead
 		scopeNeedsEvidence := rawFrom != nil || (needsExact && (strings.TrimSpace(filter.Model) == "" || usage.RequiresEventTimestampsForModel(resolver, filter.Model)))
 		if scopeNeedsEvidence {
 			progress, err = loadIndexProgress(tx)
@@ -409,6 +415,25 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 					return fmt.Errorf("%w: invalid client index progress: %v", ErrUsageHistoryIncomplete, err)
 				}
 				progress = p
+			}
+			// Issue #125 P2: a client-filtered quota read enumerates only that
+			// client's window through the index. The probe proves completeness
+			// before the walks below run scoped; otherwise the read stays
+			// exhaustive and records one countable fallback.
+			scopeEligible := useIndex && hooks.windowKeys && rawFrom == nil && allow == nil &&
+				strings.TrimSpace(filter.Model) == "" && !clientScopeDisabled(ctx)
+			if scopeEligible {
+				if fast := integrityFastFrom(ctx, tx); fast != nil {
+					if scoped = probeClientScopedRead(ctx, tx, filter.ClientName, start, end, progress, fast); scoped != nil {
+						ctx = withIntegrityClientScope(ctx, tx, scoped.scope)
+						scopedApplied = true
+					} else if ctx.Err() == nil {
+						// A probe that saw the cancellation declined without
+						// proving anything: the read returns ctx.Err() without
+						// data and never falls back, so it does not count.
+						integrityNoteFallback(integrityFallbackClientScope)
+					}
+				}
 			}
 			if err := refs.checkOrphans(ctx, progress, filter, from, to, allow); err != nil {
 				return err
@@ -443,6 +468,19 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 		if useIndex {
 			if hooks.scan != nil {
 				hooks.scan(true)
+			}
+			if scoped != nil {
+				// Issue #125 P2: the client's own hours only, with the same
+				// per-hour order, proof verification and assembly contract as
+				// the exhaustive block below. The evidence scan is skipped: the
+				// probe declined every shape in which it could change this
+				// client's verdict.
+				units, err := runClientScopedIndex(ctx, tx, filter, resolver, precise, refs, progress, scoped, hooks)
+				if err != nil {
+					return err
+				}
+				result.units = units
+				return nil
 			}
 			indexErr := requireClientIndex(tx)
 			for hour := start; indexErr == nil && hour.Before(end); hour = hour.Add(time.Hour) {
@@ -583,6 +621,16 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 	})
 	if ctx.Err() != nil {
 		return costReadResult{}, ctx.Err()
+	}
+	if err != nil && scopedApplied {
+		// Issue #125 P2: the scoped attempt is discarded; the replay runs the
+		// exhaustive read with scoping disabled and is authoritative. A replay
+		// is a client-scope fallback like a probe decline and is counted as one,
+		// so every read that did not finish on the scoped enumeration is
+		// visible in the fallback metrics.
+		integrityNoteFallback(integrityFallbackClientScope)
+		ctx = context.WithValue(ctx, noClientScopeKey{}, true)
+		return s.readCostUnitsInScope(ctx, filter, resolver, precise, rawFrom, hooks, allow)
 	}
 	if err != nil {
 		return costReadResult{}, err

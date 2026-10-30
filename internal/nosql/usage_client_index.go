@@ -283,8 +283,17 @@ func requireClientIndex(tx *bolt.Tx) error {
 	return nil
 }
 
-// readClientHourInTx reads a complete hour from a single accounting snapshot.
-func readClientHourInTx(ctx context.Context, tx *bolt.Tx, client string, hour time.Time, decoded func(), verify func([]byte, []byte, usage.Event) error) ([]usage.Event, error) {
+// clientIndexRow is one verified (or, for the client-scoped probe, one
+// count/digest-verified) client index entry: the raw key it points at and its
+// decoded event.
+type clientIndexRow struct {
+	key   []byte
+	event usage.Event
+}
+
+// readClientHourRowsInTx reads a complete hour from a single accounting
+// snapshot and returns every verified entry with its raw key.
+func readClientHourRowsInTx(ctx context.Context, tx *bolt.Tx, client string, hour time.Time, decoded func(), verify func([]byte, []byte, usage.Event) error) ([]clientIndexRow, error) {
 	state, err := loadClientHour(tx, clientHourKey(client, hour))
 	if err != nil {
 		return nil, err
@@ -293,7 +302,7 @@ func readClientHourInTx(ctx context.Context, tx *bolt.Tx, client string, hour ti
 	end := []byte(clientIndexPrefix(client) + hour.Add(time.Hour).Format(clientIndexTimeLayout))
 	var count uint64
 	var digest [sha256.Size]byte
-	var events []usage.Event
+	var rows []clientIndexRow
 	cursor := tx.Bucket([]byte(BucketUsageEventsByClient)).Cursor()
 	for k, v := cursor.Seek(start); k != nil && bytes.Compare(k, end) < 0; k, v = cursor.Next() {
 		if err := ctx.Err(); err != nil {
@@ -314,10 +323,23 @@ func readClientHourInTx(ctx context.Context, tx *bolt.Tx, client string, hour ti
 		}
 		count++
 		xorDigest(&digest, rawDigest(v, data))
-		events = append(events, event)
+		rows = append(rows, clientIndexRow{key: bytes.Clone(v), event: event})
 	}
 	if count != state.Count || digest != state.Digest {
 		return nil, ErrUsageClientIndexIncomplete
+	}
+	return rows, nil
+}
+
+// readClientHourInTx reads a complete hour from a single accounting snapshot.
+func readClientHourInTx(ctx context.Context, tx *bolt.Tx, client string, hour time.Time, decoded func(), verify func([]byte, []byte, usage.Event) error) ([]usage.Event, error) {
+	rows, err := readClientHourRowsInTx(ctx, tx, client, hour, decoded, verify)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	events := make([]usage.Event, len(rows))
+	for i := range rows {
+		events[i] = rows[i].event
 	}
 	return events, nil
 }
