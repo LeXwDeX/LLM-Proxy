@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -377,7 +378,17 @@ func validateCostRawHourEvidence(ctx context.Context, tx *bolt.Tx, progress *ind
 		}
 	}
 	allValid := true
-	for key, observed := range evidence {
+	// Issue #125 P2: the walk stops at the first invalid hour, so it must visit
+	// the hours in sorted key order. A map walk returns whichever error the
+	// random iteration order reaches first, and the Fast vs Full differential
+	// fuzz compares the whole error text.
+	keys := make([]string, 0, len(evidence))
+	for key := range evidence {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		observed := evidence[key]
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
