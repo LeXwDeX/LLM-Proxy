@@ -320,6 +320,10 @@ func TestProofOddIndexScopedVerdictsMatchExhaustive(t *testing.T) {
 	if raceEnabled {
 		rounds = 1
 	}
+	// A single damaged round can legitimately leave every proof false, but the
+	// whole test must compare at least one true verdict; otherwise both scans
+	// could report the same all-false string and prove nothing.
+	proofTrues := 0
 	for round := 0; round < rounds; round++ {
 		db, store := seedScaleStore(t, 180+rng.Intn(80), base)
 		if round%2 == 0 {
@@ -429,7 +433,8 @@ func TestProofOddIndexScopedVerdictsMatchExhaustive(t *testing.T) {
 			})
 			return fmt.Sprint(out), trues
 		}
-		ref, _ := evaluate(false, false)
+		ref, refTrues := evaluate(false, false)
+		proofTrues += refTrues
 		skipOnly, _ := evaluate(true, false)
 		beforeFull := proofOddFullClassifications.Load()
 		scoped, _ := evaluate(true, true)
@@ -439,6 +444,9 @@ func TestProofOddIndexScopedVerdictsMatchExhaustive(t *testing.T) {
 		if ref != skipOnly || ref != scoped {
 			t.Fatalf("round %d: scans disagree\nexhaustive=%s\nskip=%s\nscoped=%s", round, ref, skipOnly, scoped)
 		}
+	}
+	if proofTrues == 0 {
+		t.Fatalf("every exhaustive proof verdict is false across all rounds, so comparing the scans proves nothing")
 	}
 }
 
