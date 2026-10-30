@@ -248,7 +248,7 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推送到 `dev`
 
 | Job | 命令 |
 |---|---|
-| `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...` |
+| `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...`、`make test-fast-integrity`、`make coverage-check` |
 | `race` | 对 `internal/proxy`、`internal/nosql`、`internal/usage`、`internal/quota`、`internal/admin` 与 `cmd/proxy` 执行 `go test -race -count=1` |
 | `e2e` | `make e2e` |
 | `integration` | `make integration` |
