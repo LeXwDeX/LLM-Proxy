@@ -293,21 +293,22 @@ type clientIndexRow struct {
 }
 
 // readClientHourRowsInTx reads a complete hour from a single accounting
-// snapshot and returns every verified entry with its raw key.
-func readClientHourRowsInTx(ctx context.Context, tx *bolt.Tx, client string, hour time.Time, decoded func(), verify func([]byte, []byte, usage.Event) error) ([]clientIndexRow, error) {
+// snapshot and hands every verified entry to collect with the index pointer it
+// came from. Callers that keep the raw key clone it in their collector, so the
+// exhaustive readers that discard keys do not copy them per row.
+func readClientHourRowsInTx(ctx context.Context, tx *bolt.Tx, client string, hour time.Time, decoded func(), verify func([]byte, []byte, usage.Event) error, collect func([]byte, usage.Event)) error {
 	state, err := loadClientHour(tx, clientHourKey(client, hour))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	start := []byte(clientIndexPrefix(client) + hour.Format(clientIndexTimeLayout))
 	end := []byte(clientIndexPrefix(client) + hour.Add(time.Hour).Format(clientIndexTimeLayout))
 	var count uint64
 	var digest [sha256.Size]byte
-	var rows []clientIndexRow
 	cursor := tx.Bucket([]byte(BucketUsageEventsByClient)).Cursor()
 	for k, v := cursor.Seek(start); k != nil && bytes.Compare(k, end) < 0; k, v = cursor.Next() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		data := tx.Bucket([]byte(BucketUsageEvents)).Get(v)
 		var event usage.Event
@@ -315,32 +316,31 @@ func readClientHourRowsInTx(ctx context.Context, tx *bolt.Tx, client string, hou
 			decoded()
 		}
 		if data == nil || json.Unmarshal(data, &event) != nil || !bytes.Equal(k, clientEventIndexKey(event, v)) {
-			return nil, ErrUsageClientIndexIncomplete
+			return ErrUsageClientIndexIncomplete
 		}
 		if verify != nil {
 			if err := verify(v, data, event); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		count++
 		xorDigest(&digest, rawDigest(v, data))
-		rows = append(rows, clientIndexRow{key: bytes.Clone(v), event: event})
+		collect(v, event)
 	}
 	if count != state.Count || digest != state.Digest {
-		return nil, ErrUsageClientIndexIncomplete
+		return ErrUsageClientIndexIncomplete
 	}
-	return rows, nil
+	return nil
 }
 
 // readClientHourInTx reads a complete hour from a single accounting snapshot.
 func readClientHourInTx(ctx context.Context, tx *bolt.Tx, client string, hour time.Time, decoded func(), verify func([]byte, []byte, usage.Event) error) ([]usage.Event, error) {
-	rows, err := readClientHourRowsInTx(ctx, tx, client, hour, decoded, verify)
-	if err != nil || len(rows) == 0 {
+	var events []usage.Event
+	err := readClientHourRowsInTx(ctx, tx, client, hour, decoded, verify, func(_ []byte, event usage.Event) {
+		events = append(events, event)
+	})
+	if err != nil {
 		return nil, err
-	}
-	events := make([]usage.Event, len(rows))
-	for i := range rows {
-		events[i] = rows[i].event
 	}
 	return events, nil
 }

@@ -225,8 +225,12 @@ func probeClientScopedRead(ctx context.Context, tx *bolt.Tx, client string, star
 			if clientScopeProbeRangeSeek != nil {
 				clientScopeProbeRangeSeek()
 			}
-			rows, err := readClientHourRowsInTx(ctx, tx, c, hour, nil, nil)
-			if err != nil {
+			var rows []clientIndexRow
+			if err := readClientHourRowsInTx(ctx, tx, c, hour, nil, nil, func(key []byte, event usage.Event) {
+				// The probe keeps the raw key, so it owns a copy of the index
+				// pointer that the cursor will reuse.
+				rows = append(rows, clientIndexRow{key: bytes.Clone(key), event: event})
+			}); err != nil {
 				return nil
 			}
 			if c == "" && clientScopeProbeDecoded != nil {
@@ -331,16 +335,17 @@ func runClientScopedIndex(ctx context.Context, tx *bolt.Tx, filter usage.Filter,
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		rows, err := readClientHourRowsInTx(ctx, tx, client, hour, hooks.decoded, verify)
+		var events []usage.Event
+		err := readClientHourRowsInTx(ctx, tx, client, hour, hooks.decoded, verify, func(_ []byte, event usage.Event) {
+			// The scoped block only assembles events; it never keeps the key, so
+			// the collector skips the per-row copy the probe needs.
+			events = append(events, event)
+		})
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			return nil, errClientScopedReplay
-		}
-		events := make([]usage.Event, len(rows))
-		for i, row := range rows {
-			events[i] = row.event
 		}
 		cells, err := readCostRollupsClientHour(ctx, tx, filter, hour, nil)
 		if err != nil {
