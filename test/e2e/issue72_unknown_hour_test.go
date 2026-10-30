@@ -26,6 +26,17 @@ package e2e
 //     time windows not to be blocked -- while the window that does include the
 //     row (an explicit from/to aggregate) fails closed instead of reporting
 //     zero or a complete total.
+//
+// Both scenarios are deterministic at any wall-clock time. Quota daily
+// counters reset at the UTC day boundary, so healthy expectations are derived
+// from the ledger rows inside the current UTC day on every poll rather than
+// compared against a fixed cumulative total. The current-hour scenario also
+// injects a sentinel unknown row exactly at the next UTC midnight: before
+// midnight it is outside every calibration window, while after midnight it
+// stays inside the window whose start moved to midnight. This keeps the
+// fail-closed premise when a run crosses midnight, including the rare midnight
+// that starts both an ISO week and a month and would otherwise move the
+// earliest quota period start past the current-hour row.
 
 import (
 	"bytes"
@@ -41,16 +52,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/fakellm"
+	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 	bolt "go.etcd.io/bbolt"
 )
 
-const issue72UnknownModel = "Issue72Model"
+const (
+	issue72UnknownModel = "Issue72Model"
+	// issue72InputPricePer1M is the flat input price configured below; every
+	// seeded request uses exactly 1M input tokens, so one request costs $2.
+	issue72InputPricePer1M = 2.0
+	// Record IDs of the raw rows this test writes directly into usage_events.
+	// They are not returned by the client index and carry no identity evidence.
+	issue72CurrentRecordID  = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa00e2"
+	issue72MidnightRecordID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa00e3"
+	// issue72BoundaryGrace only needs to exceed the gap between an event's
+	// durable timestamp and the quota increment's later clock read (the row is
+	// committed first). A row inside it may legitimately belong to either side
+	// of the UTC day boundary, so both daily totals are accepted.
+	issue72BoundaryGrace = time.Minute
+)
 
 func TestIssue72UnknownHourIdentityRestart(t *testing.T) {
 	t.Run("current_hour", func(t *testing.T) { runIssue72UnknownHourScenario(t, false) })
@@ -232,7 +259,7 @@ func (e *issue72UnknownEnv) configure(clients []string) {
 	}, 201)
 	e.admin("POST", "/admin/data/pricing-templates", map[string]any{
 		"target": "target", "model": issue72UnknownModel, "mode": "flat",
-		"base_rates": usage.CostRates{InputPer1MTokens: 2},
+		"base_rates": usage.CostRates{InputPer1MTokens: issue72InputPricePer1M},
 	}, 201)
 	e.admin("POST", "/admin/data/model-groups", map[string]any{
 		"name": "models", "daily_usd": 100, "cost_coefficient": 1,
@@ -347,18 +374,107 @@ func (e *issue72UnknownEnv) quotaStatus(clientName string) map[string]any {
 	return decode(e.t, e.admin("GET", "/admin/data/quota/"+url.PathEscape(clientName), nil, 200))
 }
 
-func (e *issue72UnknownEnv) waitQuotaHealthy(clientName string, used float64) {
+// issue72EventCost applies the proxy's own cost formula to one ledger row
+// using the flat input price configured for this scenario.
+func issue72EventCost(ev usage.Event) float64 {
+	return usage.CostRates{InputPer1MTokens: issue72InputPricePer1M}.CostFor(
+		ev.InputTokens, ev.OutputTokens, ev.CachedTokens, ev.CacheCreationTokens)
+}
+
+// issue72RealEvents drops the unknown rows this test injected directly into the
+// ledger. They are exactly the rows the proxy must never treat as usage.
+func issue72RealEvents(events []usage.Event) []usage.Event {
+	real := make([]usage.Event, 0, len(events))
+	for _, ev := range events {
+		if ev.RecordID == issue72CurrentRecordID || ev.RecordID == issue72MidnightRecordID {
+			continue
+		}
+		real = append(real, ev)
+	}
+	return real
+}
+
+// issue72DailyUsedCandidates recomputes the quota daily counter implied by the
+// known-good rows at now. The daily window starts at 00:00 UTC, so a fixed
+// cumulative expectation would go stale if the run crosses a UTC day or month
+// boundary; callers evaluate this on every poll instead. A row timestamped just
+// before the day start may still have been charged to either period, because
+// the durable row is committed before the in-memory increment reads the clock;
+// such rows contribute to several candidate totals. Any other extra or missing
+// dollar still fails the assertion.
+func issue72DailyUsedCandidates(t *testing.T, events []usage.Event, now time.Time) []float64 {
+	t.Helper()
+	dayStart, _, err := quota.PeriodRange(quota.DimensionDaily, now)
+	if err != nil {
+		t.Fatalf("daily quota period: %v", err)
+	}
+	base := 0.0
+	var straddling []float64
+	for _, ev := range events {
+		at := ev.Timestamp.UTC()
+		cost := issue72EventCost(ev)
+		switch {
+		case !at.Before(dayStart):
+			base += cost
+		case !at.Before(dayStart.Add(-issue72BoundaryGrace)):
+			straddling = append(straddling, cost)
+		}
+	}
+	candidates := []float64{base}
+	for _, cost := range straddling {
+		n := len(candidates)
+		for i := 0; i < n; i++ {
+			candidates = append(candidates, candidates[i]+cost)
+		}
+	}
+	// Subset sums repeat when the base is zero; callers compare exact values.
+	unique := make([]float64, 0, len(candidates))
+	for _, candidate := range candidates {
+		duplicate := false
+		for _, kept := range unique {
+			if math.Abs(kept-candidate) <= 1e-9 {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			unique = append(unique, candidate)
+		}
+	}
+	return unique
+}
+
+// waitQuotaHealthy waits until calibration is healthy and the daily counter
+// matches the usage implied by the requests this test issued in the current UTC
+// day. requests is the exact number of known-good ledger rows expected for the
+// client, so a missing or synthesized row still fails rather than being folded
+// into the expectation. Both the expectation and the day window are recomputed
+// on every poll, which makes a restart or a boundary crossing deterministic.
+func (e *issue72UnknownEnv) waitQuotaHealthy(clientName string, requests int) {
 	e.t.Helper()
 	// Poll past calibrationRequestTimeout (15s) so a slow machine's calibration
 	// cannot fail a run that would become healthy.
 	deadline := time.Now().Add(45 * time.Second)
+	var status map[string]any
+	known := 0
 	for {
-		status := e.quotaStatus(clientName)
-		if dig(status, "calibration_error") == nil && dig(status, "groups/models/quotas/daily/used") == used {
-			return
+		events := issue72RealEvents(e.readEvents(clientName))
+		known = len(events)
+		if known == requests {
+			candidates := issue72DailyUsedCandidates(e.t, events, time.Now().UTC())
+			status = e.quotaStatus(clientName)
+			if dig(status, "calibration_error") == nil {
+				if used, ok := dig(status, "groups/models/quotas/daily/used").(float64); ok {
+					for _, want := range candidates {
+						if math.Abs(used-want) <= 1e-9 {
+							return
+						}
+					}
+				}
+			}
 		}
 		if time.Now().After(deadline) {
-			e.t.Fatalf("%s quota not healthy at used=%v: %+v", clientName, used, status)
+			e.t.Fatalf("%s quota not healthy: %d known request(s), want %d, status=%+v", clientName, known, requests, status)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -669,28 +785,14 @@ func (e *issue72UnknownEnv) verifyInjected(fx issue72UnknownFixture) {
 	}
 }
 
-// issue72NearUTCBoundary returns the UTC day or month boundary within margin of
-// now. Daily quota counters and the quota calibration window reset at the UTC
-// day boundary (the month boundary is always a day boundary too), so a run that
-// seeds before and verifies after one would compare different periods.
-func issue72NearUTCBoundary(now time.Time, margin time.Duration) (time.Time, bool) {
+// issue72NextUTCMidnight returns the first 00:00 UTC strictly after now.
+func issue72NextUTCMidnight(now time.Time) time.Time {
 	now = now.UTC()
-	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	for _, boundary := range []time.Time{day, day.AddDate(0, 0, 1), month, month.AddDate(0, 1, 0)} {
-		if delta := boundary.Sub(now); delta > -margin && delta < margin {
-			return boundary, true
-		}
-	}
-	return time.Time{}, false
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
 }
 
 func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 	t.Helper()
-	if boundary, near := issue72NearUTCBoundary(time.Now(), 5*time.Minute); near {
-		t.Skipf("within 5m of UTC boundary %s: quota daily/monthly counters and the calibration window would reset mid-run",
-			boundary.Format(time.RFC3339))
-	}
 	env := newIssue72UnknownEnv(t)
 	env.start()
 	env.configure([]string{"alice", "bob"})
@@ -708,15 +810,27 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 	// Baseline: one attested request per client, cost 1M input tokens * $2/M.
 	env.assertAggregate("alice", 1, 1000000, 2)
 	env.assertAggregate("bob", 1, 1000000, 2)
-	env.waitQuotaHealthy("alice", 2)
-	env.waitQuotaHealthy("bob", 2)
+	env.waitQuotaHealthy("alice", 1)
+	env.waitQuotaHealthy("bob", 1)
 
-	injectedAt := time.Now().UTC().Truncate(time.Hour)
+	now := time.Now().UTC()
+	injectedAt := now.Truncate(time.Hour)
+	nextMidnight := issue72NextUTCMidnight(now)
 	if future {
-		injectedAt = time.Now().UTC().Add(48 * time.Hour)
+		injectedAt = now.Add(48 * time.Hour)
 	}
 	env.stop()
-	fx := env.inject(aliceEvent, injectedAt, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa00e2")
+	fixtures := []issue72UnknownFixture{
+		env.inject(aliceEvent, injectedAt, issue72CurrentRecordID),
+	}
+	if !future {
+		// Sentinel unknown row exactly at the upcoming UTC midnight. Before
+		// midnight it is outside every calibration window; afterwards it stays
+		// inside the window whose start just moved to midnight, even when that
+		// midnight also starts an ISO week and a month and the current-hour row
+		// would fall out of the earliest period start.
+		fixtures = append(fixtures, env.inject(aliceEvent, nextMidnight, issue72MidnightRecordID))
+	}
 	futureHour := injectedAt.UTC().Truncate(time.Hour)
 	futureEnd := futureHour.Add(time.Hour)
 
@@ -728,7 +842,7 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 			// counted as new usage (a synthesized row would add 1 request and $2
 			// per restart).
 			env.assertAggregate("alice", int64(1+restart), int64(1000000*(1+restart)), 2*float64(1+restart))
-			env.waitQuotaHealthy("alice", 2*float64(1+restart))
+			env.waitQuotaHealthy("alice", 1+restart)
 			// The window that contains the unknown row must fail closed rather
 			// than report a complete total of zero. Bind the 500 to the admin
 			// handler's own error log so a different internal failure cannot
@@ -738,7 +852,7 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 			env.waitErrorLogContains(logOffset, "failed to aggregate usage", "usage history is incomplete for exact pricing")
 			env.assertWindowEmpty("bob", futureHour, futureEnd)
 			env.assertAggregate("bob", int64(1+restart), int64(1000000*(1+restart)), 2*float64(1+restart))
-			env.waitQuotaHealthy("bob", 2*float64(1+restart))
+			env.waitQuotaHealthy("bob", 1+restart)
 			seq := env.fake.LastSeq()
 			if code, raw := env.call("alice"); code != 200 || env.fake.LastSeq() == seq {
 				t.Fatalf("future-hour evidence blocked today's admission: %d %s", code, raw)
@@ -750,14 +864,14 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 		} else {
 			// The row is inside the default aggregate and quota calibration
 			// windows: every read and admission must fail closed instead of
-			// returning the attested total or 2 as if the row were zero. The 500
+			// returning the attested total as if the row were zero. The 500
 			// must be the incomplete-history error, not any other internal fault.
 			logOffset := len(env.errorLogText())
 			env.aggregate("alice", nil, nil, 500)
 			env.waitErrorLogContains(logOffset, "failed to aggregate usage", "usage history is incomplete for exact pricing")
 			env.waitQuotaCalibrationError("alice")
 			env.assertAggregate("bob", int64(1+restart), int64(1000000*(1+restart)), 2*float64(1+restart))
-			env.waitQuotaHealthy("bob", 2*float64(1+restart))
+			env.waitQuotaHealthy("bob", 1+restart)
 			seq := env.fake.LastSeq()
 			if code, raw := env.call("alice"); code != 503 || !strings.Contains(raw, "accounting_unavailable") {
 				t.Fatalf("affected admission: %d %s", code, raw)
@@ -770,6 +884,103 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 			}
 		}
 		env.stop()
-		env.verifyInjected(fx)
+		for _, fx := range fixtures {
+			env.verifyInjected(fx)
+		}
+	}
+}
+
+// issue72EarliestQuotaWindowStart mirrors quota.quotaPeriodStarts: a
+// calibration reads the daily, ISO-week and monthly dimensions from one union
+// window, so the earliest start decides whether a raw row is in scope.
+func issue72EarliestQuotaWindowStart(t *testing.T, now time.Time) time.Time {
+	t.Helper()
+	var earliest time.Time
+	for _, dim := range []string{quota.DimensionDaily, quota.DimensionWeekly, quota.DimensionMonthly} {
+		from, _, err := quota.PeriodRange(dim, now)
+		if err != nil {
+			t.Fatalf("%s quota period: %v", dim, err)
+		}
+		if earliest.IsZero() || from.Before(earliest) {
+			earliest = from
+		}
+	}
+	return earliest
+}
+
+// TestIssue72UnknownHourBoundaryWindows locks the wall-clock premises of the
+// scenario without starting a proxy. It proves that the daily quota expectation
+// follows the current UTC day instead of a stale cumulative total, and that the
+// current-hour row plus the next-midnight sentinel leave an unknown row inside
+// the quota calibration window for observation times across the boundary --
+// including the Monday month start where the current-hour row alone falls out.
+func TestIssue72UnknownHourBoundaryWindows(t *testing.T) {
+	const cost = issue72InputPricePer1M // one request uses exactly 1M input tokens
+	eventAt := func(at time.Time) usage.Event {
+		return usage.Event{Timestamp: at, InputTokens: 1000000}
+	}
+	// 2026-06-01 is both a Monday and a month start, the only kind of midnight
+	// that moves every quota period start to the new day.
+	dayStart := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		events []usage.Event
+		want   []float64
+	}{
+		{"before_boundary_outside_grace", []usage.Event{eventAt(dayStart.Add(-2 * time.Minute))}, []float64{0}},
+		{"straddling_one", []usage.Event{eventAt(dayStart.Add(-30 * time.Second))}, []float64{0, cost}},
+		{"straddling_two", []usage.Event{eventAt(dayStart.Add(-30 * time.Second)), eventAt(dayStart.Add(-10 * time.Second))}, []float64{0, cost, 2 * cost}},
+		{"straddling_plus_current", []usage.Event{eventAt(dayStart.Add(-30 * time.Second)), eventAt(dayStart.Add(time.Second))}, []float64{cost, 2 * cost}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := issue72DailyUsedCandidates(t, tc.events, dayStart.Add(time.Hour))
+			want := append([]float64(nil), tc.want...)
+			sort.Float64s(got)
+			sort.Float64s(want)
+			if len(got) != len(want) {
+				t.Fatalf("daily used candidates = %v, want %v", got, want)
+			}
+			for i := range want {
+				if math.Abs(got[i]-want[i]) > 1e-9 {
+					t.Fatalf("daily used candidates = %v, want %v", got, want)
+				}
+			}
+		})
+	}
+
+	// Simulate a current-hour injection 30s before the Monday month start. The
+	// current-hour row is inside the calibration window before midnight; after
+	// midnight only the midnight sentinel remains in scope.
+	injectNow := dayStart.Add(-30 * time.Second)
+	injectedAt := injectNow.Truncate(time.Hour)
+	sentinel := issue72NextUTCMidnight(injectNow)
+	if !sentinel.Equal(dayStart) {
+		t.Fatalf("next UTC midnight of %s = %s, want %s", injectNow, sentinel, dayStart)
+	}
+	for _, verify := range []time.Time{
+		injectNow,
+		dayStart.Add(-time.Second),
+		dayStart,
+		dayStart.Add(time.Second),
+		dayStart.Add(time.Minute),
+		dayStart.Add(12 * time.Hour),
+	} {
+		if verify.Before(injectNow) {
+			continue
+		}
+		earliest := issue72EarliestQuotaWindowStart(t, verify)
+		inside := func(at time.Time) bool {
+			return !at.Before(earliest) && !at.After(verify)
+		}
+		current, midnight := inside(injectedAt), inside(sentinel)
+		if !current && !midnight {
+			t.Fatalf("verify %s: neither injected row is in quota window %s..%s (current %s, sentinel %s)",
+				verify, earliest, verify, injectedAt, sentinel)
+		}
+		if verify.After(dayStart) && current {
+			t.Fatalf("verify %s: Monday month start should move the window past the current-hour row %s (earliest %s)",
+				verify, injectedAt, earliest)
+		}
 	}
 }
