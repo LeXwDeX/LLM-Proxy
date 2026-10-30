@@ -45,9 +45,11 @@ type UsageRetentionBuckets struct {
 	FreshAttestations UsageRetentionBucketUsage `json:"fresh_attestations"`
 }
 
-// UsageRetentionEvents reports the earliest and latest parseable usage_events
-// key time. InvalidKeys counts boundary keys that were inspected while
-// locating those times but did not parse; a key time is never guessed.
+// UsageRetentionEvents reports the earliest and latest canonical usage_events
+// key stamp: one that round-trips through RFC3339Nano in UTC. A key carrying a
+// timezone offset does not round-trip and never defines an endpoint. InvalidKeys
+// counts boundary keys that were inspected while locating those times but were
+// not canonical key stamps; a key time is never guessed.
 type UsageRetentionEvents struct {
 	Earliest    *time.Time `json:"earliest"`
 	Latest      *time.Time `json:"latest"`
@@ -194,13 +196,13 @@ func usageRetentionBucket(tx *bolt.Tx, name string) UsageRetentionBucketUsage {
 	}
 }
 
-// usageRetentionEventRange locates the earliest and latest parseable key time.
+// usageRetentionEventRange locates the earliest and latest canonical key stamp.
 // RFC3339Nano keys sort by whole second but not by time within a second: a
 // trimmed fraction or the whole-second "Z" can precede an earlier instant.
-// The first and last parseable keys therefore only identify the boundary
+// The first and last canonical keys therefore only identify the boundary
 // seconds; each complete boundary second is scanned for its timestamp range.
-// Boundary keys that do not parse are counted; no timestamp is inferred from
-// an unparseable key. If every key is invalid both times stay nil.
+// Boundary keys that are not canonical are counted; no timestamp is inferred
+// from such a key. If every key is invalid both times stay nil.
 func usageRetentionEventRange(b *bolt.Bucket) *UsageRetentionEvents {
 	events := &UsageRetentionEvents{}
 	if b == nil {
@@ -208,7 +210,7 @@ func usageRetentionEventRange(b *bolt.Bucket) *UsageRetentionEvents {
 	}
 	cursor := b.Cursor()
 
-	// Forward: skip the invalid prefix up to the first parseable key, then
+	// Forward: skip the invalid prefix up to the first canonical key, then
 	// scan that whole second for the global minimum and maximum.
 	k, _ := cursor.First()
 	for k != nil {
@@ -242,7 +244,7 @@ func usageRetentionEventRange(b *bolt.Bucket) *UsageRetentionEvents {
 	}
 	events.Earliest = &earliest
 
-	// Backward: skip the invalid suffix up to the last parseable key. Invalid
+	// Backward: skip the invalid suffix up to the last canonical key. Invalid
 	// keys in the earliest second were already counted by the forward scan; if
 	// both boundary keys share a second, the range above is already global.
 	k, _ = cursor.Last()
