@@ -241,14 +241,17 @@ func quotaKeyOwnerWindowNeutral(key []byte) bool {
 //     the raw key, not by record_id; classifyIndexEntry classifies each
 //     entry from its own proof, so this relaxation cannot skip an entry whose
 //     branch depends on the raw body.
-func rawRowWindowExempt(tx *bolt.Tx, key, value []byte) bool {
+//
+// The decoded event is returned with the verdict so a caller that still needs
+// the body (the index-completeness walk) does not decode the same bytes again.
+func rawRowWindowExempt(tx *bolt.Tx, key, value []byte) (usage.Event, bool) {
 	owner, owned, err := readRawOwner(tx, key)
 	if err != nil || value == nil || !utf8.Valid(value) {
-		return false
+		return usage.Event{}, false
 	}
 	var event usage.Event
 	if json.Unmarshal(value, &event) != nil || event.Timestamp.IsZero() {
-		return false
+		return usage.Event{}, false
 	}
 	if usageKey(event.Timestamp, event.RecordID) != string(key) {
 		// Issue #125 P1.1: legacy rows have no record_id in the body, so the
@@ -259,27 +262,27 @@ func rawRowWindowExempt(tx *bolt.Tx, key, value []byte) bool {
 		// its key hour; every other mismatch stays anomalous.
 		keyAt, ok := canonicalEventKeyStamp(key)
 		if owned || !ok || event.RecordID != "" || !keyAt.Equal(event.Timestamp) {
-			return false
+			return usage.Event{}, false
 		}
 	}
 	if owned {
 		digest, err := usage.RetryEquivalentDigest(event)
 		if err != nil || digest != owner.Digest || receiptClientHash(event.ClientName) != owner.Client {
-			return false
+			return usage.Event{}, false
 		}
 	}
 	var proof usage.Event
 	if decodeProofEventUncounted(value, &proof) && usageKey(proof.Timestamp, proof.RecordID) == string(key) {
-		return true
+		return event, true
 	}
 	scope, ambiguous := backfillRawScope(value)
 	if ambiguous && json.Valid(value) {
-		return false
+		return usage.Event{}, false
 	}
 	if owned && !ambiguous && scope.ClientName != "" && receiptClientHash(scope.ClientName) != owner.Client {
-		return false
+		return usage.Event{}, false
 	}
-	return true
+	return event, true
 }
 
 // eventKeyWindowExempt is the conjunction of the per-bucket predicates for
@@ -300,7 +303,8 @@ func eventKeyWindowExempt(tx *bolt.Tx, key []byte) bool {
 	}
 	if raw := tx.Bucket([]byte(BucketUsageEvents)); raw != nil {
 		if value := raw.Get(key); value != nil {
-			return rawRowWindowExempt(tx, key, value)
+			_, exempt := rawRowWindowExempt(tx, key, value)
+			return exempt
 		}
 		if raw.Bucket(key) != nil {
 			return false
@@ -560,12 +564,12 @@ func classifyUsageIntegrity(ctx context.Context, tx *bolt.Tx) (*integrityClassif
 		class.indexProgress, class.indexClassified = progress, true
 	}
 	visitEvents(BucketUsageEvents, func(k, v []byte) bool {
-		if !canonical(k, v) || !rawRowWindowExempt(tx, k, v) {
+		if !canonical(k, v) {
 			return false
 		}
-		var event usage.Event
-		if json.Unmarshal(v, &event) != nil {
-			return true
+		event, exempt := rawRowWindowExempt(tx, k, v)
+		if !exempt {
+			return false
 		}
 		if indexComplete {
 			if !bytes.Equal(index.Get(clientEventIndexKey(event, k)), k) {
