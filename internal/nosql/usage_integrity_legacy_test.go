@@ -586,6 +586,9 @@ func TestIntegrityLegacyV2IndexDamage(t *testing.T) {
 		if class == nil {
 			t.Fatal("classification unavailable")
 		}
+		if !class.indexClassified {
+			t.Fatal("v2 index was not classified; the stale-digest case would pass vacuously")
+		}
 		// The stale digest makes the proof invalid, but the original hour is
 		// still the entry's own hour, so the entry stays out of A.
 		if indexEntryInClass(class, fx.indexKeyA) {
