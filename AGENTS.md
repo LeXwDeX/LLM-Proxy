@@ -130,7 +130,7 @@ GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推
 
 | job | 命令 |
 |---|---|
-| `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...`、`make test-fast-integrity` |
+| `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...`、`make test-fast-integrity`、`make coverage-check` |
 | `race` | `go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...` |
 | `e2e` | `make e2e` |
 | `integration` | `make integration` |

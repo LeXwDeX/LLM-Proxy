@@ -55,6 +55,9 @@ jobs:
       - name: 单元测试（强制完整性快速路径，Issue #125）
         run: make test-fast-integrity
 
+      - name: 覆盖率门禁（Issue #136）
+        run: make coverage-check
+
   race:
     name: race
     runs-on: ubuntu-latest

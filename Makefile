@@ -12,7 +12,7 @@ VERSION     := $(BUILD_DATE).$(BUILD_NUMBER)
 VERSION_PKG := github.com/LeXwDeX/LLM-Proxy/internal/version
 LDFLAGS     := -X $(VERSION_PKG).Version=$(VERSION)
 
-.PHONY: all build test test-proxy test-fast-integrity integration e2e ui-sim clean catalog docker version check-docs
+.PHONY: all build test test-proxy test-fast-integrity coverage-check integration e2e ui-sim clean catalog docker version check-docs
 
 all: test build
 
@@ -54,6 +54,20 @@ test-proxy:
 test-fast-integrity:
 	@echo ">> running nosql/quota tests with the forced fast integrity path"
 	go test -tags forcefastintegrity ./internal/nosql/... ./internal/quota/...
+
+# Issue #136：internal 覆盖率门禁。总覆盖率与关键包均不得低于 80%；
+# 脚本按语句数汇总 cover profile，profile 缺失指定包或格式损坏时失败。
+coverage-check:
+	@echo ">> running Go coverage gate"
+	go test -count=1 -coverprofile=coverage.out ./internal/...
+	python3 scripts/testing/check_go_coverage.py --profile coverage.out \
+		--min-total 80 \
+		--min-package internal/admin=80 \
+		--min-package internal/proxy=80 \
+		--min-package internal/nosql=80 \
+		--min-package internal/usage=80 \
+		--min-package internal/quota=80 \
+		--min-package internal/pricing=80
 
 # 校验共享 Agent 指引存在
 check-docs:
