@@ -53,6 +53,12 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 	if quota == nil {
 		return nil
 	}
+	// Issue #125: with a valid classification the walks below visit only the
+	// keys of [from, to] plus the anomalous objects; each skipped object is one
+	// whose branch below returns nil without observable side effects (see the
+	// predicates in usage_integrity_class.go). The verdict is unchanged.
+	ctx = integrityReadContext(ctx, tx, from, to)
+	fast := integrityFastFrom(ctx, tx)
 	rawCounts := make(map[string]int64)
 	rawCells := make(map[string]AggCell)
 	rawPartitions := make(map[string]costPartitionCounts)
@@ -82,7 +88,9 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 		return err
 	}
 	if owners != nil {
-		if err := owners.ForEach(func(key, _ []byte) error {
+		// Skipped owners: valid (else in A) with a canonical key whose hour is
+		// outside the window, so the hour test below returns nil.
+		if err := integrityEachEvent(fast, owners, func(key, _ []byte) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -123,7 +131,10 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 		usageAgg := tx.Bucket([]byte(BucketUsageAggHourly))
 		metaBucket := tx.Bucket([]byte(BucketMeta))
 		built := metaBucket != nil && metaBucket.Get([]byte(quotaUsageAggBuiltMetaKey)) != nil
-		if err := raw.ForEach(func(key, value []byte) error {
+		// Skipped rows satisfy rawRowWindowExempt: they decode, their event hour
+		// is their key hour (outside the window), so they only accumulate cells
+		// outside the window, which no in-window check reads.
+		if err := integrityEachEvent(fast, raw, func(key, value []byte) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -279,7 +290,9 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 	}
 	if receipts := tx.Bucket([]byte(BucketUsageReceipts)); receipts != nil {
 		verified := make(map[string]bool)
-		if err := receipts.ForEach(func(key, _ []byte) error {
+		// Skipped receipts have a canonical stamp outside the window; readable
+		// cells then carry a quota key of that hour, which is out of scope.
+		if err := integrityEachEvent(fast, receipts, func(key, _ []byte) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -399,7 +412,21 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 		}
 		return nil
 	}
+	if fast != nil {
+		// Skipped quota keys have a parseable hour outside the window, for
+		// which quotaKeyInScope answers (false, nil) and visit returns nil.
+		return fast.eachQuota(quota, visit)
+	}
 	return quota.ForEach(visit)
+}
+
+// integrityEachEvent is b.ForEach, or the windowed walk of a raw-identity
+// keyed bucket when a classification applies to this read.
+func integrityEachEvent(fast *integrityFast, b *bolt.Bucket, fn func(k, v []byte) error) error {
+	if fast == nil {
+		return b.ForEach(fn)
+	}
+	return fast.eachEvent(b, fn)
 }
 
 type costPartitionCounts [16]int64
@@ -568,7 +595,10 @@ func checkMissingFreshRootsContext(ctx context.Context, tx *bolt.Tx, filter usag
 	if proofs == nil || raw == nil || receipts == nil {
 		return nil
 	}
-	return proofs.ForEach(func(key, value []byte) error {
+	// Issue #125 (v3 item 5): skipped attestations have a canonical stamp
+	// outside the window and return nil below; unparseable stamps already do.
+	ctx = integrityReadContext(ctx, tx, from, to)
+	return integrityEachEvent(integrityFastFrom(ctx, tx), proofs, func(key, value []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

@@ -55,7 +55,13 @@ func TestDirectIntegrityScansOncePerCostQuery(t *testing.T) {
 			t.Logf("direct calls=%d raw scan visits=%d receipt scan visits=%d quota scan visits=%d", calls, raw, receipts, quota)
 			if hours == 1 {
 				baselineRaw = raw
-				if raw == 0 || receipts == 0 || quota == 0 {
+				if integrityForceFast.Load() {
+					// Issue #125 fast path: the only receipt (pruned two hours
+					// before every window) is outside the window and skipped.
+					if raw == 0 || receipts != 0 || quota == 0 {
+						t.Errorf("fast path evidence: raw=%d receipt=%d quota=%d, want receipt=0", raw, receipts, quota)
+					}
+				} else if raw == 0 || receipts == 0 || quota == 0 {
 					t.Errorf("instrumentation missed evidence: raw=%d receipt=%d quota=%d", raw, receipts, quota)
 				}
 			}

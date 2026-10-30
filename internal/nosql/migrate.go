@@ -19,6 +19,9 @@ import (
 // It is idempotent: if the meta bucket contains a "migrated" key, migration is skipped.
 // Individual file failures are logged as warnings and do not abort the overall migration.
 func MigrateFromJSON(db *bolt.DB, dataFiles config.DataFiles) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	// Check if already migrated.
 	var alreadyMigrated bool
 	err := db.View(func(tx *bolt.Tx) error {
@@ -193,6 +196,9 @@ func migrateModelCosts(db *bolt.DB, path string) {
 }
 
 func migrateUsageEvents(db *bolt.DB, path string) {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	if path == "" {
 		return
 	}

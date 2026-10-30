@@ -52,6 +52,9 @@ jobs:
       - name: 单元测试
         run: go test ./...
 
+      - name: 单元测试（强制完整性快速路径，Issue #125）
+        run: make test-fast-integrity
+
   race:
     name: race
     runs-on: ubuntu-latest

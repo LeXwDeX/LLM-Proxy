@@ -547,10 +547,11 @@ func (s *UsageStore) Aggregate(filter usage.Filter, groupBy string, costs usage.
 		if err := checkUnresolvedUsageInScope(tx, clientKey, from, to, modelKey, nil); err != nil {
 			return err
 		}
-		if err := checkDirectQuotaEvidence(tx, filter, from, to, nil, nil); err != nil {
+		ctx := integrityReadContext(context.Background(), tx, from, to)
+		if err := checkDirectQuotaEvidenceContext(ctx, tx, filter, from, to, nil, nil); err != nil {
 			return err
 		}
-		if err := checkMissingFreshRoots(tx, filter, from, to); err != nil {
+		if err := checkMissingFreshRootsContext(ctx, tx, filter, from, to); err != nil {
 			return err
 		}
 		return aggIter(tx, from, to, func(hour time.Time, et, client, model, target string, cell AggCell) error {
@@ -711,6 +712,9 @@ var pruneBetweenTx func()
 // losslessly to quarantine instead of blocking subsequent batches. Their unknown
 // ownership invalidates indexed reads globally.
 func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, error) {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	if err := s.EnsureUsageReceipts(); err != nil {
 		return 0, err
 	}

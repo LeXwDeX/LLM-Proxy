@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
 	"github.com/LeXwDeX/LLM-Proxy/internal/proxy"
 	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"github.com/LeXwDeX/LLM-Proxy/internal/version"
@@ -83,6 +84,9 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		ObservationBudget proxy.ObservationBudgetMetrics `json:"observation_budget"`
 		// 额度后台刷新状态：pending 为 true 表示写操作之后的刷新尚未完成。
 		QuotaRefresh *quota.RefreshStatus `json:"quota_refresh,omitempty"`
+		// 用量完整性分类（Issue #125）：快速路径是否可用、代次、异常对象数、
+		// 最近一次分类耗时与按原因的回退计数；不含任何键或存储字节。
+		UsageIntegrity *nosql.UsageIntegrityMetrics `json:"usage_integrity,omitempty"`
 	}{
 		GeneratedAt:       now,
 		UptimeSeconds:     uptime.Seconds(),
@@ -95,6 +99,10 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if h.quotaManager != nil {
 		st := h.quotaManager.RefreshStatus()
 		response.QuotaRefresh = &st
+	}
+	if h.usageStore != nil {
+		st := h.usageStore.IntegrityStats()
+		response.UsageIntegrity = &st
 	}
 	response.Requests.Total = metrics.TotalRequests
 	response.Requests.Success = metrics.TotalSuccess

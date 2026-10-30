@@ -189,13 +189,19 @@ func validateQuotaKeys(ctx context.Context, tx *bolt.Tx, filter usage.Filter, fr
 	if b == nil {
 		return nil
 	}
-	return b.ForEach(func(k, _ []byte) error {
+	visit := func(k, _ []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		_, err := quotaKeyInScope(k, filter, from, to, allow)
 		return err
-	})
+	}
+	// Issue #125: keys outside the window with a parseable hour answer
+	// (false, nil); unparseable keys are anomalous and always visited.
+	if fast := integrityFastFrom(ctx, tx); fast != nil {
+		return fast.eachQuota(b, visit)
+	}
+	return b.ForEach(visit)
 }
 
 func quotaKeyInScope(key []byte, filter usage.Filter, from, to time.Time, allow costPairFilter) (bool, error) {
@@ -365,6 +371,8 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 	result := costReadResult{}
 	useIndex := needsExact && strings.TrimSpace(filter.ClientName) != "" && !from.IsZero() && !hooks.forceLegacy && (rawFrom != nil || strings.TrimSpace(filter.Model) == "" || usage.RequiresEventTimestampsForModel(resolver, filter.Model))
 	err := s.db.View(func(tx *bolt.Tx) error {
+		// Issue #125: decide the fast path once, after the transaction began.
+		ctx := integrityReadContext(ctx, tx, from, to)
 		refs := &indexRawReferences{tx: tx}
 		missing, err := missingUsageAggregateSources(tx)
 		if err != nil {

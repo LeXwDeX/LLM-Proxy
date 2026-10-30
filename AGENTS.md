@@ -130,7 +130,7 @@ GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推
 
 | job | 命令 |
 |---|---|
-| `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...` |
+| `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...`、`make test-fast-integrity` |
 | `race` | `go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...` |
 | `e2e` | `make e2e` |
 | `integration` | `make integration` |
@@ -143,6 +143,7 @@ GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推
 
 ```sh
 make test                 # check-docs + go test ./...
+make test-fast-integrity  # nosql/quota 用例在强制完整性快速路径下再跑一轮（Issue #125）
 go vet ./...
 go vet -tags=e2e ./test/e2e/
 go build ./...            # 与 CI 一致的编译检查

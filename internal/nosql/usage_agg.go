@@ -340,10 +340,11 @@ func (s *UsageStore) SumQuotaByClientRange(client string, from, to time.Time) (m
 			return err
 		}
 		filter := usage.Filter{ClientName: client}
-		if err := checkDirectQuotaEvidence(tx, filter, from, to, nil, nil); err != nil {
+		ctx := integrityReadContext(context.Background(), tx, from, to)
+		if err := checkDirectQuotaEvidenceContext(ctx, tx, filter, from, to, nil, nil); err != nil {
 			return err
 		}
-		if err := checkMissingFreshRoots(tx, filter, from, to); err != nil {
+		if err := checkMissingFreshRootsContext(ctx, tx, filter, from, to); err != nil {
 			return err
 		}
 		b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))
@@ -624,6 +625,9 @@ func BackfillUsageAgg(db *bolt.DB) error {
 }
 
 func backfillUsageAgg(db *bolt.DB, afterBatch func(int64) error) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	// Already done?
 	var done bool
 	err := db.View(func(tx *bolt.Tx) error {
@@ -701,6 +705,9 @@ func BackfillQuotaUsageAgg(db *bolt.DB) error {
 }
 
 func backfillQuotaUsageAgg(db *bolt.DB, afterBatch func(int64) error) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	var done bool
 	err := db.View(func(tx *bolt.Tx) error {
 		if b := tx.Bucket([]byte(BucketMeta)); b != nil {
@@ -884,10 +891,11 @@ func (s *UsageStore) SumTargetModelRange(filter usage.Filter) ([]TargetModelCell
 		if err := checkUnresolvedUsageInScope(tx, filter.ClientName, from, to, filter.Model, nil); err != nil {
 			return err
 		}
-		if err := checkDirectQuotaEvidence(tx, filter, from, to, nil, nil); err != nil {
+		ctx := integrityReadContext(context.Background(), tx, from, to)
+		if err := checkDirectQuotaEvidenceContext(ctx, tx, filter, from, to, nil, nil); err != nil {
 			return err
 		}
-		if err := checkMissingFreshRoots(tx, filter, from, to); err != nil {
+		if err := checkMissingFreshRootsContext(ctx, tx, filter, from, to); err != nil {
 			return err
 		}
 		b := tx.Bucket([]byte(BucketQuotaUsageAggHourly))

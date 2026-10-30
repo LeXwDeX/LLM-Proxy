@@ -3598,6 +3598,21 @@ func TestHandlerMetricsAndHealthzExposeCapacity(t *testing.T) {
 			t.Fatalf("/admin/metrics missing %s", key)
 		}
 	}
+	// Issue #125: the integrity classifier state, without keys or bytes.
+	var integrityRaw struct {
+		UsageIntegrity map[string]json.RawMessage `json:"usage_integrity"`
+	}
+	if err := json.Unmarshal(recentRec.Body.Bytes(), &integrityRaw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"complete", "epoch", "anomalous_count", "last_duration_ms", "fast_reads", "fallback_reads", "inflight_writers"} {
+		if _, ok := integrityRaw.UsageIntegrity[key]; !ok {
+			t.Fatalf("/admin/metrics usage_integrity missing %s: %s", key, recentRec.Body.String())
+		}
+	}
+	if len(integrityRaw.UsageIntegrity) != 7 {
+		t.Fatalf("/admin/metrics usage_integrity has unexpected fields: %s", recentRec.Body.String())
+	}
 	// The shared observation decode budget: capacity, bytes in use and
 	// exhaustion counters per encoding.
 	var budgetRaw struct {

@@ -229,6 +229,16 @@ func readIndexProof(b *bolt.Bucket, p *indexProgress, key []byte) (indexProof, e
 type indexRawReferences struct {
 	tx   *bolt.Tx
 	keys map[string]bool
+	// probe, when set, records that contains was consulted and answers false
+	// without scanning. Only the integrity classifier sets it.
+	probe *bool
+	// partial marks keys as collected by a windowed checkOrphans walk: it is
+	// exact only for raw keys whose canonical hour lies in [covFrom, covTo].
+	// Other keys fall back to the exhaustive map (full), which has the same
+	// content the exhaustive checkOrphans walk would have produced.
+	partial        bool
+	covFrom, covTo time.Time
+	full           map[string]bool
 }
 
 func indexProofScope(indexKey, rawKey []byte) (unresolvedScope, bool) {
@@ -251,7 +261,19 @@ func (refs *indexRawReferences) checkOrphans(ctx context.Context, p *indexProgre
 		return fmt.Errorf("%w: client index or raw source missing", ErrUsageHistoryIncomplete)
 	}
 	keys := make(map[string]bool)
-	err := index.ForEach(func(indexKey, pointer []byte) error {
+	// Issue #125 (v3 item 3): with a classification made under the same
+	// progress, walk only the window's entries plus anomalous ones. A skipped
+	// entry satisfies indexEntryWindowExempt and returns nil below; the keys it
+	// would have added are recovered on demand by containsExhaustive.
+	fast := integrityFastFrom(ctx, refs.tx)
+	if fast != nil && (!fast.class.indexClassified || !sameIndexProgress(fast.class.indexProgress, p)) {
+		fast = nil
+	}
+	each := index.ForEach
+	if fast != nil {
+		each = func(fn func(k, v []byte) error) error { return fast.eachIndex(index, fn) }
+	}
+	err := each(func(indexKey, pointer []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -325,11 +347,27 @@ func (refs *indexRawReferences) checkOrphans(ctx context.Context, p *indexProgre
 	})
 	if err == nil {
 		refs.keys = keys
+		if fast != nil {
+			refs.partial, refs.covFrom, refs.covTo, refs.full = true, fast.from, fast.to, nil
+			if fast.empty {
+				refs.covFrom, refs.covTo = time.Date(9999, 12, 31, 23, 0, 0, 0, time.UTC), time.Time{}
+			}
+		}
 	}
 	return err
 }
 
 func (refs *indexRawReferences) contains(ctx context.Context, key []byte) (bool, error) {
+	if refs.probe != nil {
+		*refs.probe = true
+		return false, nil
+	}
+	if refs.keys != nil && refs.partial {
+		if hour, ok := canonicalEventKeyHour(key); ok && !hour.Before(refs.covFrom) && !hour.After(refs.covTo) {
+			return refs.keys[string(key)], ctx.Err()
+		}
+		return refs.containsExhaustive(ctx, key)
+	}
 	if refs.keys == nil {
 		keys := make(map[string]bool)
 		if index := refs.tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil {
@@ -354,6 +392,30 @@ func (refs *indexRawReferences) contains(ctx context.Context, key []byte) (bool,
 		refs.keys = keys
 	}
 	return refs.keys[string(key)], ctx.Err()
+}
+
+// containsExhaustive answers a key outside a partial walk's coverage from the
+// map an exhaustive checkOrphans walk builds. The partial walk succeeded, and
+// every entry it skipped is non-anomalous (three identity parts and a pointer
+// equal to the third), so this map equals the exhaustive one.
+func (refs *indexRawReferences) containsExhaustive(ctx context.Context, key []byte) (bool, error) {
+	if refs.full == nil {
+		integrityNoteFallback(integrityFallbackPartialRefs)
+		keys := make(map[string]bool)
+		if index := refs.tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil {
+			_ = index.ForEach(func(indexKey, pointer []byte) error {
+				if parts := strings.SplitN(string(indexKey), "|", 3); len(parts) == 3 && parts[2] != "" {
+					keys[parts[2]] = true
+				}
+				if pointer != nil {
+					keys[string(pointer)] = true
+				}
+				return nil
+			})
+		}
+		refs.full = keys
+	}
+	return refs.full[string(key)], ctx.Err()
 }
 
 // A missing proof on an unowned indexed or scanned row has unknown attribution.

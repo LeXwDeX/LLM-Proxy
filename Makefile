@@ -12,7 +12,7 @@ VERSION     := $(BUILD_DATE).$(BUILD_NUMBER)
 VERSION_PKG := github.com/LeXwDeX/LLM-Proxy/internal/version
 LDFLAGS     := -X $(VERSION_PKG).Version=$(VERSION)
 
-.PHONY: all build test test-proxy integration e2e ui-sim clean catalog docker version check-docs
+.PHONY: all build test test-proxy test-fast-integrity integration e2e ui-sim clean catalog docker version check-docs
 
 all: test build
 
@@ -47,6 +47,13 @@ test: check-docs
 test-proxy:
 	@echo ">> running core proxy regression tests"
 	go test ./internal/proxy/...
+
+# Issue #125：用量完整性快速路径双模式。forcefastintegrity 标签只在测试构建中使用，
+# 让每次完整性读取都在同一读事务内先分类再走窗口化快速路径，nosql 与 quota 全部
+# 现有用例因此同时检验 Fast == Full。生产构建不带该标签。
+test-fast-integrity:
+	@echo ">> running nosql/quota tests with the forced fast integrity path"
+	go test -tags forcefastintegrity ./internal/nosql/... ./internal/quota/...
 
 # 校验共享 Agent 指引存在
 check-docs:
