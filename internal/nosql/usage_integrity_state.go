@@ -16,6 +16,7 @@ const (
 	integrityFallbackEpochChanged = "epoch_changed"
 	integrityFallbackOverflow     = "anomalous_overflow"
 	integrityFallbackPartialRefs  = "partial_refs_fallback"
+	integrityFallbackClientScope  = "client_scope_fallback"
 )
 
 // integrityForceFast is set only by this package's tests (see
@@ -235,7 +236,7 @@ func UsageIntegrityStats(db *bolt.DB) UsageIntegrityMetrics {
 		FallbackReads:   make(map[string]uint64),
 		InflightWriters: integrityInflight.Load(),
 	}
-	for _, reason := range []string{integrityFallbackIncomplete, integrityFallbackEpochChanged, integrityFallbackOverflow, integrityFallbackPartialRefs} {
+	for _, reason := range []string{integrityFallbackIncomplete, integrityFallbackEpochChanged, integrityFallbackOverflow, integrityFallbackPartialRefs, integrityFallbackClientScope} {
 		m.FallbackReads[reason] = integrityState.fallbacks[reason]
 	}
 	return m

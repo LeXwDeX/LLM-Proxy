@@ -404,6 +404,12 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 	}
 	if hooks != nil && hooks.windowKeys {
 		end := to.Truncate(time.Hour).Format(hourLayout) + "}"
+		if fast != nil && fast.scope != nil {
+			// Issue #125 P2: the calibration visit keeps its exact textual
+			// range; the scope adds the filter client's own cells (and the
+			// empty-owner cells) instead of every other client's.
+			return fast.eachQuotaWindowKeys(quota, string(hourPrefix(from)), end, visit)
+		}
 		c := quota.Cursor()
 		for k, v := c.Seek(hourPrefix(from)); k != nil && string(k) <= end; k, v = c.Next() {
 			if err := visit(k, v); err != nil {
