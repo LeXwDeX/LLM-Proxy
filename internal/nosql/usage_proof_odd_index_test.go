@@ -154,7 +154,7 @@ func TestProofOddIndexAvoidsHistoryClassification(t *testing.T) {
 	store := NewUsageStore(db)
 	base := time.Now().UTC().Truncate(time.Hour).Add(-24 * time.Hour)
 	canonicalHistory(t, db, history, base)
-	if err := resetUsageProofOddIndex(db); err != nil {
+	if err := ResetUsageProofOddIndex(db); err != nil {
 		t.Fatal(err)
 	}
 	if err := MigrateUsageProofOddIndex(context.Background(), db, 128); err != nil {
@@ -213,7 +213,7 @@ func TestProofOddIndexMigrationResumes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := resetUsageProofOddIndex(db); err != nil {
+	if err := ResetUsageProofOddIndex(db); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -257,7 +257,7 @@ func TestProofOddIndexFollowsSupportedWriters(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := resetUsageProofOddIndex(db); err != nil {
+	if err := ResetUsageProofOddIndex(db); err != nil {
 		t.Fatal(err)
 	}
 	if err := MigrateUsageProofOddIndex(context.Background(), db, 2); err != nil {
@@ -359,7 +359,7 @@ func TestProofOddIndexScopedVerdictsMatchExhaustive(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := resetUsageProofOddIndex(db); err != nil {
+		if err := ResetUsageProofOddIndex(db); err != nil {
 			t.Fatal(err)
 		}
 		if err := MigrateUsageProofOddIndex(context.Background(), db, 64); err != nil {
@@ -461,7 +461,7 @@ func TestProofOddIndexDamageFallsBack(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := resetUsageProofOddIndex(db); err != nil {
+	if err := ResetUsageProofOddIndex(db); err != nil {
 		t.Fatal(err)
 	}
 	if err := MigrateUsageProofOddIndex(context.Background(), db, 4); err != nil {
@@ -481,6 +481,26 @@ func TestProofOddIndexDamageFallsBack(t *testing.T) {
 	}
 	if delta := scan(t); delta != 0 {
 		t.Fatalf("intact index fell back to %d full classifications", delta)
+	}
+	// An index built with other location semantics (no scheme marker, as an
+	// older classification would leave it) is not trusted and is rebuilt.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketMeta)).Delete([]byte(proofOddSchemeKey))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if delta := scan(t); delta == 0 {
+		t.Fatal("missing scheme marker did not force the full-scan fallback")
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 4); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not rebuild an index with a missing scheme marker")
+	}
+	requireProofOddIndexMatches(t, db)
+	if delta := scan(t); delta != 0 {
+		t.Fatalf("rebuilt index fell back to %d full classifications", delta)
 	}
 	// Out-of-band rewrite of an indexed odd row: digest mismatch.
 	if err := db.Update(func(tx *bolt.Tx) error {
@@ -515,7 +535,7 @@ func TestProofOddIndexStaleRevisionFallsBackAndRebuilds(t *testing.T) {
 	db := testDB(t)
 	base := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
 	canonicalHistory(t, db, history, base)
-	if err := resetUsageProofOddIndex(db); err != nil {
+	if err := ResetUsageProofOddIndex(db); err != nil {
 		t.Fatal(err)
 	}
 	if err := MigrateUsageProofOddIndex(context.Background(), db, 4); err != nil {
@@ -575,6 +595,186 @@ func TestProofOddIndexStaleRevisionFallsBackAndRebuilds(t *testing.T) {
 	requireProofOddIndexMatches(t, db)
 	if delta := scan(t); delta != 0 {
 		t.Fatalf("rebuilt index fell back to %d full classifications", delta)
+	}
+}
+
+// proofFreshVerdict returns the fresh-scope verdict for one candidate bundle,
+// optionally through the persisted classification (scoped) or the exhaustive
+// pre-#114 walk (reference).
+func proofFreshVerdict(t *testing.T, db *bolt.DB, rows []usage.Event, scoped bool) bool {
+	t.Helper()
+	var proven bool
+	if err := db.View(func(tx *bolt.Tx) error {
+		ctx := context.Background()
+		if scoped {
+			ctx = withTxScopeSummary(ctx, tx)
+		}
+		proven = freshScopeProvenContext(ctx, tx, rows)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return proven
+}
+
+// An owner entry that becomes unreadable after the index was built makes
+// proofRawMayOverlap treat its raw row as relevant at every hour. The scoped
+// walk must return the same verdict as the exhaustive walk: the row has to stay
+// global in the persisted classification (or the index must fall back), never
+// be hidden under its own hour while another hour is proved.
+func TestProofOddIndexOwnerDamageMatchesExhaustive(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
+	// A canonical row establishes receipt and watermark state. It shares no
+	// hour with the proved scope and is skipped by key prefix.
+	if err := store.RecordBatch([]usage.Event{scaleEvent(760000, base.Add(3*time.Hour+2*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	odd := fixedPlainEvent()
+	odd.RecordID = ""
+	odd.ClientName = "legacy-owner"
+	odd.Timestamp = base.Add(10 * time.Minute)
+	oddKey := []byte(usageKey(odd.Timestamp, "legacy-owner-key"))
+	oddData, err := json.Marshal(odd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket([]byte(BucketMeta)).Delete([]byte(usageAccountingProofTrackedKey)); err != nil {
+			return err
+		}
+		if err := tx.Bucket([]byte(BucketUsageEvents)).Put(oddKey, oddData); err != nil {
+			return err
+		}
+		return writeRawOwner(tx, oddKey, odd)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	requireProofOddIndexMatches(t, db)
+	candidate := []usage.Event{scaleEvent(761000, base.Add(2*time.Hour+5*time.Minute))}
+	if !proofFreshVerdict(t, db, candidate, false) || !proofFreshVerdict(t, db, candidate, true) {
+		t.Fatal("healthy owner: both scans must prove the empty candidate scope")
+	}
+	// Corrupt one owner entry after the index observed it.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(rawOwnerBucket)).Put(oddKey, []byte(`{"version":1}`))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clearProofScanCacheForTest()
+	exhaustive := proofFreshVerdict(t, db, candidate, false)
+	scoped := proofFreshVerdict(t, db, candidate, true)
+	if exhaustive {
+		t.Fatal("the reference proof accepted a scope next to a damaged owner entry")
+	}
+	if scoped != exhaustive {
+		t.Fatalf("scoped verdict %v, exhaustive verdict %v after owner damage", scoped, exhaustive)
+	}
+	// The owner-bound row must be global so every proof re-reads its owner.
+	if err := db.View(func(tx *bolt.Tx) error {
+		pointer := tx.Bucket([]byte(bucketUsageProofOdd)).Get(proofOddPointerKey(proofOddRawPointer, oddKey))
+		kind, _, ok := proofOddParsePointer(pointer)
+		if !ok || kind != proofOddRawGlobal {
+			return fmt.Errorf("owner-bound odd row indexed as %v, want global", pointer)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Losing the owner source after the index was built (the bucket disappears
+// while its meta markers stay, or any other rawOwnerSource inconsistency) makes
+// readRawOwner fail for every odd row, so the exhaustive walk treats all of
+// them as relevant at any hour. The scoped walk must stop trusting hour-located
+// entries before that divergence can prove a scope the reference rejects.
+func TestProofOddIndexOwnerSourceLossMatchesExhaustive(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
+	// The supported writer creates the owner bucket and its markers.
+	if err := store.RecordBatch([]usage.Event{scaleEvent(770000, base.Add(3*time.Hour+2*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	odd := fixedPlainEvent()
+	odd.RecordID = ""
+	odd.ClientName = "legacy-unowned"
+	odd.Timestamp = base.Add(10 * time.Minute)
+	oddKey := []byte(usageKey(odd.Timestamp, "legacy-unowned-key"))
+	oddData, err := json.Marshal(odd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket([]byte(BucketMeta)).Delete([]byte(usageAccountingProofTrackedKey)); err != nil {
+			return err
+		}
+		// No owner is written for this row, so it is hour-located on its own.
+		return tx.Bucket([]byte(BucketUsageEvents)).Put(oddKey, oddData)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	requireProofOddIndexMatches(t, db)
+	candidate := []usage.Event{scaleEvent(771000, base.Add(2*time.Hour+5*time.Minute))}
+	if !proofFreshVerdict(t, db, candidate, false) || !proofFreshVerdict(t, db, candidate, true) {
+		t.Fatal("healthy owner source: both scans must prove the empty candidate scope")
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.DeleteBucket([]byte(rawOwnerBucket))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clearProofScanCacheForTest()
+	exhaustive := proofFreshVerdict(t, db, candidate, false)
+	scoped := proofFreshVerdict(t, db, candidate, true)
+	if exhaustive {
+		t.Fatal("the reference proof accepted a scope while the owner source was missing")
+	}
+	if scoped != exhaustive {
+		t.Fatalf("scoped verdict %v, exhaustive verdict %v after owner source loss", scoped, exhaustive)
+	}
+	// The revision and scheme are untouched, so the structural check still
+	// passes; readiness itself must fail while the owner source is unreadable,
+	// and that is what forces the fallback.
+	if err := db.View(func(tx *bolt.Tx) error {
+		if !proofOddIndexCurrent(tx) {
+			return fmt.Errorf("index structure stopped being current after owner source loss")
+		}
+		if proofOddIndexReady(tx) {
+			return fmt.Errorf("index reported ready while the owner source was missing")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Migration must terminate instead of rebuilding forever while the source
+	// is unreadable; the proof-path readiness check carries the fallback.
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if proofOddReadyNow(t, db) {
+		t.Fatal("the index reported ready after migrating with the owner source missing")
+	}
+}
+
+// The repair entry point is called from maintenance code with a database the
+// caller opened, so it reports a missing one instead of panicking.
+func TestResetUsageProofOddIndexRejectsNilDatabase(t *testing.T) {
+	if err := ResetUsageProofOddIndex(nil); err == nil {
+		t.Fatal("reset accepted a nil database")
 	}
 }
 

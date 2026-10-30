@@ -23,27 +23,40 @@ import (
 //   - a receipt whose key stamp is not canonical UTC.
 //
 // Objects are located by key-stamp hour, so a proof only loads the odd rows of
-// the hours it proves plus the small set that cannot be located by hour
-// (unparseable stamps). The classification mapping is exact:
+// the hours it proves plus the set that cannot be located by hour (unparseable
+// stamps) and the rows bound to a readable raw owner. The classification
+// mapping is exact:
 //
 //   - canonical raw rows and canonical receipts are never indexed: their key
 //     starts with their own UTC hour, so the proof's prefix walk reaches them;
-//   - odd raw rows with a parseable key stamp are indexed under that UTC hour;
-//     the proof walk reaches them by prefix when the literal key matches and
-//     through the index otherwise (offset-zone keys);
-//   - odd raw rows whose key stamp is unparseable, or whose bytes/owner make
-//     proofRawMayOverlap return true regardless of the hour, are global and
-//     every proof visits them;
+//   - odd raw rows with a parseable key stamp and no readable raw owner entry
+//     are indexed under that UTC hour; the proof walk reaches them by prefix
+//     when the literal key matches and through the index otherwise
+//     (offset-zone keys);
+//   - odd raw rows whose key stamp is unparseable, whose bytes make
+//     proofRawMayOverlap return true regardless of the hour, or that have a
+//     readable raw owner entry are global and every proof visits them. The
+//     owner is re-read by proofRawMayOverlap, so an entry that later turns
+//     unreadable would widen the row's overlap to every hour; owner-bound rows
+//     must therefore never be hidden under a single hour;
 //   - receipts with a parseable key stamp are indexed under that UTC hour;
 //     unparseable stamps are global. receiptMayOverlap is false for every
 //     parseable stamp outside the proved hours.
 //
+// The owner source is part of the classification input: while rawOwnerSource
+// is inconsistent (a missing bucket with its markers intact, for example),
+// readRawOwner fails for every odd row, so the scoped walk must fall back to
+// the exhaustive scan instead of trusting hour-located entries.
+//
 // Every supported writer updates the index in the same transaction:
 // writeUsageRowTx and writeUsageReceipt, ReindexUsageEvent, the JSON import,
 // and retention's raw delete. Any other path (including out-of-band edits and
-// data restored from a backup) must rebuild it with a reset plus
-// MigrateUsageProofOddIndex. Absent, incomplete, or damaged index data makes
-// proofs fall back to the previous full scans; they never fail open.
+// data restored from a backup) must rebuild it with ResetUsageProofOddIndex
+// followed by MigrateUsageProofOddIndex. Absent, incomplete, or damaged index
+// data makes proofs fall back to the previous full scans; they never fail open.
+//
+// The completion marker records the classification scheme version, so an index
+// built with different location semantics is rebuilt instead of trusted.
 const (
 	bucketUsageProofOdd      = "usage_proof_odd_v1"
 	proofOddReadyKey         = "usage_proof_odd_ready_v1"
@@ -51,8 +64,15 @@ const (
 	proofOddRawCursorKey     = "usage_proof_odd_raw_cursor_v1"
 	proofOddReceiptCursorKey = "usage_proof_odd_receipt_cursor_v1"
 	proofOddRevisionKey      = "usage_proof_odd_revision_v1"
+	proofOddSchemeKey        = "usage_proof_odd_scheme_v1"
 	proofOddMigrateBatch     = 512
 )
+
+// proofOddScheme versions the location semantics stored in the index. Bump it
+// whenever a row's location decision changes, so an index built by the older
+// semantics is rebuilt rather than trusted. Version 2 made owner-bound odd rows
+// global; version 1 located them by key hour.
+const proofOddScheme = "2"
 
 // Single-byte domains inside bucketUsageProofOdd. Locations use the lower/upper
 // kind byte followed by the optional hour; pointers use 'r'/'c'.
@@ -82,12 +102,25 @@ func proofOddMeta(tx *bolt.Tx) *bolt.Bucket {
 	return tx.Bucket([]byte(BucketMeta))
 }
 
-// proofOddIndexReady reports whether the persisted classification is complete
-// and current. The stored raw revision must equal the live one: supported
-// writers advance both in the same transaction, while a writer that does not
-// maintain the index (an older binary or an out-of-band edit that bumps the
-// revision) makes the check fail and proofs fall back to full scans.
+// proofOddIndexReady reports whether a proof may trust the persisted
+// classification. The index must be complete and current, and the raw owner
+// source it was classified from must be readable: when rawOwnerSource is
+// inconsistent, readRawOwner fails for every odd row and proofRawMayOverlap
+// treats each of them as relevant at any hour, so hour-located entries must not
+// be used. Proofs then fall back to the exhaustive scan.
 func proofOddIndexReady(tx *bolt.Tx) bool {
+	return proofOddIndexCurrent(tx) && proofOddOwnerSourceReadable(tx)
+}
+
+// proofOddIndexCurrent reports whether the persisted classification is
+// complete for the current scheme and raw revision. The stored raw revision
+// must equal the live one: supported writers advance both in the same
+// transaction, while a writer that does not maintain the index (an older
+// binary or an out-of-band edit that bumps the revision) makes the check fail.
+// Migration uses this check without the owner-source condition so it can finish
+// while the owner source is unreadable instead of rebuilding on every attempt;
+// proofs use proofOddIndexReady and keep the full-scan fallback meanwhile.
+func proofOddIndexCurrent(tx *bolt.Tx) bool {
 	b := proofOddBucket(tx)
 	meta := proofOddMeta(tx)
 	if b == nil || meta == nil {
@@ -96,11 +129,21 @@ func proofOddIndexReady(tx *bolt.Tx) bool {
 	if string(meta.Get([]byte(proofOddReadyKey))) != "1" {
 		return false
 	}
+	if string(meta.Get([]byte(proofOddSchemeKey))) != proofOddScheme {
+		return false
+	}
 	if meta.Get([]byte(proofOddPhaseKey)) != nil {
 		return false
 	}
 	stored := meta.Get([]byte(proofOddRevisionKey))
 	return len(stored) == 8 && binary.BigEndian.Uint64(stored) == rawRevision(tx)
+}
+
+// proofOddOwnerSourceReadable reports whether the raw owner source every odd
+// row's classification depends on is consistent.
+func proofOddOwnerSourceReadable(tx *bolt.Tx) bool {
+	_, err := rawOwnerSource(tx)
+	return err == nil
 }
 
 // proofOddFollowRawRevision advances the revision recorded alongside the
@@ -127,6 +170,7 @@ func proofOddInvalidate(tx *bolt.Tx) {
 		return
 	}
 	_ = meta.Delete([]byte(proofOddReadyKey))
+	_ = meta.Delete([]byte(proofOddSchemeKey))
 	_ = meta.Delete([]byte(proofOddPhaseKey))
 	_ = meta.Delete([]byte(proofOddRawCursorKey))
 	_ = meta.Delete([]byte(proofOddReceiptCursorKey))
@@ -193,6 +237,13 @@ func proofOddRawIsCanonical(key, data []byte) bool {
 // proofOddClassifyRaw maps an odd raw row to its index location. A row that
 // proofRawMayOverlap can report relevant outside its own key hour must be
 // global; everything else is locatable by the key stamp's UTC hour.
+//
+// A row with a readable owner entry is always global. proofRawMayOverlap reads
+// that entry live, and an entry that later turns unreadable makes the row
+// relevant at every hour while an hour-located entry would never be visited.
+// Keeping owner-bound rows global means every proof re-judges them with the
+// current owner bytes, so owner damage can only fall through to the reference
+// verdict, never skip a row the exhaustive walk would act on.
 func proofOddClassifyRaw(tx *bolt.Tx, key, data []byte) (byte, string) {
 	stamp, _, found := strings.Cut(string(key), "_")
 	at, err := time.Parse(time.RFC3339Nano, stamp)
@@ -203,11 +254,7 @@ func proofOddClassifyRaw(tx *bolt.Tx, key, data []byte) (byte, string) {
 	if scope.ambiguous && scope.valid {
 		return proofOddRawGlobal, ""
 	}
-	owner, known, err := readRawOwner(tx, key)
-	if err != nil {
-		return proofOddRawGlobal, ""
-	}
-	if known && !scope.ambiguous && scope.clientName != "" && scope.clientHash != owner.Client {
+	if _, known, err := readRawOwner(tx, key); err != nil || known {
 		return proofOddRawGlobal, ""
 	}
 	return proofOddRawHour, at.UTC().Truncate(time.Hour).Format(hourLayout)
@@ -378,7 +425,7 @@ func MigrateUsageProofOddIndex(ctx context.Context, db *bolt.DB, batchSize int) 
 			if proofOddBucket(tx) == nil || proofOddMeta(tx) == nil {
 				return fmt.Errorf("usage proof odd index: bucket or meta missing")
 			}
-			if proofOddIndexReady(tx) {
+			if proofOddIndexCurrent(tx) {
 				done = true
 				return nil
 			}
@@ -485,9 +532,13 @@ func migrateProofOddReceipts(ctx context.Context, tx *bolt.Tx, batchSize int) er
 	if err := meta.Delete([]byte(proofOddPhaseKey)); err != nil {
 		return err
 	}
-	// Bind the finished classification to the raw revision it covered. Every
-	// later supported write advances both; a write that skips the index (an
-	// older binary) advances only the revision and makes the index stale.
+	// Bind the finished classification to the location semantics and the raw
+	// revision it covered. Every later supported write advances both; a write
+	// that skips the index (an older binary) advances only the revision and
+	// makes the index stale.
+	if err := meta.Put([]byte(proofOddSchemeKey), []byte(proofOddScheme)); err != nil {
+		return err
+	}
 	var revision [8]byte
 	binary.BigEndian.PutUint64(revision[:], rawRevision(tx))
 	if err := meta.Put([]byte(proofOddRevisionKey), revision[:]); err != nil {
@@ -496,10 +547,15 @@ func migrateProofOddReceipts(ctx context.Context, tx *bolt.Tx, batchSize int) er
 	return meta.Put([]byte(proofOddReadyKey), []byte("1"))
 }
 
-// resetUsageProofOddIndex discards the persisted classification. It is the
-// documented repair for out-of-band edits and is used by tests before a
-// rebuild; production starts on a missing bucket.
-func resetUsageProofOddIndex(db *bolt.DB) error {
+// ResetUsageProofOddIndex discards the persisted classification. It is the
+// documented repair after out-of-band edits or detected damage, and the next
+// MigrateUsageProofOddIndex rebuilds it from the raw and receipt buckets. It is
+// exported so maintenance code has a supported rebuild path, and tests use it
+// to start from a clean classification.
+func ResetUsageProofOddIndex(db *bolt.DB) error {
+	if db == nil {
+		return fmt.Errorf("usage proof odd index: nil database")
+	}
 	return db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket([]byte(bucketUsageProofOdd)) != nil {
 			if err := tx.DeleteBucket([]byte(bucketUsageProofOdd)); err != nil {

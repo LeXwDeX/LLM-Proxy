@@ -85,6 +85,11 @@ func (s *txScopeSummary) rawOddKeys(raw *bolt.Bucket, hours map[time.Time]bool) 
 	if !s.rawFallback {
 		if !s.rawChecked {
 			s.rawChecked = true
+			// The owner source feeds every odd row's classification: while it
+			// is inconsistent, readRawOwner fails and proofRawMayOverlap treats
+			// every odd row as relevant at any hour. proofOddIndexReady reports
+			// not-ready in that state, so hour-located entries are not trusted
+			// and the proof cannot skip rows the exhaustive walk rejects on.
 			if proofOddIndexReady(s.tx) {
 				if keys, ok := proofOddLoadGlobal(s.tx, proofOddRawGlobal, raw); ok {
 					s.rawGlobal = keys
