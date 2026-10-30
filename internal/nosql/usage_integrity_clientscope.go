@@ -152,7 +152,11 @@ func foreignIndexProofPrefix(tx *bolt.Tx, p *indexProgress, indexKey []byte) ([]
 //   - a stale proof naming this client's index space (foreignProofs) makes
 //     the exhaustive evidence scan fail closed for this client;
 //   - an hour whose index state count or digest does not match the entries
-//     prevents both enumeration and the index block.
+//     prevents both enumeration and the index block;
+//   - a row whose enumerated hour (its index entry's event hour) differs from
+//     the hour of its raw key was moved by an offline rewrite; the skipped
+//     evidence scan, which ranges over key text and compares hour states, can
+//     no longer account for it, so the scope declines.
 //
 // The probe passes no hooks: its reads are validation, not read visits. The
 // scoped index block repeats them with the read's hooks and proof
@@ -225,6 +229,20 @@ func probeClientScopedRead(ctx context.Context, tx *bolt.Tx, client string, star
 				return nil
 			}
 			for _, row := range rows {
+				// An index entry carries the row's event hour, while the raw key
+				// carries the hour of its own stamp; they agree unless an offline
+				// ReindexUsageEvent-style rewrite moved the body (and the index
+				// entry, hour state and rollups) to another hour. The skipped
+				// evidence scan observes rows by key text and compares the hour
+				// states the index builds from event hours against them, so such
+				// a row is invisible to it while it still counts in the state; the
+				// scoped index block would assemble it and return a snapshot the
+				// exhaustive read fails closed on (or rejects in the legacy
+				// parity check). A key whose hour cannot be derived is equally
+				// unprovable, so both decline the scope.
+				if keyHour, ok := canonicalEventKeyHour(row.key); !ok || !keyHour.Equal(hour) {
+					return nil
+				}
 				if key := string(row.key); !seen[key] {
 					seen[key] = true
 					scope.rawKeys = append(scope.rawKeys, row.key)

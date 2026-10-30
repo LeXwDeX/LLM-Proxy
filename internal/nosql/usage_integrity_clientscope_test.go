@@ -282,6 +282,66 @@ func clientScopeDeleteRaw(t *testing.T, db *bolt.DB, key []byte) {
 	}
 }
 
+// clientScopeMoveRowIntoWindow leaves a raw row's key (and its key-hour) 40
+// days before now, but rewrites its body, client index entry, client/hour state
+// and both rollup cells into one of alice's in-window hours, exactly as an
+// offline ReindexUsageEvent-style maintenance rewrite may ("an offline rewrite
+// may move the row to another hour"; the caller updates the raw value and the
+// affected rollups in the same transaction). The row is unowned with an empty
+// record_id, the legacy shape whose key stamp equals its event time until the
+// rewrite moves the body. withProof additionally writes the v2 atomic proof a
+// consistent v2 index would carry for the rewritten event.
+//
+// The resulting row's event hour (and index entry) lie inside the read window
+// while its key text lies outside it, so the skipped evidence scan — which
+// observes rows by key text and compares them against the hour states the index
+// builds from event hours — cannot see it, while an in-window sibling of the
+// same client and hour makes the hour state disagree with the observed count.
+func clientScopeMoveRowIntoWindow(t *testing.T, db *bolt.DB, now time.Time, withProof bool) {
+	t.Helper()
+	sibling := clientScopeEvent(t, db, clientScopePickKey(t, db, "alice"))
+	inWindow := sibling.Timestamp.UTC().Truncate(time.Hour).Add(31 * time.Minute)
+	event := sibling
+	event.Timestamp = inWindow
+	event.RecordID = ""
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal moved event: %v", err)
+	}
+	key := []byte(usageKey(now.AddDate(0, 0, -40), ""))
+	if err := db.Update(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		if raw.Get(key) != nil {
+			return fmt.Errorf("raw row %q already exists", key)
+		}
+		if err := raw.Put(key, data); err != nil {
+			return err
+		}
+		if err := addClientEventIndex(tx, event, key, data); err != nil {
+			return err
+		}
+		if err := bumpAgg(tx, event); err != nil {
+			return err
+		}
+		if err := bumpQuotaAgg(tx, event); err != nil {
+			return err
+		}
+		if !withProof {
+			return nil
+		}
+		p, err := loadIndexProgressState(tx, false)
+		if err != nil {
+			return err
+		}
+		if p == nil {
+			return fmt.Errorf("no v2 progress")
+		}
+		return writeIndexProof(tx, p, key, data, event, "atomic")
+	}); err != nil {
+		t.Fatalf("move row into window: %v", err)
+	}
+}
+
 // clientScopeQuarantine moves a raw row into the quarantine bucket, as the
 // retention path does for undecodable rows.
 func clientScopeQuarantine(t *testing.T, db *bolt.DB, key []byte) {
@@ -723,7 +783,10 @@ type clientScopeShape struct {
 	wantDelta  int
 	wantUnits  int // -1: not asserted
 	wantScoped bool
-	damage     func(t *testing.T, db *bolt.DB, now time.Time)
+	// v1Only builds the client index as a completed v1-only migration (done
+	// marker, no v2 anchors) instead of running the v2 migration.
+	v1Only bool
+	damage func(t *testing.T, db *bolt.DB, now time.Time)
 }
 
 // TestClientScopedQuotaReadEqualsFullShapes pins the damaged shapes named by
@@ -778,6 +841,23 @@ func TestClientScopedQuotaReadEqualsFullShapes(t *testing.T) {
 			},
 		},
 		{
+			// The raw key hour is outside the read window and the event hour is
+			// inside: the exhaustive evidence scan compares the sibling's hour
+			// state against one observed row while the state holds two, falls
+			// back to the legacy scan and fails its raw/rollup parity. A scoped
+			// read must not return the two-row hour as a billable snapshot.
+			name: "cross-hour raw key outside window v1-only", clients: []string{"alice"}, v1Only: true, wantDelta: 1, wantUnits: -1,
+			damage: func(t *testing.T, db *bolt.DB, now time.Time) {
+				clientScopeMoveRowIntoWindow(t, db, now, false)
+			},
+		},
+		{
+			name: "cross-hour raw key outside window v2 proof", clients: []string{"alice"}, wantDelta: 1, wantUnits: -1,
+			damage: func(t *testing.T, db *bolt.DB, now time.Time) {
+				clientScopeMoveRowIntoWindow(t, db, now, true)
+			},
+		},
+		{
 			name: "numeric record id", clients: []string{"alice"}, wantDelta: 1, wantUnits: -1,
 			damage: func(t *testing.T, db *bolt.DB, now time.Time) {
 				e := clientScopeSyntheticEvent(now.Add(-3*time.Hour), "alice", "123")
@@ -829,7 +909,11 @@ func TestClientScopedQuotaReadEqualsFullShapes(t *testing.T) {
 	for _, shape := range shapes {
 		t.Run(shape.name, func(t *testing.T) {
 			store, db := buildClientScopeStore(t, now, map[string]int{"alice": 6, "bob": 6, "carol": 6})
-			migrateClientIndex(t, db)
+			if shape.v1Only {
+				markClientIndexV1Done(t, db)
+			} else {
+				migrateClientIndex(t, db)
+			}
 			if shape.damage != nil {
 				shape.damage(t, db, now)
 			}
