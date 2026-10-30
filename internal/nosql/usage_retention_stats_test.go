@@ -129,7 +129,7 @@ func TestUsageRetentionStatsEmptyDatabase(t *testing.T) {
 			t.Fatalf("empty bucket %s = %+v, want zero entries", name, bucket)
 		}
 	}
-	if stats.Events.Earliest != nil || stats.Events.Latest != nil || stats.Events.InvalidKeys != 0 {
+	if stats.Events.Earliest != nil || stats.Events.Latest != nil || stats.Events.InvalidBoundaryKeys != 0 {
 		t.Fatalf("empty event range = %+v, want no times and no invalid keys", stats.Events)
 	}
 	if stats.Metadata.LegacyUnknownBefore != nil || stats.Metadata.UntrustedThrough != nil ||
@@ -224,8 +224,8 @@ func TestUsageRetentionEventRangeReportsParseableBoundaries(t *testing.T) {
 	if stats.Events.Latest == nil || !stats.Events.Latest.Equal(latest) {
 		t.Fatalf("latest = %v, want %v", stats.Events.Latest, latest)
 	}
-	if stats.Events.InvalidKeys != 2 {
-		t.Fatalf("invalid_keys = %d, want 2", stats.Events.InvalidKeys)
+	if stats.Events.InvalidBoundaryKeys != 2 {
+		t.Fatalf("invalid_boundary_keys = %d, want 2", stats.Events.InvalidBoundaryKeys)
 	}
 
 	encoded, err := json.Marshal(stats)
@@ -253,8 +253,8 @@ func TestUsageRetentionEventRangeAllInvalidNeverGuesses(t *testing.T) {
 	if stats.Events.Earliest != nil || stats.Events.Latest != nil {
 		t.Fatalf("all-invalid range invented times: %+v", stats.Events)
 	}
-	if stats.Events.InvalidKeys != 3 {
-		t.Fatalf("invalid_keys = %d, want 3 (each key counted once)", stats.Events.InvalidKeys)
+	if stats.Events.InvalidBoundaryKeys != 3 {
+		t.Fatalf("invalid_boundary_keys = %d, want 3 (each key counted once)", stats.Events.InvalidBoundaryKeys)
 	}
 }
 
@@ -320,18 +320,18 @@ func TestUsageRetentionEventRangeSameSecondOrdersByTimestamp(t *testing.T) {
 			if stats.Events.Earliest.After(*stats.Events.Latest) {
 				t.Fatalf("earliest %v is after latest %v", stats.Events.Earliest, stats.Events.Latest)
 			}
-			if stats.Events.InvalidKeys != tc.wantInvalid {
-				t.Fatalf("invalid_keys = %d, want %d", stats.Events.InvalidKeys, tc.wantInvalid)
+			if stats.Events.InvalidBoundaryKeys != tc.wantInvalid {
+				t.Fatalf("invalid_boundary_keys = %d, want %d", stats.Events.InvalidBoundaryKeys, tc.wantInvalid)
 			}
 		})
 	}
 }
 
-// TestUsageRetentionEventRangeBoundarySecondInvalidKeys pins which invalid
+// TestUsageRetentionEventRangeBoundarySecondInvalidBoundaryKeys pins which invalid
 // keys are inspected while locating the endpoints. Invalid keys strictly
 // inside a middle second are not boundary keys and stay uncounted, while the
 // invalid prefix, suffix, and keys inside both boundary seconds count once.
-func TestUsageRetentionEventRangeBoundarySecondInvalidKeys(t *testing.T) {
+func TestUsageRetentionEventRangeBoundarySecondInvalidBoundaryKeys(t *testing.T) {
 	db := testDB(t)
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	putRetentionKeys(t, db, BucketUsageEvents,
@@ -366,8 +366,8 @@ func TestUsageRetentionEventRangeBoundarySecondInvalidKeys(t *testing.T) {
 	}
 	// Earliest-second invalid (1) + latest-second invalid (1) + suffix (1). The
 	// middle second's invalid key and the missing prefix are not counted.
-	if stats.Events.InvalidKeys != 3 {
-		t.Fatalf("invalid_keys = %d, want 3", stats.Events.InvalidKeys)
+	if stats.Events.InvalidBoundaryKeys != 3 {
+		t.Fatalf("invalid_boundary_keys = %d, want 3", stats.Events.InvalidBoundaryKeys)
 	}
 }
 
@@ -401,8 +401,8 @@ func TestUsageRetentionEventRangeLargeEventSet(t *testing.T) {
 	if stats.Events.Earliest.After(*stats.Events.Latest) {
 		t.Fatalf("earliest %v is after latest %v", stats.Events.Earliest, stats.Events.Latest)
 	}
-	if stats.Events.InvalidKeys != 0 {
-		t.Fatalf("invalid_keys = %d, want 0", stats.Events.InvalidKeys)
+	if stats.Events.InvalidBoundaryKeys != 0 {
+		t.Fatalf("invalid_boundary_keys = %d, want 0", stats.Events.InvalidBoundaryKeys)
 	}
 }
 

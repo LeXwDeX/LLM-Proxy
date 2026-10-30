@@ -153,7 +153,7 @@ func TestMetricsExposeUsageRetentionSnapshot(t *testing.T) {
 	if err := json.Unmarshal(retention["events"], &events); err != nil {
 		t.Fatalf("decode events: %v", err)
 	}
-	exactKeys(t, "usage_retention.events", events, "earliest", "latest", "invalid_keys")
+	exactKeys(t, "usage_retention.events", events, "earliest", "latest", "invalid_boundary_keys")
 	if string(events["earliest"]) == "null" || string(events["latest"]) == "null" {
 		t.Fatalf("event range did not report the seeded event: %s", raw)
 	}

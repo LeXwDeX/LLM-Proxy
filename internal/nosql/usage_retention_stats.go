@@ -47,13 +47,13 @@ type UsageRetentionBuckets struct {
 
 // UsageRetentionEvents reports the earliest and latest canonical usage_events
 // key stamp: one that round-trips through RFC3339Nano in UTC. A key carrying a
-// timezone offset does not round-trip and never defines an endpoint. InvalidKeys
+// timezone offset does not round-trip and never defines an endpoint. InvalidBoundaryKeys
 // counts boundary keys that were inspected while locating those times but were
 // not canonical key stamps; a key time is never guessed.
 type UsageRetentionEvents struct {
-	Earliest    *time.Time `json:"earliest"`
-	Latest      *time.Time `json:"latest"`
-	InvalidKeys uint64     `json:"invalid_keys"`
+	Earliest            *time.Time `json:"earliest"`
+	Latest              *time.Time `json:"latest"`
+	InvalidBoundaryKeys uint64     `json:"invalid_boundary_keys"`
 }
 
 // UsageRetentionMetadata reports the persisted receipt watermarks and marker
@@ -223,7 +223,7 @@ func usageRetentionEventRange(b *bolt.Bucket) *UsageRetentionEvents {
 			events.Earliest = &earliest
 			break
 		}
-		events.InvalidKeys++
+		events.InvalidBoundaryKeys++
 		k, _ = cursor.Next()
 	}
 	if events.Earliest == nil {
@@ -235,7 +235,7 @@ func usageRetentionEventRange(b *bolt.Bucket) *UsageRetentionEvents {
 	for k, _ = cursor.Next(); k != nil && eventKeySecond(k) == earliestSecond; k, _ = cursor.Next() {
 		at, ok := canonicalEventKeyStamp(k)
 		if !ok {
-			events.InvalidKeys++
+			events.InvalidBoundaryKeys++
 			continue
 		}
 		if at.Before(earliest) {
@@ -262,7 +262,7 @@ func usageRetentionEventRange(b *bolt.Bucket) *UsageRetentionEvents {
 			break
 		}
 		if eventKeySecond(k) != earliestSecond {
-			events.InvalidKeys++
+			events.InvalidBoundaryKeys++
 		}
 		k, _ = cursor.Prev()
 	}
@@ -274,7 +274,7 @@ func usageRetentionEventRange(b *bolt.Bucket) *UsageRetentionEvents {
 	for k, _ = cursor.Prev(); k != nil && eventKeySecond(k) == latestSecond; k, _ = cursor.Prev() {
 		at, ok := canonicalEventKeyStamp(k)
 		if !ok {
-			events.InvalidKeys++
+			events.InvalidBoundaryKeys++
 			continue
 		}
 		if at.After(latest) {
