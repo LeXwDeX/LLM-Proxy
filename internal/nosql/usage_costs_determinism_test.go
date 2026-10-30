@@ -28,10 +28,13 @@ func TestValidateCostRawHourEvidenceDeterministicFirstError(t *testing.T) {
 	}
 	// Hour A carries an invalid proof and hour B a disagreeing hour state, so
 	// the walk reaches a fatal error on either key; only the sorted order makes
-	// the choice deterministic.
+	// the choice deterministic. keyB is inserted first so a walk that followed
+	// the map's insertion order instead of sorting would report keyB's error and
+	// fail; Go's walk starts at a random slot, so a two-entry pair usually comes
+	// out in insertion order.
 	evidence := map[string]*costRawHourEvidence{
-		keyA: {client: client, hour: hourA, relevant: true, proofInvalid: true},
 		keyB: {client: client, hour: hourB, relevant: true, count: 2},
+		keyA: {client: client, hour: hourA, relevant: true, proofInvalid: true},
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
 		// A completed index keeps the walk on the state comparison instead of
