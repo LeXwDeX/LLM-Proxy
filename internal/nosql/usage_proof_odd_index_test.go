@@ -1,7 +1,9 @@
 package nosql
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -1337,5 +1339,396 @@ func TestProofOddIndexWritersAreEnumerated(t *testing.T) {
 		if regexp.MustCompile(`\.(Put|Delete)\(\s*proofOdd(PointerKey|LocationKey)\(`).Match(src) {
 			t.Errorf("%s writes proof odd index entries outside usage_proof_odd_index.go", f)
 		}
+	}
+}
+
+// A completed index whose stored revision lags the live one (an older binary
+// or an out-of-band writer advanced the raw revision without maintaining the
+// classification) must not be re-stamped as current by the next supported
+// write: that write only maintained its own row, so adopting the live revision
+// would hide everything the out-of-band writer did.
+func TestProofOddIndexCompletedWriteDoesNotLaunderOutOfBandBump(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
+	if err := store.RecordBatch([]usage.Event{scaleEvent(820000, base.Add(3*time.Hour+2*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not complete")
+	}
+	// An older binary or an out-of-band editor inserts an odd row the index
+	// never sees and advances only the raw revision.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		e := fixedPlainEvent()
+		e.RecordID = ""
+		e.ClientName = "out-of-band"
+		e.Timestamp = base.Add(2*time.Hour + 4*time.Minute)
+		data, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		if err := tx.Bucket([]byte(BucketUsageEvents)).Put([]byte(usageKey(e.Timestamp, "legacy-completed")), data); err != nil {
+			return err
+		}
+		var revision [8]byte
+		binary.BigEndian.PutUint64(revision[:], rawRevision(tx)+1)
+		return proofOddMeta(tx).Put([]byte(usageRawRevisionKey), revision[:])
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The next supported write maintains its own row and advances the revision
+	// again; it must not adopt the revision it never observed.
+	if err := store.RecordBatch([]usage.Event{scaleEvent(821000, base.Add(5*time.Hour+6*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	if proofOddReadyNow(t, db) {
+		t.Fatal("a supported write laundered an out-of-band revision bump into a current index")
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not rebuild after the out-of-band bump")
+	}
+	requireProofOddIndexMatches(t, db)
+}
+
+// A raw phase that resumes across starts must not stamp the live revision when
+// it finishes: an out-of-band writer that advanced the revision while the scan
+// was paused can insert an odd row behind the persisted cursor, which the
+// resumed scan never visits. Stamping the live revision would mark the index
+// ready over data it never observed.
+func TestProofOddIndexRawPhaseOutOfBandBumpRebuilds(t *testing.T) {
+	db := testDB(t)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-6 * time.Hour)
+	if err := db.Update(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		for i := 0; i < 3; i++ {
+			e := fixedPlainEvent()
+			e.RecordID = ""
+			e.ClientName = fmt.Sprintf("legacy-%d", i)
+			e.Timestamp = base.Add(time.Duration(10*(i+1)) * time.Minute)
+			data, err := json.Marshal(e)
+			if err != nil {
+				return err
+			}
+			if err := raw.Put([]byte(usageKey(e.Timestamp, fmt.Sprintf("legacy-raw-%d", i))), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	// Stop after the first raw batch commits, leaving a persisted cursor.
+	ctx := &proofOddInterruptContext{remaining: 2}
+	if err := MigrateUsageProofOddIndex(ctx, db, 1); err == nil {
+		t.Fatal("interrupted migration returned nil")
+	}
+	// The out-of-band row sorts before the cursor, so the resumed scan never
+	// reaches it.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		e := fixedPlainEvent()
+		e.RecordID = ""
+		e.ClientName = "out-of-band"
+		e.Timestamp = base.Add(time.Minute)
+		data, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		if err := tx.Bucket([]byte(BucketUsageEvents)).Put([]byte(usageKey(e.Timestamp, "legacy-before-cursor")), data); err != nil {
+			return err
+		}
+		var revision [8]byte
+		binary.BigEndian.PutUint64(revision[:], rawRevision(tx)+1)
+		return proofOddMeta(tx).Put([]byte(usageRawRevisionKey), revision[:])
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Resuming must notice the revision it never observed and rebuild.
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not finish")
+	}
+	requireProofOddIndexMatches(t, db)
+}
+
+// An index bucket that keeps its markers and revision but loses one location
+// entry must not read as "this range has no odd rows": the scoped proof would
+// skip a row the exhaustive walk acts on. The loaders reconcile the entries
+// they visited with the per-kind counts the writers maintain, and the startup
+// migration verifies the same counts against the bucket.
+func TestProofOddIndexMissingLocationEntryFallsBack(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
+	if err := store.RecordBatch([]usage.Event{scaleEvent(830000, base.Add(3*time.Hour+2*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	// Produce through the fresh-attestation path, as the other scope tests do.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketMeta)).Delete([]byte(usageAccountingProofTrackedKey))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The proof names one hour; the odd row below sits in that hour so the
+	// exhaustive walk acts on it.
+	candidate := []usage.Event{scaleEvent(831000, base.Add(2*time.Hour+10*time.Minute))}
+	// A row whose key stamp cannot be parsed is classified global: it is
+	// relevant at every hour, and its empty client matches every proof.
+	odd := fixedPlainEvent()
+	odd.RecordID = ""
+	odd.ClientName = ""
+	odd.Timestamp = candidate[0].Timestamp
+	oddData, err := json.Marshal(odd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalKey := []byte("zzz_legacy-global")
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketUsageEvents)).Put(globalKey, oddData)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not complete")
+	}
+	// Drop the location entry, keep the pointer: the bucket no longer lists
+	// the row, but every marker still says the index is complete.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return proofOddBucket(tx).Delete(proofOddLocationKey(proofOddRawGlobal, "", globalKey))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exhaustive := proofFreshVerdict(t, db, candidate, false)
+	scoped := proofFreshVerdict(t, db, candidate, true)
+	if exhaustive {
+		t.Fatal("the reference proof accepted a scope the global odd row reaches")
+	}
+	if scoped != exhaustive {
+		t.Fatalf("scoped verdict %v, exhaustive verdict %v after a missing location entry", scoped, exhaustive)
+	}
+	// A later migration must rebuild the classification instead of trusting
+	// the markers, after which the index matches a full classification again.
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not rebuild after a missing location entry")
+	}
+	requireProofOddIndexMatches(t, db)
+}
+
+// A location entry whose recorded digest no longer matches the stored bytes is
+// invisible to the markers and to the per-kind counts: nothing advanced them,
+// yet the scoped loaders must refuse the entry and fall back. The startup
+// migration has to notice the same damage and rebuild, otherwise a single
+// corrupted digest puts every scoped proof on the full scan until an operator
+// resets the index by hand.
+func TestProofOddIndexDigestDamageRebuilds(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
+	if err := store.RecordBatch([]usage.Event{scaleEvent(840000, base.Add(3*time.Hour+2*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	// A row whose key stamp cannot be parsed is classified global and stays
+	// observable from every hour.
+	odd := fixedPlainEvent()
+	odd.RecordID = ""
+	odd.ClientName = ""
+	odd.Timestamp = base.Add(10 * time.Minute)
+	oddKey := []byte("zzz_legacy-digest")
+	oddData, err := json.Marshal(odd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketUsageEvents)).Put(oddKey, oddData)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	requireProofOddIndexMatches(t, db)
+	// Corrupt the recorded digest while leaving the pointer and the counts in
+	// place. Only a digest check against the bucket can see this.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return proofOddBucket(tx).Put(proofOddLocationKey(proofOddRawGlobal, "", oddKey), bytes.Repeat([]byte{0xAB}, sha256.Size))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The scoped loaders already refuse the damaged entry and fall back.
+	if err := db.View(func(tx *bolt.Tx) error {
+		if _, ok := proofOddLoadGlobal(tx, proofOddRawGlobal, tx.Bucket([]byte(BucketUsageEvents))); ok {
+			t.Fatal("the scoped loader accepted an entry with a damaged digest")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The startup migration must discard and rebuild instead of trusting the
+	// markers and leaving proofs on a permanent fallback.
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not rebuild after digest damage")
+	}
+	if err := db.View(func(tx *bolt.Tx) error {
+		got := tx.Bucket([]byte(bucketUsageProofOdd)).Get(proofOddLocationKey(proofOddRawGlobal, "", oddKey))
+		if want := proofOddDigest(oddKey, oddData); !bytes.Equal(got, want) {
+			return fmt.Errorf("digest not repaired: got %x want %x", got, want)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requireProofOddIndexMatches(t, db)
+}
+
+// Writing an already-present receipt again is how a supported writer repairs
+// an index entry lost to an out-of-band restore: the receipt bucket keeps the
+// source, so the second write re-notes the classification without adding a
+// duplicate entry or disturbing the counts.
+func TestProofOddIndexReceiptRewriteRepairsEntry(t *testing.T) {
+	db := testDB(t)
+	key := []byte("legacy-receipt_1")
+	digest := "0f1e2d3c"
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return writeUsageReceipt(tx, key, digest)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	requireProofOddIndexMatches(t, db)
+	// Simulate a restore of the receipt source without the derived index: the
+	// entry, its pointer and its count are all gone.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		b := proofOddBucket(tx)
+		if err := b.Delete(proofOddLocationKey(proofOddReceiptGlobal, "", key)); err != nil {
+			return err
+		}
+		if err := b.Delete(proofOddPointerKey(proofOddReceiptPointer, key)); err != nil {
+			return err
+		}
+		return b.Delete(proofOddCountKey(proofOddReceiptGlobal, ""))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The idempotent rewrite restores the entry and leaves the counts equal to
+	// the bucket, so the scoped loaders accept the index again.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return writeUsageReceipt(tx, key, digest)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.View(func(tx *bolt.Tx) error {
+		index := proofOddBucket(tx)
+		pointer := index.Get(proofOddPointerKey(proofOddReceiptPointer, key))
+		if !bytes.Equal(pointer, proofOddPointerValue(proofOddReceiptGlobal, "")) {
+			return fmt.Errorf("pointer after repair = %x", pointer)
+		}
+		receipt := tx.Bucket([]byte(BucketUsageReceipts)).Get(key)
+		if got, want := index.Get(proofOddLocationKey(proofOddReceiptGlobal, "", key)), proofOddDigest(key, receipt); !bytes.Equal(got, want) {
+			return fmt.Errorf("location digest after repair = %x, want %x", got, want)
+		}
+		if _, ok := proofOddLoadGlobal(tx, proofOddReceiptGlobal, tx.Bucket([]byte(BucketUsageReceipts))); !ok {
+			return fmt.Errorf("the repaired index did not satisfy the receipt loader")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Rewriting a receipt with a different payload stays an error; the repair
+	// path cannot launder a conflicting source.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return writeUsageReceipt(tx, key, "different")
+	}); err == nil {
+		t.Fatal("a conflicting receipt digest was accepted")
+	}
+	requireProofOddIndexMatches(t, db)
+}
+
+// Warm-up on a ready index visits only the global odd rows: a canonical
+// history of any size and the hour-located odd rows (reached when their hour is
+// proved) stay unread. The exhaustive fallback would visit every row, so the
+// visited count distinguishes the fast path from the fallback.
+func TestWarmUsageProofScanCacheVisitsOnlyGlobalOddRows(t *testing.T) {
+	const history = 120
+	db := testDB(t)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-12 * time.Hour)
+	canonicalHistory(t, db, history, base)
+	// One global odd row (unparseable stamp) and one hour-located odd row
+	// (parseable stamp, no owner).
+	global := fixedPlainEvent()
+	global.RecordID = ""
+	global.ClientName = "legacy-global"
+	global.Timestamp = base.Add(30 * time.Minute)
+	globalData, err := json.Marshal(global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hourly := fixedPlainEvent()
+	hourly.RecordID = ""
+	hourly.ClientName = "legacy-hourly"
+	hourly.Timestamp = base.Add(90 * time.Minute)
+	hourlyData, err := json.Marshal(hourly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket([]byte(BucketMeta)).Delete([]byte(usageAccountingProofTrackedKey)); err != nil {
+			return err
+		}
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		if err := raw.Put([]byte("zzz_legacy-global-warm"), globalData); err != nil {
+			return err
+		}
+		return raw.Put([]byte(usageKey(hourly.Timestamp, "legacy-hourly-warm")), hourlyData)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	requireProofOddIndexMatches(t, db)
+	clearProofScanCacheForTest()
+	visited, err := WarmUsageProofScanCache(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visited != 1 {
+		t.Fatalf("warm-up visited %d rows, want only the single global odd row", visited)
 	}
 }
