@@ -23,17 +23,21 @@ const (
 // read transaction and takes the fast path. Production code never sets it.
 var integrityForceFast atomic.Bool
 
-// Maintenance epoch. Any write that may create or change a classified object,
-// other than the realtime row writer for non-anomalous rows, runs between
+// integrityClassifyStep, when set by tests, runs at every cancellation check
+// of a classification build.
+var integrityClassifyStep func()
+
+// Maintenance epoch. Multi-transaction maintenance writes run between
 // integrityMutationBegin and its end function: both bump the epoch and the
-// in-flight counter covers the window in which its commit may be visible
-// before the second bump. A classification is only built while nothing is in
-// flight and is only used while the epoch is unchanged and the reader's
-// snapshot is not older than the classification's.
+// in-flight counter covers the window in which a commit may be visible before
+// the second bump. Single-transaction changes (ReindexUsageEvent, anomalous
+// realtime rows, non-canonical attestations) bump it inside the transaction
+// with integrityMarkTx. A classification is only built while nothing is in
+// flight, from a snapshot taken under the bbolt writer lock, and is only used
+// while the epoch is unchanged and the reader's snapshot is not older.
 var (
 	integrityEpoch    atomic.Uint64
 	integrityInflight atomic.Int64
-	integrityTxMarks  sync.Map // *bolt.Tx -> struct{}: realtime writes that produced an anomaly
 )
 
 var integrityState = struct {
@@ -61,27 +65,13 @@ func integrityMutationBegin() func() {
 
 // integrityMarkTx records, inside a write transaction, that the transaction
 // creates or changes a classified object outside the realtime contract. The
-// mark ends when the transaction commits (OnCommit) or when the owner of the
-// transaction calls integrityFinishTx after Update/Batch returned. A
-// transaction rolled back by an owner that never calls integrityFinishTx keeps
-// the fast path disabled, which is the safe direction.
-func integrityMarkTx(tx *bolt.Tx) {
-	if _, loaded := integrityTxMarks.LoadOrStore(tx, struct{}{}); loaded {
-		return
-	}
-	integrityInflight.Add(1)
+// epoch bump happens before the commit, so a reader that can see the change
+// sees the new epoch. No end mark is needed: a classification only takes its
+// snapshot while it holds the bbolt writer lock (see RunClassificationOnce),
+// so no marked transaction is in progress at snapshot time. Whether the
+// caller commits or rolls back, nothing is left in flight.
+func integrityMarkTx(_ *bolt.Tx) {
 	integrityEpoch.Add(1)
-	tx.OnCommit(func() { integrityFinishTx(tx) })
-}
-
-func integrityFinishTx(tx *bolt.Tx) {
-	if tx == nil {
-		return
-	}
-	if _, loaded := integrityTxMarks.LoadAndDelete(tx); loaded {
-		integrityEpoch.Add(1)
-		integrityInflight.Add(-1)
-	}
 }
 
 func integrityNoteFallback(reason string) {
@@ -96,7 +86,7 @@ func integrityNoteFallback(reason string) {
 // integrityClassFor returns the classification a read in tx may use, or nil.
 func integrityClassFor(tx *bolt.Tx) *integrityClassification {
 	if integrityForceFast.Load() {
-		class, _ := classifyUsageIntegrity(tx)
+		class, _ := classifyUsageIntegrity(context.Background(), tx)
 		return class
 	}
 	db := tx.DB()
@@ -121,26 +111,37 @@ func integrityClassFor(tx *bolt.Tx) *integrityClassification {
 	return class
 }
 
-// RunClassificationOnce builds the anomalous-object classification
-// for db in one read transaction and installs it for later reads. A write in
-// flight or an epoch change during the build discards the result.
+// RunClassificationOnce builds the anomalous-object classification for db in
+// one read transaction and installs it for later reads. The snapshot is taken
+// while holding the bbolt writer lock, so no write transaction (and hence no
+// transaction marked by integrityMarkTx) is in progress at that point. A
+// maintenance write in flight, an epoch change during the build, or ctx ending
+// discards the result; on cancellation it returns ctx.Err().
 func RunClassificationOnce(ctx context.Context, db *bolt.DB) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	writer, err := db.Begin(true)
+	if err != nil {
+		return err
+	}
+	// Read the epoch before checking for maintenance writes in flight: their
+	// begin increments the in-flight count before the epoch.
+	epoch := integrityEpoch.Load()
 	if integrityInflight.Load() != 0 {
+		_ = writer.Rollback()
 		integrityDropClass(db, integrityFallbackIncomplete)
 		return nil
 	}
-	epoch := integrityEpoch.Load()
-	var class *integrityClassification
-	reason := ""
-	started := time.Now()
-	err := db.View(func(tx *bolt.Tx) error {
-		class, reason = classifyUsageIntegrity(tx)
-		return nil
-	})
+	tx, err := db.Begin(false)
+	_ = writer.Rollback()
 	if err != nil {
+		return err
+	}
+	started := time.Now()
+	class, reason := classifyUsageIntegrity(ctx, tx)
+	_ = tx.Rollback()
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if class != nil && (integrityEpoch.Load() != epoch || integrityInflight.Load() != 0) {

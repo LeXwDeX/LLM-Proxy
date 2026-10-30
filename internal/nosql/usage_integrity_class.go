@@ -245,12 +245,29 @@ func sameIndexProgress(a, b *indexProgress) bool {
 	return a.Version == b.Version && a.Generation == b.Generation && a.Phase == b.Phase && bytes.Equal(a.Through, b.Through) && bytes.Equal(a.Upper, b.Upper) && a.Binding == b.Binding
 }
 
+// integrityClassifyCheckEvery is how many objects a classification visits
+// between two cancellation checks.
+const integrityClassifyCheckEvery = 1024
+
 // classifyUsageIntegrity builds A from one read transaction. It never calls
-// read hooks, never consults the caller's context and never touches the scan
-// counters, so tests can build it in front of every read. It returns nil and a
-// fallback reason when the fast path cannot be used for this snapshot.
-func classifyUsageIntegrity(tx *bolt.Tx) (*integrityClassification, string) {
+// read hooks and never touches the scan counters, so tests can build it in
+// front of every read (with context.Background(), never the reader's context).
+// It checks ctx periodically; a canceled build returns nil. It returns nil and
+// a fallback reason when the fast path cannot be used for this snapshot.
+func classifyUsageIntegrity(ctx context.Context, tx *bolt.Tx) (*integrityClassification, string) {
 	started := time.Now()
+	visited := 0
+	canceled := false
+	step := func() bool {
+		if visited++; visited%integrityClassifyCheckEvery != 1 {
+			return !canceled
+		}
+		if integrityClassifyStep != nil {
+			integrityClassifyStep()
+		}
+		canceled = canceled || ctx.Err() != nil
+		return !canceled
+	}
 	class := &integrityClassification{db: tx.DB(), txid: tx.ID(), eventSet: make(map[string]bool)}
 	if class.db != nil {
 		class.path = class.db.Path()
@@ -271,7 +288,7 @@ func classifyUsageIntegrity(tx *bolt.Tx) (*integrityClassification, string) {
 			return
 		}
 		c := b.Cursor()
-		for k, v := c.First(); k != nil && !overflow; k, v = c.Next() {
+		for k, v := c.First(); k != nil && !overflow && step(); k, v = c.Next() {
 			if v == nil || !exempt(k, v) {
 				addEvent(k)
 				overflow = class.anomalous > integrityAnomalyLimit
@@ -296,7 +313,7 @@ func classifyUsageIntegrity(tx *bolt.Tx) (*integrityClassification, string) {
 	}
 	if quota := tx.Bucket([]byte(BucketQuotaUsageAggHourly)); quota != nil {
 		c := quota.Cursor()
-		for k, v := c.First(); k != nil && !overflow; k, v = c.Next() {
+		for k, v := c.First(); k != nil && !overflow && step(); k, v = c.Next() {
 			if _, ok := quotaKeyHour(k); v == nil || !ok {
 				class.quota = append(class.quota, bytes.Clone(k))
 				class.anomalous++
@@ -307,7 +324,7 @@ func classifyUsageIntegrity(tx *bolt.Tx) (*integrityClassification, string) {
 	if proofs, err := rollupProofSource(tx); err == nil && proofs != nil {
 		prefix := append([]byte(BucketQuotaUsageAggHourly), 0)
 		c := proofs.Cursor()
-		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) && !overflow; k, v = c.Next() {
+		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) && !overflow && step(); k, v = c.Next() {
 			if _, ok := quotaKeyHour(k[len(prefix):]); v == nil || !ok {
 				class.proofs = append(class.proofs, bytes.Clone(k))
 				class.anomalous++
@@ -320,7 +337,7 @@ func classifyUsageIntegrity(tx *bolt.Tx) (*integrityClassification, string) {
 		if index := tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil && p != nil {
 			anomalous := func(key []byte) bool { return class.eventSet[string(key)] }
 			c := index.Cursor()
-			for k, v := c.First(); k != nil && !overflow; k, v = c.Next() {
+			for k, v := c.First(); k != nil && !overflow && step(); k, v = c.Next() {
 				if !indexEntryWindowExempt(tx, p, k, v, anomalous) {
 					class.index = append(class.index, bytes.Clone(k))
 					class.anomalous++
@@ -328,6 +345,9 @@ func classifyUsageIntegrity(tx *bolt.Tx) (*integrityClassification, string) {
 				}
 			}
 		}
+	}
+	if canceled {
+		return nil, integrityFallbackIncomplete
 	}
 	if overflow {
 		return nil, integrityFallbackOverflow

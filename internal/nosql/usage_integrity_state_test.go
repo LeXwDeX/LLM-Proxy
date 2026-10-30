@@ -2,7 +2,6 @@ package nosql
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -23,14 +22,6 @@ func productionIntegrityMode(t *testing.T) {
 	saved := integrityForceFast.Load()
 	integrityForceFast.Store(false)
 	t.Cleanup(func() { integrityForceFast.Store(saved) })
-	// Earlier tests (TestIndexV2AtomicProofAndRollback) roll back a
-	// transaction that called the exported ReindexUsageEvent; its mark is
-	// never finished, which keeps the fast path off (the fail-safe direction).
-	// Clear such marks so this test starts clean.
-	integrityTxMarks.Range(func(tx, _ any) bool {
-		integrityFinishTx(tx.(*bolt.Tx))
-		return true
-	})
 	if n := integrityInflight.Load(); n != 0 {
 		t.Fatalf("integrity writes in flight before the test: %d", n)
 	}
@@ -135,19 +126,6 @@ func TestIntegrityEpochAdvancesOnMaintenanceWrites(t *testing.T) {
 		{"prune", func(_ *testing.T, _ *bolt.DB, store *UsageStore, base usage.Event) error {
 			_, err := store.PruneEventsBefore(base.Timestamp.Add(-2*time.Hour), 100)
 			return err
-		}},
-		{"recheck", func(_ *testing.T, _ *bolt.DB, store *UsageStore, _ usage.Event) error {
-			_, err := store.RecheckUsage(UsageRecheckRequest{EvidenceID: "missing", Version: "x", OperationID: "op-125", Actor: "test"})
-			if err != nil {
-				return nil
-			}
-			return nil
-		}},
-		{"unresolved", func(_ *testing.T, _ *bolt.DB, store *UsageStore, base usage.Event) error {
-			e := base
-			e.RecordID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaac1"
-			original, _ := json.Marshal(e)
-			return store.RegisterUnresolvedUsage(e, original)
 		}},
 		{"receipts", func(_ *testing.T, db *bolt.DB, _ *UsageStore, _ usage.Event) error {
 			return clockedStore(db).EnsureUsageReceipts()

@@ -594,7 +594,7 @@ func TestIntegrityFastEqualsFullFuzz(t *testing.T) {
 		rng := rand.New(rand.NewSource(int64(seed)))
 		f := buildIntegrityFuzzDB(t, rng)
 		_ = f.db.View(func(tx *bolt.Tx) error {
-			if class, _ := classifyUsageIntegrity(tx); class != nil {
+			if class, _ := classifyUsageIntegrity(context.Background(), tx); class != nil {
 				usedFast++
 			}
 			return nil
@@ -703,14 +703,14 @@ func sameIntegrityAnomalies(a, b *integrityClassification) bool {
 // bumps the epoch instead).
 func TestIntegrityFullIgnoresOutsideNonAnomalous(t *testing.T) {
 	iterations := integrityFuzzIterations(40)
-	checked := 0
+	checked, reclassified, notSkippable := 0, 0, 0
 	for seed := 0; seed < iterations; seed++ {
 		rng := rand.New(rand.NewSource(int64(1_000_000 + seed)))
 		for i := 0; i < 4; i++ {
 			f := buildIntegrityFuzzDB(t, rand.New(rand.NewSource(int64(seed))))
 			q := randomIntegrityQuery(rng)
 			var before *integrityClassification
-			_ = f.db.View(func(tx *bolt.Tx) error { before, _ = classifyUsageIntegrity(tx); return nil })
+			_ = f.db.View(func(tx *bolt.Tx) error { before, _ = classifyUsageIntegrity(context.Background(), tx); return nil })
 			if before == nil {
 				continue
 			}
@@ -718,9 +718,21 @@ func TestIntegrityFullIgnoresOutsideNonAnomalous(t *testing.T) {
 			if integrityMutateOutside(t, rng, f.db, before, q.from, q.to) == 0 {
 				continue
 			}
+			f.note("mutated objects outside %s", q)
 			var after *integrityClassification
-			_ = f.db.View(func(tx *bolt.Tx) error { after, _ = classifyUsageIntegrity(tx); return nil })
+			_ = f.db.View(func(tx *bolt.Tx) error { after, _ = classifyUsageIntegrity(context.Background(), tx); return nil })
 			if !sameIntegrityAnomalies(before, after) {
+				// The mutation created or removed anomalies, as a maintenance
+				// write would (which bumps the epoch). Verify the reclassified
+				// database instead: Fast under the new A must equal Full.
+				if after == nil {
+					notSkippable++
+					continue
+				}
+				reclassified++
+				if !compareIntegrityModes(t, f, q) {
+					t.Fatalf("seed %d: reclassified Fast != Full", seed)
+				}
 				continue
 			}
 			checked++
@@ -736,8 +748,8 @@ func TestIntegrityFullIgnoresOutsideNonAnomalous(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("invariance cases checked: %d", checked)
-	if checked < iterations {
-		t.Fatalf("only %d invariance cases kept A unchanged; the check is not exercised", checked)
+	t.Logf("invariance cases with A unchanged: %d; A changed and reclassified: %d; reclassification unavailable: %d", checked, reclassified, notSkippable)
+	if checked < iterations || reclassified < iterations {
+		t.Fatalf("coverage too low: unchanged=%d reclassified=%d (want >= %d each)", checked, reclassified, iterations)
 	}
 }
