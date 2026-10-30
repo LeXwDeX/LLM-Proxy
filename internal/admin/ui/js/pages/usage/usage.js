@@ -21,6 +21,7 @@ AdminApp.register("usage", function (app) {
   var usageModelGroupValues = app.bind("usageFilters", "usageModelGroupValues");
   var getTimeRange = app.bind("usageRange", "getTimeRange");
   var usageGroupBy = app.bind("usageRange", "usageGroupBy");
+  var usageQueryGroupBy = app.bind("usageRange", "usageQueryGroupBy");
   var addUsageTotals = app.bind("usageTables", "addUsageTotals");
   var compareUsageModelGroupItems = app.bind("usageTables", "compareUsageModelGroupItems");
   var renderAggregateTable = app.bind("usageTables", "renderAggregateTable");
@@ -129,9 +130,12 @@ AdminApp.register("usage", function (app) {
       if (clientFilter) qs.set("client_name", clientFilter);
       appendUsageModelGroups(qs, modelGroupFilter);
       var groupBy = usageGroupBy(rangeName, range);
+      // Day display is re-aggregated from hourly buckets into browser-local days;
+      // asking the API for UTC days would add a partial bar outside UTC.
+      var queryGroupBy = usageQueryGroupBy();
       var mainAgg = await api(
         "/admin/data/usage/aggregate?group_by=" +
-          groupBy +
+          queryGroupBy +
           "&" +
           qs.toString(),
         { timeoutMs: 60000 }, // wide ranges scan many usage events
@@ -140,9 +144,11 @@ AdminApp.register("usage", function (app) {
       if (!validUsageAggregate(mainAgg)) throw new Error("统计响应格式无效");
       var snapshot = {
         range: range,
+        rangeName: rangeName,
         client: clientFilter,
         groups: modelGroupFilter,
         groupBy: groupBy,
+        queryGroupBy: queryGroupBy,
         data: mainAgg,
       };
       rendering = true;
@@ -220,7 +226,11 @@ AdminApp.register("usage", function (app) {
     var responseGroupBy =
       mainAgg.group_by === "hour" || mainAgg.group_by === "day"
         ? mainAgg.group_by
-        : snapshot.groupBy;
+        : snapshot.queryGroupBy || snapshot.groupBy;
+    var displayGroupBy =
+      snapshot.groupBy === "hour" || snapshot.groupBy === "day"
+        ? snapshot.groupBy
+        : responseGroupBy;
     var totals = mainAgg.totals && typeof mainAgg.totals === "object"
       ? mainAgg.totals
       : {};
@@ -258,9 +268,10 @@ AdminApp.register("usage", function (app) {
     state.usageModelGroupRows = mainAgg.by_target_model || [];
     renderUsageModelGroups(state.usageModelGroupRows, S.usageDenominator);
     S.usageChartBuckets = mainAgg.buckets || [];
-    S.usageChartGroupBy = responseGroupBy;
-    setUsageChartNote(responseGroupBy);
-    renderDailyChart(S.usageChartBuckets, responseGroupBy, snapshot.range);
+    S.usageChartGroupBy = displayGroupBy;
+    S.usageChartSourceGroupBy = responseGroupBy;
+    setUsageChartNote(displayGroupBy, snapshot.rangeName, snapshot.range);
+    renderDailyChart(S.usageChartBuckets, displayGroupBy, snapshot.range, responseGroupBy);
   }
 
   var usageTabItems = [

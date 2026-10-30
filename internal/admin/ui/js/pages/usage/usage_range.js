@@ -15,6 +15,8 @@ AdminApp.register("usageRange", function (app) {
     return { from: window.from.toISOString(), to: window.to.toISOString() };
   }
 
+  // usageGroupBy is the display granularity: single-day ranges stay hourly,
+  // multi-day ranges are shown as browser-local days.
   function usageGroupBy(rangeName, range) {
     if (rangeName === "7d" || rangeName === "30d") return "day";
     if (rangeName === "custom") {
@@ -24,5 +26,11 @@ AdminApp.register("usageRange", function (app) {
     }
     return "hour";
   }
-  return {getTimeRange: getTimeRange, usageGroupBy: usageGroupBy};
+  // The aggregate API buckets day granularity in UTC. The chart therefore always
+  // fetches hourly buckets and re-aggregates them into browser-local days, so a
+  // 7-day preset cannot grow an extra UTC-day bar in non-UTC timezones.
+  function usageQueryGroupBy() {
+    return "hour";
+  }
+  return {getTimeRange: getTimeRange, usageGroupBy: usageGroupBy, usageQueryGroupBy: usageQueryGroupBy};
 });

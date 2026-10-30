@@ -88,7 +88,8 @@ func (h *Handler) handleListTrace(w http.ResponseWriter, r *http.Request) {
 	stats := h.proxyService.TraceStats()
 
 	// limit/offset 回显服务端实际采用的值（非法或超限的 limit 回落到默认值），
-	// 前端据此翻页。view=summary 返回不含 body/header 的列表投影；默认保持完整记录，
+	// 前端据此翻页；limit_max 让前端能预先限制输入并解释服务端的实际取值。
+	// view=summary 返回不含 body/header 的列表投影；默认保持完整记录，
 	// 但非管理员默认使用 summary，避免完整记录随列表下发。显式 view=full 仍允许，
 	// 但非管理员的客户端密钥字段使用查看者安全形式：当前 "****"+后 4 位保留，
 	// 遗留、原始与未知形态完全隐藏（旧遮罩无法证明原密钥长度）。
@@ -98,11 +99,12 @@ func (h *Handler) handleListTrace(w http.ResponseWriter, r *http.Request) {
 		summary = true
 	}
 	response := map[string]any{
-		"enabled": h.proxyService.TraceEnabled(),
-		"count":   len(records),
-		"limit":   limit,
-		"offset":  offset,
-		"stats":   stats,
+		"enabled":   h.proxyService.TraceEnabled(),
+		"count":     len(records),
+		"limit":     limit,
+		"limit_max": traceMaxLimit,
+		"offset":    offset,
+		"stats":     stats,
 	}
 	if summary {
 		response["view"] = "summary"
