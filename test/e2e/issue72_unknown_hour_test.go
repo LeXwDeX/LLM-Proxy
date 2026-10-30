@@ -127,30 +127,32 @@ func (e *issue72UnknownEnv) errorLogText() string {
 	return string(raw)
 }
 
-// waitErrorLogContains waits until every needle appears in the error log after
-// offset and returns the new log length. The admin handler logs the error
-// before writing the response, so this is direct attribution evidence for a
-// 500 rather than a heuristic. Offsets keep evidence from an earlier restart
-// from satisfying a later assertion.
+// waitErrorLogContains waits until one single log line after offset contains
+// every needle (not one needle per line) and returns the new log length. The
+// admin handler logs the error before writing the response, so this is direct
+// attribution evidence for a 500 rather than a heuristic. Offsets keep evidence
+// from an earlier restart from satisfying a later assertion.
 func (e *issue72UnknownEnv) waitErrorLogContains(offset int, needles ...string) int {
 	e.t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		text := e.errorLogText()
 		if len(text) >= offset {
-			tail := text[offset:]
-			missing := false
-			for _, needle := range needles {
-				if !strings.Contains(tail, needle) {
-					missing = true
+			for _, line := range strings.Split(text[offset:], "\n") {
+				matched := true
+				for _, needle := range needles {
+					if !strings.Contains(line, needle) {
+						matched = false
+						break
+					}
 				}
-			}
-			if !missing {
-				return len(text)
+				if matched {
+					return len(text)
+				}
 			}
 		}
 		if time.Now().After(deadline) {
-			e.t.Fatalf("error log does not contain %q; tail:\n%s", needles, tailOf(text, offset))
+			e.t.Fatalf("error log has no line containing %q; tail:\n%s", needles, tailOf(text, offset))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -347,7 +349,9 @@ func (e *issue72UnknownEnv) quotaStatus(clientName string) map[string]any {
 
 func (e *issue72UnknownEnv) waitQuotaHealthy(clientName string, used float64) {
 	e.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// Poll past calibrationRequestTimeout (15s) so a slow machine's calibration
+	// cannot fail a run that would become healthy.
+	deadline := time.Now().Add(45 * time.Second)
 	for {
 		status := e.quotaStatus(clientName)
 		if dig(status, "calibration_error") == nil && dig(status, "groups/models/quotas/daily/used") == used {
@@ -569,16 +573,24 @@ func (e *issue72UnknownEnv) verifyInjected(fx issue72UnknownFixture) {
 		if got := raw.Get(fx.originKey); !bytes.Equal(got, fx.originValue) {
 			return fmt.Errorf("original raw row changed")
 		}
-		for _, name := range []string{
-			"usage_record_receipts_v1", "usage_raw_owners_v1",
-			"usage_receipt_owner_hashes_v1", "usage_fresh_commit_attestations_v1",
-		} {
-			// A fresh tracked database never writes receipts, fresh attestations
-			// or receipt-owner hashes for live rows, so these buckets may be
-			// absent; the assertion is only that no entry for the injected
-			// identity appeared. Coverage of the identity's other evidence comes
-			// from the client-hour, client-index, quota-cell and usage-cell
-			// checks below, not from a nil==nil comparison here.
+		// Receipts are created with the schema and raw owners by the seeded live
+		// writes (inject requires them too), so both buckets must exist; neither
+		// may gain an entry for the injected identity.
+		for _, name := range []string{"usage_record_receipts_v1", "usage_raw_owners_v1"} {
+			b := tx.Bucket([]byte(name))
+			if b == nil {
+				return fmt.Errorf("%s bucket missing", name)
+			}
+			if b.Get(fx.rawKey) != nil {
+				return fmt.Errorf("injected identity gained a %s entry", name)
+			}
+		}
+		// Receipt-owner hashes and fresh attestations are only written for pruned
+		// or untracked ledgers, so a fresh tracked database may never create these
+		// buckets; only assert that no entry for the injected identity appeared,
+		// and do not treat nil==nil as coverage. The client-hour, client-index,
+		// quota-cell and usage-cell checks below provide that coverage.
+		for _, name := range []string{"usage_receipt_owner_hashes_v1", "usage_fresh_commit_attestations_v1"} {
 			b := tx.Bucket([]byte(name))
 			if b == nil {
 				continue
