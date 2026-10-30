@@ -106,7 +106,11 @@ func TestRouterAuthenticationBoundaries(t *testing.T) {
 // QUERY is not a supported proxy/admin method and must be rejected with 405
 // before authentication, session handling, or any proxy forwarding. chi 5.4.0
 // added QUERY to its method union, so a mounted router would otherwise match
-// it and run the full downstream chain.
+// it and run the full downstream chain. The assertions also pin the response
+// shape of chi 5.3.0's default method-not-allowed handler: empty body and no
+// Allow or Content-Type headers. Content-Length is deliberately not asserted
+// because httptest.ResponseRecorder does not always set it the way a real
+// server does.
 func TestRouterRejectsQueryMethod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sessions := admin.NewSessionManager(config.AdminSessionConfig{CookieName: "fixture_session", Secret: "fixture-session-signing-key", TTLSeconds: 3600}, logger)
@@ -133,7 +137,16 @@ func TestRouterRejectsQueryMethod(t *testing.T) {
 		apiKey string
 	}{
 		{name: "authenticated proxy path", path: "/v1/chat/completions", apiKey: "Bearer fixture-client-key"},
+		{name: "proxy path without key", path: "/v1/chat/completions"},
+		{name: "unregistered path without key", path: "/nope"},
+		{name: "root path without key", path: "/"},
 		{name: "health check without key", path: "/healthz"},
+		// Pre-fix this case already returned 405 by accident: the root tree
+		// probed the static GET /healthz route and set the shared
+		// RouteContext.methodNotAllowed flag, which the mounted protected
+		// router inherited. That accidental 405 carried Allow: GET, so the
+		// shape assertions below still distinguish it from the guard even
+		// though the status-only assertion cannot.
 		{name: "health check with key", path: "/healthz", apiKey: "Bearer fixture-client-key"},
 		{name: "admin schema without session", path: "/admin/data/schema"},
 	}
@@ -148,6 +161,15 @@ func TestRouterRejectsQueryMethod(t *testing.T) {
 			router.ServeHTTP(rec, req)
 			if rec.Code != http.StatusMethodNotAllowed {
 				t.Errorf("QUERY %s status=%d, want %d", tc.path, rec.Code, http.StatusMethodNotAllowed)
+			}
+			if rec.Body.Len() != 0 {
+				t.Errorf("QUERY %s body=%q, want empty", tc.path, rec.Body.String())
+			}
+			if allow := rec.Header().Get("Allow"); allow != "" {
+				t.Errorf("QUERY %s Allow=%q, want no Allow header", tc.path, allow)
+			}
+			if contentType := rec.Header().Get("Content-Type"); contentType != "" {
+				t.Errorf("QUERY %s Content-Type=%q, want no Content-Type header", tc.path, contentType)
 			}
 			if proxyCalls != 0 {
 				t.Errorf("QUERY %s reached proxy %d times", tc.path, proxyCalls)
