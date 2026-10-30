@@ -70,6 +70,9 @@ type integrityFuzzDB struct {
 	store  *UsageStore
 	log    []string
 	legacy int // Issue #125 P1.1 rows without record_id
+	// legacyExempt holds the case 24 keys whose shape the P1.1 relaxation must
+	// exempt unless later damage overwrote them.
+	legacyExempt [][]byte
 }
 
 func (f *integrityFuzzDB) note(format string, args ...any) {
@@ -428,6 +431,7 @@ func applyIntegrityDamage(t testing.TB, rng *rand.Rand, f *integrityFuzzDB) {
 			key := []byte(usageKey(e.Timestamp, fmt.Sprintf("legacy-%d", rng.Intn(1000))))
 			f.note("legacy no-record-id raw %s", key)
 			f.legacy++
+			f.legacyExempt = append(f.legacyExempt, bytes.Clone(key))
 			return raw.Put(key, data)
 		case 25: // legacy-shaped row whose event hour differs from its key hour
 			e := fuzzEvent(rng)
@@ -613,12 +617,40 @@ func TestIntegrityFastEqualsFullFuzz(t *testing.T) {
 		rng := rand.New(rand.NewSource(int64(seed)))
 		f := buildIntegrityFuzzDB(t, rng)
 		legacyRows += f.legacy
+		legacyProblem := ""
 		_ = f.db.View(func(tx *bolt.Tx) error {
-			if class, _ := classifyUsageIntegrity(context.Background(), tx); class != nil {
-				usedFast++
+			class, _ := classifyUsageIntegrity(context.Background(), tx)
+			if class == nil {
+				return nil // overflow or cancellation: the fast path is unused
+			}
+			usedFast++
+			raw := tx.Bucket([]byte(BucketUsageEvents))
+			if raw == nil {
+				return nil
+			}
+			for _, key := range f.legacyExempt {
+				value := raw.Get(key)
+				if value == nil {
+					continue // deleted or overwritten by later damage
+				}
+				var event usage.Event
+				if json.Unmarshal(value, &event) != nil || event.RecordID != "" {
+					continue // later damage changed the shape
+				}
+				at, ok := canonicalEventKeyStamp(key)
+				if !ok || !at.Equal(event.Timestamp) {
+					continue // later damage moved the event or the key
+				}
+				if class.eventSet[string(key)] {
+					legacyProblem = fmt.Sprintf("seed %d: legacy row %q lost the P1.1 window exemption; damage: %v", seed, key, f.log)
+					return nil
+				}
 			}
 			return nil
 		})
+		if legacyProblem != "" {
+			t.Fatal(legacyProblem)
+		}
 		for i := 0; i < 12; i++ {
 			if !compareIntegrityModes(t, f, randomIntegrityQuery(rng)) {
 				t.Fatalf("seed %d", seed)
@@ -629,7 +661,10 @@ func TestIntegrityFastEqualsFullFuzz(t *testing.T) {
 		t.Fatalf("classification available on %d/%d databases; the fuzz would not exercise the fast path", usedFast, iterations)
 	}
 	if legacyRows == 0 {
-		t.Fatalf("no legacy rows without record_id were generated; the P1.1 shape is not exercised")
+		if iterations >= 10 {
+			t.Fatalf("no legacy rows without record_id were generated; the P1.1 shape is not exercised")
+		}
+		t.Logf("coverage note: no legacy rows without record_id generated at %d iterations; the P1.1 shape was not exercised", iterations)
 	}
 	t.Logf("legacy rows without record_id generated: %d", legacyRows)
 }

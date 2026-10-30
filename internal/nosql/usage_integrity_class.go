@@ -283,9 +283,12 @@ func sameIndexProgress(a, b *indexProgress) bool {
 // between two cancellation checks.
 const integrityClassifyCheckEvery = 1024
 
-// classifyUsageIntegrity builds A from one read transaction. It never calls
-// read hooks and never touches the scan counters, so tests can build it in
-// front of every read (with context.Background(), never the reader's context).
+// classifyUsageIntegrity builds A from one read transaction. It does not call
+// read hooks and does not change the read context or verdict, so tests can
+// build it in front of every read (with context.Background(), never the
+// reader's context). It does increment the test-only proofRawParses counter
+// through backfillRawScope; classification already did so for non-proof rows
+// before P1.1.
 // It checks ctx periodically; a canceled build returns nil. It returns nil and
 // a fallback reason when the fast path cannot be used for this snapshot.
 func classifyUsageIntegrity(ctx context.Context, tx *bolt.Tx) (*integrityClassification, string) {
