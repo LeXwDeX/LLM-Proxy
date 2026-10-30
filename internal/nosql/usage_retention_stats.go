@@ -173,8 +173,11 @@ func (s *UsageStore) loadUsageRetentionStats() UsageRetentionStats {
 	return stats
 }
 
-// usageRetentionBucket reports only counts derived from bucket statistics; it
-// never walks keys or values. A small bucket is stored inline in its parent,
+// usageRetentionBucket reports only counts derived from bucket statistics; the
+// snapshot never iterates entries at the application level. bbolt computes
+// those statistics by traversing the bucket's pages and leaf elements, so the
+// refresh cost still grows with the bucket even though no key or value is
+// decoded for the caller. A small bucket is stored inline in its parent,
 // where bbolt reports its bytes as InlineBucketInuse instead of LeafInuse, so
 // the byte estimate must include it. Pages counts logical leaf and branch
 // pages only: an inline bucket has none of its own.

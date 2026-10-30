@@ -689,3 +689,54 @@ func TestUsageRetentionSnapshotConcurrentReadsTriggerOneRefresh(t *testing.T) {
 	close(release)
 	waitUsageRetentionIdle(t, store)
 }
+
+// TestUsageRetentionSnapshotFailureReplacesSuccess pins the degradation
+// contract on a store that only fails after publishing a success: a failed
+// refresh replaces the previous successful snapshot for a whole refresh
+// interval, so the endpoint reports available:false with the failure reason
+// instead of serving values it could not refresh.
+func TestUsageRetentionSnapshotFailureReplacesSuccess(t *testing.T) {
+	store := NewUsageStore(testDB(t))
+	base := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return base }
+	var fail atomic.Bool
+	var loads atomic.Int64
+	store.retention.load = func() UsageRetentionStats {
+		loads.Add(1)
+		if fail.Load() {
+			return UsageRetentionStats{Available: false, Reason: UsageRetentionReasonTransactionFailed}
+		}
+		return UsageRetentionStats{Available: true}
+	}
+
+	first := awaitUsageRetentionStats(t, store)
+	if !first.Available || first.Reason != "" {
+		t.Fatalf("first snapshot = available %v reason %q, want success", first.Available, first.Reason)
+	}
+	if first.CapturedAt == nil || !first.CapturedAt.Equal(base) {
+		t.Fatalf("first captured_at = %v, want %v", first.CapturedAt, base)
+	}
+
+	fail.Store(true)
+	refreshedAt := base.Add(usageRetentionInterval() + time.Second)
+	store.now = func() time.Time { return refreshedAt }
+	// The stale read returns the previous success and starts the refresh.
+	if got := store.UsageRetentionSnapshot(); !got.Available {
+		t.Fatalf("stale read = %+v, want the previous success while the refresh runs", got)
+	}
+	waitUsageRetentionIdle(t, store)
+
+	stats := store.UsageRetentionSnapshot()
+	if stats.Available || stats.Reason != UsageRetentionReasonTransactionFailed {
+		t.Fatalf("snapshot after a failed refresh = available %v reason %q, want %q", stats.Available, stats.Reason, UsageRetentionReasonTransactionFailed)
+	}
+	if stats.CapturedAt == nil || !stats.CapturedAt.Equal(refreshedAt) {
+		t.Fatalf("failure captured_at = %v, want %v", stats.CapturedAt, refreshedAt)
+	}
+	if stats.Buckets != nil || stats.Events != nil || stats.Metadata != nil {
+		t.Fatalf("failure snapshot carried detail: %+v", stats)
+	}
+	if got := loads.Load(); got < 2 {
+		t.Fatalf("loads = %d, want the success and the failure refresh", got)
+	}
+}
