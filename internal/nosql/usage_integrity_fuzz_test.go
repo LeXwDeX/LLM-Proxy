@@ -66,9 +66,10 @@ func fuzzEvent(rng *rand.Rand) usage.Event {
 }
 
 type integrityFuzzDB struct {
-	db    *bolt.DB
-	store *UsageStore
-	log   []string
+	db     *bolt.DB
+	store  *UsageStore
+	log    []string
+	legacy int // Issue #125 P1.1 rows without record_id
 }
 
 func (f *integrityFuzzDB) note(format string, args ...any) {
@@ -136,7 +137,7 @@ func buildIntegrityFuzzDB(t testing.TB, rng *rand.Rand) *integrityFuzzDB {
 }
 
 func applyIntegrityDamage(t testing.TB, rng *rand.Rand, f *integrityFuzzDB) {
-	kind := rng.Intn(24)
+	kind := rng.Intn(26)
 	err := f.db.Update(func(tx *bolt.Tx) error {
 		raw := tx.Bucket([]byte(BucketUsageEvents))
 		rawKeys := fuzzKeys(tx, BucketUsageEvents)
@@ -420,6 +421,24 @@ func applyIntegrityDamage(t testing.TB, rng *rand.Rand, f *integrityFuzzDB) {
 					return quota.Put(k, v)
 				}
 			}
+		case 24: // legacy row: no record_id, key stamp exactly the event time, no owner
+			e := fuzzEvent(rng)
+			e.RecordID = ""
+			data, _ := json.Marshal(e)
+			key := []byte(usageKey(e.Timestamp, fmt.Sprintf("legacy-%d", rng.Intn(1000))))
+			f.note("legacy no-record-id raw %s", key)
+			f.legacy++
+			return raw.Put(key, data)
+		case 25: // legacy-shaped row whose event hour differs from its key hour
+			e := fuzzEvent(rng)
+			e.RecordID = ""
+			e.Timestamp = otherHour.Add(time.Duration(rng.Intn(3600)) * time.Second)
+			data, _ := json.Marshal(e)
+			keyAt := otherHour.Add(time.Hour + time.Duration(rng.Intn(3600))*time.Second)
+			key := []byte(usageKey(keyAt, fmt.Sprintf("legacy-moved-%d", rng.Intn(1000))))
+			f.note("legacy cross-hour raw %s event %v", key, e.Timestamp)
+			f.legacy++
+			return raw.Put(key, data)
 		}
 		return nil
 	})
@@ -589,10 +608,11 @@ func compareIntegrityModes(t *testing.T, f *integrityFuzzDB, q integrityQuery) b
 
 func TestIntegrityFastEqualsFullFuzz(t *testing.T) {
 	iterations := integrityFuzzIterations(40)
-	usedFast := 0
+	usedFast, legacyRows := 0, 0
 	for seed := 0; seed < iterations; seed++ {
 		rng := rand.New(rand.NewSource(int64(seed)))
 		f := buildIntegrityFuzzDB(t, rng)
+		legacyRows += f.legacy
 		_ = f.db.View(func(tx *bolt.Tx) error {
 			if class, _ := classifyUsageIntegrity(context.Background(), tx); class != nil {
 				usedFast++
@@ -608,6 +628,10 @@ func TestIntegrityFastEqualsFullFuzz(t *testing.T) {
 	if usedFast < iterations*9/10 {
 		t.Fatalf("classification available on %d/%d databases; the fuzz would not exercise the fast path", usedFast, iterations)
 	}
+	if legacyRows == 0 {
+		t.Fatalf("no legacy rows without record_id were generated; the P1.1 shape is not exercised")
+	}
+	t.Logf("legacy rows without record_id generated: %d", legacyRows)
 }
 
 // integrityMutateOutside changes or deletes objects whose key hour is outside
