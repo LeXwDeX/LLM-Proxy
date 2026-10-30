@@ -197,7 +197,7 @@ func run(args []string) int {
 	oddStarted := time.Now()
 	oddCtx, oddCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	if err := nosql.MigrateUsageProofOddIndex(oddCtx, db, 0); err != nil {
-		appLogger.Warn("usage proof odd index migration incomplete; proof scans use the full-scan fallback; supported writes keep the receipt phase resumable and a later start resumes, but an unsupported writer makes that start rebuild", "error", err, "duration", time.Since(oddStarted).String())
+		appLogger.Warn("usage proof odd index migration incomplete; proof scans use the full-scan fallback; supported writes keep the receipt phase resumable and a later start resumes, but an unsupported writer that advances the raw revision without maintaining the index makes that start rebuild", "error", err, "duration", time.Since(oddStarted).String())
 	} else {
 		appLogger.Info("usage proof odd index ready", "duration", time.Since(oddStarted).String())
 	}
