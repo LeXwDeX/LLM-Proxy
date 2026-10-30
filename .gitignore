@@ -74,6 +74,9 @@ WINDSURF.md
 .qoder/
 .serena/
 .agents/
+.specgit/
+.impeccable/
+.codebase-memory/
 
 # One-time migration scripts (not part of the project)
 migrate-to-bbolt.sh
