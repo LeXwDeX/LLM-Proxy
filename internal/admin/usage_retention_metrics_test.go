@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -314,4 +315,32 @@ func TestMetricsUsageRetentionDegradesWhenDatabaseFails(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("/admin/metrics never reported a transaction_failed usage_retention snapshot: %s", readMetricsRawForTest(t, h))
+}
+
+// TestMetricsUsageProofIndex pins the Issue #114 operator view: /admin/metrics
+// reports whether proofs trust the persisted index and the process-lifetime
+// fallback/load counters, without any keys or stored bytes.
+func TestMetricsUsageProofIndex(t *testing.T) {
+	stores := setupTestStores(t, t.TempDir())
+	h := metricsTestHandler(t, stores, stores.usageStore)
+	body, raw := readMetricsBody(t, h)
+	encoded, ok := body["usage_proof_index"]
+	if !ok {
+		t.Fatalf("/admin/metrics omitted usage_proof_index: %s", raw)
+	}
+	var metric map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &metric); err != nil {
+		t.Fatalf("decode usage_proof_index: %v", err)
+	}
+	exactKeys(t, "usage_proof_index", metric, "ready", "full_classifications", "index_loads")
+	var ready bool
+	if err := json.Unmarshal(metric["ready"], &ready); err != nil {
+		t.Fatalf("decode ready: %v", err)
+	}
+	if ready {
+		t.Fatalf("fresh test store reports a ready proof index: %s", raw)
+	}
+	if bytes.Contains(encoded, []byte("weird-")) {
+		t.Fatalf("usage_proof_index leaked stored content: %s", encoded)
+	}
 }

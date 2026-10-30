@@ -1740,3 +1740,73 @@ func TestWarmUsageProofScanCacheVisitsOnlyGlobalOddRows(t *testing.T) {
 		t.Fatalf("warm-up visited %d rows, want only the single global odd row", visited)
 	}
 }
+
+// TestUsageProofIndexMetricsReportsReadinessAndCounters pins the operator-facing
+// view of Issue #114: a fresh database has no trusted index, a completed
+// migration makes it ready, a reset puts proofs back on the fallback, and the
+// exported counters move with the fallback scan and index loads.
+func TestUsageProofIndexMetricsReportsReadinessAndCounters(t *testing.T) {
+	db := testDB(t)
+	if got := UsageProofIndexStats(db); got.Ready {
+		t.Fatalf("fresh database reports a ready proof index: %+v", got)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketUsageEvents)).Put([]byte("metrics-weird-1"), []byte(`{"client_name":"c01"}`))
+	}); err != nil {
+		t.Fatalf("seed odd row: %v", err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 0); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	before := UsageProofIndexStats(db)
+	if !before.Ready {
+		t.Fatalf("completed migration reports no ready proof index: %+v", before)
+	}
+
+	if err := db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		keys, ok := proofOddLoadGlobal(tx, proofOddRawGlobal, raw)
+		if !ok || len(keys) != 1 {
+			t.Fatalf("load global odd keys: ok=%v keys=%d, want the seeded row", ok, len(keys))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after := UsageProofIndexStats(db); after.IndexLoads <= before.IndexLoads {
+		t.Fatalf("index loads = %d, want more than %d after loading the index", after.IndexLoads, before.IndexLoads)
+	}
+
+	if err := db.View(func(tx *bolt.Tx) error {
+		summary := &txScopeSummary{}
+		keys := summary.fallbackRaw(tx.Bucket([]byte(BucketUsageEvents)))
+		if len(keys) != 1 {
+			t.Fatalf("fallback classified %d odd keys, want the seeded row", len(keys))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if after := UsageProofIndexStats(db); after.FullClassifications <= before.FullClassifications {
+		t.Fatalf("full classifications = %d, want more than %d after a fallback scan", after.FullClassifications, before.FullClassifications)
+	}
+
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if got := UsageProofIndexStats(db); got.Ready {
+		t.Fatalf("reset database still reports a ready proof index: %+v", got)
+	}
+}
+
+// TestUsageProofIndexMetricsWithoutDatabase pins the nil paths: no store and
+// no database report counters but never a ready index.
+func TestUsageProofIndexMetricsWithoutDatabase(t *testing.T) {
+	var store *UsageStore
+	if got := store.UsageProofIndexStats(); got.Ready {
+		t.Fatalf("nil store reports a ready proof index: %+v", got)
+	}
+	if got := UsageProofIndexStats(nil); got.Ready {
+		t.Fatalf("nil database reports a ready proof index: %+v", got)
+	}
+}

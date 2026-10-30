@@ -128,12 +128,50 @@ var proofOddCountsMarkerKey = []byte("m1")
 
 var (
 	// proofOddFullClassifications counts keys examined by the fallback full
-	// classification scan. Tests and operators use it to prove the scoped path
-	// no longer walks all history.
+	// classification scan. The exported metrics below expose it so operators
+	// can see a proof index that is not being trusted, and tests use it to
+	// prove the scoped path no longer walks all history.
 	proofOddFullClassifications atomic.Int64
-	// proofOddIndexLoads counts entries loaded from the persisted index.
+	// proofOddIndexLoads counts entries loaded from the persisted index. The
+	// exported metrics expose it next to the fallback count.
 	proofOddIndexLoads atomic.Int64
 )
+
+// UsageProofIndexMetrics is the exported, key-free state of the persistent
+// odd-row proof index (Issue #114). Ready reports whether proofs currently
+// trust the index; false at runtime means every proof scans the whole history
+// through the fallback. The counters cover the lifetime of this process and
+// never include keys or stored bytes.
+type UsageProofIndexMetrics struct {
+	Ready               bool   `json:"ready"`
+	FullClassifications uint64 `json:"full_classifications"`
+	IndexLoads          uint64 `json:"index_loads"`
+}
+
+// UsageProofIndexStats reports the proof-index state for db. A failed read
+// transaction reports ready=false rather than guessing.
+func UsageProofIndexStats(db *bolt.DB) UsageProofIndexMetrics {
+	m := UsageProofIndexMetrics{
+		FullClassifications: uint64(proofOddFullClassifications.Load()),
+		IndexLoads:          uint64(proofOddIndexLoads.Load()),
+	}
+	if db == nil {
+		return m
+	}
+	_ = db.View(func(tx *bolt.Tx) error {
+		m.Ready = proofOddIndexReady(tx)
+		return nil
+	})
+	return m
+}
+
+// UsageProofIndexStats reports the proof-index state of the store's database.
+func (s *UsageStore) UsageProofIndexStats() UsageProofIndexMetrics {
+	if s == nil || s.db == nil {
+		return UsageProofIndexMetrics{}
+	}
+	return UsageProofIndexStats(s.db)
+}
 
 func proofOddBucket(tx *bolt.Tx) *bolt.Bucket {
 	return tx.Bucket([]byte(bucketUsageProofOdd))
