@@ -105,7 +105,11 @@ const (
 const proofOddScheme = "2"
 
 // Single-byte domains inside bucketUsageProofOdd. Locations use the lower/upper
-// kind byte followed by the optional hour; pointers use 'r'/'c'.
+// kind byte followed by the optional hour; pointers use 'r'/'c'; per-kind
+// counts use 'n', and the marker that says the counts were established is
+// proofOddCountsMarkerKey. The marker and the counts live in the index bucket
+// itself so a reset (which deletes and recreates the bucket) clears them with
+// the entries they describe.
 const (
 	proofOddRawGlobal      = 'g'
 	proofOddRawHour        = 'h'
@@ -113,7 +117,14 @@ const (
 	proofOddReceiptHour    = 'H'
 	proofOddRawPointer     = 'r'
 	proofOddReceiptPointer = 'c'
+	proofOddCountPrefix    = 'n'
 )
+
+// proofOddCountsMarkerKey marks that every location entry has a matching
+// per-kind count. A completed index without it was built before the counts
+// existed; its entries are still readable but its completeness cannot be
+// checked, so it is rebuilt instead of trusted.
+var proofOddCountsMarkerKey = []byte("m1")
 
 var (
 	// proofOddFullClassifications counts keys examined by the fallback full
@@ -165,6 +176,13 @@ func proofOddIndexCurrent(tx *bolt.Tx) bool {
 	if meta.Get([]byte(proofOddPhaseKey)) != nil {
 		return false
 	}
+	if b.Get(proofOddCountsMarkerKey) == nil {
+		// No counts: either a partial build or an index from before the counts
+		// existed. Without them a deleted location entry would read as "no odd
+		// rows", so such an index is not current and the next migration
+		// rebuilds it.
+		return false
+	}
 	stored := meta.Get([]byte(proofOddRevisionKey))
 	return len(stored) == 8 && binary.BigEndian.Uint64(stored) == rawRevision(tx)
 }
@@ -187,23 +205,36 @@ func proofOddFollowRawRevision(tx *bolt.Tx, revision uint64) error {
 	var data [8]byte
 	binary.BigEndian.PutUint64(data[:], revision)
 	if string(meta.Get([]byte(proofOddReadyKey))) == "1" {
+		// A completed classification may only adopt a contiguous step from the
+		// revision it stored. A stored revision that already lags belongs to a
+		// writer that advanced the data without maintaining the index (an older
+		// binary or an out-of-band edit); adopting the live value here would
+		// hide that change permanently, because every later start would see a
+		// current index. Leaving it behind keeps proofs on the full-scan
+		// fallback and makes the next migration rebuild.
+		stored := meta.Get([]byte(proofOddRevisionKey))
+		if len(stored) != 8 || binary.BigEndian.Uint64(stored)+1 != revision {
+			return nil
+		}
 		return meta.Put([]byte(proofOddRevisionKey), data[:])
 	}
-	// A build interrupted after its raw phase is bound to the raw revision that
-	// phase scanned (proofOddRawRevisionKey). This writer updated the index in
-	// this same transaction, so advancing the snapshot keeps the receipt phase
-	// resumable across starts instead of forcing a reset and a full rescan.
-	// Only advance when the stored snapshot still matches the revision this
-	// bump started from: a bump that did not maintain the index (an older
-	// binary or an out-of-band edit) leaves the snapshot behind, and a later
-	// supported write must not launder that inconsistency into a resumable
-	// state. Consecutive bumps in one transaction advance step by step,
-	// because each sees the snapshot written by the previous bump.
-	if string(meta.Get([]byte(proofOddPhaseKey))) != "receipts" {
+	// A staged build is bound to the raw revision its scanner started from
+	// (proofOddRawRevisionKey). This writer updated the index in the same
+	// transaction, so advancing the snapshot lets a paused raw or receipt phase
+	// resume across starts instead of forcing a reset and a full rescan. Only a
+	// contiguous step is safe: a bump that did not maintain the index leaves the
+	// snapshot behind, and a later supported write must not launder that
+	// inconsistency into a resumable state. Consecutive bumps in one
+	// transaction advance step by step, because each sees the snapshot written
+	// by the previous bump. Before the first raw batch records the snapshot
+	// there is nothing to advance: that batch takes the live revision itself,
+	// after this write committed.
+	phase := string(meta.Get([]byte(proofOddPhaseKey)))
+	if phase != "raw" && phase != "receipts" {
 		return nil
 	}
 	stored := meta.Get([]byte(proofOddRawRevisionKey))
-	if len(stored) != 8 || binary.BigEndian.Uint64(stored) != revision-1 {
+	if len(stored) != 8 || binary.BigEndian.Uint64(stored)+1 != revision {
 		return nil
 	}
 	return meta.Put([]byte(proofOddRawRevisionKey), data[:])
@@ -368,8 +399,63 @@ func proofOddClassifyReceipt(key []byte) (byte, string) {
 	return proofOddReceiptHour, at.UTC().Truncate(time.Hour).Format(hourLayout)
 }
 
+// proofOddCountKey locates the entry count for one kind and hour. The hour is
+// empty for a global kind, so the key is 'n', kind, hour.
+func proofOddCountKey(kind byte, hour string) []byte {
+	out := make([]byte, 2+len(hour))
+	out[0] = proofOddCountPrefix
+	out[1] = kind
+	copy(out[2:], hour)
+	return out
+}
+
+// proofOddLoadCount returns the recorded entry count, treating a missing count
+// as zero.
+func proofOddLoadCount(b *bolt.Bucket, kind byte, hour string) (uint64, bool) {
+	v := b.Get(proofOddCountKey(kind, hour))
+	if v == nil {
+		return 0, true
+	}
+	if len(v) != 8 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(v), true
+}
+
+// proofOddCountAdd adjusts the entry count for one kind and hour. A negative
+// delta that would underflow means the recorded count no longer describes the
+// bucket; the counts marker is dropped so proofs fall back to the exhaustive
+// scan and the next migration rebuilds the classification. The writer itself
+// must never fail because of index bookkeeping.
+func proofOddCountAdd(b *bolt.Bucket, kind byte, hour string, delta int) error {
+	if delta == 0 {
+		return nil
+	}
+	count, ok := proofOddLoadCount(b, kind, hour)
+	if !ok {
+		return b.Delete(proofOddCountsMarkerKey)
+	}
+	if delta < 0 {
+		if count < uint64(-delta) {
+			return b.Delete(proofOddCountsMarkerKey)
+		}
+		count -= uint64(-delta)
+	} else {
+		count += uint64(delta)
+	}
+	if count == 0 {
+		return b.Delete(proofOddCountKey(kind, hour))
+	}
+	var data [8]byte
+	binary.BigEndian.PutUint64(data[:], count)
+	return b.Put(proofOddCountKey(kind, hour), data[:])
+}
+
 // proofOddNote writes the classification of one object, replacing any previous
-// location through its pointer.
+// location through its pointer. The location count for the old and new kinds is
+// maintained in the same transaction; a location entry the bucket lost out of
+// band is still subtracted, which keeps the count equal to the bucket once the
+// object is written again.
 func proofOddNote(tx *bolt.Tx, pointer byte, key, data []byte, kind byte, hour string) error {
 	b := proofOddBucket(tx)
 	if b == nil {
@@ -382,6 +468,9 @@ func proofOddNote(tx *bolt.Tx, pointer byte, key, data []byte, kind byte, hour s
 			if err := b.Delete(proofOddLocationKey(oldKind, oldHour, key)); err != nil {
 				return err
 			}
+			if err := proofOddCountAdd(b, oldKind, oldHour, -1); err != nil {
+				return err
+			}
 		} else if err := b.Delete(pointerKey); err != nil {
 			return err
 		}
@@ -390,6 +479,9 @@ func proofOddNote(tx *bolt.Tx, pointer byte, key, data []byte, kind byte, hour s
 		return b.Delete(pointerKey)
 	}
 	if err := b.Put(proofOddLocationKey(kind, hour, key), proofOddDigest(key, data)); err != nil {
+		return err
+	}
+	if err := proofOddCountAdd(b, kind, hour, +1); err != nil {
 		return err
 	}
 	return b.Put(pointerKey, proofOddPointerValue(kind, hour))
@@ -440,6 +532,9 @@ func proofOddRemoveRaw(tx *bolt.Tx, key []byte) error {
 		if err := b.Delete(proofOddLocationKey(kind, hour, key)); err != nil {
 			return err
 		}
+		if err := proofOddCountAdd(b, kind, hour, -1); err != nil {
+			return err
+		}
 	}
 	return b.Delete(pointerKey)
 }
@@ -448,16 +543,49 @@ func proofOddRemoveRaw(tx *bolt.Tx, key []byte) error {
 // bytes the index recorded. A missing object makes the index untrusted, which
 // falls back to the exhaustive scan.
 func proofOddEntryMatches(data *bolt.Bucket, key, want []byte) bool {
+	if data == nil || len(want) != sha256.Size {
+		return false
+	}
 	actualKey, actualValue := data.Cursor().Seek(key)
 	return actualKey != nil && bytes.Equal(actualKey, key) && bytes.Equal(want, proofOddDigest(key, actualValue))
 }
 
-// proofOddLoadGlobal returns every global odd key and verifies each entry.
+// proofOddDataBucket returns the bucket that location kind indexes: raw kinds
+// point into the usage events bucket, receipt kinds into the receipts bucket.
+func proofOddDataBucket(kind byte, raw, receipts *bolt.Bucket) *bolt.Bucket {
+	if kind == proofOddRawGlobal || kind == proofOddRawHour {
+		return raw
+	}
+	return receipts
+}
+
+// proofOddPointerFor returns the pointer kind that locates an object of a
+// location kind.
+func proofOddPointerFor(kind byte) byte {
+	switch kind {
+	case proofOddRawGlobal, proofOddRawHour:
+		return proofOddRawPointer
+	default:
+		return proofOddReceiptPointer
+	}
+}
+
+// proofOddLoadGlobal returns every global odd key and verifies each entry. The
+// entry count must equal the count the writers maintain: a deleted location
+// entry would otherwise read as "this kind has no odd rows" and let a scoped
+// proof skip a row the exhaustive walk acts on. Each entry must also still own
+// its pointer in the same location.
 func proofOddLoadGlobal(tx *bolt.Tx, kind byte, data *bolt.Bucket) ([][]byte, bool) {
 	index := proofOddBucket(tx)
-	if index == nil || data == nil {
+	if index == nil || data == nil || index.Get(proofOddCountsMarkerKey) == nil {
 		return nil, false
 	}
+	want, ok := proofOddLoadCount(index, kind, "")
+	if !ok {
+		return nil, false
+	}
+	pointer := proofOddPointerFor(kind)
+	pointerValue := proofOddPointerValue(kind, "")
 	var keys [][]byte
 	cursor := index.Cursor()
 	for k, v := cursor.Seek([]byte{kind}); k != nil && len(k) > 0 && k[0] == kind; k, v = cursor.Next() {
@@ -468,19 +596,32 @@ func proofOddLoadGlobal(tx *bolt.Tx, kind byte, data *bolt.Bucket) ([][]byte, bo
 		if !proofOddEntryMatches(data, key, v) {
 			return nil, false
 		}
+		if !bytes.Equal(index.Get(proofOddPointerKey(pointer, key)), pointerValue) {
+			return nil, false
+		}
 		proofOddIndexLoads.Add(1)
 		keys = append(keys, append([]byte(nil), key...))
+	}
+	if uint64(len(keys)) != want {
+		return nil, false
 	}
 	return keys, true
 }
 
 // proofOddLoadHour returns the odd keys indexed under one UTC hour and
-// verifies each entry.
+// verifies each entry against the bucket and its pointer, then reconciles the
+// visited count with the count the writers maintain for that hour.
 func proofOddLoadHour(tx *bolt.Tx, kind byte, hour string, data *bolt.Bucket) ([][]byte, bool) {
 	index := proofOddBucket(tx)
-	if index == nil || data == nil {
+	if index == nil || data == nil || index.Get(proofOddCountsMarkerKey) == nil {
 		return nil, false
 	}
+	want, ok := proofOddLoadCount(index, kind, hour)
+	if !ok {
+		return nil, false
+	}
+	pointer := proofOddPointerFor(kind)
+	pointerValue := proofOddPointerValue(kind, hour)
 	prefix := append([]byte{kind}, hour...)
 	var keys [][]byte
 	cursor := index.Cursor()
@@ -492,10 +633,81 @@ func proofOddLoadHour(tx *bolt.Tx, kind byte, hour string, data *bolt.Bucket) ([
 		if !proofOddEntryMatches(data, key, v) {
 			return nil, false
 		}
+		if !bytes.Equal(index.Get(proofOddPointerKey(pointer, key)), pointerValue) {
+			return nil, false
+		}
 		proofOddIndexLoads.Add(1)
 		keys = append(keys, append([]byte(nil), key...))
 	}
+	if uint64(len(keys)) != want {
+		return nil, false
+	}
 	return keys, true
+}
+
+// proofOddVerifyCounts re-derives every per-kind count from the bucket and
+// checks that every location entry still owns its pointer. It is O(index
+// entries), so it runs only when a startup migration would otherwise trust a
+// completed index; a fresh proof instead reconciles the counts of the hours it
+// loads. A mismatch means an entry was added or removed out of band, which the
+// markers alone cannot see.
+func proofOddVerifyCounts(tx *bolt.Tx) bool {
+	index := proofOddBucket(tx)
+	if index == nil || index.Get(proofOddCountsMarkerKey) == nil {
+		return false
+	}
+	rawData := tx.Bucket([]byte(BucketUsageEvents))
+	receiptData := tx.Bucket([]byte(BucketUsageReceipts))
+	actual := make(map[string]uint64)
+	declared := make(map[string]struct{})
+	cursor := index.Cursor()
+	for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+		if len(k) == 0 {
+			return false
+		}
+		switch k[0] {
+		case proofOddRawGlobal, proofOddReceiptGlobal:
+			key := k[1:]
+			if !proofOddEntryMatches(proofOddDataBucket(k[0], rawData, receiptData), key, v) {
+				return false
+			}
+			if !bytes.Equal(index.Get(proofOddPointerKey(proofOddPointerFor(k[0]), key)), proofOddPointerValue(k[0], "")) {
+				return false
+			}
+			actual[string(proofOddCountKey(k[0], ""))]++
+		case proofOddRawHour, proofOddReceiptHour:
+			if len(k) < 1+len(hourLayout) {
+				return false
+			}
+			hour := string(k[1 : 1+len(hourLayout)])
+			key := k[1+len(hourLayout):]
+			if !proofOddEntryMatches(proofOddDataBucket(k[0], rawData, receiptData), key, v) {
+				return false
+			}
+			if !bytes.Equal(index.Get(proofOddPointerKey(proofOddPointerFor(k[0]), key)), proofOddPointerValue(k[0], hour)) {
+				return false
+			}
+			actual[string(proofOddCountKey(k[0], hour))]++
+		case proofOddCountPrefix:
+			if len(v) != 8 {
+				return false
+			}
+			declared[string(k)] = struct{}{}
+		case proofOddRawPointer, proofOddReceiptPointer, 'm':
+			// Pointers and the marker carry no count of their own.
+		default:
+			// Any other key is not part of the classification. It cannot hide an
+			// entry: rewriting a location entry's kind byte makes the count
+			// mismatch, and rewriting a pointer breaks the pointer check above.
+		}
+	}
+	for key, count := range actual {
+		v := index.Get([]byte(key))
+		if len(v) != 8 || binary.BigEndian.Uint64(v) != count {
+			return false
+		}
+	}
+	return len(actual) == len(declared)
 }
 
 // MigrateUsageProofOddIndex builds or resumes the persisted classification in
@@ -523,17 +735,24 @@ func MigrateUsageProofOddIndex(ctx context.Context, db *bolt.DB, batchSize int) 
 				return fmt.Errorf("usage proof odd index: bucket or meta missing")
 			}
 			if proofOddIndexCurrent(tx) {
-				done = true
-				return nil
+				// The markers say the classification is current. They cannot see
+				// an entry deleted out of band, so re-derive the counts and the
+				// pointer set before trusting it; a mismatch discards the index
+				// instead of leaving proofs on a permanent full-scan fallback.
+				if proofOddVerifyCounts(tx) {
+					done = true
+					return nil
+				}
+				return proofOddResetBucket(tx)
 			}
 			meta := proofOddMeta(tx)
 			if string(meta.Get([]byte(proofOddReadyKey))) == "1" {
 				// The classification was completed for an older raw revision or
 				// scheme: a writer that does not maintain the index (an older
 				// binary after a downgrade) advanced the data without it, or the
-				// index predates the current location semantics. Discard the
-				// stale classification and rebuild; proofs stay on the fallback
-				// until this finishes.
+				// index predates the current location semantics or the entry
+				// counts. Discard the stale classification and rebuild; proofs
+				// stay on the fallback until this finishes.
 				return proofOddResetBucket(tx)
 			}
 			if string(meta.Get([]byte(proofOddSchemeKey))) != proofOddScheme {
@@ -574,11 +793,29 @@ func migrateProofOddRaw(ctx context.Context, tx *bolt.Tx, batchSize int) error {
 	cursor := raw.Cursor()
 	var key, value []byte
 	if resume := meta.Get([]byte(proofOddRawCursorKey)); resume != nil {
+		// A resumed scan only describes the bucket while the raw revision it
+		// started from is still current. A writer that advanced the revision
+		// without maintaining the index (an older binary or an out-of-band
+		// edit) left part of the bucket unobserved; resuming would never visit
+		// the rows behind the cursor, so the build is discarded instead.
+		if !proofOddRawRevisionBound(tx) {
+			return proofOddResetBucket(tx)
+		}
 		key, value = cursor.Seek(resume)
 		if key != nil && bytes.Equal(key, resume) {
 			key, value = cursor.Next()
 		}
 	} else {
+		// Record the revision this scan starts from before touching any row.
+		// Supported writers advance the snapshot step by step in the same
+		// transaction that maintains the index (proofOddFollowRawRevision), so
+		// the check below accepts a build that raced only supported writes and
+		// discards one that raced an unsupported writer.
+		var start [8]byte
+		binary.BigEndian.PutUint64(start[:], rawRevision(tx))
+		if err := meta.Put([]byte(proofOddRawRevisionKey), start[:]); err != nil {
+			return err
+		}
 		key, value = cursor.First()
 	}
 	var last []byte
@@ -594,20 +831,17 @@ func migrateProofOddRaw(ctx context.Context, tx *bolt.Tx, batchSize int) error {
 		processed++
 	}
 	if key == nil {
+		// The scan covered the bucket only if no writer advanced the revision
+		// without maintaining the index since the start-of-scan snapshot.
+		// Stamping the live revision here would make a paused raw phase report
+		// every change it never saw as covered.
+		if !proofOddRawRevisionBound(tx) {
+			return proofOddResetBucket(tx)
+		}
 		if err := meta.Delete([]byte(proofOddRawCursorKey)); err != nil {
 			return err
 		}
-		if err := meta.Put([]byte(proofOddPhaseKey), []byte("receipts")); err != nil {
-			return err
-		}
-		// Bind the receipt phase to the raw revision this scan covered. A
-		// writer that advances the revision before the receipt phase finishes
-		// without maintaining the index (an older binary or an out-of-band
-		// edit) leaves part of the data unobserved; the receipt phase discards
-		// this build instead of stamping a revision the scan never saw.
-		var revision [8]byte
-		binary.BigEndian.PutUint64(revision[:], rawRevision(tx))
-		return meta.Put([]byte(proofOddRawRevisionKey), revision[:])
+		return meta.Put([]byte(proofOddPhaseKey), []byte("receipts"))
 	}
 	return meta.Put([]byte(proofOddRawCursorKey), last)
 }
@@ -682,6 +916,12 @@ func migrateProofOddReceipts(ctx context.Context, tx *bolt.Tx, batchSize int) er
 	var revision [8]byte
 	binary.BigEndian.PutUint64(revision[:], rawRevision(tx))
 	if err := meta.Put([]byte(proofOddRevisionKey), revision[:]); err != nil {
+		return err
+	}
+	// The counts were maintained by the same per-entry writes that built the
+	// index; this marker says a reader may reconcile them. It is written last,
+	// so a completed marker always covers a full set of counts.
+	if err := proofOddBucket(tx).Put(proofOddCountsMarkerKey, []byte("1")); err != nil {
 		return err
 	}
 	return meta.Put([]byte(proofOddReadyKey), []byte("1"))
