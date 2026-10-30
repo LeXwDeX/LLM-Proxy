@@ -54,11 +54,10 @@ type integrityClassification struct {
 	duration        time.Duration
 }
 
-// canonicalEventKeyHour returns the UTC hour of a raw-identity key whose stamp
-// round-trips through RFC3339Nano in UTC. Only such keys start with their own
-// hour, so only they are reachable by an hour-prefix seek. The id suffix is not
-// inspected (legacy rows have numeric ids).
-func canonicalEventKeyHour(key []byte) (time.Time, bool) {
+// canonicalEventKeyStamp returns the instant encoded by a raw-identity key
+// whose stamp round-trips through RFC3339Nano in UTC. The id suffix is not
+// inspected (legacy rows have numeric or missing record ids).
+func canonicalEventKeyStamp(key []byte) (time.Time, bool) {
 	stamp, _, found := strings.Cut(string(key), "_")
 	if !found {
 		return time.Time{}, false
@@ -67,7 +66,18 @@ func canonicalEventKeyHour(key []byte) (time.Time, bool) {
 	if err != nil || at.UTC().Format(time.RFC3339Nano) != stamp {
 		return time.Time{}, false
 	}
-	return at.UTC().Truncate(time.Hour), true
+	return at.UTC(), true
+}
+
+// canonicalEventKeyHour returns the UTC hour of a canonical raw-identity key.
+// Only such keys start with their own hour, so only they are reachable by an
+// hour-prefix seek.
+func canonicalEventKeyHour(key []byte) (time.Time, bool) {
+	at, ok := canonicalEventKeyStamp(key)
+	if !ok {
+		return time.Time{}, false
+	}
+	return at.Truncate(time.Hour), true
 }
 
 // quotaKeyHour returns the hour of a quota aggregation key. parseAggHour only
@@ -86,26 +96,47 @@ func quotaKeyHour(key []byte) (time.Time, bool) {
 //
 //   - checkDirectQuotaEvidenceContext raw loop: readRawOwner and the encoding
 //     checks error at any hour, so the owner must be valid and the bytes valid
-//     UTF-8 JSON with a non-zero timestamp. With usageKey(event) == key the
-//     event's own hour is H, so every quota/usage cell it accumulates or checks
-//     is outside W and quotaKeyInScope answers (false, nil) for them; a bound
-//     owner must agree with the event, or the "owner and event disagree"
-//     branch may fire whatever the hour (numeric ids are never bound-exempt).
+//     UTF-8 JSON with a non-zero timestamp. An owned row must satisfy
+//     usageKey(event) == key, because the exhaustive loop compares the two
+//     exactly when owned; its event hour is then H, so every quota/usage cell
+//     it accumulates or checks is outside W and quotaKeyInScope answers
+//     (false, nil) for them. An unowned legacy row written before record ids
+//     were stored has an empty record_id and a key stamp exactly equal to its
+//     event time; the exhaustive loop does not compare key and event for
+//     unowned rows, so the row only accumulates cells of its own hour H.
 //   - quotaProofBatchInScopeContext raw loop: a canonical proof event lands in
 //     cells[quotaAggKey(event)], an hour-H key that is never a cell of W. A row
-//     that is not a canonical proof event (for example an empty client) loops
-//     over the cells with proofRawMayOverlap, which is false for every hour of
-//     W when the owner is valid, the scope is not an ambiguous valid JSON
-//     document and does not contradict the owner, and the stamp parses to H.
+//     that is not a canonical proof event (a legacy row without record_id, for
+//     example) loops over the in-window cells with proofRawMayOverlap, which is
+//     false for all of them: the owner read succeeded, the JSON is not an
+//     ambiguous valid document, and the key stamp parses to H outside their
+//     hours, so the hour test rejects each cell before its client or event
+//     scope matters.
 //   - malformed rows (checkMalformedIndexScope) never reach this predicate.
+//   - checkOrphans and the client index are keyed by event client and time plus
+//     the raw key, not by record_id; indexEntryWindowExempt classifies each
+//     entry from its own proof, so this relaxation cannot skip an entry whose
+//     branch depends on the raw body.
 func rawRowWindowExempt(tx *bolt.Tx, key, value []byte) bool {
 	owner, owned, err := readRawOwner(tx, key)
 	if err != nil || value == nil || !utf8.Valid(value) {
 		return false
 	}
 	var event usage.Event
-	if json.Unmarshal(value, &event) != nil || event.Timestamp.IsZero() || usageKey(event.Timestamp, event.RecordID) != string(key) {
+	if json.Unmarshal(value, &event) != nil || event.Timestamp.IsZero() {
 		return false
+	}
+	if usageKey(event.Timestamp, event.RecordID) != string(key) {
+		// Issue #125 P1.1: legacy rows have no record_id in the body, so the
+		// key cannot be rebuilt from the event. Accept only the shape observed
+		// in pre-record-id history: unowned, empty record_id, and a key stamp
+		// exactly equal to the event time. The exhaustive direct check treats
+		// unowned rows by their event hour alone, so this row is inert outside
+		// its key hour; every other mismatch stays anomalous.
+		keyAt, ok := canonicalEventKeyStamp(key)
+		if owned || !ok || event.RecordID != "" || !keyAt.Equal(event.Timestamp) {
+			return false
+		}
 	}
 	if owned {
 		digest, err := usage.RetryEquivalentDigest(event)
@@ -166,6 +197,9 @@ func eventKeyWindowExempt(tx *bolt.Tx, key []byte) bool {
 //     reference map (the exhaustive map could fail on an unrelated entry), and
 //     an invalid proof must be attributable to a valid original of hour H, or
 //     be unattributable for an owned row; otherwise it errors regardless of W.
+//     A legacy row without record_id still matches clientEventIndexKey (it is
+//     built from client, event time and the raw key), and a scan or atomic
+//     proof identifies the entry's own hour, so it remains inert outside H.
 //   - an entry without a matching raw row is only inert with a trusted proof
 //     whose original scope has hour H; the owner shortcuts depend on the
 //     client filter and the fallback errors whenever no client is filtered.
@@ -249,9 +283,12 @@ func sameIndexProgress(a, b *indexProgress) bool {
 // between two cancellation checks.
 const integrityClassifyCheckEvery = 1024
 
-// classifyUsageIntegrity builds A from one read transaction. It never calls
-// read hooks and never touches the scan counters, so tests can build it in
-// front of every read (with context.Background(), never the reader's context).
+// classifyUsageIntegrity builds A from one read transaction. It does not call
+// read hooks and does not change the read context or verdict, so tests can
+// build it in front of every read (with context.Background(), never the
+// reader's context). It does increment the test-only proofRawParses counter
+// through backfillRawScope; classification already did so for non-proof rows
+// before P1.1.
 // It checks ctx periodically; a canceled build returns nil. It returns nil and
 // a fallback reason when the fast path cannot be used for this snapshot.
 func classifyUsageIntegrity(ctx context.Context, tx *bolt.Tx) (*integrityClassification, string) {

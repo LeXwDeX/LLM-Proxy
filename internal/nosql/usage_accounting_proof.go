@@ -397,8 +397,10 @@ func decodeProofEvent(data []byte, event *usage.Event) bool {
 	return decodeProofEventUncounted(data, event)
 }
 
-// decodeProofEventUncounted is decodeProofEvent without the parse counter; the
-// integrity classifier uses it so it never perturbs scan-count assertions.
+// decodeProofEventUncounted is decodeProofEvent without the parse counter. The
+// integrity classifier uses it so this decode step does not perturb scan-count
+// assertions; classification still counts through backfillRawScope for rows
+// that are not canonical proof events.
 func decodeProofEventUncounted(data []byte, event *usage.Event) bool {
 	if !json.Valid(data) || !utf8.Valid(data) {
 		return false
