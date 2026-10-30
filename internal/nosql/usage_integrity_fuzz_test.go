@@ -158,8 +158,15 @@ func applyIntegrityDamage(t testing.TB, rng *rand.Rand, f *integrityFuzzDB) {
 			}
 		case 2: // invalid UTF-8
 			if k := pickKey(rng, rawKeys); k != nil {
-				f.note("invalid utf8 raw %s", k)
 				v := bytes.Clone(raw.Get(k))
+				if len(v) == 0 {
+					// Damage 17 can plant a nested bucket in the raw bucket,
+					// and a bucket key has no value to truncate; the read
+					// paths must classify it without this damage applied.
+					f.note("invalid utf8 raw %s skipped: no value", k)
+					return nil
+				}
+				f.note("invalid utf8 raw %s", k)
 				return raw.Put(k, append(v[:len(v)-1], 0xff, '}'))
 			}
 		case 3: // move an unbound/bound row's time to another hour and lower that hour's quota cell
@@ -448,6 +455,51 @@ func applyIntegrityDamage(t testing.TB, rng *rand.Rand, f *integrityFuzzDB) {
 	})
 	if err != nil {
 		f.note("damage %d err %v", kind, err)
+	}
+}
+
+// TestApplyIntegrityDamageSkipsNestedRawKey pins the damage injector against
+// the shape its own nested-bucket damage leaves behind: a raw key that is a
+// bucket has no value, so truncating "the last value byte" used to panic the
+// differential harness before it could compare the two read paths.
+func TestApplyIntegrityDamageSkipsNestedRawKey(t *testing.T) {
+	db := testDB(t)
+	f := &integrityFuzzDB{db: db, store: NewUsageStore(db)}
+	nested := []byte("2026-10-20T01:00:00Z_nested")
+	if err := db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.Bucket([]byte(BucketUsageEvents)).CreateBucket(nested)
+		return err
+	}); err != nil {
+		t.Fatalf("plant nested bucket: %v", err)
+	}
+	seed := int64(-1)
+	for candidate := int64(0); candidate < 10000; candidate++ {
+		if rand.New(rand.NewSource(candidate)).Intn(26) == 2 {
+			seed = candidate
+			break
+		}
+	}
+	if seed < 0 {
+		t.Fatal("no seed draws the invalid-UTF-8 damage kind")
+	}
+	applyIntegrityDamage(t, rand.New(rand.NewSource(seed)), f)
+	reached := false
+	for _, line := range f.log {
+		if strings.Contains(line, "skipped: no value") {
+			reached = true
+			break
+		}
+	}
+	if !reached {
+		t.Fatalf("the invalid-UTF-8 damage did not reach the nested key: %v", f.log)
+	}
+	if err := db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket([]byte(BucketUsageEvents)).Bucket(nested) == nil {
+			return fmt.Errorf("nested bucket %q disappeared", nested)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
