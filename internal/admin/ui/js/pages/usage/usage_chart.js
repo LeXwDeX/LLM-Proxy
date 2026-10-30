@@ -9,8 +9,17 @@ AdminApp.register("usageChart", function (app) {
   var usageCell = app.bind("usageTables", "usageCell");
   var usageNumber = app.bind("usageTables", "usageNumber");
   var usageTokensAvailable = app.bind("usageTables", "usageTokensAvailable");
+  var offsetMinutes = app.bind("overview", "offsetMinutes");
   function pad2(value) { return String(value).padStart(2, "0"); }
   var localDayFillMax = 800;
+  // Half-hour zones make a whole UTC hour straddle two local dates; the chart
+  // cannot split a server bucket, so the note must say boundary usage may move.
+  var halfHourDriftNote = "当前时区不是整点偏移，UTC 整点桶跨本地日界时，边界用量可能归到相邻日。";
+  function hasHalfHourOffset(range) {
+    var from = range && Date.parse(range.from), to = range && Date.parse(range.to);
+    if (!isFinite(from) || !isFinite(to)) return false;
+    return offsetMinutes(new Date(from)) % 60 !== 0 || offsetMinutes(new Date(to)) % 60 !== 0;
+  }
   function localDayStart(ms) {
     var at = new Date(ms);
     return new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime();
@@ -55,13 +64,15 @@ AdminApp.register("usageChart", function (app) {
       note.textContent =
         "按查询时的时间范围和筛选 · 服务端返回 UTC 整点小时桶，图表按浏览器本地日重新汇总；区间超过 " +
         localDayFillMax +
-        " 个本地日，仅绘制有数据的本地日，不补齐空白日。今日/昨日/近 7/30 天范围按浏览器本地时间选取，横轴按本地日标注。";
+        " 个本地日，仅绘制有数据的本地日，不补齐空白日。开始与结束边界所在整点小时整桶计入（含边界小时），不扩展到完整起止 UTC 日，因此边界日可能包含范围外记录。今日/昨日/近 7/30 天范围按浏览器本地时间选取，横轴按本地日标注。" +
+        (hasHalfHourOffset(range) ? halfHourDriftNote : "");
       return;
     }
     note.textContent =
       groupBy === "hour"
         ? "按查询时的时间范围和筛选 · 按 UTC 小时聚合；开始与结束时间所在整点小时均整桶计入（含边界小时），因此边界桶可能包含范围外记录。今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。横轴小时按浏览器本地时间标注，标题保留对应 UTC 小时。"
-        : "按查询时的时间范围和筛选 · 服务端返回 UTC 整点小时桶，图表按浏览器本地日重新汇总；今日/昨日/近 7/30 天范围按浏览器本地时间选取，柱状图为本地自然日。横轴按本地日标注。";
+        : "按查询时的时间范围和筛选 · 服务端返回 UTC 整点小时桶，图表按浏览器本地日重新汇总；开始与结束边界所在整点小时整桶计入（含边界小时），不扩展到完整起止 UTC 日，因此边界日可能包含范围外记录。今日/昨日/近 7/30 天范围按浏览器本地时间选取，柱状图按本地日期汇总（不拆分小时桶）。横轴按本地日标注。" +
+          (hasHalfHourOffset(range) ? halfHourDriftNote : "");
   }
   // Hour buckets are labelled in browser-local time (the title keeps the UTC
   // hour); day buckets are already browser-local days.

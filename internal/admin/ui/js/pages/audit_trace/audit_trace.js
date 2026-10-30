@@ -159,8 +159,10 @@ AdminApp.register("audit_trace", function (app) {
   }
 
   function tracePageSize() {
-    var requested = Math.floor(Number(document.getElementById("traceLimit").value));
-    if (!isFinite(requested) || requested < 1) {
+    var requested = Number(document.getElementById("traceLimit").value);
+    // Fractional input is not a partial page: treat it as invalid instead of
+    // silently flooring 1.9 to a one-row request.
+    if (!Number.isInteger(requested) || requested < 1) {
       traceLimitNotice = "显示条数需在 1–" + traceLimitMax + " 之间，已按 " + traceDefaultLimit + " 条查询。";
       renderTraceLimitHint();
       return traceDefaultLimit;
@@ -239,13 +241,15 @@ AdminApp.register("audit_trace", function (app) {
 
     var version = ++traceLoadVersion;
     traceOffset = 0; // 重置偏移量
-    var limit = tracePageSize();
     var searchId = document.getElementById("traceSearchId").value.trim();
 
     startBrailleSpinner("加载请求记录...");
     try {
-      // If searching by ID, use the single-record endpoint
+      // If searching by ID, use the single-record endpoint. The page-size cap
+      // does not apply, so it must not leave a stale limit notice behind.
       if (searchId) {
+        traceLimitNotice = "";
+        renderTraceLimitHint();
         var record = await api(
           "/admin/data/trace/" + encodeURIComponent(searchId),
         );
@@ -259,6 +263,7 @@ AdminApp.register("audit_trace", function (app) {
         return;
       }
 
+      var limit = tracePageSize();
       var data = await api(
         tracePath(limit, traceOffset),
         { timeoutMs: 60000 }, // trace pages scan the trace store

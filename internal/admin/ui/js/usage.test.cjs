@@ -986,6 +986,7 @@ test("daily chart keeps late buckets on their real local date beyond 800 days", 
     {bucket_start: "2025-03-20T01:00:00Z", input_tokens: 100, estimated_cost: 0},
   ], "day", {from: "2022-12-31T16:00:00Z", to: "2025-03-20T15:59:59Z"}, "hour");
   const bars = chart.innerHTML.split("<div class='chart-bar-group'").slice(1);
+  assert.equal(bars.length, 1, "long ranges draw only the data day, never a capped calendar");
   assert.equal(
     bars.filter(bar => bar.includes("本地 2025-03-10 日") && /chart-value'>100</.test(bar)).length,
     0,
@@ -996,4 +997,128 @@ test("daily chart keeps late buckets on their real local date beyond 800 days", 
   assert.match(late[0], /chart-value'>100</, "the late bucket stays on the last day");
   app.modules.usageChart.setUsageChartNote("day", "custom", {from: "2022-12-31T16:00:00Z", to: "2025-03-20T15:59:59Z"});
   assert.match(h.document.getElementById("usageChartNote").textContent, /仅绘制有数据的本地日/, "long ranges disclose that empty days are omitted");
+}));
+
+test("daily chart keeps seven local days and discloses whole-hour bucket drift in a half-hour zone", () => withTZ("Asia/Kolkata", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  const chart = h.document.getElementById("dailyChart");
+  // Local 2026-10-24 00:00 through 2026-10-30 23:59:59 (UTC+05:30).
+  const range = {from: "2026-10-23T18:30:00Z", to: "2026-10-30T18:29:59Z"};
+  app.modules.usage.renderDailyChart([
+    {bucket_start: "2026-10-24T18:00:00Z", input_tokens: 10, estimated_cost: 0},
+    {bucket_start: "2026-10-25T18:00:00Z", input_tokens: 100, estimated_cost: 0},
+  ], "day", range, "hour");
+  const labels = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(labels, ["10-24", "10-25", "10-26", "10-27", "10-28", "10-29", "10-30"], "a half-hour offset still yields exactly seven local-day bars");
+  const values = [...chart.innerHTML.matchAll(/class='chart-value'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(values, ["10", "100", "0", "0", "0", "0", "0"], "whole UTC hours are grouped by the local date of their start");
+  app.modules.usageChart.setUsageChartNote("day", "custom", range);
+  const note = h.document.getElementById("usageChartNote").textContent;
+  assert.match(note, /不是整点偏移/, "the note names the non-whole-hour offset");
+  assert.match(note, /相邻日/, "the note warns that boundary usage may land on an adjacent local day");
+}));
+
+test("custom range ending at local midnight discloses whole-hour boundaries and keeps the adjacent day bar", () => withTZ("Asia/Shanghai", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  h.context.fetch = async () => response(aggregate({
+    group_by: "hour",
+    buckets: [
+      {bucket_start: "2026-10-17T17:00:00Z", input_tokens: 5, estimated_cost: 0},
+      {bucket_start: "2026-10-20T16:00:00Z", input_tokens: 999, estimated_cost: 0},
+    ],
+  }));
+  const ranges = h.document.querySelectorAll(".time-range-btn");
+  click(ranges.find(button => button.dataset.range === "custom"));
+  h.document.getElementById("usageFrom").value = "2026-10-18T00:00";
+  h.document.getElementById("usageTo").value = "2026-10-21T00:00";
+  click(h.document.getElementById("applyCustomRange"));
+  await settle();
+  const chart = h.document.getElementById("dailyChart");
+  const labels = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(labels, ["10-18", "10-19", "10-20", "10-21"], "the server's inclusive boundary hour draws the adjacent local day");
+  const values = [...chart.innerHTML.matchAll(/class='chart-value'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(values, ["5", "0", "0", "999"]);
+  const note = h.document.getElementById("usageChartNote").textContent;
+  assert.match(note, /开始与结束边界所在整点小时整桶计入/, "the day note restores the whole-hour boundary disclosure");
+  assert.match(note, /不扩展到完整起止 UTC 日/, "the note does not claim full UTC-day coverage");
+  assert.doesNotMatch(note, /不是整点偏移/, "a whole-hour offset does not warn about half-hour drift");
+}));
+
+test("custom multi-day range re-aggregates hourly buckets into local days through loadUsage", () => withTZ("Asia/Shanghai", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  app.state.modelGroupsLoaded = true;
+  h.context.fetch = async () => response(aggregate({
+    group_by: "hour",
+    buckets: [
+      {bucket_start: "2026-10-19T16:00:00Z", input_tokens: 10, estimated_cost: 0},
+      {bucket_start: "2026-10-20T16:00:00Z", input_tokens: 20, estimated_cost: 0},
+      {bucket_start: "2026-10-21T16:00:00Z", input_tokens: 30, estimated_cost: 0},
+    ],
+  }));
+  const ranges = h.document.querySelectorAll(".time-range-btn");
+  click(ranges.find(button => button.dataset.range === "custom"));
+  h.document.getElementById("usageFrom").value = "2026-10-20T00:00";
+  h.document.getElementById("usageTo").value = "2026-10-22T01:00";
+  click(h.document.getElementById("applyCustomRange"));
+  await settle();
+  const chart = h.document.getElementById("dailyChart");
+  const labels = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(labels, ["10-20", "10-21", "10-22"], "loadUsage keeps the hourly response and draws local-day labels");
+  const values = [...chart.innerHTML.matchAll(/class='chart-value'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(values, ["10", "20", "30"], "loadUsage sums hourly buckets into the day containing their local start");
+}));
+
+test("local-day zero fill stops exactly after 800 days and longer ranges draw only data days", () => withTZ("Asia/Shanghai", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  const chart = h.document.getElementById("dailyChart");
+  const cases = [
+    {days: 799, to: "2025-03-09T15:59:59Z", bars: 799},
+    {days: 800, to: "2025-03-10T15:59:59Z", bars: 800},
+    {days: 801, to: "2025-03-11T15:59:59Z", bars: 1},
+  ];
+  for (const item of cases) {
+    app.modules.usage.renderDailyChart([
+      {bucket_start: "2023-01-01T01:00:00Z", input_tokens: item.days, estimated_cost: 0},
+    ], "day", {from: "2022-12-31T16:00:00Z", to: item.to}, "hour");
+    const bars = chart.innerHTML.split("<div class='chart-bar-group'").slice(1);
+    assert.equal(bars.length, item.bars, item.days + " local days draw " + item.bars + " bars");
+  }
+}));
+
+test("daily chart keeps spring-forward days to seven local bars", () => withTZ("America/New_York", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  const chart = h.document.getElementById("dailyChart");
+  // Local 2026-03-04 00:00 EST through 2026-03-10 23:59:59 EDT: 2026-03-08 has 23 hours.
+  app.modules.usage.renderDailyChart([
+    {bucket_start: "2026-03-04T05:00:00Z", input_tokens: 1, estimated_cost: 0},
+    {bucket_start: "2026-03-08T07:00:00Z", input_tokens: 2, estimated_cost: 0},
+    {bucket_start: "2026-03-09T04:00:00Z", input_tokens: 4, estimated_cost: 0},
+  ], "day", {from: "2026-03-04T05:00:00Z", to: "2026-03-11T03:59:59Z"}, "hour");
+  const labels = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(labels, ["03-04", "03-05", "03-06", "03-07", "03-08", "03-09", "03-10"], "the 23-hour day is still one local day");
+  const values = [...chart.innerHTML.matchAll(/class='chart-value'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(values, ["1", "0", "0", "0", "2", "4", "0"]);
+}));
+
+test("daily chart sums both repeated hours on a fall-back day", () => withTZ("America/New_York", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  const chart = h.document.getElementById("dailyChart");
+  // Local 2026-10-28 00:00 EDT through 2026-11-03 23:59:59 EST: 2026-11-01 has 25 hours.
+  app.modules.usage.renderDailyChart([
+    {bucket_start: "2026-10-28T04:00:00Z", input_tokens: 1, estimated_cost: 0},
+    {bucket_start: "2026-11-01T05:00:00Z", input_tokens: 2, estimated_cost: 0},
+    {bucket_start: "2026-11-01T06:00:00Z", input_tokens: 4, estimated_cost: 0},
+    {bucket_start: "2026-11-02T05:00:00Z", input_tokens: 8, estimated_cost: 0},
+  ], "day", {from: "2026-10-28T04:00:00Z", to: "2026-11-04T04:59:59Z"}, "hour");
+  const labels = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(labels, ["10-28", "10-29", "10-30", "10-31", "11-01", "11-02", "11-03"], "the 25-hour day is still one local day");
+  const values = [...chart.innerHTML.matchAll(/class='chart-value'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(values, ["1", "0", "0", "0", "6", "8", "0"], "both 01:00 hours land in the same local day");
 }));

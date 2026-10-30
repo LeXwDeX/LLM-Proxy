@@ -59,6 +59,35 @@ test("trace limit rejects values below one instead of silently querying them", a
   assert.match(hint.textContent, /50/, "the applied default is disclosed");
 });
 
+test("trace limit rejects fractional values instead of silently flooring them", async () => {
+  const t = await traceHarness(() => ({records: [], count: 0, limit: 50, limit_max: 5000, offset: 0, stats: {}, enabled: true}));
+  await t.trace.checkTraceEnabled().catch(() => {});
+  t.requests.length = 0;
+  t.app.state.traceEnabledForTest = true;
+  t.select("traceLimit", "1.9");
+  await t.trace.loadTrace();
+  assert.match(t.requests[0], /limit=50(&|$)/, "a fractional value falls back to the default before querying");
+  const hint = t.h.document.getElementById("traceLimitHint");
+  assert.match(hint.textContent, /1–5000/, "a fractional value is treated as invalid and explains the range");
+  assert.match(hint.textContent, /50/, "the applied default is disclosed");
+  assert.doesNotMatch(hint.textContent, /最多 5000 条/, "a fractional value is not reported as an oversized value");
+});
+
+test("request-id search ignores list page-size limits and shows no cap notice", async () => {
+  const t = await traceHarness(() => ({records: [], count: 0, limit: 50, limit_max: 5000, offset: 0, stats: {}, enabled: true}));
+  await t.trace.checkTraceEnabled().catch(() => {});
+  t.h.requests.length = 0;
+  t.app.state.traceEnabledForTest = true;
+  t.select("traceSearchId", "abc123");
+  t.select("traceLimit", "99999");
+  await t.trace.loadTrace();
+  const calls = t.h.requests.map(item => item.url).filter(url => url.startsWith("/admin/data/trace"));
+  assert.deepEqual(calls, ["/admin/data/trace/abc123"], "ID search uses the single-record endpoint and never queries a page");
+  const hint = t.h.document.getElementById("traceLimitHint");
+  assert.doesNotMatch(hint.textContent, /最多 5000 条/, "a page-size cap cannot apply to a single-record lookup");
+  assert.doesNotMatch(hint.textContent, /5000/, "no stale page-size notice is left behind");
+});
+
 test("trace filters apply to appended pages and empty placeholders never mix with rows", async () => {
   const t = await traceHarness(url => {
     const offset = Number((/offset=(\d+)/.exec(url) || [0, 0])[1]);

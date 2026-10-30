@@ -16,6 +16,7 @@ AdminApp.register("overview", function (app) {
   var renderRangeWindow = app.bind("overviewTrends", "renderRangeWindow");
   var el = app.bind("overviewUtil", "el");
   var isObject = app.bind("overviewUtil", "isObject");
+  var offsetMinutes = app.bind("overviewUtil", "offsetMinutes");
   var text = app.bind("overviewUtil", "text");
   var visible = app.bind("overviewUtil", "visible");
   var rollupBuckets = app.bind("overviewRange", "rollupBuckets");
@@ -287,5 +288,5 @@ AdminApp.register("overview", function (app) {
   document.addEventListener("keydown", function (event) { if (event.key === "Escape") hideTooltip(); });
   document.addEventListener("pointerdown", function (event) { if (S.tooltipTrigger && event.target !== S.tooltipTrigger && !S.tooltipTrigger.contains(event.target)) hideTooltip(); });
   document.addEventListener("scroll", hideTooltip, true);
-  return {loadOverview: loadOverview, startOverviewAutoRefresh: startOverviewAutoRefresh, stopOverviewAutoRefresh: stopOverviewAutoRefresh, selectRange: selectRange, rangeWindow: rangeWindow, rollupBuckets: rollupBuckets, aggregatePath: aggregatePath, request: request, schedule: schedule, showTooltip: showTooltip};
+  return {loadOverview: loadOverview, startOverviewAutoRefresh: startOverviewAutoRefresh, stopOverviewAutoRefresh: stopOverviewAutoRefresh, selectRange: selectRange, rangeWindow: rangeWindow, rollupBuckets: rollupBuckets, aggregatePath: aggregatePath, offsetMinutes: offsetMinutes, request: request, schedule: schedule, showTooltip: showTooltip};
 });
