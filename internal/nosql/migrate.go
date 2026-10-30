@@ -110,10 +110,15 @@ func migrateClients(db *bolt.DB, path string) {
 		return
 	}
 
+	imported := 0
 	err = db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(BucketClients))
 		for _, c := range clients {
 			c = normalizeClient(c)
+			if strings.EqualFold(c.Name, reservedClientName) {
+				slog.Warn("bbolt migration: skipping reserved client name", "name", c.Name, "path", path)
+				continue
+			}
 			key := strings.ToLower(c.Name)
 			data, err := json.Marshal(c)
 			if err != nil {
@@ -123,6 +128,7 @@ func migrateClients(db *bolt.DB, path string) {
 			if err := b.Put([]byte(key), data); err != nil {
 				return err
 			}
+			imported++
 		}
 		return nil
 	})
@@ -130,7 +136,7 @@ func migrateClients(db *bolt.DB, path string) {
 		slog.Warn("bbolt migration: failed to write clients", "err", err)
 		return
 	}
-	slog.Info("bbolt migration: migrated clients", "count", len(clients))
+	slog.Info("bbolt migration: migrated clients", "count", imported)
 }
 
 func migrateModelCosts(db *bolt.DB, path string) {
