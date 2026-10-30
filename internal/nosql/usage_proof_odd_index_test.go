@@ -1292,6 +1292,9 @@ func TestProofOddIndexWritersAreEnumerated(t *testing.T) {
 		"usage_integrity_class.go": true, "usage_proof_odd_index.go": true,
 		"usage_proof_scan_cache.go": true, "usage_quarantine.go": true,
 		"usage_receipts.go": true, "usage_recheck.go": true, "usage_rollup_proof.go": true,
+		// Added by concurrent branches: both only read these buckets (#146
+		// retention stats; #125 P2 client-scoped quota reads).
+		"usage_retention_stats.go": true, "usage_integrity_clientscope.go": true,
 	}
 	writers := map[string][]string{
 		"usage_receipts.go":     {"proofOddNoteRaw", "proofOddNoteReceipt"},
