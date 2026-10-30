@@ -256,8 +256,9 @@ func TestMetricsUsageRetentionNotReadyOnFirstRead(t *testing.T) {
 
 func TestMetricsUsageRetentionStoreUnavailable(t *testing.T) {
 	stores := setupTestStores(t, t.TempDir())
-	// A non-nil usage store whose database handle is unavailable is reachable
-	// through the constructor without stubbing.
+	// A non-nil usage store with a nil database is a defensive constructor
+	// state, not a production path: main.go always passes an open database and
+	// the handler omits the section when the store is nil.
 	h := metricsTestHandler(t, stores, nosql.NewUsageStore(nil))
 
 	body, raw := readMetricsBody(t, h)

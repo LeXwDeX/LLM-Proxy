@@ -85,6 +85,14 @@ func TestUsageRetentionDefaultRefreshInterval(t *testing.T) {
 	if UsageRetentionRefreshInterval != 5*time.Minute {
 		t.Fatalf("UsageRetentionRefreshInterval = %v, want the 5 minute default", UsageRetentionRefreshInterval)
 	}
+
+	t.Run("non-positive falls back to the default", func(t *testing.T) {
+		UsageRetentionRefreshInterval = 0
+		t.Cleanup(func() { UsageRetentionRefreshInterval = old })
+		if got := usageRetentionInterval(); got != 5*time.Minute {
+			t.Fatalf("usageRetentionInterval() with a zero interval = %v, want 5m", got)
+		}
+	})
 }
 
 func TestUsageRetentionStatsEmptyDatabase(t *testing.T) {
@@ -316,6 +324,50 @@ func TestUsageRetentionEventRangeSameSecondOrdersByTimestamp(t *testing.T) {
 				t.Fatalf("invalid_keys = %d, want %d", stats.Events.InvalidKeys, tc.wantInvalid)
 			}
 		})
+	}
+}
+
+// TestUsageRetentionEventRangeBoundarySecondInvalidKeys pins which invalid
+// keys are inspected while locating the endpoints. Invalid keys strictly
+// inside a middle second are not boundary keys and stay uncounted, while the
+// invalid prefix, suffix, and keys inside both boundary seconds count once.
+func TestUsageRetentionEventRangeBoundarySecondInvalidKeys(t *testing.T) {
+	db := testDB(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	putRetentionKeys(t, db, BucketUsageEvents,
+		// Earliest second: two parseable keys with one invalid key between them
+		// in key order. Only the forward boundary-second scan sees it.
+		usageKey(base.Add(100*time.Millisecond), "earliest-a"),
+		"2026-01-01T00:00:00.50Z_invalid-early", // non-canonical fraction sorts between .1Z and .5Z
+		usageKey(base.Add(500*time.Millisecond), "earliest-b"),
+		// Middle second: parseable plus invalid keys that are not boundary keys.
+		usageKey(base.Add(time.Second+100*time.Millisecond), "middle"),
+		"2026-01-01T00:00:01_invalid-middle",
+		// Latest second: mirror of the earliest second. Only the backward
+		// boundary-second scan sees the invalid key.
+		usageKey(base.Add(2*time.Second+100*time.Millisecond), "latest-a"),
+		"2026-01-01T00:00:02.50Z_invalid-late",
+		usageKey(base.Add(2*time.Second+500*time.Millisecond), "latest-b"),
+		// Invalid suffix after every parseable key.
+		"zzzz-not-a-time",
+	)
+
+	stats := awaitUsageRetentionStats(t, NewUsageStore(db))
+	if !stats.Available {
+		t.Fatalf("snapshot unavailable: reason %q", stats.Reason)
+	}
+	wantEarliest := base.Add(100 * time.Millisecond)
+	wantLatest := base.Add(2*time.Second + 500*time.Millisecond)
+	if stats.Events.Earliest == nil || !stats.Events.Earliest.Equal(wantEarliest) {
+		t.Fatalf("earliest = %v, want %v", stats.Events.Earliest, wantEarliest)
+	}
+	if stats.Events.Latest == nil || !stats.Events.Latest.Equal(wantLatest) {
+		t.Fatalf("latest = %v, want %v", stats.Events.Latest, wantLatest)
+	}
+	// Earliest-second invalid (1) + latest-second invalid (1) + suffix (1). The
+	// middle second's invalid key and the missing prefix are not counted.
+	if stats.Events.InvalidKeys != 3 {
+		t.Fatalf("invalid_keys = %d, want 3", stats.Events.InvalidKeys)
 	}
 }
 
