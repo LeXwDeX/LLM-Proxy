@@ -3,9 +3,11 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"net/http"
 	"strings"
+
+	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
+	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 )
 
 func (h *Handler) handleListClients(w http.ResponseWriter, r *http.Request) {
@@ -16,10 +18,10 @@ func (h *Handler) handleListClients(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Plaintext access keys are admin-only; other roles (and sessionless
-	// requests) get the same masked form targets use.
-	if session, ok := SessionFromContext(r.Context()); !ok || session == nil || session.Role != RoleAdmin {
+	// requests) get the same suffix-only mask used by audit logs.
+	if !isAdminSession(r) {
 		for i := range clients {
-			clients[i].AccessKey = maskClientKeyForViewer(clients[i].AccessKey)
+			clients[i].AccessKey = auth.MaskClientKey(clients[i].AccessKey)
 		}
 	}
 
@@ -50,7 +52,7 @@ func (h *Handler) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.evaluateClientQuota(req.Name)
-	h.recordAudit(r, "client_create", req.Name, "success", maskKey(req.AccessKey))
+	h.recordAudit(r, "client_create", req.Name, "success", auth.MaskClientKey(req.AccessKey))
 
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "ok"})
 }
@@ -92,7 +94,7 @@ func (h *Handler) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.evaluateClientQuota(name)
-	h.recordAudit(r, "client_update", name, "success", maskKey(req.AccessKey))
+	h.recordAudit(r, "client_update", name, "success", auth.MaskClientKey(req.AccessKey))
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -208,14 +210,4 @@ func (h *Handler) validateClientPoolQuotas(client *config.Client) error {
 		}
 	}
 	return nil
-}
-
-// maskClientKeyForViewer hides a client key from non-admin roles. Client keys
-// have no minimum length, so a prefix-plus-suffix mask could reveal most of a
-// short key; viewers see at most the last four characters of a long key.
-func maskClientKeyForViewer(key string) string {
-	if len(key) < 16 {
-		return "****"
-	}
-	return "****" + key[len(key)-4:]
 }

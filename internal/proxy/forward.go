@@ -1189,7 +1189,7 @@ func (s *Service) recordTrace(r *http.Request, target *Target, resp *http.Respon
 	clientAccessKey := ""
 	if principal != nil {
 		clientName = principal.Name
-		clientAccessKey = maskAPIKey(principal.AccessKey)
+		clientAccessKey = auth.MaskClientKey(principal.AccessKey)
 	}
 
 	// 收集请求头（脱敏）
