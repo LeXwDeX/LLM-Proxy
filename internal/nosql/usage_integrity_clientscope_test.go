@@ -178,15 +178,12 @@ func clientScopeProbeDeclines(t *testing.T, db *bolt.DB, client string, from, to
 
 // clientScopeAssertSameVerdict compares the scoped read with the exhaustive
 // reference: same failure category, and on success the same cost units.
-// Exhaustive checks may report the first failing cell of a Go map, so a
-// category mismatch is retried before it is reported.
+// Exhaustive failure evidence is chosen by sorted key, so a category mismatch
+// is a real divergence and is reported on the first comparison.
 func clientScopeAssertSameVerdict(t *testing.T, label string, gotUnits []CostUnit, gotErr error, reference func() ([]CostUnit, error)) {
 	t.Helper()
 	wantUnits, wantErr := reference()
 	gotClass := integrityErrClass(gotErr)
-	for retry := 0; gotClass != integrityErrClass(wantErr) && retry < 20; retry++ {
-		wantUnits, wantErr = reference()
-	}
 	if gotClass != integrityErrClass(wantErr) {
 		t.Fatalf("%s: scoped verdict %q, exhaustive %q", label, gotClass, integrityErrClass(wantErr))
 	}

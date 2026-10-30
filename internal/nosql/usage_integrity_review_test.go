@@ -44,15 +44,9 @@ func compareInstalledWithFull(t *testing.T, db *bolt.DB, q integrityQuery, class
 		if full[i] == fast[i] {
 			continue
 		}
-		matched := false
-		installIntegrityClass(db, nil)
-		for retry := 0; retry < 20 && !matched; retry++ {
-			matched = runIntegrityQuery(db, q, false)[i] == fast[i]
-		}
-		installIntegrityClass(db, class)
-		if !matched {
-			t.Fatalf("installed Fast != Full for %s\n full: %s\n fast: %s\n log: %v", q, full[i], fast[i], log)
-		}
+		// Exhaustive failure evidence is chosen by sorted key, so a retry would
+		// only hide a real Fast/Full divergence behind a random draw.
+		t.Fatalf("installed Fast != Full for %s\n full: %s\n fast: %s\n log: %v", q, full[i], fast[i], log)
 	}
 	return used
 }
