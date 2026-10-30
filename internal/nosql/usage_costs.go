@@ -274,12 +274,20 @@ func readCostRollups(ctx context.Context, tx *bolt.Tx, filter usage.Filter, from
 	return result, nil
 }
 
-// sortedCostKeys orders mismatch reporting so identical damage reports the
-// same first error regardless of map iteration order.
-func sortedCostKeys(counts map[string]int64) []string {
-	keys := make([]string, 0, len(counts))
-	for key := range counts {
+// sortedCostKeys orders mismatch reporting across both parity directions so
+// identical damage reports the same first error regardless of map iteration
+// order.
+func sortedCostKeys(expected, observed map[string]int64) []string {
+	seen := make(map[string]struct{}, len(expected)+len(observed))
+	keys := make([]string, 0, len(expected)+len(observed))
+	for key := range expected {
+		seen[key] = struct{}{}
 		keys = append(keys, key)
+	}
+	for key := range observed {
+		if _, ok := seen[key]; !ok {
+			keys = append(keys, key)
+		}
 	}
 	sort.Strings(keys)
 	return keys
@@ -323,24 +331,21 @@ func assembleCostUnits(ctx context.Context, cells []TargetModelCell, events []us
 			Hour: event.Timestamp.UTC().Truncate(time.Hour), Client: strings.TrimSpace(event.ClientName), Target: strings.ToLower(strings.TrimSpace(event.Target)), Model: strings.ToLower(event.Model), AggCell: eventAggCell(event),
 		}, At: event.Timestamp, EventPriced: true, Event: &event})
 	}
-	// Walk the mismatch checks in key order so the first report is deterministic.
-	for _, key := range sortedCostKeys(expected) {
-		count := expected[key]
+	// Walk the union of both parity directions in key order so the first report
+	// is the globally smallest quotaAggKey, not the smallest per direction.
+	for _, key := range sortedCostKeys(expected, observed) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if observed[key] != count {
-			return nil, fmt.Errorf("%w: raw record count %d differs from rollup count %d", ErrUsageHistoryIncomplete, observed[key], count)
+		expectedCount, expectedOK := expected[key]
+		observedCount := observed[key]
+		if observedCount == expectedCount {
+			continue
 		}
-	}
-	for _, key := range sortedCostKeys(observed) {
-		count := observed[key]
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if expectedOK {
+			return nil, fmt.Errorf("%w: raw record count %d differs from rollup count %d", ErrUsageHistoryIncomplete, observedCount, expectedCount)
 		}
-		if expected[key] != count {
-			return nil, fmt.Errorf("%w: raw event lacks matching quota rollup", ErrUsageHistoryIncomplete)
-		}
+		return nil, fmt.Errorf("%w: raw event lacks matching quota rollup", ErrUsageHistoryIncomplete)
 	}
 	return units, nil
 }
