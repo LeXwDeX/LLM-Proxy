@@ -144,6 +144,7 @@ GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推
 ```sh
 make test                 # check-docs + go test ./...
 make test-fast-integrity  # nosql/quota 用例在强制完整性快速路径下再跑一轮（Issue #125）
+make coverage-check       # internal 覆盖率门禁（串行跑包；总覆盖率与六个核心包均不低于 80%，Issue #136）
 go vet ./...
 go vet -tags=e2e ./test/e2e/
 go build ./...            # 与 CI 一致的编译检查

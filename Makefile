@@ -57,9 +57,12 @@ test-fast-integrity:
 
 # Issue #136：internal 覆盖率门禁。总覆盖率与关键包均不得低于 80%；
 # 脚本按语句数汇总 cover profile，profile 缺失指定包或格式损坏时失败。
+# 串行跑包（-p 1）：包间并行负载会让 internal/nosql 的 wall-clock 比值用例
+# （TestRecordBatchTimeDoesNotScaleWithRetainedEventsOnUpgradedLedger）偶发超阈值。
+# 不要改用 -race 规避，也不要删除或放宽该用例。
 coverage-check:
 	@echo ">> running Go coverage gate"
-	go test -count=1 -coverprofile=coverage.out ./internal/...
+	go test -p 1 -count=1 -coverprofile=coverage.out ./internal/...
 	python3 scripts/testing/check_go_coverage.py --profile coverage.out \
 		--min-total 80 \
 		--min-package internal/admin=80 \

@@ -55,9 +55,9 @@ class CoverageCheckTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertIn('coverage check passed', stdout)
         self.assertIn('TOTAL', stdout)
-        self.assertIn('75.0%', stdout)
-        self.assertIn('100.0%', stdout)
-        self.assertIn('50.0%', stdout)
+        self.assertIn('75.00%', stdout)
+        self.assertIn('100.00%', stdout)
+        self.assertIn('50.00%', stdout)
         # 输出按包名排序，与 profile 中的出现顺序无关。
         self.assertLess(stdout.index('internal/admin'), stdout.index('internal/proxy'))
 
@@ -65,7 +65,21 @@ class CoverageCheckTests(unittest.TestCase):
         self.two_package_profile()
         code, _, stderr = self.run_main('--min-total', '75.1')
         self.assertEqual(code, 1)
-        self.assertIn('total coverage 75.0% is below threshold 75.1%', stderr)
+        self.assertIn('total coverage 75.00% (3/4 statements) is below threshold 75.10%', stderr)
+
+    def test_failure_message_shows_raw_counts_when_percent_rounds_to_threshold(self):
+        # 79999/100000 = 79.999%：两位小数会四舍五入成 80.00，与阈值显示相同。
+        # 失败信息必须带原始语句计数，不能只显示 "80.00% is below threshold 80.00%"。
+        self.write_profile(
+            'mode: set',
+            cover_line(ADMIN, statements=79999, count=1, line=1),
+            cover_line(ADMIN, statements=20001, count=0, line=5),
+        )
+        code, _, stderr = self.run_main('--min-total', '80')
+        self.assertEqual(code, 1)
+        self.assertIn('total coverage 80.00% (79999/100000 statements)', stderr)
+        self.assertIn('threshold 80.00%', stderr)
+        self.assertNotIn('80.00% is below threshold 80.00%', stderr)
 
     def test_package_below_threshold_fails(self):
         self.two_package_profile()
@@ -75,7 +89,7 @@ class CoverageCheckTests(unittest.TestCase):
             'package github.com/LeXwDeX/LLM-Proxy/internal/proxy',
             stderr,
         )
-        self.assertIn('50.0% is below threshold 50.1%', stderr)
+        self.assertIn('50.00% (1/2 statements) is below threshold 50.10%', stderr)
 
     def test_missing_package_fails(self):
         self.two_package_profile()
@@ -102,8 +116,18 @@ class CoverageCheckTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertIn('TOTAL', stdout)
 
+    def test_child_package_does_not_satisfy_parent_min_package(self):
+        # --min-package 只匹配精确包目录，不并入子包。
+        child = 'github.com/LeXwDeX/LLM-Proxy/internal/admin/ui/app.go'
+        self.write_profile('mode: set', cover_line(child, count=1))
+        code, _, stderr = self.run_main(
+            '--min-total', '0', '--min-package', 'internal/admin=80',
+        )
+        self.assertEqual(code, 1)
+        self.assertIn('package not found in profile: internal/admin', stderr)
+
     def test_total_uses_statement_counts_not_block_counts(self):
-        # 2/3 覆盖：按语句数而非块数计算，总计 66.7%。
+        # 2/3 覆盖：按语句数而非块数计算，总计 66.67%。
         self.write_profile(
             'mode: count',
             cover_line(ADMIN, statements=2, count=1),
@@ -111,7 +135,7 @@ class CoverageCheckTests(unittest.TestCase):
         )
         code, stdout, stderr = self.run_main()
         self.assertEqual(code, 1)
-        self.assertIn('total coverage 66.7% is below threshold 80.0%', stderr)
+        self.assertIn('total coverage 66.67% (2/3 statements) is below threshold 80.00%', stderr)
         totals = check_go_coverage.parse_profile(self.profile)
         grand = sum((totals[name].covered for name in totals), 0)
         statements = sum((totals[name].statements for name in totals), 0)
@@ -192,6 +216,17 @@ class CoverageCheckTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn('unsupported mode', stderr)
 
+    def test_multiple_mode_lines_are_rejected(self):
+        # 只支持单次 go test 生成的单一 mode 行；合并 profile 的多个 mode 段视为损坏。
+        self.write_profile(
+            'mode: set', cover_line(ADMIN),
+            'mode: count', cover_line(PROXY),
+        )
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn('multiple mode lines', stderr)
+        self.assertNotIn('Traceback', stderr)
+
     def test_profile_with_only_mode_line_is_rejected(self):
         self.write_profile('mode: set')
         code, _, stderr = self.run_main()
@@ -225,6 +260,15 @@ class CoverageCheckTests(unittest.TestCase):
             code = check_go_coverage.main(['--profile', str(missing)])
         self.assertEqual(code, 2)
         self.assertIn('cannot read profile', stderr.getvalue())
+
+    def test_non_utf8_profile_is_rejected_without_traceback(self):
+        self.profile.write_bytes(b'mode: set\n' + bytes([0xff, 0xfe]) + b'\n')
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = check_go_coverage.main(['--profile', str(self.profile)])
+        self.assertEqual(code, 2)
+        self.assertIn('not valid UTF-8', stderr.getvalue())
+        self.assertNotIn('Traceback', stderr.getvalue())
 
     def test_invalid_thresholds_are_rejected(self):
         self.two_package_profile()

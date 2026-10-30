@@ -11,13 +11,19 @@ profile 行格式:
   mode: set|count|atomic
   <import/path/file.go>:<startLine>.<startCol>,<endLine>.<endCol> <numStmts> <count>
 
-同一块可能出现多次（合并 profile 时常见）：按块键去重并取最大 count，
-语句数只累计一次；count>0 记为已覆盖。
+只支持单次 `go test -coverprofile` 生成的 profile（单一 mode 行）。合并 profile
+或多个 mode 段不属于支持范围，按损坏处理并以退出码 2 结束。
+
+同一 profile 内同一块重复出现时按块键去重并取最大 count，语句数只累计一次；
+count>0 记为已覆盖。
+
+--min-package 只匹配精确的包目录：完整导入路径等于 PKG 或以 "/PKG" 结尾，
+不并入其子包（例如 internal/admin 不匹配 internal/admin/ui）。
 
 退出码:
   0  所有阈值满足
   1  覆盖率低于阈值，或指定的包在 profile 中不存在
-  2  profile 为空、格式错误或命令行参数非法
+  2  profile 为空、格式错误（含非 UTF-8、多 mode 段）或命令行参数非法
 """
 
 from __future__ import annotations
@@ -79,6 +85,8 @@ def parse_profile(path: Path) -> Dict[str, Totals]:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ProfileError(f"cannot read profile {path}: {exc}") from exc
+    except UnicodeError as exc:
+        raise ProfileError(f"profile {path} is not valid UTF-8: {exc}") from exc
 
     lines = text.splitlines()
     if not lines or not lines[0].strip():
@@ -98,6 +106,11 @@ def parse_profile(path: Path) -> Dict[str, Totals]:
         line = raw_line.strip()
         if not line:
             continue
+        if line.startswith("mode:"):
+            raise ProfileError(
+                f"profile {path} line {line_number}: multiple mode lines are not supported; "
+                "expected a profile from a single go test run"
+            )
         match = BLOCK_RE.match(line)
         if match is None:
             raise ProfileError(f"profile {path} line {line_number}: invalid coverage block {line!r}")
@@ -167,11 +180,11 @@ def print_table(totals: Dict[str, Totals]) -> None:
         grand.merge(package_totals)
         print(
             f"{package:<{width}} {package_totals.covered:>8} "
-            f"{package_totals.statements:>11} {package_totals.percent:>8.1f}%"
+            f"{package_totals.statements:>11} {package_totals.percent:>8.2f}%"
         )
     print(
         f"{'TOTAL':<{width}} {grand.covered:>8} "
-        f"{grand.statements:>11} {grand.percent:>8.1f}%"
+        f"{grand.statements:>11} {grand.percent:>8.2f}%"
     )
 
 
@@ -188,10 +201,12 @@ def evaluate(
             failures.append(f"package not found in profile: {package}")
             continue
         for name in matched:
-            actual = totals[name].percent
-            if actual < minimum:
+            actual = totals[name]
+            if actual.percent < minimum:
                 failures.append(
-                    f"package {name} coverage {actual:.1f}% is below threshold {minimum:.1f}%"
+                    f"package {name} coverage {actual.percent:.2f}% "
+                    f"({actual.covered}/{actual.statements} statements) "
+                    f"is below threshold {minimum:.2f}%"
                 )
 
     grand = Totals()
@@ -199,16 +214,26 @@ def evaluate(
         grand.merge(package_totals)
     if grand.percent < min_total:
         failures.append(
-            f"total coverage {grand.percent:.1f}% is below threshold {min_total:.1f}%"
+            f"total coverage {grand.percent:.2f}% "
+            f"({grand.covered}/{grand.statements} statements) "
+            f"is below threshold {min_total:.2f}%"
         )
     return failures
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Parse a Go cover profile and enforce per-package/total coverage thresholds."
+        description=(
+            "Parse a Go cover profile from a single `go test -coverprofile` run "
+            "and enforce per-package/total coverage thresholds. Profiles with "
+            "multiple mode lines are rejected as corrupt."
+        )
     )
-    parser.add_argument("--profile", required=True, help="path to a Go cover profile")
+    parser.add_argument(
+        "--profile",
+        required=True,
+        help="path to a Go cover profile from a single go test run",
+    )
     parser.add_argument(
         "--min-total",
         default="80",
@@ -220,7 +245,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="PKG=PERCENT",
-        help="minimum coverage for a package directory (repeatable)",
+        help=(
+            "minimum coverage for an exact package directory (repeatable); "
+            "subpackages are not included"
+        ),
     )
     return parser
 
