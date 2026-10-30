@@ -249,11 +249,140 @@ AdminApp.register("targetsSave", function (app) {
     if (value === null || value === undefined || value === "" || value === false) return undefined;
     return value;
   }
+  // Canonical JSON text for one custom-body value. The tokenizer decodes
+  // strings (normalising escape spellings) while copying every number token
+  // verbatim, so integers above Number.MAX_SAFE_INTEGER are never parsed into
+  // a JS number. Object members are sorted because JSON objects are unordered;
+  // arrays keep their order. The server stores RawMessage through
+  // encoding/json, which compacts whitespace, normalises some escapes and may
+  // HTML-escape strings, so comparing these canonical strings avoids false
+  // conflicts after an unconfirmed save.
+  function canonicalCustomBodyRaw(value) {
+    if (typeof value !== "string") return value;
+    try {
+      return canonicalJSONText(value);
+    } catch (e) {
+      // Validated input should never reach here. Keep malformed text distinct
+      // from every other value instead of treating it as an empty field.
+      return "invalid-json:" + value;
+    }
+  }
+  function canonicalJSONText(text) {
+    var i = 0;
+    function fail() { throw new Error("invalid JSON"); }
+    function whitespace() {
+      while (i < text.length) {
+        var c = text[i];
+        if (c !== " " && c !== "\t" && c !== "\n" && c !== "\r") break;
+        i++;
+      }
+    }
+    function parseValue() {
+      whitespace();
+      var c = text[i];
+      if (c === "{") return parseObject();
+      if (c === "[") return parseArray();
+      if (c === '"') return JSON.stringify(parseString());
+      if (c === "t") { expect("true"); return "true"; }
+      if (c === "f") { expect("false"); return "false"; }
+      if (c === "n") { expect("null"); return "null"; }
+      return parseNumber();
+    }
+    function parseObject() {
+      i++;
+      var entries = new Map();
+      whitespace();
+      if (text[i] === "}") { i++; return "{}"; }
+      while (true) {
+        whitespace();
+        if (text[i] !== '"') fail();
+        var key = parseString();
+        whitespace();
+        if (text[i] !== ":") fail();
+        i++;
+        // Standard JSON parsers (including encoding/json) keep the last duplicate member.
+        entries.set(key, parseValue());
+        whitespace();
+        if (text[i] === ",") { i++; continue; }
+        if (text[i] === "}") { i++; break; }
+        fail();
+      }
+      var keys = Array.from(entries.keys()).sort();
+      return "{" + keys.map(function (key) {
+        return JSON.stringify(key) + ":" + entries.get(key);
+      }).join(",") + "}";
+    }
+    function parseArray() {
+      i++;
+      var values = [];
+      whitespace();
+      if (text[i] === "]") { i++; return "[]"; }
+      while (true) {
+        values.push(parseValue());
+        whitespace();
+        if (text[i] === ",") { i++; continue; }
+        if (text[i] === "]") { i++; break; }
+        fail();
+      }
+      return "[" + values.join(",") + "]";
+    }
+    function parseString() {
+      i++;
+      var out = "";
+      while (i < text.length) {
+        var c = text[i++];
+        if (c === '"') return out;
+        if (c === "\\") {
+          var esc = text[i++];
+          if (esc === '"' || esc === "\\" || esc === "/") out += esc;
+          else if (esc === "b") out += "\b";
+          else if (esc === "f") out += "\f";
+          else if (esc === "n") out += "\n";
+          else if (esc === "r") out += "\r";
+          else if (esc === "t") out += "\t";
+          else if (esc === "u") {
+            var hex = text.slice(i, i + 4);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail();
+            out += String.fromCharCode(parseInt(hex, 16));
+            i += 4;
+          } else {
+            fail();
+          }
+        } else if (c.charCodeAt(0) < 0x20) {
+          fail();
+        } else {
+          out += c;
+        }
+      }
+      fail();
+    }
+    function parseNumber() {
+      var match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(text.slice(i));
+      if (!match) fail();
+      i += match[0].length;
+      return match[0];
+    }
+    function expect(word) {
+      if (text.slice(i, i + word.length) !== word) fail();
+      i += word.length;
+    }
+    var parsed = parseValue();
+    whitespace();
+    if (i !== text.length) fail();
+    return parsed;
+  }
   function comparableFields(source, sent) {
     var picked = {};
     COMPARED_FIELDS.forEach(function (field) {
       if (sent && !Object.prototype.hasOwnProperty.call(sent, field)) return;
       var v = source[field];
+      if (field === "custom_body_raw" && v && typeof v === "object" && !Array.isArray(v)) {
+        var raw = {};
+        Object.keys(v).forEach(function (key) {
+          raw[key] = canonicalCustomBodyRaw(v[key]);
+        });
+        v = raw;
+      }
       if (typeof v === "string") {
         v = v.trim();
         if (field === "pool" || field === "auth_mode" || field === "image_operation") v = v.toLowerCase();

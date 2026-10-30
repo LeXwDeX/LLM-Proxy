@@ -1174,3 +1174,67 @@ test("edited custom body rows are syntax-checked without re-serializing valid JS
   });
   assert.equal("custom_body" in body, false);
 });
+
+// The server stores custom_body values as json.RawMessage, so encoding/json
+// compacts whitespace and normalizes some string escapes (not number tokens)
+// on write. An unconfirmed save compares the submitted text with that stored
+// copy and must treat both JSON forms as the same content without parsing the
+// integer into a JavaScript number.
+test("unconfirmed: custom body whitespace and escapes still match the stored copy", async () => {
+  const originalRaw = {
+    seed: '{ "z": 1, "id": 9007199254740993, "list": [ 1, { "b": 2, "a": 3 } ], "text": "a b\\n\\"c\\"\\\\d" }',
+    forms: '[ 1e+2, 2.0, -0 ]',
+    tag: '{"label":"<tag>&"}',
+  };
+  const storedRaw = {
+    seed: '{"id":9007199254740993,"list":[1,{"a":3,"b":2}],"text":"a b\\u000a\\u0022c\\u0022\\u005cd","z":1}',
+    forms: '[1e+2,2.0,-0]',
+    tag: '{"label":"\\u003ctag\\u003e\\u0026"}',
+  };
+  const f = await setup(target({
+    custom_body: { seed: "", forms: "", tag: "" },
+    custom_body_raw: originalRaw,
+  }), (url, opts, fallback) => {
+    if (isTargetPut(url, opts)) {
+      f.harness.setRoute("/admin/data/targets", { targets: [target({
+        etag: "t1-6",
+        endpoint: "https://draft.invalid",
+        custom_body: { seed: "", forms: "", tag: "" },
+        custom_body_raw: storedRaw,
+      })] });
+      return Promise.resolve(htmlResponse(504));
+    }
+    return fallback(url, opts);
+  });
+  useCustomBodyRows(f);
+  await f.edit();
+  f.harness.ids.get("tgtEndpoint").value = "https://draft.invalid";
+  await f.save();
+  assert.ok(f.messages.some((m) => m.msg === "已保存" && m.kind === "success"), messageTexts(f).join("|"));
+  assert.ok(!messageTexts(f).some((m) => /已被修改|保存失败/.test(m)), messageTexts(f).join("|"));
+  assert.equal(f.harness.ids.get("targetModal").classList.contains("open"), false);
+});
+
+test("unconfirmed: a different custom body number is not mistaken for the submitted one", async () => {
+  const f = await setup(target({
+    custom_body: { seed: { id: 9007199254740992 } },
+    custom_body_raw: { seed: '{"id":9007199254740993}' },
+  }), (url, opts, fallback) => {
+    if (isTargetPut(url, opts)) {
+      f.harness.setRoute("/admin/data/targets", { targets: [target({
+        etag: "t1-6",
+        endpoint: "https://draft.invalid",
+        custom_body: { seed: { id: 9007199254740994 } },
+        custom_body_raw: { seed: '{"id":9007199254740994}' },
+      })] });
+      return Promise.resolve(htmlResponse(504));
+    }
+    return fallback(url, opts);
+  });
+  useCustomBodyRows(f);
+  await f.edit();
+  f.harness.ids.get("tgtEndpoint").value = "https://draft.invalid";
+  await f.save();
+  assert.ok(!f.messages.some((m) => m.msg === "已保存"), messageTexts(f).join("|"));
+  assert.match(f.harness.ids.get("keyCardList").innerHTML, /该目标已被修改，请重新加载后再保存/);
+});
