@@ -672,7 +672,11 @@ func TestProofOddIndexRebuildsLegacyPartialBuilds(t *testing.T) {
 					return meta.Put([]byte(proofOddReceiptCursorKey), append([]byte(nil), k...))
 				}
 				// entries_only: the old semantics already wrote entries but no
-				// progress marker survived.
+				// progress marker survived. Unlike the cursor states, this
+				// shape recovers under the old implementation's full rescan,
+				// so it is not a fail-open reproduction; it guards the rule
+				// that entries without the current scheme are reset and
+				// rebuilt rather than resumed under the new semantics.
 				return nil
 			}); err != nil {
 				t.Fatal(err)
@@ -927,6 +931,171 @@ func TestProofOddIndexCrossPhaseRevisionBumpRebuilds(t *testing.T) {
 		t.Fatalf("after rebuild: scoped verdict %v, exhaustive verdict %v", scoped, exhaustive)
 	}
 	requireProofOddIndexMatches(t, db)
+}
+
+// proofOddRewindToReceipts reproduces the state an interrupted build leaves
+// after its raw phase: the raw-scan revision snapshot and the receipt phase are
+// present, the ready and completion revision markers are not, and a sentinel
+// entry records whether a later migration reset the bucket or resumed it.
+func proofOddRewindToReceipts(t *testing.T, db *bolt.DB) uint64 {
+	t.Helper()
+	var live uint64
+	if err := db.Update(func(tx *bolt.Tx) error {
+		meta := proofOddMeta(tx)
+		live = rawRevision(tx)
+		var revision [8]byte
+		binary.BigEndian.PutUint64(revision[:], live)
+		if err := meta.Put([]byte(proofOddRawRevisionKey), revision[:]); err != nil {
+			return err
+		}
+		if err := meta.Delete([]byte(proofOddReadyKey)); err != nil {
+			return err
+		}
+		if err := meta.Delete([]byte(proofOddRevisionKey)); err != nil {
+			return err
+		}
+		if err := meta.Put([]byte(proofOddPhaseKey), []byte("receipts")); err != nil {
+			return err
+		}
+		return proofOddBucket(tx).Put([]byte("sentinel"), []byte("1"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return live
+}
+
+func proofOddSentinelPresent(t *testing.T, db *bolt.DB) bool {
+	t.Helper()
+	var present bool
+	if err := db.View(func(tx *bolt.Tx) error {
+		present = proofOddBucket(tx).Get([]byte("sentinel")) != nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return present
+}
+
+// A supported write between the raw and receipt phases updates the index in its
+// own transaction and advances the receipt-phase revision snapshot, so a build
+// interrupted after its raw phase resumes across starts instead of rebuilding.
+// Without the snapshot advance the next start treats the build as stale, resets
+// it and rescans the whole history: correct, but the #114 performance goal is
+// lost and "next start resumes" is false.
+func TestProofOddIndexResumesAfterSupportedWriteBetweenPhases(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
+	if err := store.RecordBatch([]usage.Event{scaleEvent(800000, base.Add(3*time.Hour+2*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	rawBefore := proofOddRewindToReceipts(t, db)
+	// A real supported write after the raw phase: RecordBatch maintains the
+	// index and bumps the raw revision in the same transaction.
+	if err := store.RecordBatch([]usage.Event{scaleEvent(801000, base.Add(4*time.Hour+5*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot, live uint64
+	if err := db.View(func(tx *bolt.Tx) error {
+		live = rawRevision(tx)
+		stored := proofOddMeta(tx).Get([]byte(proofOddRawRevisionKey))
+		if len(stored) != 8 {
+			return fmt.Errorf("raw revision snapshot missing after a supported write")
+		}
+		snapshot = binary.BigEndian.Uint64(stored)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if live != rawBefore+1 {
+		t.Fatalf("live revision = %d after the supported write, want %d", live, rawBefore+1)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	// Check the resume outcome first: a build without the snapshot advance is
+	// reset here, which is the user-visible failure this case guards.
+	if !proofOddSentinelPresent(t, db) {
+		t.Fatal("the receipt phase reset a partial build that a supported write had kept current")
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("resumed migration did not finish")
+	}
+	requireProofOddIndexMatches(t, db)
+	// The snapshot was read before the migration, which deletes it on success.
+	if snapshot != live {
+		t.Fatalf("receipt-phase snapshot = %d after the supported write, want the live revision %d", snapshot, live)
+	}
+}
+
+// A supported write must not advance the receipt-phase snapshot past a
+// revision only an out-of-band writer produced. Such a writer bumps the raw
+// revision without maintaining the index, so the raw phase never observed its
+// change; adopting the revision here would launder that inconsistency into a
+// resumable build and stamp a complete index over unobserved data. The write
+// after the out-of-band bump still maintains its own change; only the snapshot
+// advance is withheld, and the next migration rebuilds.
+func TestProofOddIndexSupportedWriteDoesNotLaunderOutOfBandBump(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
+	if err := store.RecordBatch([]usage.Event{scaleEvent(810000, base.Add(3*time.Hour+2*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	rawBefore := proofOddRewindToReceipts(t, db)
+	// Simulate an older binary or another unsupported writer: it advances only
+	// the raw revision and leaves the classification untouched.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		var revision [8]byte
+		binary.BigEndian.PutUint64(revision[:], rawBefore+1)
+		return tx.Bucket([]byte(BucketMeta)).Put([]byte(usageRawRevisionKey), revision[:])
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The next supported write bumps the revision again and maintains the index
+	// for its own change, but must not adopt the unobserved revision.
+	if err := store.RecordBatch([]usage.Event{scaleEvent(811000, base.Add(4*time.Hour+5*time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot uint64
+	if err := db.View(func(tx *bolt.Tx) error {
+		stored := proofOddMeta(tx).Get([]byte(proofOddRawRevisionKey))
+		if len(stored) != 8 {
+			return fmt.Errorf("raw revision snapshot missing after a supported write")
+		}
+		snapshot = binary.BigEndian.Uint64(stored)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	// The build must be discarded: resuming would bind the live revision to a
+	// raw scan that never saw the out-of-band change.
+	if proofOddSentinelPresent(t, db) {
+		t.Fatal("the receipt phase resumed after an unobserved out-of-band revision bump")
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not rebuild after the out-of-band bump")
+	}
+	requireProofOddIndexMatches(t, db)
+	// The snapshot was read before the migration, which tears it down on reset.
+	if snapshot != rawBefore {
+		t.Fatalf("receipt-phase snapshot = %d after an out-of-band bump, want %d", snapshot, rawBefore)
+	}
 }
 
 // proofFreshVerdict returns the fresh-scope verdict for one candidate bundle,

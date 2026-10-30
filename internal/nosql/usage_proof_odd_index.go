@@ -67,7 +67,11 @@ import (
 // resumed raw phase trusts its cursor the same way: an out-of-band rewrite is
 // caught by the entry digest, but an out-of-band insertion behind the cursor is
 // not. Absent, incomplete, or damaged index data makes proofs fall back to the
-// previous full scans; they never fail open.
+// previous full scans; the index never fails open on its own state. That
+// guarantee covers index data only: adding or rewriting a readable owner
+// outside the supported writers violates the contract above, the index cannot
+// detect it, and ResetUsageProofOddIndex followed by MigrateUsageProofOddIndex
+// is required to restore the guarantee.
 //
 // The completion marker records the classification scheme version, so an index
 // built with different location semantics is rebuilt instead of trusted. A
@@ -77,7 +81,11 @@ import (
 // phase also records the raw revision it scanned; the receipt phase only
 // completes when that snapshot still matches, so a writer that advances the
 // data between the phases without maintaining the index forces a rebuild
-// instead of a revision stamp the scan never observed.
+// instead of a revision stamp the scan never observed. A supported writer
+// advances the snapshot in the same transaction that maintains the index, so
+// an interrupted receipt phase resumes across starts; a writer that advances
+// only the revision (an older binary or an out-of-band edit) leaves the
+// snapshot behind and the next migration rebuilds.
 const (
 	bucketUsageProofOdd      = "usage_proof_odd_v1"
 	proofOddReadyKey         = "usage_proof_odd_ready_v1"
@@ -176,12 +184,29 @@ func proofOddFollowRawRevision(tx *bolt.Tx, revision uint64) error {
 	if meta == nil || proofOddBucket(tx) == nil {
 		return nil
 	}
-	if string(meta.Get([]byte(proofOddReadyKey))) != "1" {
-		return nil
-	}
 	var data [8]byte
 	binary.BigEndian.PutUint64(data[:], revision)
-	return meta.Put([]byte(proofOddRevisionKey), data[:])
+	if string(meta.Get([]byte(proofOddReadyKey))) == "1" {
+		return meta.Put([]byte(proofOddRevisionKey), data[:])
+	}
+	// A build interrupted after its raw phase is bound to the raw revision that
+	// phase scanned (proofOddRawRevisionKey). This writer updated the index in
+	// this same transaction, so advancing the snapshot keeps the receipt phase
+	// resumable across starts instead of forcing a reset and a full rescan.
+	// Only advance when the stored snapshot still matches the revision this
+	// bump started from: a bump that did not maintain the index (an older
+	// binary or an out-of-band edit) leaves the snapshot behind, and a later
+	// supported write must not launder that inconsistency into a resumable
+	// state. Consecutive bumps in one transaction advance step by step,
+	// because each sees the snapshot written by the previous bump.
+	if string(meta.Get([]byte(proofOddPhaseKey))) != "receipts" {
+		return nil
+	}
+	stored := meta.Get([]byte(proofOddRawRevisionKey))
+	if len(stored) != 8 || binary.BigEndian.Uint64(stored) != revision-1 {
+		return nil
+	}
+	return meta.Put([]byte(proofOddRawRevisionKey), data[:])
 }
 
 // proofOddInvalidate drops the completion marker so proofs fall back to full
@@ -591,7 +616,15 @@ func migrateProofOddReceipts(ctx context.Context, tx *bolt.Tx, batchSize int) er
 	meta := proofOddMeta(tx)
 	if !proofOddRawRevisionBound(tx) {
 		// The raw phase did not finish for the live revision: its entries no
-		// longer describe the bucket, so this state cannot be resumed.
+		// longer describe the bucket, so this state cannot be resumed. This
+		// check runs at the start of every batch transaction, including the one
+		// that scans the final receipt batch; the identical check at the end of
+		// this function runs later in that same transaction. rawRevision cannot
+		// change while the transaction is open, and the batch only writes index
+		// entries, so there the completion check is already implied by this
+		// one. It is defensive redundancy, not an independently observable
+		// condition: no existing test can kill one check without the other.
+		// Keep both as a guard against future transaction-boundary changes.
 		return proofOddResetBucket(tx)
 	}
 	receipts := tx.Bucket([]byte(BucketUsageReceipts))
@@ -623,7 +656,10 @@ func migrateProofOddReceipts(ctx context.Context, tx *bolt.Tx, batchSize int) er
 	// The receipt phase must finish against the same raw revision the raw phase
 	// scanned. A writer that advanced the revision in between (an older binary
 	// or an out-of-band edit) leaves that change unobserved; stamping the live
-	// revision would report a complete index that never saw it.
+	// revision would report a complete index that never saw it. This call
+	// already passed the same check at its start, in this transaction, so a
+	// failure here cannot be triggered without also failing there; the check is
+	// kept as defensive redundancy (see the entry check above).
 	if !proofOddRawRevisionBound(tx) {
 		return proofOddResetBucket(tx)
 	}
