@@ -94,3 +94,25 @@ func TestPrepareTargetBodyPreservesLargeNumbersThroughModelRewrite(t *testing.T)
 		t.Errorf("custom_body number changed: %s", custom["big"])
 	}
 }
+
+func TestInjectCustomBodyPreservesRawMessageText(t *testing.T) {
+	const large = "12345678901234567890"
+	const nested = `{"id":9007199254740993}`
+	got := injectCustomBody([]byte(`{"model":"m"}`), map[string]any{
+		"seed":     json.RawMessage(large),
+		"nested":   json.RawMessage(nested),
+		"ordinary": json.RawMessage(`"ok"`),
+		"enabled":  json.RawMessage("false"),
+	})
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("injectCustomBody returned invalid JSON: %v", err)
+	}
+	for key, want := range map[string]string{
+		"seed": large, "nested": nested, "ordinary": `"ok"`, "enabled": "false",
+	} {
+		if string(decoded[key]) != want {
+			t.Errorf("custom_body[%q] = %s, want %s", key, decoded[key], want)
+		}
+	}
+}
