@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"reflect"
 	"runtime"
 	"sort"
@@ -229,6 +230,77 @@ func TestTargetIdentityChangeVariants(t *testing.T) {
 			publishConfig(t, svc, cfg, "ApplyConfig")
 			assertBreakerFresh(t, svc, old, svc.targetsByName["a"], armed)
 		})
+	}
+}
+
+func TestTargetCustomBodyEquivalentJSONKeepsBreaker(t *testing.T) {
+	// Custom body identity is JSON semantics, not RawMessage bytes. The server
+	// compacts whitespace and HTML-escapes strings when persisting; configuration
+	// sources may also spell numbers or order keys differently. None of these
+	// change what is sent upstream, so the breaker state stays shared.
+	// encoding/json escapes HTML-sensitive characters and U+2028 while the
+	// literal spelling keeps them as-is; the identity comparison must see the
+	// same decoded string.
+	htmlEscaped, err := json.Marshal("<a>&" + string(rune(0x2028)))
+	if err != nil {
+		t.Fatalf("marshal HTML-escaped fixture: %v", err)
+	}
+	cases := map[string]struct{ before, after string }{
+		"whitespace-and-key-order": {
+			`{"temperature":0.7,"nested":{"b":2,"a":[1,2]}}`,
+			`{ "nested": { "a": [ 1, 2 ], "b": 2 }, "temperature": 0.7 }`,
+		},
+		"number-spelling": {
+			`{"temperature":0.7,"count":100,"rate":1e2,"zero":-0}`,
+			`{"temperature":0.70,"count":1e2,"rate":100,"zero":0}`,
+		},
+		"string-escapes-and-html": {
+			`{"text":"<a>&` + string(rune(0x2028)) + `","quote":"\"\\/"}`,
+			`{"text":` + string(htmlEscaped) + `,"quote":"\"\\/"}`,
+		},
+		"large-integer-token": {
+			`{"seed":12345678901234567890}`,
+			`{ "seed": 12345678901234567890 }`,
+		},
+	}
+	for name, tc := range cases {
+		for _, via := range publishPaths {
+			t.Run(name+"/"+via, func(t *testing.T) {
+				cfg := identityBaseConfig()
+				cfg.Targets[0].CustomBody = map[string]any{"value": json.RawMessage(tc.before)}
+				svc := newIdentityService(t, cfg)
+				old := svc.targetsByName["a"]
+				armed := armBreaker(t, old, "muted")
+				cfg.Targets[0].CustomBody = map[string]any{"value": json.RawMessage(tc.after)}
+				publishConfig(t, svc, cfg, via)
+				assertBreakerKept(t, old, svc.targetsByName["a"], armed)
+			})
+		}
+	}
+}
+
+func TestTargetCustomBodyChangedJSONResetsBreaker(t *testing.T) {
+	cases := map[string]struct{ before, after string }{
+		"large-integer": {`{"seed":12345678901234567890}`, `{"seed":12345678901234567891}`},
+		"number-value":  {`{"temperature":0.7}`, `{"temperature":0.8}`},
+		"array-order":   {`{"items":[1,2]}`, `{"items":[2,1]}`},
+		"string-space":  {`{"text":"a b"}`, `{"text":"a  b"}`},
+	}
+	for name, tc := range cases {
+		for _, via := range publishPaths {
+			t.Run(name+"/"+via, func(t *testing.T) {
+				cfg := identityBaseConfig()
+				cfg.Targets[0].CustomBody = map[string]any{"value": json.RawMessage(tc.before)}
+				svc := newIdentityService(t, cfg)
+				old := svc.targetsByName["a"]
+				armed := armBreaker(t, old, "muted")
+				cfg.Targets[0].CustomBody = map[string]any{"value": json.RawMessage(tc.after)}
+				publishConfig(t, svc, cfg, via)
+				current := svc.targetsByName["a"]
+				assertBreakerFresh(t, svc, old, current, armed)
+				assertSelectable(t, svc, current)
+			})
+		}
 	}
 }
 
