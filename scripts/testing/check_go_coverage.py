@@ -23,7 +23,8 @@ count>0 记为已覆盖。
 退出码:
   0  所有阈值满足
   1  覆盖率低于阈值，或指定的包在 profile 中不存在
-  2  profile 为空、格式错误（含非 UTF-8、多 mode 段、计数超限）或命令行参数非法
+  2  profile 为空、格式错误（含非 UTF-8、多 mode 段、语句数/命中数超限）
+     或命令行参数非法
 """
 
 from __future__ import annotations
@@ -42,9 +43,14 @@ BLOCK_RE = re.compile(
 )
 VALID_MODES = {"set", "count", "atomic"}
 
-# Go 编译器产出的单块语句数和命中次数远小于该上限；超过即视为损坏 profile，
-# 同时保证 Totals.percent 的浮点运算不会因超大整数溢出成 inf。
-MAX_BLOCK_COUNT = 1_000_000_000
+# Go 编译器产出的单块语句数远小于该上限；超过即视为损坏 profile，同时保证
+# Totals.percent 的浮点运算不会因超大整数溢出成 inf。
+MAX_BLOCK_STATEMENTS = 1_000_000_000
+
+# Go 覆盖格式的命中计数是 uint32（internal/coverage/cformat 的 AddUnit count 参数，
+# 合并经 cmerge.SaturatingAdd 饱和到该上界）；count 只用于判断是否已覆盖，不进入
+# 百分比计算，因此按格式上界校验，避免把合法的 count/atomic profile 误判为损坏。
+MAX_BLOCK_COUNT = 2**32 - 1
 
 BlockKey = Tuple[str, int, int, int, int]
 
@@ -145,7 +151,8 @@ def parse_profile(path: Path) -> Dict[str, Totals]:
             raise ProfileError(f"profile {path} line {line_number}: invalid coverage block {line!r}")
         file_path = match.group("file")
         statements = parse_block_number(
-            path, line_number, "statements", match.group("statements"), limit=MAX_BLOCK_COUNT
+            path, line_number, "statements", match.group("statements"),
+            limit=MAX_BLOCK_STATEMENTS,
         )
         count = parse_block_number(
             path, line_number, "count", match.group("count"), limit=MAX_BLOCK_COUNT

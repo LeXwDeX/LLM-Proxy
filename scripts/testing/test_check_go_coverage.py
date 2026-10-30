@@ -281,13 +281,27 @@ class CoverageCheckTests(unittest.TestCase):
         self.assertIn('exceeds the maximum supported value', stderr)
         self.assertNotIn('Traceback', stderr)
 
-    def test_count_above_maximum_is_rejected(self):
-        self.write_profile('mode: set', cover_line(ADMIN, statements=1, count=1000000001))
+    def test_count_above_uint32_maximum_is_rejected(self):
+        # Go 覆盖格式的 count 是 uint32，合法上界为 2**32-1；超界按损坏 profile 处理。
+        self.write_profile('mode: atomic', cover_line(ADMIN, statements=1, count=2**32))
         code, _, stderr = self.run_main()
         self.assertEqual(code, 2)
         self.assertIn('count', stderr)
         self.assertIn('exceeds the maximum supported value', stderr)
         self.assertNotIn('Traceback', stderr)
+
+    def test_format_maximum_statement_and_count_are_accepted(self):
+        # statements 与 count 恰好等于各自上限时仍是合法 profile。
+        self.write_profile(
+            'mode: count',
+            cover_line(ADMIN, statements=1000000000, count=1, line=1),
+            cover_line(ADMIN, statements=1, count=2**32 - 1, line=5),
+        )
+        code, stdout, stderr = self.run_main('--min-total', '0')
+        self.assertEqual(code, 0, stderr)
+        self.assertIn('100.00%', stdout)
+        admin = check_go_coverage.parse_profile(self.profile)['github.com/LeXwDeX/LLM-Proxy/internal/admin']
+        self.assertEqual((admin.statements, admin.covered), (1000000001, 1000000001))
 
     def test_too_many_digits_in_block_position_is_rejected_without_traceback(self):
         # 块位置的数字字段同样不能因 int() 位数上限抛出未捕获异常。
@@ -299,7 +313,7 @@ class CoverageCheckTests(unittest.TestCase):
         self.assertNotIn('Traceback', stderr)
 
     def test_large_but_legal_counts_still_pass(self):
-        # 上限内的计数不能误伤：百万级语句与恰好等于上限的 count 都应正常计算。
+        # 上限内的大计数不能误伤：百万级语句与十亿级 count 都应正常计算。
         self.write_profile(
             'mode: count',
             cover_line(ADMIN, statements=1000000, count=1, line=1),
