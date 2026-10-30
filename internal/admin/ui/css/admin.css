@@ -977,6 +977,16 @@
     }
 
     /* ===== Trace Stats ===== */
+    .trace-limit-hint {
+      max-width: 240px;
+      font-size: 12px;
+      line-height: 1.35;
+      color: var(--warning);
+      white-space: normal;
+    }
+    .trace-limit-hint:empty {
+      display: none;
+    }
     .trace-stats {
       display: flex;
       gap: 16px;

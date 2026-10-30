@@ -38,8 +38,25 @@ test("trace list requests the body-free projection and pages by the server's eff
   await t.trace.loadTrace();
   assert.ok(t.requests[0], "list requested");
   assert.match(t.requests[0], /view=summary/, "list never ships bodies");
+  assert.match(t.requests[0], /limit=5000(&|$)/, "oversized input is capped at the server maximum before the request");
+  const hint = t.h.document.getElementById("traceLimitHint");
+  assert.match(hint.textContent, /最多 5000 条/, "the input cap is disclosed");
+  assert.match(hint.textContent, /服务端实际采用 1 条/, "the server's applied limit is disclosed when it differs");
   await t.h.document.getElementById("traceLoadMore").listeners.click[0]();
   assert.match(t.requests[1], /offset=1(&|$)/, "offset advances by the server's effective limit, not the typed 99999");
+});
+
+test("trace limit rejects values below one instead of silently querying them", async () => {
+  const t = await traceHarness(() => ({records: [], count: 0, limit: 50, limit_max: 5000, offset: 0, stats: {}, enabled: true}));
+  await t.trace.checkTraceEnabled().catch(() => {});
+  t.requests.length = 0;
+  t.app.state.traceEnabledForTest = true;
+  t.select("traceLimit", "0");
+  await t.trace.loadTrace();
+  assert.match(t.requests[0], /limit=50(&|$)/, "an invalid value falls back to the default before querying");
+  const hint = t.h.document.getElementById("traceLimitHint");
+  assert.match(hint.textContent, /1–5000/, "the accepted range is disclosed");
+  assert.match(hint.textContent, /50/, "the applied default is disclosed");
 });
 
 test("trace filters apply to appended pages and empty placeholders never mix with rows", async () => {

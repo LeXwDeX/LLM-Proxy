@@ -106,6 +106,9 @@ func TestTraceListReportsEffectiveLimitAndOffset(t *testing.T) {
 		if body["limit"] != tc.limit || body["offset"] != tc.offset {
 			t.Errorf("%q: limit/offset = %v/%v, want %v/%v", tc.query, body["limit"], body["offset"], tc.limit, tc.offset)
 		}
+		if body["limit_max"] != float64(traceMaxLimit) {
+			t.Errorf("%q: limit_max = %v, want %d so the UI can disclose the cap", tc.query, body["limit_max"], traceMaxLimit)
+		}
 		if records, ok := body["records"].([]any); !ok || len(records) != 0 {
 			t.Errorf("%q: records = %#v, want empty array", tc.query, body["records"])
 		}

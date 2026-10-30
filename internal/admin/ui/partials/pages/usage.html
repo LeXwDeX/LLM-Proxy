@@ -150,7 +150,7 @@
               </div>
             </div>
             <div class="panel-body">
-              <p class="usage-chart-note" id="usageChartNote">按 UTC 小时聚合；开始与结束时间所在整点小时均整桶计入（含边界小时），今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。</p>
+              <p class="usage-chart-note" id="usageChartNote">按 UTC 小时聚合；开始与结束时间所在整点小时均整桶计入（含边界小时），因此边界桶可能包含范围外记录。今日/昨日/近 7/30 天范围按浏览器本地时间选取；多日图表按浏览器本地日重新汇总 UTC 小时桶，横轴按本地日标注。</p>
               <div class="chart-container" id="dailyChart">
                 <div class="loading-overlay"><span class="loading-spinner"></span> 加载中...</div>
               </div>

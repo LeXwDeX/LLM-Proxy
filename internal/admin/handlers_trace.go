@@ -80,13 +80,15 @@ func (h *Handler) handleListTrace(w http.ResponseWriter, r *http.Request) {
 	stats := h.proxyService.TraceStats()
 
 	// limit/offset 回显服务端实际采用的值（非法或超限的 limit 回落到默认值），
-	// 前端据此翻页。view=summary 返回不含 body/header 的列表投影；默认保持完整记录。
+	// 前端据此翻页；limit_max 让前端能预先限制输入并解释服务端的实际取值。
+	// view=summary 返回不含 body/header 的列表投影；默认保持完整记录。
 	response := map[string]any{
-		"enabled": h.proxyService.TraceEnabled(),
-		"count":   len(records),
-		"limit":   limit,
-		"offset":  offset,
-		"stats":   stats,
+		"enabled":   h.proxyService.TraceEnabled(),
+		"count":     len(records),
+		"limit":     limit,
+		"limit_max": traceMaxLimit,
+		"offset":    offset,
+		"stats":     stats,
 	}
 	if r.URL.Query().Get("view") == "summary" {
 		response["view"] = "summary"

@@ -9,45 +9,76 @@ AdminApp.register("usageChart", function (app) {
   var usageCell = app.bind("usageTables", "usageCell");
   var usageNumber = app.bind("usageTables", "usageNumber");
   var usageTokensAvailable = app.bind("usageTables", "usageTokensAvailable");
-  function setUsageChartNote(groupBy) {
+  function pad2(value) { return String(value).padStart(2, "0"); }
+  function localHourStamp(ms) {
+    var at = new Date(ms);
+    return (
+      pad2(at.getMonth() + 1) + "-" + pad2(at.getDate()) + " " +
+      pad2(at.getHours()) + ":" + pad2(at.getMinutes())
+    );
+  }
+  // hourCoverage spells out what the API really covers for a rolling window:
+  // the whole UTC hour of each boundary is included.
+  function hourCoverage(range) {
+    var from = range && Date.parse(range.from), to = range && Date.parse(range.to);
+    if (!isFinite(from) || !isFinite(to) || to < from) return "";
+    var first = Math.floor(from / 3600000) * 3600000;
+    var last = Math.floor(to / 3600000) * 3600000 + 3600000;
+    var count = Math.round((last - first) / 3600000);
+    return "本次实际覆盖本地 " + localHourStamp(first) + " 至 " + localHourStamp(last) +
+      "（" + count + " 个整点小时）";
+  }
+  function setUsageChartNote(groupBy, rangeName, range) {
     var note = document.getElementById("usageChartNote");
     if (!note) return;
+    if (groupBy === "hour" && rangeName === "1h") {
+      var coverage = hourCoverage(range);
+      note.textContent =
+        "「近1小时」为滚动查询窗口；服务端按整点小时桶统计" +
+        (coverage ? "，" + coverage : "") +
+        "，边界桶可能包含所选 1 小时窗口外的记录。横轴小时按浏览器本地时间标注，标题保留对应 UTC 小时。";
+      return;
+    }
     note.textContent =
       groupBy === "hour"
         ? "按查询时的时间范围和筛选 · 按 UTC 小时聚合；开始与结束时间所在整点小时均整桶计入（含边界小时），因此边界桶可能包含范围外记录。今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。横轴小时按浏览器本地时间标注，标题保留对应 UTC 小时。"
-        : "按查询时的时间范围和筛选 · 所选范围内的小时用量按 UTC 自然日分组；开始与结束边界所在整点小时整桶计入，不扩展到完整起止 UTC 日。今日/昨日/近 7/30 天范围按浏览器本地时间选取，桶边界按 UTC。横轴按 UTC 日标注（标 UTC）。";
+        : "按查询时的时间范围和筛选 · 服务端返回 UTC 整点小时桶，图表按浏览器本地日重新汇总；今日/昨日/近 7/30 天范围按浏览器本地时间选取，柱状图为本地自然日。横轴按本地日标注。";
   }
-  function pad2(value) { return String(value).padStart(2, "0"); }
   // Hour buckets are labelled in browser-local time (the title keeps the UTC
-  // hour); day buckets are UTC days and the label says so.
+  // hour); day buckets are already browser-local days.
   function usageChartLabel(start, groupBy) {
     var text = String(start || "");
+    var date = new Date(Date.parse(text));
+    if (groupBy !== "hour") {
+      if (isNaN(date.getTime())) return text || "—";
+      return pad2(date.getMonth() + 1) + "-" + pad2(date.getDate());
+    }
     var match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})/.exec(text);
     if (!match) return text || "—";
-    if (groupBy !== "hour") return match[2] + "-" + match[3] + " (UTC)";
-    var date = new Date(Date.parse(text));
     if (isNaN(date.getTime())) return match[2] + "-" + match[3] + " " + match[4] + ":00";
     return pad2(date.getMonth() + 1) + "-" + pad2(date.getDate()) + " " + pad2(date.getHours()) + ":" + pad2(date.getMinutes());
   }
   function usageChartTitleTime(start, groupBy) {
     var text = String(start || "");
+    var date = new Date(Date.parse(text));
+    if (groupBy !== "hour") {
+      if (isNaN(date.getTime())) return text || "—";
+      return "本地 " + date.getFullYear() + "-" + pad2(date.getMonth() + 1) + "-" + pad2(date.getDate()) + " 日";
+    }
     var match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(text);
     if (!match) return text || "—";
-    var utc = groupBy === "hour"
-      ? "UTC " + match[2] + "-" + match[3] + " " + match[4] + ":" + match[5]
-      : "UTC " + match[2] + "-" + match[3];
-    return groupBy === "hour" ? "本地 " + usageChartLabel(start, groupBy) + "（" + utc + "）" : utc + " 日";
+    var utc = "UTC " + match[2] + "-" + match[3] + " " + match[4] + ":" + match[5];
+    return "本地 " + usageChartLabel(start, groupBy) + "（" + utc + "）";
   }
-  // zeroFillBuckets adds an empty bucket for every hour (or UTC day) of the
-  // queried range that has no row, so gaps are drawn as real zeros.
-  function zeroFillBuckets(buckets, groupBy, range) {
-    var step = groupBy === "hour" ? 3600000 : 86400000;
+  // zeroFillBuckets adds an empty bucket for every UTC hour of the queried
+  // range that has no row, so gaps are drawn as real zeros.
+  function zeroFillBuckets(buckets, range) {
+    var step = 3600000;
     var from = range && Date.parse(range.from), to = range && Date.parse(range.to);
     var known = Object.create(null);
-    var starts = [];
     buckets.forEach(function (bucket) {
       var at = Date.parse(bucket.bucket_start);
-      if (isFinite(at)) { known[Math.floor(at / step) * step] = true; starts.push(at); }
+      if (isFinite(at)) known[Math.floor(at / step) * step] = true;
     });
     if (!isFinite(from) || !isFinite(to) || to < from) return buckets;
     var first = Math.floor(from / step) * step, last = Math.floor(to / step) * step;
@@ -57,6 +88,89 @@ AdminApp.register("usageChart", function (app) {
       if (!known[at]) filled.push({bucket_start: new Date(at).toISOString(), zeroFilled: true});
     }
     return filled;
+  }
+  var chartSumFields = [
+    "requests",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cache_creation_tokens",
+    "explicit_cache_read_tokens",
+    "reasoning_tokens",
+    "cache_creation_5m_tokens",
+    "cache_creation_1h_tokens",
+    "tool_use_prompt_tokens",
+    "image_input_tokens",
+    "cached_image_input_tokens",
+    "image_output_tokens",
+    "incomplete_usage_count",
+    "incomplete_cost_count",
+  ];
+  function addRolledBucket(target, source) {
+    chartSumFields.forEach(function (key) {
+      if (source[key] === undefined || source[key] === null) return;
+      var value = usageNumber(source[key]);
+      if (value === null) return;
+      target[key] = (usageNumber(target[key]) || 0) + value;
+    });
+    var cost = usageNumber(source.estimated_cost);
+    if (cost === null) {
+      target.costMissing = true;
+    } else {
+      target.estimated_cost = (usageNumber(target.estimated_cost) || 0) + cost;
+    }
+    if (target.costMissing) target.estimated_cost = null;
+  }
+  // localDaySlots lists every browser-local calendar day touched by the range,
+  // so a 7-day range always yields seven slots regardless of the UTC offset.
+  function localDaySlots(fromMs, toMs) {
+    var slots = [];
+    var cursor = new Date(fromMs);
+    for (var i = 0; i < 800; i++) {
+      var start = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate());
+      if (start.getTime() > toMs) break;
+      slots.push({start: start, at: start.getTime(), totals: {}});
+      cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() + 1);
+    }
+    return slots;
+  }
+  // rollupLocalDays folds UTC hour buckets into browser-local days. Buckets that
+  // start before the first slot (UTC truncation in half-hour zones) stay in the
+  // first slot instead of creating an extra bar outside the queried range.
+  function rollupLocalDays(buckets, range) {
+    var from = range && Date.parse(range.from), to = range && Date.parse(range.to);
+    if (!isFinite(from) || !isFinite(to) || to < from) {
+      var times = [];
+      buckets.forEach(function (bucket) {
+        var at = Date.parse(bucket && bucket.bucket_start);
+        if (isFinite(at)) times.push(at);
+      });
+      if (!times.length) return [];
+      from = Math.min.apply(null, times);
+      to = Math.max.apply(null, times);
+    }
+    var slots = localDaySlots(from, to);
+    if (!slots.length) return [];
+    buckets.forEach(function (bucket) {
+      var started = Date.parse(bucket && bucket.bucket_start);
+      var index = 0;
+      if (isFinite(started)) {
+        var moment = Math.max(started, slots[0].at);
+        for (var i = slots.length - 1; i >= 0; i--) {
+          if (slots[i].at <= moment) { index = i; break; }
+        }
+      }
+      slots[index].seen = true;
+      addRolledBucket(slots[index].totals, bucket || {});
+    });
+    return slots.map(function (slot) {
+      var out = {bucket_start: slot.start.toISOString()};
+      Object.keys(slot.totals).forEach(function (key) {
+        if (key !== "costMissing") out[key] = slot.totals[key];
+      });
+      if (!slot.seen) out.zeroFilled = true;
+      return out;
+    });
   }
   function usageChartValue(bucket, metric) {
     if (metric === "cost") return usageNumber(bucket.estimated_cost);
@@ -74,14 +188,18 @@ AdminApp.register("usageChart", function (app) {
       button.setAttribute("aria-pressed", String(active));
       button.classList.toggle("active", active);
     });
-    if (S.usageSnapshot) renderDailyChart(S.usageChartBuckets, S.usageChartGroupBy, S.usageChartRange);
+    if (S.usageSnapshot) {
+      renderDailyChart(S.usageChartBuckets, S.usageChartGroupBy, S.usageChartRange, S.usageChartSourceGroupBy);
+    }
   }
-  function renderDailyChart(buckets, groupBy, range) {
+  function renderDailyChart(buckets, groupBy, range, bucketGroupBy) {
     var chart = document.getElementById("dailyChart");
     buckets = Array.isArray(buckets) ? buckets : [];
     groupBy = groupBy || S.usageChartGroupBy || "day";
+    var sourceGroupBy = bucketGroupBy || S.usageChartSourceGroupBy || (groupBy === "day" ? "hour" : groupBy);
     S.usageChartBuckets = buckets;
     S.usageChartGroupBy = groupBy;
+    S.usageChartSourceGroupBy = sourceGroupBy;
     S.usageChartRange = range || null;
     if (!buckets.length) {
       chart.innerHTML =
@@ -89,7 +207,12 @@ AdminApp.register("usageChart", function (app) {
       return;
     }
     var isCost = S.usageChartMetric === "cost";
-    var rows = zeroFillBuckets(buckets, groupBy, range)
+    var drawn = groupBy === "day" && sourceGroupBy === "hour"
+      ? rollupLocalDays(buckets, range)
+      : groupBy === "hour"
+        ? zeroFillBuckets(buckets, range)
+        : buckets;
+    var rows = drawn
       .sort(function (a, b) {
         return String(a.bucket_start).localeCompare(String(b.bucket_start));
       })

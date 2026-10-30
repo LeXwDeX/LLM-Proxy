@@ -133,7 +133,7 @@ test("one aggregate request follows the selected range and filters for both tabl
   click(sevenDays);
   await settle();
   assert.equal(calls.length, 2);
-  assert.match(calls[1], /group_by=day/);
+  assert.match(calls[1], /group_by=hour/, "7d fetches hourly buckets for local-day rollup");
   const oneHour = ranges.find(button => button.dataset.range === "1h");
   click(oneHour);
   await settle();
@@ -163,7 +163,7 @@ test("one aggregate request follows the selected range and filters for both tabl
   click(h.document.getElementById("applyCustomRange"));
   await settle();
   assert.equal(calls.length, 6);
-  assert.match(calls[5], /group_by=day/, "custom ranges longer than 48 hours use day buckets");
+  assert.match(calls[5], /group_by=hour/, "long custom ranges also fetch hourly buckets for local-day rollup");
 });
 
 test("custom range rejects an inverted boundary before any request and keeps filters", async () => {
@@ -222,7 +222,7 @@ test("token and cost chart toggle redraws without a request and separates zero f
   assert.match(h.document.getElementById("usageChartNote").textContent, /边界小时/);
 });
 
-test("chart notes disclose both UTC boundary hours, day grouping and local range presets", async () => {
+test("chart notes disclose hour bucket boundaries, local-day rollup and the 1h effective window", async () => {
   const h = createHarness();
   const app = await h.run();
   app.state.modelGroupsLoaded = true;
@@ -233,18 +233,25 @@ test("chart notes disclose both UTC boundary hours, day grouping and local range
   assert.match(note.textContent, /整桶计入/);
   assert.match(note.textContent, /浏览器本地/);
   assert.match(note.textContent, /UTC/);
-  const sevenDays = h.document.querySelectorAll(".time-range-btn").find(button => button.dataset.range === "7d");
-  click(sevenDays);
+  const ranges = h.document.querySelectorAll(".time-range-btn");
+  click(ranges.find(button => button.dataset.range === "1h"));
   await settle();
-  assert.match(note.textContent, /UTC 自然日/);
-  assert.match(note.textContent, /整点小时/);
-  assert.match(note.textContent, /不扩展到完整起止 UTC 日/);
+  assert.match(note.textContent, /近1小时/);
+  assert.match(note.textContent, /实际覆盖/);
+  assert.match(note.textContent, /个整点小时/);
+  assert.match(note.textContent, /窗口外/);
+  click(ranges.find(button => button.dataset.range === "7d"));
+  await settle();
+  assert.match(note.textContent, /浏览器本地日/);
+  assert.match(note.textContent, /重新汇总/);
+  assert.match(note.textContent, /整点小时桶/);
+  assert.doesNotMatch(note.textContent, /UTC 自然日/);
   assert.match(note.textContent, /浏览器本地/);
   const html = assembleAdminHTML();
   const initial = /<p class="usage-chart-note" id="usageChartNote">([^<]*)<\/p>/.exec(html);
   assert.ok(initial, "initial chart note must exist");
   assert.match(initial[1], /开始与结束时间所在整点小时/);
-  assert.match(initial[1], /浏览器本地/);
+  assert.match(initial[1], /浏览器本地日/);
 });
 
 test("three tabs are keyboard operable and the group tree uses by_target_model with tool tokens", async () => {
@@ -917,7 +924,7 @@ test("usage presets use the same local-day windows as the overview range helper"
   assert.ok(Math.abs((Date.parse(hour.to) - Date.parse(hour.from)) - 3600000) < 1000, "1h stays a rolling hour");
 }));
 
-test("daily chart zero-fills missing buckets inside the queried range and labels hours in local time", () => withTZ("Asia/Shanghai", async () => {
+test("daily chart zero-fills missing hour buckets inside the queried range and labels hours in local time", () => withTZ("Asia/Shanghai", async () => {
   const h = createHarness();
   const app = await h.run();
   const chart = h.document.getElementById("dailyChart");
@@ -931,7 +938,40 @@ test("daily chart zero-fills missing buckets inside the queried range and labels
   assert.deepEqual(values, ["15", "0", "0", "2"], "gaps are real zeros, not missing");
   assert.match(chart.innerHTML, /本地 10-27 00:00/);
   assert.match(chart.innerHTML, /UTC 10-26 16:00/);
-  app.modules.usage.renderDailyChart([{bucket_start: "2026-10-24T00:00:00Z", input_tokens: 4}], "day", {from: "2026-10-24T00:00:00Z", to: "2026-10-26T05:00:00Z"});
-  const days = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
-  assert.deepEqual(days, ["10-24 (UTC)", "10-25 (UTC)", "10-26 (UTC)"], "day buckets are UTC days and say so");
+}));
+
+test("daily chart rolls hourly buckets into exactly seven local days in UTC+8", () => withTZ("Asia/Shanghai", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  const chart = h.document.getElementById("dailyChart");
+  // Range: 2026-10-24 00:00 through 2026-10-30 13:00 local (UTC+8).
+  app.modules.usage.renderDailyChart([
+    {bucket_start: "2026-10-24T15:00:00Z", input_tokens: 1, estimated_cost: 0},
+    {bucket_start: "2026-10-24T16:00:00Z", input_tokens: 2, estimated_cost: 0},
+    {bucket_start: "2026-10-29T16:00:00Z", input_tokens: 4, estimated_cost: 0},
+  ], "day", {from: "2026-10-23T16:00:00Z", to: "2026-10-30T05:00:00Z"}, "hour");
+  const labels = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(labels, ["10-24", "10-25", "10-26", "10-27", "10-28", "10-29", "10-30"], "exactly seven local-day bars, no extra UTC day");
+  const values = [...chart.innerHTML.matchAll(/class='chart-value'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(values, ["1", "2", "0", "0", "0", "0", "4"], "hours are summed into the local day containing their start");
+  assert.match(chart.innerHTML, /本地 2026-10-25 日/);
+  assert.doesNotMatch(chart.innerHTML, /\(UTC\)/);
+}));
+
+test("daily chart rolls hourly buckets into exactly seven local days in a western timezone", () => withTZ("America/Los_Angeles", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  const chart = h.document.getElementById("dailyChart");
+  // Range: 2026-10-24 00:00 through 2026-10-30 13:00 local (UTC-7, before DST ends).
+  app.modules.usage.renderDailyChart([
+    {bucket_start: "2026-10-24T07:00:00Z", input_tokens: 1, estimated_cost: 0},
+    {bucket_start: "2026-10-25T06:00:00Z", input_tokens: 2, estimated_cost: 0},
+    {bucket_start: "2026-10-25T07:00:00Z", input_tokens: 4, estimated_cost: 0},
+    {bucket_start: "2026-10-30T19:00:00Z", input_tokens: 8, estimated_cost: 0},
+  ], "day", {from: "2026-10-24T07:00:00Z", to: "2026-10-30T20:00:00Z"}, "hour");
+  const labels = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(labels, ["10-24", "10-25", "10-26", "10-27", "10-28", "10-29", "10-30"], "exactly seven local-day bars, no extra trailing UTC day");
+  const values = [...chart.innerHTML.matchAll(/class='chart-value'>([^<]*)</g)].map(m => m[1]);
+  assert.deepEqual(values, ["3", "4", "0", "0", "0", "0", "8"], "UTC hours after local midnight stay on the correct local day");
+  assert.match(chart.innerHTML, /本地 2026-10-24 日/);
 }));

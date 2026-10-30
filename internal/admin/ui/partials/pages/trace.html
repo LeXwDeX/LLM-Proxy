@@ -17,7 +17,8 @@
                   <option value="4xx">4xx 客户端错误</option>
                   <option value="5xx">5xx 服务端错误</option>
                 </select>
-                <input type="number" class="form-control" id="traceLimit" value="50" min="1" max="5000" style="width:80px;" title="显示条数">
+                <input type="number" class="form-control" id="traceLimit" value="50" min="1" max="5000" step="1" style="width:80px;" title="显示条数（1–5000）">
+                <span class="trace-limit-hint" id="traceLimitHint" role="status" aria-live="polite"></span>
                 <button class="btn" id="searchTraceBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.3-4.3"></path></svg>查询</button>
                 <button class="btn" id="refreshTraceBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
               </div>
