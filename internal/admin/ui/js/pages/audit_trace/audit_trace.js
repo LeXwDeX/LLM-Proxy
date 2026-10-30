@@ -163,7 +163,7 @@ AdminApp.register("audit_trace", function (app) {
     // Fractional input is not a partial page: treat it as invalid instead of
     // silently flooring 1.9 to a one-row request.
     if (!Number.isInteger(requested) || requested < 1) {
-      traceLimitNotice = "显示条数需在 1–" + traceLimitMax + " 之间，已按 " + traceDefaultLimit + " 条查询。";
+      traceLimitNotice = "显示条数必须是 1–" + traceLimitMax + " 的整数，已按 " + traceDefaultLimit + " 条查询。";
       renderTraceLimitHint();
       return traceDefaultLimit;
     }

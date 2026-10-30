@@ -70,6 +70,17 @@ function jsonResponse(status, body) {
   return {ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body)};
 }
 
+function withTZ(zone, fn) {
+  const previous = process.env.TZ;
+  process.env.TZ = zone;
+  const restore = () => { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; };
+  let result;
+  try { result = fn(); } catch (error) { restore(); throw error; }
+  if (result && typeof result.then === "function") return result.finally(restore);
+  restore();
+  return result;
+}
+
 // A transport that never answers: models a keep-alive socket silently dropped by a middlebox.
 function hangingFetch(calls) {
   return (url, init) => {
@@ -90,6 +101,17 @@ test("totalTok matches the backend activity contract and counts tool-use prompt 
   }), 28);
   assert.equal(core.totalTok({input_tokens: 2, output_tokens: 3, tool_use_prompt_tokens: 4}), 9);
   assert.equal(core.totalTok({}), 0);
+});
+
+test("core offsetMinutes reports negative and half-hour offsets east of UTC", async () => {
+  await withTZ("America/New_York", async () => {
+    const core = loadCore();
+    assert.equal(core.offsetMinutes(new Date("2026-10-30T12:00:00Z")), -240, "EDT is four hours behind UTC");
+  });
+  await withTZ("Asia/Kolkata", async () => {
+    const core = loadCore();
+    assert.equal(core.offsetMinutes(new Date("2026-10-30T12:00:00Z")), 330, "IST is five and a half hours ahead of UTC");
+  });
 });
 
 test("api times out after the 15s default when fetch never settles", async () => {

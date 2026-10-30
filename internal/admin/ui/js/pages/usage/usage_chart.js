@@ -9,7 +9,7 @@ AdminApp.register("usageChart", function (app) {
   var usageCell = app.bind("usageTables", "usageCell");
   var usageNumber = app.bind("usageTables", "usageNumber");
   var usageTokensAvailable = app.bind("usageTables", "usageTokensAvailable");
-  var offsetMinutes = app.bind("overview", "offsetMinutes");
+  var offsetMinutes = app.bind("core", "offsetMinutes");
   function pad2(value) { return String(value).padStart(2, "0"); }
   var localDayFillMax = 800;
   // Half-hour zones make a whole UTC hour straddle two local dates; the chart

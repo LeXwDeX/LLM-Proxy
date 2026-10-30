@@ -3,6 +3,7 @@
 AdminApp.register("overviewUtil", function (app) {
   var state = app.state;
   var fmtNum = app.bind("core", "fmtNum");
+  var offsetMinutes = app.bind("core", "offsetMinutes");
   var totalTok = app.bind("core", "totalTok");
   var schemaLabel = null;
   try { schemaLabel = app.bind("schema", "schemaLabel"); } catch (error) { schemaLabel = null; }
@@ -103,7 +104,6 @@ AdminApp.register("overviewUtil", function (app) {
   function pad(value) { return String(value).padStart(2, "0"); }
   function shortDate(date) { return pad(date.getMonth() + 1) + "-" + pad(date.getDate()); }
   function shortTime(date) { return pad(date.getHours()) + ":" + pad(date.getMinutes()); }
-  function offsetMinutes(date) { return -date.getTimezoneOffset(); }
   function offsetLabel(date) {
     var minutes = offsetMinutes(date);
     var sign = minutes < 0 ? "-" : "+";
@@ -145,5 +145,5 @@ AdminApp.register("overviewUtil", function (app) {
       return rect;
     }).join("");
   }
-  return {amount: amount, barRect: barRect, barWidth: barWidth, chartAxis: chartAxis, chartGeometry: chartGeometry, clock: clock, compactNumber: compactNumber, compareTime: compareTime, counter: counter, duration: duration, el: el, inputTotal: inputTotal, isObject: isObject, keyIssue: keyIssue, keySummary: keySummary, localDate: localDate, number: number, offsetLabel: offsetLabel, offsetMinutes: offsetMinutes, phaseLabel: phaseLabel, shortDate: shortDate, shortTime: shortTime, stackedBars: stackedBars, targetPhase: targetPhase, targetRank: targetRank, text: text, visible: visible};
+  return {amount: amount, barRect: barRect, barWidth: barWidth, chartAxis: chartAxis, chartGeometry: chartGeometry, clock: clock, compactNumber: compactNumber, compareTime: compareTime, counter: counter, duration: duration, el: el, inputTotal: inputTotal, isObject: isObject, keyIssue: keyIssue, keySummary: keySummary, localDate: localDate, number: number, offsetLabel: offsetLabel, phaseLabel: phaseLabel, shortDate: shortDate, shortTime: shortTime, stackedBars: stackedBars, targetPhase: targetPhase, targetRank: targetRank, text: text, visible: visible};
 });

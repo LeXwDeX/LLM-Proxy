@@ -68,8 +68,8 @@ test("trace limit rejects fractional values instead of silently flooring them", 
   await t.trace.loadTrace();
   assert.match(t.requests[0], /limit=50(&|$)/, "a fractional value falls back to the default before querying");
   const hint = t.h.document.getElementById("traceLimitHint");
-  assert.match(hint.textContent, /1–5000/, "a fractional value is treated as invalid and explains the range");
-  assert.match(hint.textContent, /50/, "the applied default is disclosed");
+  assert.match(hint.textContent, /必须是 1–5000 的整数/, "a fractional value is rejected as non-integer, not as an out-of-range number");
+  assert.match(hint.textContent, /已按 50 条查询/, "the applied default is disclosed");
   assert.doesNotMatch(hint.textContent, /最多 5000 条/, "a fractional value is not reported as an oversized value");
 });
 

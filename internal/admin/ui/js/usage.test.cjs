@@ -996,7 +996,35 @@ test("daily chart keeps late buckets on their real local date beyond 800 days", 
   assert.equal(late.length, 1, "the late bucket keeps its own local date");
   assert.match(late[0], /chart-value'>100</, "the late bucket stays on the last day");
   app.modules.usageChart.setUsageChartNote("day", "custom", {from: "2022-12-31T16:00:00Z", to: "2025-03-20T15:59:59Z"});
-  assert.match(h.document.getElementById("usageChartNote").textContent, /仅绘制有数据的本地日/, "long ranges disclose that empty days are omitted");
+  const note = h.document.getElementById("usageChartNote").textContent;
+  assert.match(note, /仅绘制有数据的本地日/, "long ranges disclose that empty days are omitted");
+  assert.match(note, /开始与结束边界所在整点小时整桶计入/, "long ranges disclose the whole-hour boundary");
+  assert.match(note, /不扩展到完整起止 UTC 日/, "long ranges do not claim full UTC-day coverage");
+}));
+
+test("long ranges in a half-hour zone disclose both the boundary and adjacent-day drift", () => withTZ("Asia/Kolkata", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  // Local 2023-01-01 00:00 through 2025-03-11 23:59:59 (UTC+05:30), 801 local days.
+  app.modules.usageChart.setUsageChartNote("day", "custom", {from: "2022-12-31T18:30:00Z", to: "2025-03-11T18:29:59Z"});
+  const note = h.document.getElementById("usageChartNote").textContent;
+  assert.match(note, /超过 800 个本地日/, "the over-limit note still applies");
+  assert.match(note, /开始与结束边界所在整点小时整桶计入/, "the over-limit note keeps the whole-hour boundary disclosure");
+  assert.match(note, /不扩展到完整起止 UTC 日/, "the over-limit note does not claim full UTC-day coverage");
+  assert.match(note, /不是整点偏移/, "half-hour zones get the drift disclosure in the over-limit note");
+  assert.match(note, /相邻日/, "the drift disclosure says usage may move to an adjacent day");
+}));
+
+test("exactly 800 local days keeps the normal day note without over-limit wording", () => withTZ("Asia/Shanghai", async () => {
+  const h = createHarness();
+  const app = await h.run();
+  // Local 2023-01-01 00:00 through 2025-03-10 23:59:59 (UTC+8) is exactly 800 days.
+  app.modules.usageChart.setUsageChartNote("day", "custom", {from: "2022-12-31T16:00:00Z", to: "2025-03-10T15:59:59Z"});
+  const note = h.document.getElementById("usageChartNote").textContent;
+  assert.doesNotMatch(note, /超过 800 个本地日/, "the over-limit wording starts above 800 days");
+  assert.doesNotMatch(note, /仅绘制有数据的本地日/, "800 days still draws the zero-filled calendar");
+  assert.doesNotMatch(note, /不补齐空白日/, "800 days does not omit empty days");
+  assert.match(note, /不扩展到完整起止 UTC 日/, "the normal day note keeps the boundary disclosure");
 }));
 
 test("daily chart keeps seven local days and discloses whole-hour bucket drift in a half-hour zone", () => withTZ("Asia/Kolkata", async () => {
@@ -1054,8 +1082,10 @@ test("custom multi-day range re-aggregates hourly buckets into local days throug
   h.context.fetch = async () => response(aggregate({
     group_by: "hour",
     buckets: [
-      {bucket_start: "2026-10-19T16:00:00Z", input_tokens: 10, estimated_cost: 0},
+      {bucket_start: "2026-10-19T17:00:00Z", input_tokens: 10, estimated_cost: 0},
+      {bucket_start: "2026-10-20T02:00:00Z", input_tokens: 5, estimated_cost: 0},
       {bucket_start: "2026-10-20T16:00:00Z", input_tokens: 20, estimated_cost: 0},
+      {bucket_start: "2026-10-21T02:00:00Z", input_tokens: 7, estimated_cost: 0},
       {bucket_start: "2026-10-21T16:00:00Z", input_tokens: 30, estimated_cost: 0},
     ],
   }));
@@ -1069,7 +1099,7 @@ test("custom multi-day range re-aggregates hourly buckets into local days throug
   const labels = [...chart.innerHTML.matchAll(/class='chart-label'>([^<]*)</g)].map(m => m[1]);
   assert.deepEqual(labels, ["10-20", "10-21", "10-22"], "loadUsage keeps the hourly response and draws local-day labels");
   const values = [...chart.innerHTML.matchAll(/class='chart-value'>([^<]*)</g)].map(m => m[1]);
-  assert.deepEqual(values, ["10", "20", "30"], "loadUsage sums hourly buckets into the day containing their local start");
+  assert.deepEqual(values, ["15", "27", "30"], "loadUsage sums multiple hourly buckets into the day containing their local start");
 }));
 
 test("local-day zero fill stops exactly after 800 days and longer ranges draw only data days", () => withTZ("Asia/Shanghai", async () => {
