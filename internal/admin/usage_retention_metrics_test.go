@@ -184,8 +184,9 @@ func TestMetricsExposeUsageRetentionSnapshot(t *testing.T) {
 		t.Fatalf("metadata flags = invalid %v done_v1 %v, want true/true: %s", untrustedInvalid, doneV1, raw)
 	}
 
+	topLevel := readTopLevelKeys(t, h)
 	for _, key := range []string{"generated_at", "uptime_seconds", "active_requests", "requests", "targets", "targets_runtime", "responses_ws", "persistence", "observation_budget"} {
-		if _, ok := readTopLevelKeys(t, h)[key]; !ok {
+		if _, ok := topLevel[key]; !ok {
 			t.Fatalf("/admin/metrics lost legacy field %q", key)
 		}
 	}
@@ -219,6 +220,66 @@ func TestMetricsOmitUsageRetentionWithoutStore(t *testing.T) {
 	for _, key := range []string{"generated_at", "uptime_seconds", "active_requests", "requests", "targets", "targets_runtime", "responses_ws", "persistence", "observation_budget"} {
 		if _, ok := body[key]; !ok {
 			t.Fatalf("/admin/metrics lost legacy field %q: %s", key, raw)
+		}
+	}
+}
+
+func TestMetricsUsageRetentionNotReadyOnFirstRead(t *testing.T) {
+	stores := setupTestStores(t, t.TempDir())
+	h := metricsTestHandler(t, stores, stores.usageStore)
+
+	// The first read starts the asynchronous refresh and must report not_ready
+	// without waiting for the database.
+	body, raw := readMetricsBody(t, h)
+	encoded, ok := body["usage_retention"]
+	if !ok {
+		t.Fatalf("/admin/metrics omitted usage_retention: %s", raw)
+	}
+	var retention map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &retention); err != nil {
+		t.Fatalf("decode usage_retention: %v", err)
+	}
+	exactKeys(t, "usage_retention", retention, "available", "reason", "captured_at", "buckets", "events", "metadata")
+	var available bool
+	var reason string
+	_ = json.Unmarshal(retention["available"], &available)
+	_ = json.Unmarshal(retention["reason"], &reason)
+	if available || reason != "not_ready" {
+		t.Fatalf("first read = available %v reason %q, want %q: %s", available, reason, "not_ready", raw)
+	}
+	for _, key := range []string{"captured_at", "buckets", "events", "metadata"} {
+		if string(retention[key]) != "null" {
+			t.Fatalf("not_ready snapshot carried %s = %s: %s", key, retention[key], raw)
+		}
+	}
+}
+
+func TestMetricsUsageRetentionStoreUnavailable(t *testing.T) {
+	stores := setupTestStores(t, t.TempDir())
+	// A non-nil usage store whose database handle is unavailable is reachable
+	// through the constructor without stubbing.
+	h := metricsTestHandler(t, stores, nosql.NewUsageStore(nil))
+
+	body, raw := readMetricsBody(t, h)
+	encoded, ok := body["usage_retention"]
+	if !ok {
+		t.Fatalf("/admin/metrics omitted usage_retention: %s", raw)
+	}
+	var retention map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &retention); err != nil {
+		t.Fatalf("decode usage_retention: %v", err)
+	}
+	exactKeys(t, "usage_retention", retention, "available", "reason", "captured_at", "buckets", "events", "metadata")
+	var available bool
+	var reason string
+	_ = json.Unmarshal(retention["available"], &available)
+	_ = json.Unmarshal(retention["reason"], &reason)
+	if available || reason != "store_unavailable" {
+		t.Fatalf("nil database snapshot = available %v reason %q, want %q: %s", available, reason, "store_unavailable", raw)
+	}
+	for _, key := range []string{"captured_at", "buckets", "events", "metadata"} {
+		if string(retention[key]) != "null" {
+			t.Fatalf("store_unavailable snapshot carried %s = %s: %s", key, retention[key], raw)
 		}
 	}
 }

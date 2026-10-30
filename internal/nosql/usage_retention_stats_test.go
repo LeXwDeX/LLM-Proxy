@@ -79,6 +79,14 @@ func putRetentionMeta(t *testing.T, db *bolt.DB, key, value string) {
 	}
 }
 
+func TestUsageRetentionDefaultRefreshInterval(t *testing.T) {
+	old := UsageRetentionRefreshInterval
+	t.Cleanup(func() { UsageRetentionRefreshInterval = old })
+	if UsageRetentionRefreshInterval != 5*time.Minute {
+		t.Fatalf("UsageRetentionRefreshInterval = %v, want the 5 minute default", UsageRetentionRefreshInterval)
+	}
+}
+
 func TestUsageRetentionStatsEmptyDatabase(t *testing.T) {
 	store := NewUsageStore(testDB(t))
 	stats := awaitUsageRetentionStats(t, store)
@@ -242,6 +250,110 @@ func TestUsageRetentionEventRangeAllInvalidNeverGuesses(t *testing.T) {
 	}
 }
 
+// TestUsageRetentionEventRangeSameSecondOrdersByTimestamp covers RFC3339Nano
+// keys whose byte order within one second differs from their time order:
+// fraction digits sort before the whole-second "Z", and trimming trailing
+// zeroes makes ".1" sort after ".15".
+func TestUsageRetentionEventRangeSameSecondOrdersByTimestamp(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name         string
+		keys         []string
+		wantEarliest time.Time
+		wantLatest   time.Time
+		wantInvalid  uint64
+	}{
+		{
+			name: "whole second sorts after its fractions",
+			keys: []string{
+				usageKey(base, "record-whole"),
+				usageKey(base.Add(time.Millisecond), "record-early"),
+				usageKey(base.Add(999*time.Millisecond), "record-late"),
+			},
+			wantEarliest: base,
+			wantLatest:   base.Add(999 * time.Millisecond),
+		},
+		{
+			name: "trimmed trailing zeroes invert key order",
+			keys: []string{
+				usageKey(base.Add(100*time.Millisecond), "record-tenth"),
+				usageKey(base.Add(150*time.Millisecond), "record-fifteenth"),
+			},
+			wantEarliest: base.Add(100 * time.Millisecond),
+			wantLatest:   base.Add(150 * time.Millisecond),
+		},
+		{
+			name: "invalid key inside the boundary second counted once",
+			keys: []string{
+				"2026-01-01T00:00:00_not-a-stamp",
+				usageKey(base, "record-whole"),
+				usageKey(base.Add(time.Millisecond), "record-early"),
+			},
+			wantEarliest: base,
+			wantLatest:   base.Add(time.Millisecond),
+			wantInvalid:  1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testDB(t)
+			putRetentionKeys(t, db, BucketUsageEvents, tc.keys...)
+
+			stats := awaitUsageRetentionStats(t, NewUsageStore(db))
+			if !stats.Available {
+				t.Fatalf("snapshot unavailable: reason %q", stats.Reason)
+			}
+			if stats.Events.Earliest == nil || !stats.Events.Earliest.Equal(tc.wantEarliest) {
+				t.Fatalf("earliest = %v, want %v", stats.Events.Earliest, tc.wantEarliest)
+			}
+			if stats.Events.Latest == nil || !stats.Events.Latest.Equal(tc.wantLatest) {
+				t.Fatalf("latest = %v, want %v", stats.Events.Latest, tc.wantLatest)
+			}
+			if stats.Events.Earliest.After(*stats.Events.Latest) {
+				t.Fatalf("earliest %v is after latest %v", stats.Events.Earliest, stats.Events.Latest)
+			}
+			if stats.Events.InvalidKeys != tc.wantInvalid {
+				t.Fatalf("invalid_keys = %d, want %d", stats.Events.InvalidKeys, tc.wantInvalid)
+			}
+		})
+	}
+}
+
+// TestUsageRetentionEventRangeLargeEventSet seeds 200,000 events one
+// millisecond apart. The seconds are dense and both boundary seconds end with
+// a whole-second key, so the truncated key order reports earliest .001 and
+// latest .000 unless both boundary seconds are scanned for their timestamp
+// range. Only the endpoints are asserted.
+func TestUsageRetentionEventRangeLargeEventSet(t *testing.T) {
+	db := testDB(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	const events = 200_000
+	keys := make([]string, events)
+	for i := range keys {
+		keys[i] = usageKey(base.Add(time.Duration(i)*time.Millisecond), fmt.Sprintf("record-%06d", i))
+	}
+	putRetentionKeys(t, db, BucketUsageEvents, keys...)
+
+	stats := awaitUsageRetentionStats(t, NewUsageStore(db))
+	if !stats.Available {
+		t.Fatalf("snapshot unavailable: reason %q", stats.Reason)
+	}
+	wantEarliest := base
+	wantLatest := base.Add((events - 1) * time.Millisecond)
+	if stats.Events.Earliest == nil || !stats.Events.Earliest.Equal(wantEarliest) {
+		t.Fatalf("earliest = %v, want %v", stats.Events.Earliest, wantEarliest)
+	}
+	if stats.Events.Latest == nil || !stats.Events.Latest.Equal(wantLatest) {
+		t.Fatalf("latest = %v, want %v", stats.Events.Latest, wantLatest)
+	}
+	if stats.Events.Earliest.After(*stats.Events.Latest) {
+		t.Fatalf("earliest %v is after latest %v", stats.Events.Earliest, stats.Events.Latest)
+	}
+	if stats.Events.InvalidKeys != 0 {
+		t.Fatalf("invalid_keys = %d, want 0", stats.Events.InvalidKeys)
+	}
+}
+
 func TestUsageRetentionMetadata(t *testing.T) {
 	t.Run("watermarks and markers", func(t *testing.T) {
 		db := testDB(t)
@@ -321,6 +433,60 @@ func TestUsageRetentionSnapshotNilStore(t *testing.T) {
 	}
 }
 
+func TestUsageRetentionSnapshotRecoversFromLoadPanic(t *testing.T) {
+	store := NewUsageStore(testDB(t))
+	var loads atomic.Int64
+	store.retention.load = func() UsageRetentionStats {
+		loads.Add(1)
+		panic("retention load panic")
+	}
+
+	stats := awaitUsageRetentionStats(t, store)
+	if stats.Available || stats.Reason != UsageRetentionReasonInternalError {
+		t.Fatalf("panicking load snapshot = available %v reason %q, want %q", stats.Available, stats.Reason, UsageRetentionReasonInternalError)
+	}
+	if stats.CapturedAt == nil {
+		t.Fatalf("panicking load snapshot lost its capture time: %+v", stats)
+	}
+	if stats.Buckets != nil || stats.Events != nil || stats.Metadata != nil {
+		t.Fatalf("panicking load snapshot carried detail: %+v", stats)
+	}
+	store.retention.mu.Lock()
+	refreshing := store.retention.refreshing
+	store.retention.mu.Unlock()
+	if refreshing {
+		t.Fatal("single-flight flag stayed set after a panicking load")
+	}
+
+	// The cleared flag lets a later stale read refresh again.
+	oldInterval := UsageRetentionRefreshInterval
+	UsageRetentionRefreshInterval = time.Nanosecond
+	t.Cleanup(func() { UsageRetentionRefreshInterval = oldInterval })
+	refreshedAt := stats.CapturedAt.Add(time.Second)
+	store.now = func() time.Time { return refreshedAt }
+	store.retention.load = func() UsageRetentionStats {
+		loads.Add(1)
+		return UsageRetentionStats{Available: true}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		stats = store.UsageRetentionSnapshot()
+		if stats.Available {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !stats.Available {
+		t.Fatalf("refresh after a panicking load never published: %+v", stats)
+	}
+	if stats.CapturedAt == nil || !stats.CapturedAt.Equal(refreshedAt) {
+		t.Fatalf("captured_at = %v, want %v", stats.CapturedAt, refreshedAt)
+	}
+	if got := loads.Load(); got != 2 {
+		t.Fatalf("loads = %d, want 2", got)
+	}
+}
+
 func TestUsageRetentionSnapshotNotReadyThenRefreshesOnce(t *testing.T) {
 	store := NewUsageStore(testDB(t))
 	started := make(chan struct{})
@@ -367,6 +533,14 @@ func TestUsageRetentionSnapshotStaleReadReturnsPreviousSnapshot(t *testing.T) {
 	if !ready.Available || ready.CapturedAt == nil {
 		t.Fatalf("initial snapshot = %+v", ready)
 	}
+	if ready.Buckets == nil || ready.Buckets.Receipts.Entries != 0 {
+		t.Fatalf("initial receipts = %+v, want an empty bucket", ready.Buckets)
+	}
+	// Change data and move the clock so the refresh must republish both the
+	// values and captured_at, not just clear the single-flight flag.
+	putRetentionKeys(t, store.db, BucketUsageReceipts, "receipt-after-stale-refresh")
+	refreshedAt := ready.CapturedAt.Add(time.Hour)
+	store.now = func() time.Time { return refreshedAt }
 
 	oldInterval := UsageRetentionRefreshInterval
 	UsageRetentionRefreshInterval = time.Nanosecond
@@ -404,9 +578,16 @@ func TestUsageRetentionSnapshotStaleReadReturnsPreviousSnapshot(t *testing.T) {
 		t.Fatalf("refreshes during the stale window = %d, want 1", got)
 	}
 
-	UsageRetentionRefreshInterval = oldInterval
 	close(release)
 	waitUsageRetentionIdle(t, store)
+
+	fresh := store.UsageRetentionSnapshot()
+	if !fresh.Available || fresh.CapturedAt == nil || !fresh.CapturedAt.Equal(refreshedAt) {
+		t.Fatalf("refreshed snapshot = %+v, want captured_at %v", fresh, refreshedAt)
+	}
+	if fresh.Buckets == nil || fresh.Buckets.Receipts.Entries != 1 {
+		t.Fatalf("refreshed receipts = %+v, want 1 entry", fresh.Buckets)
+	}
 }
 
 func TestUsageRetentionSnapshotConcurrentReadsTriggerOneRefresh(t *testing.T) {

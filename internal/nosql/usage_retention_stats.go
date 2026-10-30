@@ -126,9 +126,12 @@ func (s *UsageStore) UsageRetentionSnapshot() UsageRetentionStats {
 }
 
 // refreshUsageRetention publishes one snapshot and clears the single-flight
-// flag, including after a recovered panic.
+// flag, including after a recovered panic. A failed snapshot replaces the
+// previous successful one for a whole refresh interval, so the endpoint
+// degrades to available:false instead of serving stale values; Issue #146 only
+// requires degradation.
 func (s *UsageStore) refreshUsageRetention(load func() UsageRetentionStats) {
-	stats := usageRetentionLoadSafely(s, load)
+	stats := usageRetentionLoadSafely(load)
 	now := s.retentionNow()
 	stats.CapturedAt = &now
 
@@ -139,7 +142,7 @@ func (s *UsageStore) refreshUsageRetention(load func() UsageRetentionStats) {
 	cache.mu.Unlock()
 }
 
-func usageRetentionLoadSafely(s *UsageStore, load func() UsageRetentionStats) (stats UsageRetentionStats) {
+func usageRetentionLoadSafely(load func() UsageRetentionStats) (stats UsageRetentionStats) {
 	defer func() {
 		if recover() != nil {
 			stats = UsageRetentionStats{Available: false, Reason: UsageRetentionReasonInternalError}
@@ -180,14 +183,22 @@ func usageRetentionBucket(tx *bolt.Tx, name string) UsageRetentionBucketUsage {
 	}
 	st := b.Stats()
 	return UsageRetentionBucketUsage{
-		Present:    true,
-		Entries:    uint64(st.KeyN),
-		Pages:      st.LeafPageN + st.BranchPageN,
+		Present: true,
+		Entries: uint64(st.KeyN),
+		Pages:   st.LeafPageN + st.BranchPageN,
+		// bbolt already counts an inline child bucket's bytes in the parent's
+		// LeafInuse, so this sum is exact only while these four ledger buckets
+		// stay flat (no child buckets). They have no child buckets today; if one
+		// is added, InlineBucketInuse must be dropped to avoid double counting.
 		InUseBytes: uint64(st.LeafInuse + st.BranchInuse + st.InlineBucketInuse),
 	}
 }
 
-// usageRetentionEventRange locates the first and last parseable key time.
+// usageRetentionEventRange locates the earliest and latest parseable key time.
+// RFC3339Nano keys sort by whole second but not by time within a second: a
+// trimmed fraction or the whole-second "Z" can precede an earlier instant.
+// The first and last parseable keys therefore only identify the boundary
+// seconds; each complete boundary second is scanned for its timestamp range.
 // Boundary keys that do not parse are counted; no timestamp is inferred from
 // an unparseable key. If every key is invalid both times stay nil.
 func usageRetentionEventRange(b *bolt.Bucket) *UsageRetentionEvents {
@@ -196,33 +207,86 @@ func usageRetentionEventRange(b *bolt.Bucket) *UsageRetentionEvents {
 		return events
 	}
 	cursor := b.Cursor()
-	found := false
-	for k, _ := cursor.First(); k != nil; k, _ = cursor.Next() {
+
+	// Forward: skip the invalid prefix up to the first parseable key, then
+	// scan that whole second for the global minimum and maximum.
+	k, _ := cursor.First()
+	for k != nil {
 		at, ok := canonicalEventKeyStamp(k)
-		if !ok {
-			events.InvalidKeys++
-			continue
+		if ok {
+			earliest := at
+			events.Earliest = &earliest
+			break
 		}
-		earliest := at
-		events.Earliest = &earliest
-		found = true
-		break
+		events.InvalidKeys++
+		k, _ = cursor.Next()
 	}
-	if !found {
+	if events.Earliest == nil {
 		// The forward scan already counted every key exactly once.
 		return events
 	}
-	for k, _ := cursor.Last(); k != nil; k, _ = cursor.Prev() {
+	earliestSecond := eventKeySecond(k)
+	earliest, latest := *events.Earliest, *events.Earliest
+	for k, _ = cursor.Next(); k != nil && eventKeySecond(k) == earliestSecond; k, _ = cursor.Next() {
 		at, ok := canonicalEventKeyStamp(k)
 		if !ok {
 			events.InvalidKeys++
 			continue
 		}
-		latest := at
-		events.Latest = &latest
-		break
+		if at.Before(earliest) {
+			earliest = at
+		}
+		if at.After(latest) {
+			latest = at
+		}
 	}
+	events.Earliest = &earliest
+
+	// Backward: skip the invalid suffix up to the last parseable key. Invalid
+	// keys in the earliest second were already counted by the forward scan; if
+	// both boundary keys share a second, the range above is already global.
+	k, _ = cursor.Last()
+	for k != nil {
+		at, ok := canonicalEventKeyStamp(k)
+		if ok {
+			if eventKeySecond(k) == earliestSecond {
+				events.Latest = &latest
+				return events
+			}
+			latest = at
+			break
+		}
+		if eventKeySecond(k) != earliestSecond {
+			events.InvalidKeys++
+		}
+		k, _ = cursor.Prev()
+	}
+	if k == nil {
+		events.Latest = &latest
+		return events
+	}
+	latestSecond := eventKeySecond(k)
+	for k, _ = cursor.Prev(); k != nil && eventKeySecond(k) == latestSecond; k, _ = cursor.Prev() {
+		at, ok := canonicalEventKeyStamp(k)
+		if !ok {
+			events.InvalidKeys++
+			continue
+		}
+		if at.After(latest) {
+			latest = at
+		}
+	}
+	events.Latest = &latest
 	return events
+}
+
+// eventKeySecond returns the whole-second prefix shared by every RFC3339Nano
+// key for one instant. Shorter keys cannot carry it and compare as empty.
+func eventKeySecond(key []byte) string {
+	if len(key) < len(eventSecondLayout) {
+		return ""
+	}
+	return string(key[:len(eventSecondLayout)])
 }
 
 func usageRetentionMetadata(meta *bolt.Bucket) *UsageRetentionMetadata {
