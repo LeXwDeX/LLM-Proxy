@@ -89,6 +89,9 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 			maskedAPIKeys[j] = maskKey(k)
 		}
 
+		// custom_body_raw is the exact JSON text per field. The browser cannot
+		// represent integers beyond 2^53 after JSON.parse, so its editor
+		// round-trips this field instead of the parsed custom_body values.
 		m := map[string]any{
 			"name":                            t.Name,
 			"endpoint_type":                   epType,
@@ -114,6 +117,7 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 			"prefer_websocket":                t.PreferWebSocket,
 			"custom_headers":                  t.CustomHeaders,
 			"custom_body":                     t.CustomBody,
+			"custom_body_raw":                 customBodyRawText(t.CustomBody),
 			"pool":                            t.Pool,
 			"max_concurrency":                 t.MaxConcurrency,
 			// 内容 ETag（存储字节的哈希）与稳定 key ID：重启后不变，不随别的目标或封禁变化。
@@ -128,6 +132,7 @@ func (h *Handler) handleListTargets(w http.ResponseWriter, r *http.Request) {
 			m["anthropic_prefix"] = ""
 			m["custom_headers"] = nil
 			m["custom_body"] = nil
+			m["custom_body_raw"] = nil
 		}
 		// Only publish a precondition when stored and runtime identity agree.
 		if snaps[i].token != "" {
@@ -161,29 +166,30 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	txn := h.lockConfig(r)
 	defer txn.Unlock()
 	var body struct {
-		Name                        string                `json:"name"`
-		EndpointType                string                `json:"endpoint_type"`
-		UsageAdapter                string                `json:"usage_adapter"`
-		Endpoint                    string                `json:"endpoint"`
-		APIKey                      string                `json:"api_key"`
-		APIKeys                     []string              `json:"api_keys"`
-		KeyResetTime                string                `json:"key_reset_time"`
-		Paused                      bool                  `json:"paused"`
-		AllowBearer                 bool                  `json:"allow_bearer_passthrough"`
-		AuthMode                    string                `json:"auth_mode"`
-		ImageOperation              string                `json:"image_operation"`
-		ModelMappings               []config.ModelMapping `json:"model_mappings"`
-		ModelPrefix                 string                `json:"model_prefix"`
-		OpenAIPrefix                string                `json:"openai_prefix"`
-		AnthropicPrefix             string                `json:"anthropic_prefix"`
-		SupportsResponses           bool                  `json:"supports_responses"`
-		RequestStreamUsageIfMissing bool                  `json:"request_stream_usage_if_missing"`
-		PreferWebSocket             bool                  `json:"prefer_websocket"`
-		CustomHeaders               map[string]string     `json:"custom_headers"`
-		CustomBody                  map[string]any        `json:"custom_body"`
-		Pool                        string                `json:"pool"`
-		Group                       string                `json:"group"`
-		MaxConcurrency              int                   `json:"max_concurrency"`
+		Name                        string                     `json:"name"`
+		EndpointType                string                     `json:"endpoint_type"`
+		UsageAdapter                string                     `json:"usage_adapter"`
+		Endpoint                    string                     `json:"endpoint"`
+		APIKey                      string                     `json:"api_key"`
+		APIKeys                     []string                   `json:"api_keys"`
+		KeyResetTime                string                     `json:"key_reset_time"`
+		Paused                      bool                       `json:"paused"`
+		AllowBearer                 bool                       `json:"allow_bearer_passthrough"`
+		AuthMode                    string                     `json:"auth_mode"`
+		ImageOperation              string                     `json:"image_operation"`
+		ModelMappings               []config.ModelMapping      `json:"model_mappings"`
+		ModelPrefix                 string                     `json:"model_prefix"`
+		OpenAIPrefix                string                     `json:"openai_prefix"`
+		AnthropicPrefix             string                     `json:"anthropic_prefix"`
+		SupportsResponses           bool                       `json:"supports_responses"`
+		RequestStreamUsageIfMissing bool                       `json:"request_stream_usage_if_missing"`
+		PreferWebSocket             bool                       `json:"prefer_websocket"`
+		CustomHeaders               map[string]string          `json:"custom_headers"`
+		CustomBody                  map[string]json.RawMessage `json:"custom_body"`
+		CustomBodyRaw               map[string]string          `json:"custom_body_raw"`
+		Pool                        string                     `json:"pool"`
+		Group                       string                     `json:"group"`
+		MaxConcurrency              int                        `json:"max_concurrency"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
@@ -244,11 +250,20 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	customBody := config.CustomBodyFromRaw(body.CustomBody)
+	if body.CustomBodyRaw != nil {
+		parsed, err := customBodyFromRawText(body.CustomBodyRaw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
+			return
+		}
+		customBody = parsed
+	}
 	if blocked := proxy.ValidateCustomHeaders(body.CustomHeaders); blocked != "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse(fmt.Sprintf("custom_headers contains blocked key %q", blocked)))
 		return
 	}
-	if blocked := proxy.ValidateCustomBody(body.CustomBody); blocked != "" {
+	if blocked := proxy.ValidateCustomBody(customBody); blocked != "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse(fmt.Sprintf("custom_body contains blocked field %q", blocked)))
 		return
 	}
@@ -287,7 +302,7 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		// prefer_websocket 仅对 canonical openai 有意义；其余类型一律归一化为 false。
 		PreferWebSocket: body.PreferWebSocket && epType == config.EndpointTypeOpenAI,
 		CustomHeaders:   body.CustomHeaders,
-		CustomBody:      body.CustomBody,
+		CustomBody:      customBody,
 		Pool:            pool,
 		MaxConcurrency:  maxConcurrency,
 	}
@@ -324,28 +339,29 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		EndpointType                string                 `json:"endpoint_type"`
-		UsageAdapter                json.RawMessage        `json:"usage_adapter"`
-		Endpoint                    string                 `json:"endpoint"`
-		APIKey                      *string                `json:"api_key"`
-		APIKeys                     *[]string              `json:"api_keys"`
-		KeyResetTime                *string                `json:"key_reset_time"`
-		Paused                      *bool                  `json:"paused"`
-		AllowBearer                 bool                   `json:"allow_bearer_passthrough"`
-		AuthMode                    *string                `json:"auth_mode"`
-		ImageOperation              *string                `json:"image_operation"`
-		ModelMappings               *[]config.ModelMapping `json:"model_mappings"`
-		ModelPrefix                 *string                `json:"model_prefix"`
-		OpenAIPrefix                *string                `json:"openai_prefix"`
-		AnthropicPrefix             *string                `json:"anthropic_prefix"`
-		SupportsResponses           *bool                  `json:"supports_responses"`
-		RequestStreamUsageIfMissing *bool                  `json:"request_stream_usage_if_missing"`
-		PreferWebSocket             *bool                  `json:"prefer_websocket"`
-		CustomHeaders               *map[string]string     `json:"custom_headers"`
-		CustomBody                  *map[string]any        `json:"custom_body"`
-		Pool                        *string                `json:"pool"`
-		Group                       *string                `json:"group"`
-		MaxConcurrency              *int                   `json:"max_concurrency"`
+		EndpointType                string                      `json:"endpoint_type"`
+		UsageAdapter                json.RawMessage             `json:"usage_adapter"`
+		Endpoint                    string                      `json:"endpoint"`
+		APIKey                      *string                     `json:"api_key"`
+		APIKeys                     *[]string                   `json:"api_keys"`
+		KeyResetTime                *string                     `json:"key_reset_time"`
+		Paused                      *bool                       `json:"paused"`
+		AllowBearer                 bool                        `json:"allow_bearer_passthrough"`
+		AuthMode                    *string                     `json:"auth_mode"`
+		ImageOperation              *string                     `json:"image_operation"`
+		ModelMappings               *[]config.ModelMapping      `json:"model_mappings"`
+		ModelPrefix                 *string                     `json:"model_prefix"`
+		OpenAIPrefix                *string                     `json:"openai_prefix"`
+		AnthropicPrefix             *string                     `json:"anthropic_prefix"`
+		SupportsResponses           *bool                       `json:"supports_responses"`
+		RequestStreamUsageIfMissing *bool                       `json:"request_stream_usage_if_missing"`
+		PreferWebSocket             *bool                       `json:"prefer_websocket"`
+		CustomHeaders               *map[string]string          `json:"custom_headers"`
+		CustomBody                  *map[string]json.RawMessage `json:"custom_body"`
+		CustomBodyRaw               *map[string]string          `json:"custom_body_raw"`
+		Pool                        *string                     `json:"pool"`
+		Group                       *string                     `json:"group"`
+		MaxConcurrency              *int                        `json:"max_concurrency"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
@@ -386,8 +402,22 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if body.CustomBody != nil {
-		if blocked := proxy.ValidateCustomBody(*body.CustomBody); blocked != "" {
+	var customBodyUpdate map[string]any
+	customBodySet := false
+	if body.CustomBodyRaw != nil {
+		parsed, err := customBodyFromRawText(*body.CustomBodyRaw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
+			return
+		}
+		customBodyUpdate = parsed
+		customBodySet = true
+	} else if body.CustomBody != nil {
+		customBodyUpdate = config.CustomBodyFromRaw(*body.CustomBody)
+		customBodySet = true
+	}
+	if customBodySet {
+		if blocked := proxy.ValidateCustomBody(customBodyUpdate); blocked != "" {
 			writeJSON(w, http.StatusBadRequest, errorResponse(fmt.Sprintf("custom_body contains blocked field %q", blocked)))
 			return
 		}
@@ -507,8 +537,8 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 			if body.CustomHeaders != nil {
 				t.CustomHeaders = *body.CustomHeaders
 			}
-			if body.CustomBody != nil {
-				t.CustomBody = *body.CustomBody
+			if customBodySet {
+				t.CustomBody = customBodyUpdate
 			}
 			if body.Pool != nil {
 				nextPool := strings.ToLower(strings.TrimSpace(*body.Pool))
@@ -948,6 +978,46 @@ func validateModelMappings(mappings []config.ModelMapping) error {
 		}
 	}
 	return nil
+}
+
+// customBodyFromRawText validates exact JSON text submitted for each custom
+// body field and stores it as json.RawMessage. This is the lossless transport
+// used by the admin editor: the browser never has to parse the value into a
+// JavaScript number.
+func customBodyFromRawText(raw map[string]string) (map[string]any, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	body := make(map[string]any, len(raw))
+	for key, text := range raw {
+		if !json.Valid([]byte(text)) {
+			return nil, fmt.Errorf("custom_body_raw[%q] is not valid JSON", key)
+		}
+		body[key] = json.RawMessage(text)
+	}
+	return body, nil
+}
+
+// customBodyRawText returns each custom body value as exact JSON text. Values
+// written through the JSON APIs are already json.RawMessage; other values are
+// encoded once for older/programmatic configurations.
+func customBodyRawText(body map[string]any) map[string]string {
+	if body == nil {
+		return nil
+	}
+	raw := make(map[string]string, len(body))
+	for key, value := range body {
+		if text, ok := value.(json.RawMessage); ok {
+			raw[key] = string(text)
+			continue
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			continue
+		}
+		raw[key] = string(encoded)
+	}
+	return raw
 }
 
 // maskKey returns a masked version of a key for safe logging.

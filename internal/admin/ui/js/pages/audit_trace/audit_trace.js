@@ -88,6 +88,11 @@ AdminApp.register("audit_trace", function (app) {
   /* ===== Trace (DEBUG) ===== */
   var traceEnabled = false;
   var traceOffset = 0;
+  // Mirrors the server's fallback and hard cap; limit_max from a list response
+  // refreshes the cap so the UI never silently depends on a stale constant.
+  var traceDefaultLimit = 50;
+  var traceLimitMax = 5000;
+  var traceLimitNotice = "";
   // The page size the server actually applied; paging follows it, not the typed value.
   var traceEffectiveLimit = 50;
   // Bumped by every list load and by detail views so a late response is dropped.
@@ -143,8 +148,51 @@ AdminApp.register("audit_trace", function (app) {
     }
   }
 
+  function renderTraceLimitHint() {
+    var hint = document.getElementById("traceLimitHint");
+    if (hint) hint.textContent = traceLimitNotice;
+  }
+
+  function appendTraceLimitNotice(text) {
+    traceLimitNotice = traceLimitNotice ? traceLimitNotice + " " + text : text;
+    renderTraceLimitHint();
+  }
+
   function tracePageSize() {
-    return parseInt(document.getElementById("traceLimit").value) || 50;
+    var requested = Number(document.getElementById("traceLimit").value);
+    // Fractional input is not a partial page: treat it as invalid instead of
+    // silently flooring 1.9 to a one-row request.
+    if (!Number.isInteger(requested) || requested < 1) {
+      traceLimitNotice = "显示条数必须是 1–" + traceLimitMax + " 的整数，已按 " + traceDefaultLimit + " 条查询。";
+      renderTraceLimitHint();
+      return traceDefaultLimit;
+    }
+    if (requested > traceLimitMax) {
+      traceLimitNotice = "显示条数最多 " + traceLimitMax + " 条，已按 " + traceLimitMax + " 条查询。";
+      renderTraceLimitHint();
+      return traceLimitMax;
+    }
+    traceLimitNotice = "";
+    renderTraceLimitHint();
+    return requested;
+  }
+
+  // applyTraceLimit reads the limit the server actually applied, refreshes the
+  // disclosed maximum and keeps the value visible when it differs from the ask.
+  function applyTraceLimit(data, requested) {
+    if (
+      data &&
+      typeof data.limit_max === "number" &&
+      isFinite(data.limit_max) &&
+      data.limit_max > 0
+    ) {
+      traceLimitMax = Math.floor(data.limit_max);
+    }
+    var effective = data && data.limit > 0 ? data.limit : requested;
+    if (effective !== requested) {
+      appendTraceLimitNotice("服务端实际采用 " + effective + " 条（请求 " + requested + " 条）。");
+    }
+    return effective;
   }
 
   function tracePath(limit, offset) {
@@ -193,13 +241,15 @@ AdminApp.register("audit_trace", function (app) {
 
     var version = ++traceLoadVersion;
     traceOffset = 0; // 重置偏移量
-    var limit = tracePageSize();
     var searchId = document.getElementById("traceSearchId").value.trim();
 
     startBrailleSpinner("加载请求记录...");
     try {
-      // If searching by ID, use the single-record endpoint
+      // If searching by ID, use the single-record endpoint. The page-size cap
+      // does not apply, so it must not leave a stale limit notice behind.
       if (searchId) {
+        traceLimitNotice = "";
+        renderTraceLimitHint();
         var record = await api(
           "/admin/data/trace/" + encodeURIComponent(searchId),
         );
@@ -213,13 +263,14 @@ AdminApp.register("audit_trace", function (app) {
         return;
       }
 
+      var limit = tracePageSize();
       var data = await api(
         tracePath(limit, traceOffset),
         { timeoutMs: 60000 }, // trace pages scan the trace store
       );
       if (version !== traceLoadVersion) return;
       var raw = data.records || [];
-      traceEffectiveLimit = data.limit > 0 ? data.limit : limit;
+      traceEffectiveLimit = applyTraceLimit(data, limit);
       traceClients = {};
       traceTargets = {};
       populateTraceFilters(raw);
@@ -248,7 +299,7 @@ AdminApp.register("audit_trace", function (app) {
       );
       if (version !== traceLoadVersion) return;
       traceOffset = offset;
-      if (data && data.limit > 0) traceEffectiveLimit = data.limit;
+      traceEffectiveLimit = applyTraceLimit(data, traceEffectiveLimit);
       if (data && data.records && data.records.length > 0) {
         populateTraceFilters(data.records);
         appendTraceRecords(filterTraceRecords(data.records));

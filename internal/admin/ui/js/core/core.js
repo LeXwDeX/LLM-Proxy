@@ -134,6 +134,8 @@ AdminApp.register("core", function (app) {
     if (isNaN(d.getTime())) throw new Error("请填写有效时间");
     return d.toISOString();
   }
+  // offsetMinutes is the wall-clock offset east of UTC (+05:30 -> 330).
+  function offsetMinutes(date) { return -date.getTimezoneOffset(); }
 
   /* ===== Theme ===== */
   var THEME_STORAGE_KEY = "llms-proxy-admin-theme";
@@ -606,6 +608,7 @@ AdminApp.register("core", function (app) {
     fmtTime: fmtTime,
     toLocalInput: toLocalInput,
     inputToISO: inputToISO,
+    offsetMinutes: offsetMinutes,
     toast: toast,
     api: api,
     isTransientError: isTransientError,

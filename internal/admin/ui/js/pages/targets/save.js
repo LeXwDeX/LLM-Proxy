@@ -8,7 +8,7 @@ AdminApp.register("targetsSave", function (app) {
   var api = app.bind("core", "api");
   var closeModal = app.bind("core", "closeModal");
   var epMeta = app.bind("schema", "epMeta");
-  var collectCustomBody = app.bind("targetsMappings", "collectCustomBody");
+  var collectCustomBodyRaw = app.bind("targetsMappings", "collectCustomBodyRaw");
   var collectCustomHeaders = app.bind("targetsMappings", "collectCustomHeaders");
   var collectModelMappings = app.bind("targetsMappings", "collectModelMappings");
   var loadTargets = app.bind("targets", "loadTargets");
@@ -36,7 +36,8 @@ AdminApp.register("targetsSave", function (app) {
         document.getElementById("tgtPreferWS").checked;
       var modelMappings = collectModelMappings();
       var customHeaders = collectCustomHeaders();
-      var customBody = collectCustomBody();
+      // Raw JSON text, never a parsed value: JSON.parse would round large integers.
+      var customBodyRaw = collectCustomBodyRaw();
       // 统一 keypool：从卡片列表读取，第一个为 api_key，其余为 api_keys。
       // 已保存的空主密钥槽位保持为空，不让第一个附加密钥顶替主密钥。
       var emptyPrimary = !!(ts.tgtKeyList[0] && ts.tgtKeyList[0].emptyPrimary);
@@ -116,7 +117,7 @@ AdminApp.register("targetsSave", function (app) {
             model_mappings: modelMappings,
             model_prefix: document.getElementById("tgtModelPrefix").value,
             custom_headers: customHeaders,
-            custom_body: customBody,
+            custom_body_raw: customBodyRaw,
             key_reset_time: keyResetTime,
             pool: pool,
           },
@@ -147,7 +148,7 @@ AdminApp.register("targetsSave", function (app) {
             model_mappings: modelMappings,
             model_prefix: document.getElementById("tgtModelPrefix").value,
             custom_headers: customHeaders,
-            custom_body: customBody,
+            custom_body_raw: customBodyRaw,
             api_keys: apiKeys,
             key_reset_time: keyResetTime,
             pool: pool,
@@ -227,6 +228,7 @@ AdminApp.register("targetsSave", function (app) {
     "endpoint_type", "endpoint", "paused", "allow_bearer_passthrough", "auth_mode", "usage_adapter",
     "image_operation", "prefer_websocket", "openai_prefix", "anthropic_prefix", "supports_responses",
     "request_stream_usage_if_missing", "model_mappings", "model_prefix", "custom_headers", "custom_body",
+    "custom_body_raw",
     "key_reset_time", "pool",
   ];
   // Stable form with the server's own normalisation applied and "empty" values dropped,
@@ -237,7 +239,8 @@ AdminApp.register("targetsSave", function (app) {
       return items.length ? items : undefined;
     }
     if (value && typeof value === "object") {
-      var out = {};
+      // Null-prototype map: keys such as "__proto__" are JSON data, not setters.
+      var out = Object.create(null);
       Object.keys(value).sort().forEach(function (k) {
         var c = canonical(value[k]);
         if (c !== undefined) out[k] = c;
@@ -247,11 +250,141 @@ AdminApp.register("targetsSave", function (app) {
     if (value === null || value === undefined || value === "" || value === false) return undefined;
     return value;
   }
+  // Canonical JSON text for one custom-body value. The tokenizer decodes
+  // strings (normalising escape spellings) while copying every number token
+  // verbatim, so integers above Number.MAX_SAFE_INTEGER are never parsed into
+  // a JS number. Object members are sorted because JSON objects are unordered;
+  // arrays keep their order. The server stores RawMessage through
+  // encoding/json, which compacts whitespace, normalises some escapes and may
+  // HTML-escape strings, so comparing these canonical strings avoids false
+  // conflicts after an unconfirmed save.
+  function canonicalCustomBodyRaw(value) {
+    if (typeof value !== "string") return value;
+    try {
+      return canonicalJSONText(value);
+    } catch (e) {
+      // Validated input should never reach here. Keep malformed text distinct
+      // from every other value instead of treating it as an empty field.
+      return "invalid-json:" + value;
+    }
+  }
+  function canonicalJSONText(text) {
+    var i = 0;
+    function fail() { throw new Error("invalid JSON"); }
+    function whitespace() {
+      while (i < text.length) {
+        var c = text[i];
+        if (c !== " " && c !== "\t" && c !== "\n" && c !== "\r") break;
+        i++;
+      }
+    }
+    function parseValue() {
+      whitespace();
+      var c = text[i];
+      if (c === "{") return parseObject();
+      if (c === "[") return parseArray();
+      if (c === '"') return JSON.stringify(parseString());
+      if (c === "t") { expect("true"); return "true"; }
+      if (c === "f") { expect("false"); return "false"; }
+      if (c === "n") { expect("null"); return "null"; }
+      return parseNumber();
+    }
+    function parseObject() {
+      i++;
+      var entries = new Map();
+      whitespace();
+      if (text[i] === "}") { i++; return "{}"; }
+      while (true) {
+        whitespace();
+        if (text[i] !== '"') fail();
+        var key = parseString();
+        whitespace();
+        if (text[i] !== ":") fail();
+        i++;
+        // Standard JSON parsers (including encoding/json) keep the last duplicate member.
+        entries.set(key, parseValue());
+        whitespace();
+        if (text[i] === ",") { i++; continue; }
+        if (text[i] === "}") { i++; break; }
+        fail();
+      }
+      var keys = Array.from(entries.keys()).sort();
+      return "{" + keys.map(function (key) {
+        return JSON.stringify(key) + ":" + entries.get(key);
+      }).join(",") + "}";
+    }
+    function parseArray() {
+      i++;
+      var values = [];
+      whitespace();
+      if (text[i] === "]") { i++; return "[]"; }
+      while (true) {
+        values.push(parseValue());
+        whitespace();
+        if (text[i] === ",") { i++; continue; }
+        if (text[i] === "]") { i++; break; }
+        fail();
+      }
+      return "[" + values.join(",") + "]";
+    }
+    function parseString() {
+      i++;
+      var out = "";
+      while (i < text.length) {
+        var c = text[i++];
+        if (c === '"') return out;
+        if (c === "\\") {
+          var esc = text[i++];
+          if (esc === '"' || esc === "\\" || esc === "/") out += esc;
+          else if (esc === "b") out += "\b";
+          else if (esc === "f") out += "\f";
+          else if (esc === "n") out += "\n";
+          else if (esc === "r") out += "\r";
+          else if (esc === "t") out += "\t";
+          else if (esc === "u") {
+            var hex = text.slice(i, i + 4);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail();
+            out += String.fromCharCode(parseInt(hex, 16));
+            i += 4;
+          } else {
+            fail();
+          }
+        } else if (c.charCodeAt(0) < 0x20) {
+          fail();
+        } else {
+          out += c;
+        }
+      }
+      fail();
+    }
+    function parseNumber() {
+      var match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(text.slice(i));
+      if (!match) fail();
+      i += match[0].length;
+      return match[0];
+    }
+    function expect(word) {
+      if (text.slice(i, i + word.length) !== word) fail();
+      i += word.length;
+    }
+    var parsed = parseValue();
+    whitespace();
+    if (i !== text.length) fail();
+    return parsed;
+  }
   function comparableFields(source, sent) {
-    var picked = {};
+    // Null-prototype maps keep arbitrary JSON keys, including "__proto__".
+    var picked = Object.create(null);
     COMPARED_FIELDS.forEach(function (field) {
       if (sent && !Object.prototype.hasOwnProperty.call(sent, field)) return;
       var v = source[field];
+      if (field === "custom_body_raw" && v && typeof v === "object" && !Array.isArray(v)) {
+        var raw = Object.create(null);
+        Object.keys(v).forEach(function (key) {
+          raw[key] = canonicalCustomBodyRaw(v[key]);
+        });
+        v = raw;
+      }
       if (typeof v === "string") {
         v = v.trim();
         if (field === "pool" || field === "auth_mode" || field === "image_operation") v = v.toLowerCase();
