@@ -23,7 +23,7 @@ count>0 记为已覆盖。
 退出码:
   0  所有阈值满足
   1  覆盖率低于阈值，或指定的包在 profile 中不存在
-  2  profile 为空、格式错误（含非 UTF-8、多 mode 段）或命令行参数非法
+  2  profile 为空、格式错误（含非 UTF-8、多 mode 段、计数超限）或命令行参数非法
 """
 
 from __future__ import annotations
@@ -41,6 +41,10 @@ BLOCK_RE = re.compile(
     r"(?P<end_line>\d+)\.(?P<end_col>\d+) (?P<statements>\d+) (?P<count>\d+)$"
 )
 VALID_MODES = {"set", "count", "atomic"}
+
+# Go 编译器产出的单块语句数和命中次数远小于该上限；超过即视为损坏 profile，
+# 同时保证 Totals.percent 的浮点运算不会因超大整数溢出成 inf。
+MAX_BLOCK_COUNT = 1_000_000_000
 
 BlockKey = Tuple[str, int, int, int, int]
 
@@ -79,6 +83,31 @@ def package_of(file_path: str) -> str:
     return directory if separator else "."
 
 
+def parse_block_number(
+    path: Path,
+    line_number: int,
+    field: str,
+    text: str,
+    limit: int | None = None,
+) -> int:
+    """解析块行中的数字字段；位数超限或超过约定上限按损坏 profile 处理。"""
+    try:
+        value = int(text)
+    except (ValueError, OverflowError) as exc:
+        # CPython 对超过 sys.get_int_max_str_digits()（默认 4300 位）的十进制字面量
+        # 抛 ValueError；同时捕获 OverflowError 以覆盖其他解释器的同类失败。
+        raise ProfileError(
+            f"profile {path} line {line_number}: {field} {text[:32]!r} "
+            f"is not a valid integer: {exc}"
+        ) from exc
+    if limit is not None and value > limit:
+        raise ProfileError(
+            f"profile {path} line {line_number}: {field} {value} "
+            f"exceeds the maximum supported value {limit}"
+        )
+    return value
+
+
 def parse_profile(path: Path) -> Dict[str, Totals]:
     """读取并解析 cover profile，返回按包累计的覆盖率。"""
     try:
@@ -115,15 +144,19 @@ def parse_profile(path: Path) -> Dict[str, Totals]:
         if match is None:
             raise ProfileError(f"profile {path} line {line_number}: invalid coverage block {line!r}")
         file_path = match.group("file")
-        statements = int(match.group("statements"))
-        count = int(match.group("count"))
+        statements = parse_block_number(
+            path, line_number, "statements", match.group("statements"), limit=MAX_BLOCK_COUNT
+        )
+        count = parse_block_number(
+            path, line_number, "count", match.group("count"), limit=MAX_BLOCK_COUNT
+        )
         # Go 会为没有语句的块（如空函数体、右花括号）输出 numStmts=0，需接受并忽略。
         key: BlockKey = (
             file_path,
-            int(match.group("start_line")),
-            int(match.group("start_col")),
-            int(match.group("end_line")),
-            int(match.group("end_col")),
+            parse_block_number(path, line_number, "start_line", match.group("start_line")),
+            parse_block_number(path, line_number, "start_col", match.group("start_col")),
+            parse_block_number(path, line_number, "end_line", match.group("end_line")),
+            parse_block_number(path, line_number, "end_col", match.group("end_col")),
         )
         previous = blocks.get(key)
         if previous is None:

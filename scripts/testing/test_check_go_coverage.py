@@ -253,6 +253,80 @@ class CoverageCheckTests(unittest.TestCase):
         admin = check_go_coverage.parse_profile(self.profile)['github.com/LeXwDeX/LLM-Proxy/internal/admin']
         self.assertEqual((admin.statements, admin.covered), (2, 2))
 
+    def test_statement_count_with_too_many_digits_is_rejected_without_traceback(self):
+        # 5000 位数字超过 Python int() 的默认 4300 位上限；必须按损坏 profile 处理。
+        self.write_profile('mode: set', cover_line(ADMIN, statements='9' * 5000))
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn('line 2', stderr)
+        self.assertIn('statements', stderr)
+        self.assertIn('not a valid integer', stderr)
+        self.assertNotIn('Traceback', stderr)
+
+    def test_309_digit_statement_count_is_rejected_without_traceback(self):
+        # 旧实现 int() 能成功，但在百分比 float 转换时抛 OverflowError。
+        self.write_profile('mode: set', cover_line(ADMIN, statements='9' * 309))
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn('statements', stderr)
+        self.assertIn('exceeds the maximum supported value', stderr)
+        self.assertNotIn('Traceback', stderr)
+
+    def test_308_digit_statement_count_is_rejected_instead_of_passing_with_inf_percent(self):
+        # 旧实现会算出 inf% 并以退出码 0 放行；损坏 profile 不得通过门禁。
+        self.write_profile('mode: set', cover_line(ADMIN, statements='9' * 308))
+        code, stdout, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertNotIn('inf%', stdout)
+        self.assertIn('exceeds the maximum supported value', stderr)
+        self.assertNotIn('Traceback', stderr)
+
+    def test_count_above_maximum_is_rejected(self):
+        self.write_profile('mode: set', cover_line(ADMIN, statements=1, count=1000000001))
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn('count', stderr)
+        self.assertIn('exceeds the maximum supported value', stderr)
+        self.assertNotIn('Traceback', stderr)
+
+    def test_too_many_digits_in_block_position_is_rejected_without_traceback(self):
+        # 块位置的数字字段同样不能因 int() 位数上限抛出未捕获异常。
+        self.write_profile('mode: set', cover_line(ADMIN, line='9' * 5000))
+        code, _, stderr = self.run_main()
+        self.assertEqual(code, 2)
+        self.assertIn('start_line', stderr)
+        self.assertIn('not a valid integer', stderr)
+        self.assertNotIn('Traceback', stderr)
+
+    def test_large_but_legal_counts_still_pass(self):
+        # 上限内的计数不能误伤：百万级语句与恰好等于上限的 count 都应正常计算。
+        self.write_profile(
+            'mode: count',
+            cover_line(ADMIN, statements=1000000, count=1, line=1),
+            cover_line(ADMIN, statements=1, count=1000000000, line=5),
+        )
+        code, stdout, stderr = self.run_main(
+            '--min-total', '100', '--min-package', 'internal/admin=100',
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertIn('100.00%', stdout)
+        admin = check_go_coverage.parse_profile(self.profile)['github.com/LeXwDeX/LLM-Proxy/internal/admin']
+        self.assertEqual((admin.statements, admin.covered), (1000001, 1000001))
+
+    def test_non_finite_thresholds_are_rejected(self):
+        # 守护用例：旧实现已拒绝 nan/inf，此用例防止后续重构退回浮点比较放行。
+        self.two_package_profile()
+        for arguments in (
+            ('--min-total', 'nan'),
+            ('--min-total', 'inf'),
+            ('--min-total=-inf',),
+            ('--min-total', '0', '--min-package', 'internal/admin=nan'),
+        ):
+            with self.subTest(arguments=arguments):
+                code, _, stderr = self.run_main(*arguments)
+                self.assertEqual(code, 2)
+                self.assertIn('must be between 0 and 100', stderr)
+
     def test_missing_profile_file_is_rejected(self):
         missing = Path(self.tmp.name) / 'missing.out'
         stdout, stderr = io.StringIO(), io.StringIO()
