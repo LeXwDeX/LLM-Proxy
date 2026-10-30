@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -153,5 +154,33 @@ func TestExactTargetModelCostsIsolateCorruptEventToItsClient(t *testing.T) {
 	// bob's own rollup still expects the event, so his history stays incomplete.
 	if _, err := store.SumTargetModelCostsRange(usage.Filter{From: &day, To: &to, ClientName: "bob"}, resolver); !errors.Is(err, ErrUsageHistoryIncomplete) {
 		t.Fatalf("corrupt own event was not detected: %v", err)
+	}
+}
+
+// TestAssembleCostUnitsParityErrorIsDeterministic pins which mismatch is
+// reported first. Rollup cells are collected in a map, so without an explicit
+// order two equally mismatched keys can swap between calls and differential
+// fuzzing sees full and fast reads disagree on the same state. The mismatch
+// for the lexicographically smallest quotaAggKey must always be reported.
+func TestAssembleCostUnitsParityErrorIsDeterministic(t *testing.T) {
+	hour := time.Date(2026, 10, 20, 13, 0, 0, 0, time.UTC)
+	cells := []TargetModelCell{
+		{Hour: hour, Client: "alice", Target: "anthropic", Model: "executor", AggCell: AggCell{RecordCount: 1}},
+		{Hour: hour, Client: "alice", Target: "openai", Model: "advisor", AggCell: AggCell{RecordCount: 2}},
+	}
+	firstKey := string(quotaAggKey(cells[0].Hour, cells[0].Client, cells[0].Target, cells[0].Model))
+	secondKey := string(quotaAggKey(cells[1].Hour, cells[1].Client, cells[1].Target, cells[1].Model))
+	if firstKey >= secondKey {
+		t.Fatalf("fixture keys are not ordered: %q >= %q", firstKey, secondKey)
+	}
+	want := fmt.Sprintf("%s: raw record count 0 differs from rollup count %d", ErrUsageHistoryIncomplete, cells[0].recordCount())
+	for i := 0; i < 64; i++ {
+		units, err := assembleCostUnits(context.Background(), cells, nil, usage.Filter{}, exactCostTable{replayCosts}, true, nil)
+		if len(units) != 0 || !errors.Is(err, ErrUsageHistoryIncomplete) {
+			t.Fatalf("iteration %d: units=%+v err=%v", i, units, err)
+		}
+		if got := err.Error(); got != want {
+			t.Fatalf("iteration %d: first mismatch is not the smallest quotaAggKey: got %q, want %q", i, got, want)
+		}
 	}
 }
