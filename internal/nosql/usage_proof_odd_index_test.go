@@ -598,6 +598,337 @@ func TestProofOddIndexStaleRevisionFallsBackAndRebuilds(t *testing.T) {
 	}
 }
 
+// A build interrupted by the pre-scheme binary leaves entries located by the
+// old semantics (owner-bound rows under their key hour), staged progress in the
+// phase or raw cursor keys, and no scheme marker. Resuming that state and
+// stamping the current scheme would trust hour-located owner rows, so a scoped
+// proof could skip a row the exhaustive walk rejects. The migration must
+// discard such a partial build and classify every row again.
+func TestProofOddIndexRebuildsLegacyPartialBuilds(t *testing.T) {
+	for _, legacyState := range []string{"raw_cursor", "receipts_cursor", "entries_only"} {
+		t.Run(legacyState, func(t *testing.T) {
+			db := testDB(t)
+			store := NewUsageStore(db)
+			base := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
+			// A supported write establishes the owner source and a receipt.
+			if err := store.RecordBatch([]usage.Event{scaleEvent(780000, base.Add(3*time.Hour+2*time.Minute))}); err != nil {
+				t.Fatal(err)
+			}
+			odd := fixedPlainEvent()
+			odd.RecordID = ""
+			odd.ClientName = "legacy-scheme1"
+			odd.Timestamp = base.Add(10 * time.Minute)
+			oddKey := []byte(usageKey(odd.Timestamp, "legacy-scheme1-key"))
+			oddData, err := json.Marshal(odd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Update(func(tx *bolt.Tx) error {
+				if err := tx.Bucket([]byte(BucketMeta)).Delete([]byte(usageAccountingProofTrackedKey)); err != nil {
+					return err
+				}
+				if err := tx.Bucket([]byte(BucketUsageEvents)).Put(oddKey, oddData); err != nil {
+					return err
+				}
+				return writeRawOwner(tx, oddKey, odd)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ResetUsageProofOddIndex(db); err != nil {
+				t.Fatal(err)
+			}
+			// Reproduce the pre-scheme partial build: the row was classified by
+			// its key hour without an owner rule, no scheme marker exists, and
+			// progress sits exactly where the old migration leaves it.
+			if err := db.Update(func(tx *bolt.Tx) error {
+				hour := odd.Timestamp.UTC().Truncate(time.Hour).Format(hourLayout)
+				b := proofOddBucket(tx)
+				if err := b.Put(proofOddLocationKey(proofOddRawHour, hour, oddKey), proofOddDigest(oddKey, oddData)); err != nil {
+					return err
+				}
+				if err := b.Put(proofOddPointerKey(proofOddRawPointer, oddKey), proofOddPointerValue(proofOddRawHour, hour)); err != nil {
+					return err
+				}
+				meta := proofOddMeta(tx)
+				if legacyState == "receipts_cursor" {
+					// A partial receipt scan implies a receipt to resume after.
+					if err := writeUsageReceipt(tx, oddKey, "legacy-digest"); err != nil {
+						return err
+					}
+				}
+				switch legacyState {
+				case "raw_cursor":
+					// The interrupted raw scan had already passed this row.
+					return meta.Put([]byte(proofOddRawCursorKey), []byte(usageKey(odd.Timestamp.Add(time.Second), "past")))
+				case "receipts_cursor":
+					// The raw phase finished; the receipt scan stopped partway.
+					if err := meta.Put([]byte(proofOddPhaseKey), []byte("receipts")); err != nil {
+						return err
+					}
+					k, _ := tx.Bucket([]byte(BucketUsageReceipts)).Cursor().First()
+					if k == nil {
+						return fmt.Errorf("test setup: no receipt to point the cursor at")
+					}
+					return meta.Put([]byte(proofOddReceiptCursorKey), append([]byte(nil), k...))
+				}
+				// entries_only: the old semantics already wrote entries but no
+				// progress marker survived.
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.View(func(tx *bolt.Tx) error {
+				meta := proofOddMeta(tx)
+				if meta.Get([]byte(proofOddSchemeKey)) != nil || meta.Get([]byte(proofOddReadyKey)) != nil {
+					return fmt.Errorf("legacy partial build unexpectedly carried scheme/ready markers")
+				}
+				pointer := proofOddBucket(tx).Get(proofOddPointerKey(proofOddRawPointer, oddKey))
+				if kind, _, ok := proofOddParsePointer(pointer); !ok || kind != proofOddRawHour {
+					return fmt.Errorf("legacy partial build pointer = %v, want hour-located", pointer)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := MigrateUsageProofOddIndex(context.Background(), db, 4); err != nil {
+				t.Fatal(err)
+			}
+			if !proofOddReadyNow(t, db) {
+				t.Fatal("migration did not finish after discarding the legacy partial build")
+			}
+			requireProofOddIndexMatches(t, db)
+			if err := db.View(func(tx *bolt.Tx) error {
+				meta := proofOddMeta(tx)
+				if string(meta.Get([]byte(proofOddSchemeKey))) != proofOddScheme {
+					return fmt.Errorf("scheme = %q, want %q", meta.Get([]byte(proofOddSchemeKey)), proofOddScheme)
+				}
+				pointer := proofOddBucket(tx).Get(proofOddPointerKey(proofOddRawPointer, oddKey))
+				if kind, _, ok := proofOddParsePointer(pointer); !ok || kind != proofOddRawGlobal {
+					return fmt.Errorf("rebuilt owner-bound row pointer = %v, want global", pointer)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			// Owner damage after the rebuild must not be hidden by an
+			// hour-located entry.
+			if err := db.Update(func(tx *bolt.Tx) error {
+				return tx.Bucket([]byte(rawOwnerBucket)).Put(oddKey, []byte(`{"version":1}`))
+			}); err != nil {
+				t.Fatal(err)
+			}
+			clearProofScanCacheForTest()
+			candidate := []usage.Event{scaleEvent(781000, base.Add(2*time.Hour+5*time.Minute))}
+			exhaustive := proofFreshVerdict(t, db, candidate, false)
+			scoped := proofFreshVerdict(t, db, candidate, true)
+			if exhaustive {
+				t.Fatal("the reference proof accepted a scope next to a damaged owner entry")
+			}
+			if scoped != exhaustive {
+				t.Fatalf("scoped verdict %v, exhaustive verdict %v after owner damage", scoped, exhaustive)
+			}
+		})
+	}
+}
+
+// proofOddInterruptContext cancels after a fixed number of Err probes, so a
+// test can stop the migration after an exact number of committed transactions
+// without racing a timer.
+type proofOddInterruptContext struct {
+	remaining int
+}
+
+func (c *proofOddInterruptContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *proofOddInterruptContext) Done() <-chan struct{}       { return nil }
+func (c *proofOddInterruptContext) Err() error {
+	c.remaining--
+	if c.remaining < 0 {
+		return context.Canceled
+	}
+	return nil
+}
+func (c *proofOddInterruptContext) Value(any) any { return nil }
+
+// A fresh build must record its scheme in the same transaction as the first raw
+// batch. Otherwise a restart of an interrupted scheme-2 migration would see
+// progress without a scheme and start over, and an interrupted legacy build
+// could be resumed with entries classified by the old semantics.
+func TestProofOddIndexFirstRawTransactionRecordsScheme(t *testing.T) {
+	const rows = 4
+	db := testDB(t)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	if err := db.Update(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		for i := 0; i < rows; i++ {
+			e := fixedPlainEvent()
+			e.RecordID = ""
+			e.ClientName = fmt.Sprintf("legacy-%d", i)
+			e.Timestamp = base.Add(time.Duration(i) * time.Minute)
+			data, err := json.Marshal(e)
+			if err != nil {
+				return err
+			}
+			if err := raw.Put([]byte(usageKey(e.Timestamp, fmt.Sprintf("legacy-scheme-%d", i))), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	// Two Err probes: the loop entry of the first transaction and the first row
+	// of the raw batch. The third probe cancels after that transaction commits.
+	ctx := &proofOddInterruptContext{remaining: 2}
+	if err := MigrateUsageProofOddIndex(ctx, db, 1); err == nil {
+		t.Fatal("interrupted migration returned nil")
+	}
+	if proofOddReadyNow(t, db) {
+		t.Fatal("interrupted migration marked the index ready")
+	}
+	if err := db.View(func(tx *bolt.Tx) error {
+		meta := proofOddMeta(tx)
+		if string(meta.Get([]byte(proofOddSchemeKey))) != proofOddScheme {
+			return fmt.Errorf("scheme after the first committed raw transaction = %q, want %q", meta.Get([]byte(proofOddSchemeKey)), proofOddScheme)
+		}
+		if meta.Get([]byte(proofOddRawCursorKey)) == nil {
+			return fmt.Errorf("interrupted raw scan did not persist its cursor")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A scheme-matching partial build resumes instead of starting over: the
+	// sentinel would not survive a bucket reset.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return proofOddBucket(tx).Put([]byte("sentinel"), []byte("1"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("resumed migration did not finish")
+	}
+	requireProofOddIndexMatches(t, db)
+	if err := db.View(func(tx *bolt.Tx) error {
+		if proofOddBucket(tx).Get([]byte("sentinel")) == nil {
+			return fmt.Errorf("migration discarded a scheme-matching partial build")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A migration interrupted after the raw phase is bound to the raw revision that
+// phase scanned. If a writer advances the revision before the receipt phase
+// finishes without maintaining the index (an older binary or an out-of-band
+// edit), stamping the live revision would report a complete index that never
+// observed part of the data. The migration must discard and rebuild, and the
+// scoped proof must never be more permissive than the exhaustive walk meanwhile.
+func TestProofOddIndexCrossPhaseRevisionBumpRebuilds(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
+	recorded := scaleEvent(790000, base.Add(3*time.Hour+2*time.Minute))
+	recordedKey := []byte(usageKey(recorded.Timestamp, recorded.RecordID))
+	if err := store.RecordBatch([]usage.Event{recorded}); err != nil {
+		t.Fatal(err)
+	}
+	// Produce through the fresh-attestation path, as the other scope tests do.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketMeta)).Delete([]byte(usageAccountingProofTrackedKey))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	candidate := []usage.Event{scaleEvent(791000, base.Add(2*time.Hour+5*time.Minute))}
+	if !proofFreshVerdict(t, db, candidate, false) || !proofFreshVerdict(t, db, candidate, true) {
+		t.Fatal("healthy history: both scans must prove the empty candidate scope")
+	}
+	// Rewind to the state an interrupted build leaves after its raw phase:
+	// scheme and the raw-scan revision snapshot are present, the receipt phase
+	// has not finished, and neither the ready nor the completion revision is set.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		meta := proofOddMeta(tx)
+		var revision [8]byte
+		binary.BigEndian.PutUint64(revision[:], rawRevision(tx))
+		if err := meta.Put([]byte(proofOddRawRevisionKey), revision[:]); err != nil {
+			return err
+		}
+		if err := meta.Delete([]byte(proofOddReadyKey)); err != nil {
+			return err
+		}
+		if err := meta.Delete([]byte(proofOddRevisionKey)); err != nil {
+			return err
+		}
+		return meta.Put([]byte(proofOddPhaseKey), []byte("receipts"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// An out-of-band writer rewrites the row's data (same key, timestamp moved
+	// into the candidate hour, a different client) and advances only the raw
+	// revision. The row was canonical when the raw phase scanned it, so the
+	// index holds no entry for it and the resumed receipt phase would stamp the
+	// changed revision without ever scanning the change.
+	moved := recorded
+	moved.Timestamp = base.Add(2*time.Hour + 5*time.Minute)
+	moved.ClientName = "moved-client"
+	movedData, err := json.Marshal(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket([]byte(BucketUsageEvents)).Put(recordedKey, movedData); err != nil {
+			return err
+		}
+		var revision [8]byte
+		binary.BigEndian.PutUint64(revision[:], rawRevision(tx)+1)
+		return proofOddMeta(tx).Put([]byte(usageRawRevisionKey), revision[:])
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clearProofScanCacheForTest()
+	if proofOddReadyNow(t, db) {
+		t.Fatal("an unfinished build reported the index ready")
+	}
+	exhaustive := proofFreshVerdict(t, db, candidate, false)
+	scoped := proofFreshVerdict(t, db, candidate, true)
+	if exhaustive {
+		t.Fatal("the reference proof accepted a scope the rewritten row reaches")
+	}
+	if scoped != exhaustive {
+		t.Fatalf("scoped verdict %v, exhaustive verdict %v across the revision window", scoped, exhaustive)
+	}
+	// Resuming must not stamp the live revision onto the old raw scan: it has
+	// to discard the classification and rebuild from the current rows, after
+	// which the scoped proof agrees with the exhaustive walk again.
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not converge after rebuilding across the revision window")
+	}
+	exhaustive = proofFreshVerdict(t, db, candidate, false)
+	scoped = proofFreshVerdict(t, db, candidate, true)
+	if exhaustive {
+		t.Fatal("the reference proof accepted a scope the rewritten row reaches")
+	}
+	if scoped != exhaustive {
+		t.Fatalf("after rebuild: scoped verdict %v, exhaustive verdict %v", scoped, exhaustive)
+	}
+	requireProofOddIndexMatches(t, db)
+}
+
 // proofFreshVerdict returns the fresh-scope verdict for one candidate bundle,
 // optionally through the persisted classification (scoped) or the exhaustive
 // pre-#114 walk (reference).

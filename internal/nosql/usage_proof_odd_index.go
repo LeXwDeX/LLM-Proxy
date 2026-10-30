@@ -48,15 +48,36 @@ import (
 // readRawOwner fails for every odd row, so the scoped walk must fall back to
 // the exhaustive scan instead of trusting hour-located entries.
 //
+// Owner-bound rows are global, so every proof loads all of them. Proof cost
+// therefore grows with the owner-bound odd history instead of staying
+// proportional to the proved hours: a database whose odd rows all have readable
+// owners degrades to the previous full scan. That is the deliberate price of
+// keeping owner damage fail-closed; an hour-located row would be unreachable
+// once an owner read that decides overlap changes after classification.
+//
 // Every supported writer updates the index in the same transaction:
 // writeUsageRowTx and writeUsageReceipt, ReindexUsageEvent, the JSON import,
 // and retention's raw delete. Any other path (including out-of-band edits and
 // data restored from a backup) must rebuild it with ResetUsageProofOddIndex
-// followed by MigrateUsageProofOddIndex. Absent, incomplete, or damaged index
-// data makes proofs fall back to the previous full scans; they never fail open.
+// followed by MigrateUsageProofOddIndex; the rebuild entry point is a Go
+// function only, there is no admin or CLI command for it. Out-of-band owner
+// writes are a residual risk: adding a readable owner after the build without
+// maintaining the index turns an hour-located row into one proofRawMayOverlap
+// can report outside its hour, and nothing in the index detects the change. A
+// resumed raw phase trusts its cursor the same way: an out-of-band rewrite is
+// caught by the entry digest, but an out-of-band insertion behind the cursor is
+// not. Absent, incomplete, or damaged index data makes proofs fall back to the
+// previous full scans; they never fail open.
 //
 // The completion marker records the classification scheme version, so an index
-// built with different location semantics is rebuilt instead of trusted.
+// built with different location semantics is rebuilt instead of trusted. A
+// build records that scheme in the transaction that scans its first raw batch,
+// so a resumable partial build always carries it and any partial state without
+// the current scheme was made by older semantics and is discarded. The raw
+// phase also records the raw revision it scanned; the receipt phase only
+// completes when that snapshot still matches, so a writer that advances the
+// data between the phases without maintaining the index forces a rebuild
+// instead of a revision stamp the scan never observed.
 const (
 	bucketUsageProofOdd      = "usage_proof_odd_v1"
 	proofOddReadyKey         = "usage_proof_odd_ready_v1"
@@ -64,6 +85,7 @@ const (
 	proofOddRawCursorKey     = "usage_proof_odd_raw_cursor_v1"
 	proofOddReceiptCursorKey = "usage_proof_odd_receipt_cursor_v1"
 	proofOddRevisionKey      = "usage_proof_odd_revision_v1"
+	proofOddRawRevisionKey   = "usage_proof_odd_raw_revision_v1"
 	proofOddSchemeKey        = "usage_proof_odd_scheme_v1"
 	proofOddMigrateBatch     = 512
 )
@@ -175,6 +197,53 @@ func proofOddInvalidate(tx *bolt.Tx) {
 	_ = meta.Delete([]byte(proofOddRawCursorKey))
 	_ = meta.Delete([]byte(proofOddReceiptCursorKey))
 	_ = meta.Delete([]byte(proofOddRevisionKey))
+	_ = meta.Delete([]byte(proofOddRawRevisionKey))
+}
+
+// proofOddResetBucket discards every entry and progress marker but keeps the
+// bucket, so the next migration transaction starts a fresh build. Proofs fall
+// back to the exhaustive scan until that build records the ready marker.
+func proofOddResetBucket(tx *bolt.Tx) error {
+	if tx.Bucket([]byte(bucketUsageProofOdd)) != nil {
+		if err := tx.DeleteBucket([]byte(bucketUsageProofOdd)); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.CreateBucketIfNotExists([]byte(bucketUsageProofOdd)); err != nil {
+		return err
+	}
+	proofOddInvalidate(tx)
+	return nil
+}
+
+// proofOddHasProgress reports whether the persisted classification carries
+// staged state: a phase, a cursor, the raw-phase revision snapshot, or any
+// entry. Partial progress without the current scheme cannot be resumed.
+func proofOddHasProgress(tx *bolt.Tx) bool {
+	meta := proofOddMeta(tx)
+	if meta.Get([]byte(proofOddPhaseKey)) != nil ||
+		meta.Get([]byte(proofOddRawCursorKey)) != nil ||
+		meta.Get([]byte(proofOddReceiptCursorKey)) != nil ||
+		meta.Get([]byte(proofOddRawRevisionKey)) != nil {
+		return true
+	}
+	b := proofOddBucket(tx)
+	if b == nil {
+		return false
+	}
+	k, _ := b.Cursor().First()
+	return k != nil
+}
+
+// proofOddRawRevisionBound reports whether the raw-phase revision snapshot
+// still matches the live raw revision.
+func proofOddRawRevisionBound(tx *bolt.Tx) bool {
+	meta := proofOddMeta(tx)
+	if meta == nil {
+		return false
+	}
+	stored := meta.Get([]byte(proofOddRawRevisionKey))
+	return len(stored) == 8 && binary.BigEndian.Uint64(stored) == rawRevision(tx)
 }
 
 // proofOddDigest binds key and bytes with a process-independent digest, so a
@@ -405,10 +474,13 @@ func proofOddLoadHour(tx *bolt.Tx, kind byte, hour string, data *bolt.Bucket) ([
 }
 
 // MigrateUsageProofOddIndex builds or resumes the persisted classification in
-// bounded write transactions. It is repeatable and resumable: progress is
+// bounded write transactions. It is repeatable and resumable: the build records
+// its scheme in the transaction that scans the first raw batch, progress is
 // stored in meta after each batch, the ready marker is only written in the
 // transaction that finishes the receipt phase, and a cancelled or failed run
-// leaves proofs on the full-scan fallback.
+// leaves proofs on the full-scan fallback. A partial build whose scheme is
+// missing or different was made by older location semantics; it is discarded
+// and rebuilt from the raw and receipt buckets instead of resumed.
 func MigrateUsageProofOddIndex(ctx context.Context, db *bolt.DB, batchSize int) error {
 	if db == nil {
 		return fmt.Errorf("usage proof odd index: nil database")
@@ -431,19 +503,26 @@ func MigrateUsageProofOddIndex(ctx context.Context, db *bolt.DB, batchSize int) 
 			}
 			meta := proofOddMeta(tx)
 			if string(meta.Get([]byte(proofOddReadyKey))) == "1" {
-				// The classification was completed for an older raw revision:
-				// a writer that does not maintain the index (an older binary
-				// after a downgrade) advanced the data without it. Discard the
-				// stale classification and rebuild; proofs stay on the
-				// fallback until this finishes.
-				if err := tx.DeleteBucket([]byte(bucketUsageProofOdd)); err != nil {
+				// The classification was completed for an older raw revision or
+				// scheme: a writer that does not maintain the index (an older
+				// binary after a downgrade) advanced the data without it, or the
+				// index predates the current location semantics. Discard the
+				// stale classification and rebuild; proofs stay on the fallback
+				// until this finishes.
+				return proofOddResetBucket(tx)
+			}
+			if string(meta.Get([]byte(proofOddSchemeKey))) != proofOddScheme {
+				// A build records its scheme in the transaction that scans the
+				// first raw batch, so resumable progress always carries it. Any
+				// phase, cursor, or entry without the current scheme was made by
+				// older location semantics (or predates the marker); its entries
+				// cannot be trusted and are discarded rather than resumed.
+				if proofOddHasProgress(tx) {
+					return proofOddResetBucket(tx)
+				}
+				if err := meta.Put([]byte(proofOddSchemeKey), []byte(proofOddScheme)); err != nil {
 					return err
 				}
-				if _, err := tx.CreateBucketIfNotExists([]byte(bucketUsageProofOdd)); err != nil {
-					return err
-				}
-				proofOddInvalidate(tx)
-				return nil
 			}
 			phase := string(meta.Get([]byte(proofOddPhaseKey)))
 			switch phase {
@@ -493,13 +572,28 @@ func migrateProofOddRaw(ctx context.Context, tx *bolt.Tx, batchSize int) error {
 		if err := meta.Delete([]byte(proofOddRawCursorKey)); err != nil {
 			return err
 		}
-		return meta.Put([]byte(proofOddPhaseKey), []byte("receipts"))
+		if err := meta.Put([]byte(proofOddPhaseKey), []byte("receipts")); err != nil {
+			return err
+		}
+		// Bind the receipt phase to the raw revision this scan covered. A
+		// writer that advances the revision before the receipt phase finishes
+		// without maintaining the index (an older binary or an out-of-band
+		// edit) leaves part of the data unobserved; the receipt phase discards
+		// this build instead of stamping a revision the scan never saw.
+		var revision [8]byte
+		binary.BigEndian.PutUint64(revision[:], rawRevision(tx))
+		return meta.Put([]byte(proofOddRawRevisionKey), revision[:])
 	}
 	return meta.Put([]byte(proofOddRawCursorKey), last)
 }
 
 func migrateProofOddReceipts(ctx context.Context, tx *bolt.Tx, batchSize int) error {
 	meta := proofOddMeta(tx)
+	if !proofOddRawRevisionBound(tx) {
+		// The raw phase did not finish for the live revision: its entries no
+		// longer describe the bucket, so this state cannot be resumed.
+		return proofOddResetBucket(tx)
+	}
 	receipts := tx.Bucket([]byte(BucketUsageReceipts))
 	cursor := receipts.Cursor()
 	var key, value []byte
@@ -526,10 +620,20 @@ func migrateProofOddReceipts(ctx context.Context, tx *bolt.Tx, batchSize int) er
 	if key != nil {
 		return meta.Put([]byte(proofOddReceiptCursorKey), last)
 	}
+	// The receipt phase must finish against the same raw revision the raw phase
+	// scanned. A writer that advanced the revision in between (an older binary
+	// or an out-of-band edit) leaves that change unobserved; stamping the live
+	// revision would report a complete index that never saw it.
+	if !proofOddRawRevisionBound(tx) {
+		return proofOddResetBucket(tx)
+	}
 	if err := meta.Delete([]byte(proofOddReceiptCursorKey)); err != nil {
 		return err
 	}
 	if err := meta.Delete([]byte(proofOddPhaseKey)); err != nil {
+		return err
+	}
+	if err := meta.Delete([]byte(proofOddRawRevisionKey)); err != nil {
 		return err
 	}
 	// Bind the finished classification to the location semantics and the raw
@@ -556,16 +660,5 @@ func ResetUsageProofOddIndex(db *bolt.DB) error {
 	if db == nil {
 		return fmt.Errorf("usage proof odd index: nil database")
 	}
-	return db.Update(func(tx *bolt.Tx) error {
-		if tx.Bucket([]byte(bucketUsageProofOdd)) != nil {
-			if err := tx.DeleteBucket([]byte(bucketUsageProofOdd)); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.CreateBucketIfNotExists([]byte(bucketUsageProofOdd)); err != nil {
-			return err
-		}
-		proofOddInvalidate(tx)
-		return nil
-	})
+	return db.Update(proofOddResetBucket)
 }
