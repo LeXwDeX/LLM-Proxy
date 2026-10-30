@@ -105,13 +105,16 @@ func TestResponsesWSGenerationFailureDiagnostics(t *testing.T) {
 						http.Error(w, "unexpected HTTP replay", 500)
 						return
 					}
+					// Count the attempt before the 101 is written: the client can
+					// finish the failed generation and assert as soon as Upgrade
+					// returns, before this handler goroutine resumes.
+					handshakes.Add(1)
 					c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 					if err != nil {
 						t.Error(err)
 						return
 					}
 					defer c.Close()
-					handshakes.Add(1)
 					for {
 						if _, _, err := c.ReadMessage(); err != nil {
 							return
