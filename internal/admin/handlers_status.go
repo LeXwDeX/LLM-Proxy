@@ -238,7 +238,7 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"usage_summary": summary,
 	}
 	if events, err := h.listAuditEvents(10); err == nil {
-		response["recent_audit"] = events
+		response["recent_audit"] = redactAuditEventsForViewer(r, events)
 	}
 	writeJSON(w, http.StatusOK, response)
 }

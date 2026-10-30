@@ -2,11 +2,13 @@ package admin
 
 import (
 	"errors"
-	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
+	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
 )
 
 func (h *Handler) handleListAudit(w http.ResponseWriter, r *http.Request) {
@@ -15,10 +17,43 @@ func (h *Handler) handleListAudit(w http.ResponseWriter, r *http.Request) {
 		h.writeInternalError(w, "failed to list audit events", err)
 		return
 	}
+	events = redactAuditEventsForViewer(r, events)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"events": events,
 		"count":  len(events),
 	})
+}
+
+// clientKeyAuditActions lists the audit actions whose Detail is a client-key
+// mask. Other actions keep their details untouched.
+var clientKeyAuditActions = map[string]struct{}{
+	"client_create": {},
+	"client_update": {},
+}
+
+// redactAuditEventForViewer normalizes a stored client-key mask to the
+// viewer-safe form. Unknown and legacy values are fully hidden rather than
+// echoed.
+func redactAuditEventForViewer(event nosql.AuditEvent) nosql.AuditEvent {
+	if _, ok := clientKeyAuditActions[event.Action]; !ok || event.Detail == "" {
+		return event
+	}
+	event.Detail = auth.NormalizeClientKeyMask(event.Detail)
+	return event
+}
+
+// redactAuditEventsForViewer applies the viewer role to a freshly loaded audit
+// list. Admins keep the stored values for compatibility; every other role only
+// sees normalized client-key details. Both the audit list and the overview
+// recent-audit projection must go through this helper.
+func redactAuditEventsForViewer(r *http.Request, events []nosql.AuditEvent) []nosql.AuditEvent {
+	if isAdminSession(r) {
+		return events
+	}
+	for i := range events {
+		events[i] = redactAuditEventForViewer(events[i])
+	}
+	return events
 }
 
 func (h *Handler) listAuditEvents(limit int) ([]nosql.AuditEvent, error) {
