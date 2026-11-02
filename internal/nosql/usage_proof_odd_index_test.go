@@ -1758,6 +1758,133 @@ func TestProofOddIndexReceiptRewriteRepairsEntry(t *testing.T) {
 	requireProofOddIndexMatches(t, db)
 }
 
+// This pins a known out-of-band boundary of the Issue #114 contract; it is not
+// a statement of intended semantics. Removing a receipt's location entry, its
+// pointer, and its per-kind count together leaves an index that is
+// self-consistent in every way the index can check: Ready stays true, the
+// global loader accepts an empty set, and the startup migration's O(index)
+// verification finds nothing to reconcile, so it does not rebuild. A scoped
+// proof then skips the receipt while the exhaustive walk treats it as
+// overlapping the proved hours. The documented repair for this class of
+// out-of-band restore is ResetUsageProofOddIndex followed by
+// MigrateUsageProofOddIndex before serving.
+func TestProofOddIndexTripleDeleteIsOutOfBandBoundary(t *testing.T) {
+	db := testDB(t)
+	// fixedPlainEvent and the clocked store keep the scope deterministic.
+	store := clockedStore(db)
+	if err := store.EnsureUsageReceipts(); err != nil {
+		t.Fatal(err)
+	}
+	candidate := []usage.Event{fixedPlainEvent()}
+	// An unparseable key stamp makes the receipt global, and with no readable
+	// owner receiptMayOverlap reports it as relevant to every hour.
+	receiptKey := []byte("legacy-receipt-boundary_1")
+	if err := db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket([]byte(BucketMeta)).Delete([]byte(usageAccountingProofTrackedKey)); err != nil {
+			return err
+		}
+		return writeUsageReceipt(tx, receiptKey, "0f1e2d3c")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	requireProofOddIndexMatches(t, db)
+	// Simulate a partial restore of the receipt side: the entry, its pointer,
+	// and its count all disappear, yet every remaining marker stays in place.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		b := proofOddBucket(tx)
+		if err := b.Delete(proofOddLocationKey(proofOddReceiptGlobal, "", receiptKey)); err != nil {
+			return err
+		}
+		if err := b.Delete(proofOddPointerKey(proofOddReceiptPointer, receiptKey)); err != nil {
+			return err
+		}
+		return b.Delete(proofOddCountKey(proofOddReceiptGlobal, ""))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// (a) Every index-internal check still reports a trusted index.
+	if stats := UsageProofIndexStats(db); !stats.Ready {
+		t.Fatalf("triple deletion left the index untrusted: %+v", stats)
+	}
+	// (b) The global loader reads the missing receipt as "no global receipts".
+	if err := db.View(func(tx *bolt.Tx) error {
+		keys, ok := proofOddLoadGlobal(tx, proofOddReceiptGlobal, tx.Bucket([]byte(BucketUsageReceipts)))
+		if !ok {
+			return fmt.Errorf("the receipt loader rejected the self-consistent index")
+		}
+		if len(keys) != 0 {
+			return fmt.Errorf("loaded %d global receipts, want 0", len(keys))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// (c) The startup migration verifies the remaining state and trusts it, so
+	// the missing entry stays missing.
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration discarded a self-consistent index")
+	}
+	if err := db.View(func(tx *bolt.Tx) error {
+		b := proofOddBucket(tx)
+		if got := b.Get(proofOddLocationKey(proofOddReceiptGlobal, "", receiptKey)); got != nil {
+			return fmt.Errorf("migration rebuilt the missing location entry: %x", got)
+		}
+		if got := b.Get(proofOddPointerKey(proofOddReceiptPointer, receiptKey)); got != nil {
+			return fmt.Errorf("migration rebuilt the missing pointer: %x", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// (d) The two paths disagree: the exhaustive walk visits the restored
+	// receipt and rejects the scope, while the scoped walk trusts the
+	// self-consistent index and skips it. This is the documented boundary, not
+	// the intended result.
+	if err := db.View(func(tx *bolt.Tx) error {
+		exhaustive := freshScopeProvenContext(context.Background(), tx, candidate)
+		scoped := freshScopeProvenContext(withTxScopeSummary(context.Background(), tx), tx, candidate)
+		if exhaustive {
+			t.Fatal("exhaustive walk proved a scope the global receipt may overlap")
+		}
+		if !scoped {
+			t.Fatal("scoped walk did not trust the self-consistent index")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// (e) The documented repair restores agreement and a matching index.
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("migration did not complete after reset")
+	}
+	requireProofOddIndexMatches(t, db)
+	if err := db.View(func(tx *bolt.Tx) error {
+		exhaustive := freshScopeProvenContext(context.Background(), tx, candidate)
+		scoped := freshScopeProvenContext(withTxScopeSummary(context.Background(), tx), tx, candidate)
+		if exhaustive || scoped {
+			return fmt.Errorf("after repair exhaustive=%v scoped=%v, want both false", exhaustive, scoped)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Warm-up on a ready index visits only the global odd rows: a canonical
 // history of any size and the hour-located odd rows (reached when their hour is
 // proved) stay unread. The exhaustive fallback would visit every row, so the

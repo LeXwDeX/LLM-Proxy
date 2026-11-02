@@ -66,12 +66,22 @@ import (
 // can report outside its hour, and nothing in the index detects the change. A
 // resumed raw phase trusts its cursor the same way: an out-of-band rewrite is
 // caught by the entry digest, but an out-of-band insertion behind the cursor is
-// not. Absent, incomplete, or damaged index data makes proofs fall back to the
-// previous full scans; the index never fails open on its own state. That
-// guarantee covers index data only: adding or rewriting a readable owner
-// outside the supported writers violates the contract above, the index cannot
-// detect it, and ResetUsageProofOddIndex followed by MigrateUsageProofOddIndex
-// is required to restore the guarantee.
+// not. Damage the index can determine from its own state — a missing or
+// unreadable bucket or marker, a foreign scheme or revision, a leftover phase
+// marker, a per-kind count or pointer that disagrees with the entries, an entry
+// digest that no longer matches its object, or an unreadable raw-owner source —
+// makes proofs fall back to the previous full scans; the index never fails open
+// on its own state. That guarantee is bounded by index state alone. A location
+// entry, its pointer, and its per-kind count removed together in a
+// self-consistent way, a restore of only the raw or receipt buckets, a restore
+// into a different database, and any other partial restore are
+// indistinguishable from a complete index: proofs can skip a row the exhaustive
+// walk acts on, and nothing in the index detects it. After restoring data or
+// editing out of band, run ResetUsageProofOddIndex followed by
+// MigrateUsageProofOddIndex before serving. Adding or rewriting a readable
+// owner outside the supported writers is the same kind of residual risk: the
+// index cannot detect it, and the same reset and migration restore the
+// guarantee.
 //
 // The completion marker records the classification scheme version, so an index
 // built with different location semantics is rebuilt instead of trusted. A
@@ -80,7 +90,7 @@ import (
 // the current scheme was made by older semantics and is discarded. The raw
 // phase also records the raw revision it scanned; the receipt phase only
 // completes when that snapshot still matches, so a writer that advances the
-// data between the phases without maintaining the index forces a rebuild
+// revision between the phases without maintaining the index forces a rebuild
 // instead of a revision stamp the scan never observed. A supported writer
 // advances the snapshot in the same transaction that maintains the index, so
 // an interrupted receipt phase resumes across starts; a writer that advances
@@ -139,9 +149,14 @@ var (
 
 // UsageProofIndexMetrics is the exported, key-free state of the persistent
 // odd-row proof index (Issue #114). Ready reports whether proofs currently
-// trust the index; false at runtime means every proof scans the whole history
-// through the fallback. The counters cover the lifetime of this process and
-// never include keys or stored bytes.
+// trust the index's own state; false at runtime means every proof scans the
+// whole history through the fallback. Ready is not a data-consistency proof:
+// it says the markers, scheme, revision, counts, pointers, entry digests, and
+// owner source passed the checks proofs make. Damage that leaves those checks
+// self-consistent — a location entry, its pointer, and its count removed
+// together, or data restored without the index — is outside what Ready can
+// observe. The counters cover the lifetime of this process and never include
+// keys or stored bytes.
 type UsageProofIndexMetrics struct {
 	Ready               bool   `json:"ready"`
 	FullClassifications uint64 `json:"full_classifications"`
@@ -149,7 +164,9 @@ type UsageProofIndexMetrics struct {
 }
 
 // UsageProofIndexStats reports the proof-index state for db. A failed read
-// transaction reports ready=false rather than guessing.
+// transaction reports ready=false rather than guessing. Ready carries the same
+// index-state-only meaning as UsageProofIndexMetrics.Ready: it is not a
+// data-consistency proof.
 func UsageProofIndexStats(db *bolt.DB) UsageProofIndexMetrics {
 	m := UsageProofIndexMetrics{
 		FullClassifications: uint64(proofOddFullClassifications.Load()),
@@ -196,6 +213,8 @@ func proofOddIndexReady(tx *bolt.Tx) bool {
 // must equal the live one: supported writers advance both in the same
 // transaction, while a writer that does not maintain the index (an older
 // binary or an out-of-band edit that bumps the revision) makes the check fail.
+// The revision is a writer sequence number, not a digest of the data, so an
+// out-of-band rewrite that leaves it unchanged is outside this check.
 // Migration uses this check without the owner-source condition so it can finish
 // while the owner source is unreadable instead of rebuilding on every attempt;
 // proofs use proofOddIndexReady and keep the full-scan fallback meanwhile.
@@ -215,10 +234,13 @@ func proofOddIndexCurrent(tx *bolt.Tx) bool {
 		return false
 	}
 	if b.Get(proofOddCountsMarkerKey) == nil {
-		// No counts: either a partial build or an index from before the counts
-		// existed. Without them a deleted location entry would read as "no odd
-		// rows", so such an index is not current and the next migration
-		// rebuilds it.
+		// No counts marker: either a partial build or an index from before the
+		// counts existed. Without per-kind counts a load cannot reconcile the
+		// entries it visited with the entries the bucket should contain, so such
+		// an index is not current, proofs fall back, and the next migration
+		// rebuilds it. The marker only says the counts existed at completion: a
+		// location entry, its pointer, and its count removed together afterwards
+		// are self-consistent and stay outside what the index can detect.
 		return false
 	}
 	stored := meta.Get([]byte(proofOddRevisionKey))
@@ -245,7 +267,7 @@ func proofOddFollowRawRevision(tx *bolt.Tx, revision uint64) error {
 	if string(meta.Get([]byte(proofOddReadyKey))) == "1" {
 		// A completed classification may only adopt a contiguous step from the
 		// revision it stored. A stored revision that already lags belongs to a
-		// writer that advanced the data without maintaining the index (an older
+		// writer that advanced the revision without maintaining the index (an older
 		// binary or an out-of-band edit); adopting the live value here would
 		// hide that change permanently, because every later start would see a
 		// current index. Leaving it behind keeps proofs on the full-scan
@@ -447,8 +469,11 @@ func proofOddCountKey(kind byte, hour string) []byte {
 	return out
 }
 
-// proofOddLoadCount returns the recorded entry count, treating a missing count
-// as zero.
+// proofOddLoadCount returns the recorded entry count; a missing count reads as
+// zero. The counts marker is written last at completion and implies every count
+// exists, but a count deleted together with its entries and pointer leaves no
+// trace, so zero here is indistinguishable from a kind that legitimately has no
+// entries.
 func proofOddLoadCount(b *bolt.Bucket, kind byte, hour string) (uint64, bool) {
 	v := b.Get(proofOddCountKey(kind, hour))
 	if v == nil {
@@ -609,10 +634,12 @@ func proofOddPointerFor(kind byte) byte {
 }
 
 // proofOddLoadGlobal returns every global odd key and verifies each entry. The
-// entry count must equal the count the writers maintain: a deleted location
-// entry would otherwise read as "this kind has no odd rows" and let a scoped
-// proof skip a row the exhaustive walk acts on. Each entry must also still own
-// its pointer in the same location.
+// entry count must equal the count the writers maintain: a location entry
+// deleted while its count remains would otherwise read as "this kind has no odd
+// rows" and let a scoped proof skip a row the exhaustive walk acts on. A
+// location entry, its pointer, and its count removed together stay
+// self-consistent and are outside this check. Each entry must also still own its
+// pointer in the same location.
 func proofOddLoadGlobal(tx *bolt.Tx, kind byte, data *bolt.Bucket) ([][]byte, bool) {
 	index := proofOddBucket(tx)
 	if index == nil || data == nil || index.Get(proofOddCountsMarkerKey) == nil {
@@ -648,7 +675,9 @@ func proofOddLoadGlobal(tx *bolt.Tx, kind byte, data *bolt.Bucket) ([][]byte, bo
 
 // proofOddLoadHour returns the odd keys indexed under one UTC hour and
 // verifies each entry against the bucket and its pointer, then reconciles the
-// visited count with the count the writers maintain for that hour.
+// visited count with the count the writers maintain for that hour. The same
+// self-consistent removal of an entry, its pointer, and its count is outside
+// this check.
 func proofOddLoadHour(tx *bolt.Tx, kind byte, hour string, data *bolt.Bucket) ([][]byte, bool) {
 	index := proofOddBucket(tx)
 	if index == nil || data == nil || index.Get(proofOddCountsMarkerKey) == nil {
@@ -694,8 +723,10 @@ const proofOddVerifyCheckEvery = 1024
 // checks that every location entry still owns its pointer. It is O(index
 // entries), so it runs only when a startup migration would otherwise trust a
 // completed index; a fresh proof instead reconciles the counts of the hours it
-// loads. A mismatch means an entry was added or removed out of band, which the
-// markers alone cannot see. A non-nil error means the pass was interrupted and
+// loads. A mismatch means an entry was added or removed out of band while the
+// remaining counts, pointers, or digests disagree; removing a location entry,
+// its pointer, and its count together leaves no mismatch to find. A non-nil
+// error means the pass was interrupted and
 // proves nothing; the caller must not treat it as a mismatch.
 func proofOddVerifyCounts(ctx context.Context, tx *bolt.Tx) (bool, error) {
 	index := proofOddBucket(tx)
@@ -789,9 +820,13 @@ func MigrateUsageProofOddIndex(ctx context.Context, db *bolt.DB, batchSize int) 
 			}
 			if proofOddIndexCurrent(tx) {
 				// The markers say the classification is current. They cannot see
-				// an entry deleted out of band, so re-derive the counts and the
-				// pointer set before trusting it; a mismatch discards the index
-				// instead of leaving proofs on a permanent full-scan fallback.
+				// an entry deleted out of band while its count remains, so
+				// re-derive the counts and the pointer set before trusting it; a
+				// mismatch discards the index instead of leaving proofs on a
+				// permanent full-scan fallback. A location entry, its pointer,
+				// and its count deleted together leave nothing to reconcile and
+				// remain outside detection, as documented at the top of this
+				// file.
 				verified, err := proofOddVerifyCounts(ctx, tx)
 				if err != nil {
 					return err
@@ -806,7 +841,7 @@ func MigrateUsageProofOddIndex(ctx context.Context, db *bolt.DB, batchSize int) 
 			if string(meta.Get([]byte(proofOddReadyKey))) == "1" {
 				// The classification was completed for an older raw revision or
 				// scheme: a writer that does not maintain the index (an older
-				// binary after a downgrade) advanced the data without it, or the
+				// binary after a downgrade) advanced the revision without it, or the
 				// index predates the current location semantics or the entry
 				// counts. Discard the stale classification and rebuild; proofs
 				// stay on the fallback until this finishes.
