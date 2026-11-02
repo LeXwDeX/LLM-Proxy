@@ -1814,6 +1814,45 @@ func TestWarmUsageProofScanCacheVisitsOnlyGlobalOddRows(t *testing.T) {
 	}
 }
 
+// Startup warm-up on a ready index only classifies global odd rows, so the
+// legacy history is left for the scoped proof walk to skip by key prefix. The
+// first RecordOnce after that warm-up must use the same transaction scope
+// summary as RecordBatch; otherwise it re-parses every hour-located legacy row
+// while holding the bbolt writer, which is what warm-up exists to prevent.
+func TestRecordOnceAfterReadyIndexWarmupDoesNotReparseLegacyRows(t *testing.T) {
+	const legacyRows = 300
+	db := testDB(t)
+	base := fixedPlainEvent().Timestamp.UTC().Truncate(time.Hour)
+	legacyRawHistory(t, db, legacyRows, base.Add(-2*time.Hour))
+	store := clockedStore(db)
+	if err := store.EnsureUsageReceipts(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 8); err != nil {
+		t.Fatal(err)
+	}
+	requireProofOddIndexMatches(t, db)
+	clearProofScanCacheForTest()
+	// The legacy rows carry a parseable key stamp and no raw owner, so they are
+	// hour-located odd rows and not part of the global set warm-up visits.
+	if visited, err := WarmUsageProofScanCache(db); err != nil || visited != 0 {
+		t.Fatalf("warm-up visited=%d err=%v, want 0 hour-located odd rows (test premise)", visited, err)
+	}
+	event := fixedPlainEvent()
+	event.ClientName = "live-client"
+	event.RecordID = "40000000-0000-4000-8000-000000000001"
+	event.Timestamp = base // an hour no legacy row occupies
+	before := proofRawParses.Load()
+	added, err := store.RecordOnce(event)
+	t.Logf("RecordOnce after warm-up: added=%v err=%v", added, err)
+	if delta := proofRawParses.Load() - before; delta >= legacyRows/10 {
+		t.Fatalf("first RecordOnce after warm-up parsed %d raw rows; the %d hour-located legacy rows must stay out of the proof scope", delta, legacyRows)
+	}
+}
+
 // TestUsageProofIndexMetricsReportsReadinessAndCounters pins the operator-facing
 // view of Issue #114: a fresh database has no trusted index, a completed
 // migration makes it ready, a reset puts proofs back on the fallback, and the
