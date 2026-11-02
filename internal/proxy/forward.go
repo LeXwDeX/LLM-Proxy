@@ -1106,6 +1106,7 @@ func (s *Service) writeResponse(
 		lifecycleFailed = lifecycleFailed || wsBody.local || wsBody.failed.Load()
 	}
 	if websocketResponse {
+		websocketSession.recordCopyOutcome(copyErr, usageReader)
 		lifecycleFailed = lifecycleFailed || websocketSession.turnFailed
 		if nativeWriter, ok := w.(*responsesWebsocketWriter); ok {
 			lifecycleFailed = lifecycleFailed || !nativeWriter.terminal
