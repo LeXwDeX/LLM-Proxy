@@ -66,22 +66,25 @@ import (
 // can report outside its hour, and nothing in the index detects the change. A
 // resumed raw phase trusts its cursor the same way: an out-of-band rewrite is
 // caught by the entry digest, but an out-of-band insertion behind the cursor is
-// not. Damage the index can determine from its own state — a missing or
-// unreadable bucket or marker, a foreign scheme or revision, a leftover phase
-// marker, a per-kind count or pointer that disagrees with the entries, an entry
-// digest that no longer matches its object, or an unreadable raw-owner source —
-// makes proofs fall back to the previous full scans; the index never fails open
-// on its own state. That guarantee is bounded by index state alone. A location
-// entry, its pointer, and its per-kind count removed together in a
-// self-consistent way, a restore of only the raw or receipt buckets, a restore
-// into a different database, and any other partial restore are
-// indistinguishable from a complete index: proofs can skip a row the exhaustive
-// walk acts on, and nothing in the index detects it. After restoring data or
-// editing out of band, run ResetUsageProofOddIndex followed by
-// MigrateUsageProofOddIndex before serving. Adding or rewriting a readable
-// owner outside the supported writers is the same kind of residual risk: the
-// index cannot detect it, and the same reset and migration restore the
-// guarantee.
+// not. Damage the index can determine from its own checkable state — a missing
+// or unreadable bucket or marker, a foreign scheme or revision, a leftover
+// phase marker, a per-kind count or pointer that disagrees with the entries, an
+// entry digest that no longer matches its object, or an unreadable raw-owner
+// source — makes proofs fall back to the previous full scans; the index never
+// fails open on that account. That guarantee is bounded by the index's own
+// checkable state. Two shapes are genuinely undetectable: an odd object added
+// out of band that the index does not record, including an insertion behind a
+// resumed raw cursor, and a location entry whose pointer and per-kind count are
+// removed together in a self-consistent way. A restore of only the raw or
+// receipt buckets, a restore into a different database, and any other partial
+// restore may delete or rewrite objects the index still references, which the
+// entry, pointer, and count checks can detect, but the restore as a whole is
+// outside this guarantee because it can also add odd objects the index does not
+// record. After restoring data or editing out of band, run
+// ResetUsageProofOddIndex followed by MigrateUsageProofOddIndex before serving.
+// Adding or rewriting a readable owner outside the supported writers is the
+// same kind of residual risk: the index cannot detect it, and the same reset
+// and migration restore the guarantee.
 //
 // The completion marker records the classification scheme version, so an index
 // built with different location semantics is rebuilt instead of trusted. A
@@ -151,12 +154,15 @@ var (
 // odd-row proof index (Issue #114). Ready reports whether proofs currently
 // trust the index's own state; false at runtime means every proof scans the
 // whole history through the fallback. Ready is not a data-consistency proof:
-// it says the markers, scheme, revision, counts, pointers, entry digests, and
-// owner source passed the checks proofs make. Damage that leaves those checks
-// self-consistent — a location entry, its pointer, and its count removed
-// together, or data restored without the index — is outside what Ready can
-// observe. The counters cover the lifetime of this process and never include
-// keys or stored bytes.
+// it only covers the top-level checks that the bucket exists, the ready and
+// counts markers are present, the scheme and raw revision match, no phase
+// marker is left over, and the raw-owner source is readable. Entries are not
+// checked here: per-kind counts, pointers, and entry digests are checked when a
+// proof loads a scope, or by the migration's count verification. Damage that
+// leaves those top-level checks self-consistent — a location entry, its
+// pointer, and its count removed together, or data restored without the index —
+// is outside what Ready can observe. The counters cover the lifetime of this
+// process and never include keys or stored bytes.
 type UsageProofIndexMetrics struct {
 	Ready               bool   `json:"ready"`
 	FullClassifications uint64 `json:"full_classifications"`
@@ -165,8 +171,8 @@ type UsageProofIndexMetrics struct {
 
 // UsageProofIndexStats reports the proof-index state for db. A failed read
 // transaction reports ready=false rather than guessing. Ready carries the same
-// index-state-only meaning as UsageProofIndexMetrics.Ready: it is not a
-// data-consistency proof.
+// meaning as UsageProofIndexMetrics.Ready: it covers only those top-level
+// checks and is not a data-consistency proof.
 func UsageProofIndexStats(db *bolt.DB) UsageProofIndexMetrics {
 	m := UsageProofIndexMetrics{
 		FullClassifications: uint64(proofOddFullClassifications.Load()),

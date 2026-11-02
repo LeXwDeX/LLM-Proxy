@@ -1974,7 +1974,9 @@ func TestRecordOnceAfterReadyIndexWarmupDoesNotReparseLegacyRows(t *testing.T) {
 	event.Timestamp = base // an hour no legacy row occupies
 	before := proofRawParses.Load()
 	added, err := store.RecordOnce(event)
-	t.Logf("RecordOnce after warm-up: added=%v err=%v", added, err)
+	if err != nil || !added {
+		t.Fatalf("RecordOnce after warm-up: added=%v err=%v; the proof path must complete", added, err)
+	}
 	if delta := proofRawParses.Load() - before; delta >= legacyRows/10 {
 		t.Fatalf("first RecordOnce after warm-up parsed %d raw rows; the %d hour-located legacy rows must stay out of the proof scope", delta, legacyRows)
 	}
