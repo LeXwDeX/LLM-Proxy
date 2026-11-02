@@ -17,6 +17,7 @@ import (
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
+	"github.com/LeXwDeX/LLM-Proxy/internal/errorlog"
 	appmiddleware "github.com/LeXwDeX/LLM-Proxy/internal/middleware"
 	coderwebsocket "github.com/coder/websocket"
 	"github.com/gorilla/websocket"
@@ -55,6 +56,57 @@ type responsesWebsocketSession struct {
 	turnHandshake bool // completed pre-generation rejection delivered this turn
 	httpFallback  bool
 	httpSession   bool
+	// copy diagnostics for the terminal 502/504 warning. forward records them
+	// after the response copy; they never affect routing or accounting.
+	copyErrKnown    bool
+	copyErrCategory string
+	usageKnown      bool
+	usageTerminal   bool
+	closeCode       int
+	closeReason     string
+}
+
+// recordCopyOutcome keeps the copy failure category, the upstream close
+// details when the error carries them, and whether usage observed a terminal
+// event. It is the only writer of these fields before the terminal warning.
+func (s *responsesWebsocketSession) recordCopyOutcome(copyErr error, usage *usageStream) {
+	s.copyErrKnown = true
+	s.copyErrCategory = errorlog.ErrorCategory(copyErr)
+	var closeErr coderwebsocket.CloseError
+	if errors.As(copyErr, &closeErr) {
+		s.closeCode, s.closeReason = int(closeErr.Code), closeErr.Reason
+	}
+	if usage != nil {
+		s.usageKnown = true
+		s.usageTerminal = usage.terminal
+	}
+}
+
+func (s *responsesWebsocketSession) copyErrorDiagnostic() string {
+	if !s.copyErrKnown {
+		return "unknown"
+	}
+	if s.copyErrCategory == "" {
+		return "none"
+	}
+	return s.copyErrCategory
+}
+
+func (s *responsesWebsocketSession) usageTerminalDiagnostic() string {
+	if !s.usageKnown {
+		return "unknown"
+	}
+	if s.usageTerminal {
+		return "true"
+	}
+	return "false"
+}
+
+func (s *responsesWebsocketSession) closeCodeDiagnostic() string {
+	if s.closeCode == 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", s.closeCode)
 }
 
 // responsesWebsocketError forbids failover after an ambiguous send and for local
@@ -287,6 +339,22 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 				if session.turnStatus == http.StatusGatewayTimeout {
 					status, code, message = 504, "upstream_timeout", "Responses generation timed out; it was not replayed"
 				}
+				// One terminal diagnostic per interrupted turn. Fields come from
+				// state already held here; unavailable values stay "unknown" and
+				// no prompt, response body, key or Authorization is logged.
+				s.logger.Warn("responses websocket ended without a terminal event",
+					"request_id", websocketDiagnosticValue(writer.header.Get(appmiddleware.HeaderRequestID)),
+					"target", websocketDiagnosticValue(session.target),
+					"status", status,
+					"code", code,
+					"forwarded", writer.forwarded,
+					"last_event_type", websocketDiagnosticValue(writer.lastEventType),
+					"last_event_sequence", websocketDiagnosticValue(writer.lastEventSequence),
+					"upstream_close_code", session.closeCodeDiagnostic(),
+					"upstream_close_reason", websocketDiagnosticValue(session.closeReason),
+					"copy_error", session.copyErrorDiagnostic(),
+					"usage_terminal", session.usageTerminalDiagnostic(),
+				)
 				if writeResponsesWebsocketError(conn, status, code, message) != nil {
 					return
 				}
@@ -298,6 +366,13 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 func writeResponsesWebsocketError(conn *websocket.Conn, status int, code, message string) error {
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return conn.WriteJSON(map[string]any{"type": "error", "status": status, "error": map[string]string{"type": "proxy_error", "code": code, "message": message}})
+}
+
+func websocketDiagnosticValue(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 // responsesWebsocketWriter converts the existing response writer's SSE back to
@@ -316,6 +391,10 @@ type responsesWebsocketWriter struct {
 	skipLF   bool
 	started  bool
 	members  []jsonMember // reused per event
+	// forwarded and the last event fields feed the terminal 502/504 warning.
+	forwarded         bool
+	lastEventType     string
+	lastEventSequence string
 	// clientErr marks a failed write to the downstream socket, as opposed to
 	// upstream content the adapter rejected.
 	clientErr bool
@@ -402,6 +481,9 @@ func (w *responsesWebsocketWriter) finishSSELine() error {
 			w.clientErr = true
 			return err
 		}
+		w.forwarded = true
+		w.lastEventType, _ = jsonStructString(w.members, "type")
+		w.lastEventSequence = string(jsonLast(w.members, "sequence_number"))
 		return nil
 	}
 	field, value, found := bytes.Cut(line, []byte(":"))
@@ -784,6 +866,11 @@ func (b *responsesWebsocketBody) Read(p []byte) (int, error) {
 			if err := b.ctx.Err(); err != nil {
 				return 0, err
 			}
+			if err := b.conn.readError(); err != nil {
+				// Keep io.ErrUnexpectedEOF for existing classification while
+				// carrying the close code/reason (or network error) through.
+				return 0, fmt.Errorf("%w: upstream WebSocket read failed: %w", io.ErrUnexpectedEOF, err)
+			}
 			return 0, io.ErrUnexpectedEOF
 		}
 		event = next
@@ -835,6 +922,10 @@ type responsesWebsocketUpstream struct {
 	state atomic.Int32
 	// lastActive is the time (Unix ns) of the last frame read or turn end.
 	lastActive atomic.Int64
+	// readErr is the terminal socket read error (including close code/reason)
+	// for the 502/504 diagnostic. Written once before events closes.
+	errMu   sync.Mutex
+	readErr error
 }
 
 const (
@@ -857,6 +948,9 @@ func newResponsesWebsocketUpstream(conn *coderwebsocket.Conn, pool *responsesWSP
 		for {
 			kind, data, err := conn.Read(context.Background())
 			if err != nil {
+				upstream.errMu.Lock()
+				upstream.readErr = err
+				upstream.errMu.Unlock()
 				return
 			}
 			upstream.lastActive.Store(time.Now().UnixNano())
@@ -872,6 +966,12 @@ func newResponsesWebsocketUpstream(conn *coderwebsocket.Conn, pool *responsesWSP
 func (u *responsesWebsocketUpstream) Close() error {
 	u.closeOnce.Do(func() { close(u.done); u.conn.CloseNow() })
 	return nil
+}
+
+func (u *responsesWebsocketUpstream) readError() error {
+	u.errMu.Lock()
+	defer u.errMu.Unlock()
+	return u.readErr
 }
 
 // beginTurn reserves the socket for a turn. It fails once a failed idle ping
