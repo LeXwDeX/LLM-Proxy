@@ -911,6 +911,108 @@ func TestProofOddIndexFirstRawTransactionRecordsScheme(t *testing.T) {
 	}
 }
 
+// A raw build that stops on its startup budget must persist its phase in the
+// same transaction as the cursor. A supported writer between starts then
+// advances the raw-revision snapshot; without the phase that writer is
+// ignored, the next start finds the snapshot unbound, and it discards the
+// partial build instead of resuming. A history larger than one startup budget
+// could then never converge whenever traffic writes between starts.
+func TestProofOddIndexPartialRawBatchPersistsPhase(t *testing.T) {
+	const rows = 4
+	db := testDB(t)
+	base := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	if err := db.Update(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		for i := 0; i < rows; i++ {
+			e := fixedPlainEvent()
+			e.RecordID = ""
+			e.ClientName = fmt.Sprintf("legacy-%d", i)
+			e.Timestamp = base.Add(time.Duration(i) * time.Minute)
+			data, err := json.Marshal(e)
+			if err != nil {
+				return err
+			}
+			if err := raw.Put([]byte(usageKey(e.Timestamp, fmt.Sprintf("legacy-phase-%d", i))), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetUsageProofOddIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	// Stop after the first committed raw batch, as a startup budget would.
+	ctx := &proofOddInterruptContext{remaining: 2}
+	if err := MigrateUsageProofOddIndex(ctx, db, 1); err == nil {
+		t.Fatal("interrupted migration returned nil")
+	}
+	var phase string
+	var snapshot uint64
+	if err := db.View(func(tx *bolt.Tx) error {
+		meta := proofOddMeta(tx)
+		phase = string(meta.Get([]byte(proofOddPhaseKey)))
+		if stored := meta.Get([]byte(proofOddRawRevisionKey)); len(stored) == 8 {
+			snapshot = binary.BigEndian.Uint64(stored)
+		}
+		if meta.Get([]byte(proofOddRawCursorKey)) == nil {
+			return fmt.Errorf("interrupted raw scan did not persist its cursor")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if phase != "raw" {
+		t.Fatalf("partial raw batch phase = %q, want %q so supported writes advance the revision snapshot", phase, "raw")
+	}
+	// A supported write between starts maintains the index and bumps the raw
+	// revision in one transaction; the paused build must accept the step.
+	written := scaleEvent(795000, base.Add(30*time.Minute))
+	added, err := NewUsageStore(db).RecordOnce(written)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !added {
+		t.Fatal("supported write between starts was not recorded")
+	}
+	var live uint64
+	if err := db.View(func(tx *bolt.Tx) error {
+		if stored := proofOddMeta(tx).Get([]byte(proofOddRawRevisionKey)); len(stored) == 8 {
+			snapshot = binary.BigEndian.Uint64(stored)
+		}
+		live = rawRevision(tx)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot != live {
+		t.Fatalf("raw-revision snapshot after the supported write = %d, want %d", snapshot, live)
+	}
+	// The sentinel proves the resumed build kept its entries instead of
+	// resetting the bucket.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return proofOddBucket(tx).Put([]byte("sentinel"), []byte("1"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !proofOddReadyNow(t, db) {
+		t.Fatal("resumed migration did not finish")
+	}
+	requireProofOddIndexMatches(t, db)
+	if err := db.View(func(tx *bolt.Tx) error {
+		if proofOddBucket(tx).Get([]byte("sentinel")) == nil {
+			return fmt.Errorf("migration discarded a resumable partial raw build")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A migration interrupted after the raw phase is bound to the raw revision that
 // phase scanned. If a writer advances the revision before the receipt phase
 // finishes without maintaining the index (an older binary or an out-of-band

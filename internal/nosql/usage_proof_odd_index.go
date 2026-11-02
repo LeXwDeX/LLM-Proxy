@@ -944,7 +944,15 @@ func migrateProofOddRaw(ctx context.Context, tx *bolt.Tx, batchSize int) error {
 		}
 		return meta.Put([]byte(proofOddPhaseKey), []byte("receipts"))
 	}
-	return meta.Put([]byte(proofOddRawCursorKey), last)
+	if err := meta.Put([]byte(proofOddRawCursorKey), last); err != nil {
+		return err
+	}
+	// Record the phase in the transaction that commits the first cursor, not
+	// only when the scan finishes. proofOddFollowRawRevision advances the
+	// raw-revision snapshot only for a staged build; without the phase a
+	// supported writer between starts leaves the snapshot behind, and the next
+	// start discards the partial build instead of resuming it.
+	return meta.Put([]byte(proofOddPhaseKey), []byte("raw"))
 }
 
 func migrateProofOddReceipts(ctx context.Context, tx *bolt.Tx, batchSize int) error {
