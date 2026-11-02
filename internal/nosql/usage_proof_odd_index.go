@@ -72,10 +72,13 @@ import (
 // entry digest that no longer matches its object, or an unreadable raw-owner
 // source — makes proofs fall back to the previous full scans; the index never
 // fails open on that account. That guarantee is bounded by the index's own
-// checkable state. Two shapes are genuinely undetectable: an odd object added
-// out of band that the index does not record, including an insertion behind a
-// resumed raw cursor, and a location entry whose pointer and per-kind count are
-// removed together in a self-consistent way. A restore of only the raw or
+// checkable state. The index cannot detect every out-of-band change. Examples
+// include: an odd object added out of band that the index does not record,
+// including an insertion behind a resumed raw cursor; a location entry and its
+// per-kind count removed together in a self-consistent way while the other
+// pointer and entry checks stay self-consistent, so its pointer may remain; and
+// a readable owner added or rewritten outside the supported writers (see the
+// owner residual risk below). A restore of only the raw or
 // receipt buckets, a restore into a different database, and any other partial
 // restore may delete or rewrite objects the index still references, which the
 // entry, pointer, and count checks can detect, but the restore as a whole is
