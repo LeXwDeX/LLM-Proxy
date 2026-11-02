@@ -247,6 +247,14 @@ func SessionFromContext(ctx context.Context) (*Session, bool) {
 	return session, true
 }
 
+// isAdminSession reports whether the request carries an admin-role session.
+// Sessionless calls are treated as non-admin so an internal caller cannot
+// accidentally receive unmasked secret material.
+func isAdminSession(r *http.Request) bool {
+	session, ok := SessionFromContext(r.Context())
+	return ok && session != nil && session.Role == RoleAdmin
+}
+
 // AdminSecurityHeaders marks every /admin response as non-cacheable (it carries
 // plaintext secrets and session-dependent shells), non-sniffable and non-frameable.
 // Mount it outside SessionManager.Middleware so 302/401 responses are covered too.

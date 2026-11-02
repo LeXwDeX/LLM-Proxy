@@ -460,6 +460,11 @@ func writeFreshAttestation(tx *bolt.Tx, root usage.Event, key string) error {
 		return err
 	}
 	owner := receiptClientHash(root.ClientName)
+	// Issue #125: attestations are walked by key hour; one under a
+	// non-canonical key is an anomalous object.
+	if _, ok := canonicalEventKeyHour([]byte(key)); !ok {
+		integrityMarkTx(tx)
+	}
 	attestation := freshAttestation{Digest: digest, ClientHash: owner, Binding: receiptOwnerBinding([]byte(key), digest, owner)}
 	value, err := json.Marshal(attestation)
 	if err != nil {

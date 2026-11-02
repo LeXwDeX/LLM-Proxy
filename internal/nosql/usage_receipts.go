@@ -130,6 +130,9 @@ func (s *UsageStore) EnsureUsageReceipts() error {
 }
 
 func (s *UsageStore) ensureUsageReceiptsLocked(scanTime time.Time) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	s.receiptScans.Add(1)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket([]byte(BucketUsageReceipts)) == nil {
@@ -435,13 +438,17 @@ func writeUsageReceipt(tx *bolt.Tx, key []byte, digest string) error {
 		if existing.Digest != digest {
 			return fmt.Errorf("usage receipts: receipt already exists with different payload digest")
 		}
-		return nil
+		// Repair an entry missing after an out-of-band restore; idempotent.
+		return proofOddNoteReceipt(tx, key, bucket.Get(key))
 	}
 	data, err := json.Marshal(usageReceipt{Version: usageReceiptVersion, Digest: digest})
 	if err != nil {
 		return err
 	}
-	return bucket.Put(key, data)
+	if err := bucket.Put(key, data); err != nil {
+		return err
+	}
+	return proofOddNoteReceipt(tx, key, data)
 }
 
 // clientIndexReferencesKey probes for a canonical index entry that points at
@@ -750,6 +757,9 @@ func recordUsageBundleTx(tx *bolt.Tx, rows []usage.Event, keys []string, migrati
 				if err := addClientEventIndex(tx, storedEvents[i], []byte(keys[i]), storedRaw[i]); err != nil {
 					return false, err
 				}
+				// Issue #125: a re-added entry of an anomalous row is a change
+				// to a classified object.
+				integrityNoteRealtimeRow(tx, storedEvents[i], []byte(keys[i]))
 			}
 		}
 		return false, nil
@@ -798,7 +808,13 @@ func writeUsageRowTx(tx *bolt.Tx, event usage.Event, key string) error {
 	if err := b.Put([]byte(key), data); err != nil {
 		return err
 	}
+	// Write the owner first: the proof classification treats every odd row with
+	// a readable owner entry as global, and it must observe the owner this
+	// transaction commits, not the state before it.
 	if err := writeRawOwner(tx, []byte(key), event); err != nil {
+		return err
+	}
+	if err := proofOddNoteRawEvent(tx, []byte(key), data, event); err != nil {
 		return err
 	}
 	if err := bumpAgg(tx, event); err != nil {
@@ -820,5 +836,8 @@ func writeUsageRowTx(tx *bolt.Tx, event usage.Event, key string) error {
 	if err := addClientEventIndex(tx, event, []byte(key), data); err != nil {
 		return err
 	}
+	// Issue #125: realtime rows must stay non-anomalous; one that is not
+	// invalidates the integrity classification.
+	integrityNoteRealtimeRow(tx, event, []byte(key))
 	return bumpRawRevision(tx)
 }

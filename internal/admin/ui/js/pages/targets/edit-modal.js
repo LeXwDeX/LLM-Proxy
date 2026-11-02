@@ -174,12 +174,16 @@ AdminApp.register("targetsModal", function (app) {
     }
     if (headersContainer.children.length === 0) addCustomHeaderRow("", "");
 
-    // Custom Body：填充 KV 行
+    // Custom Body：填充 KV 行。优先使用服务端给出的原始 JSON 文本：
+    // custom_body 已经过 JSON.parse，超过 2^53 的整数无法还原。
     var bodyContainer = document.getElementById("custom-body-container");
     bodyContainer.innerHTML = "";
     if (t && t.custom_body) {
       Object.keys(t.custom_body).forEach(function (k) {
-        addCustomBodyRow(k, JSON.stringify(t.custom_body[k]));
+        var raw = t.custom_body_raw && typeof t.custom_body_raw[k] === "string"
+          ? t.custom_body_raw[k]
+          : JSON.stringify(t.custom_body[k]);
+        addCustomBodyRow(k, raw);
       });
     }
     if (bodyContainer.children.length === 0) addCustomBodyRow("", "");

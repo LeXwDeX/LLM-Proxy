@@ -41,9 +41,13 @@ type UsageStore struct {
 	receiptBackoff time.Duration
 	// receiptScans counts migration attempts that read the database.
 	receiptScans atomic.Int64
-	// now overrides the clock for receipt retry backoff and Count warning
-	// rate limiting in tests.
+	// now overrides the clock for receipt retry backoff, Count warning rate
+	// limiting and retention snapshot freshness in tests.
 	now func() time.Time
+
+	// retention caches the read-only retention snapshot served by
+	// /admin/metrics and refreshes it lazily in a short-lived goroutine.
+	retention usageRetentionCache
 
 	// countWarnMu guards Count's skipped-cell WARN rate limit: at most one
 	// WARN per countWarnInterval, carrying the number of suppressed ones.
@@ -93,7 +97,11 @@ func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
 		// bbolt may retry this callback after a different batch member fails.
 		added = false
 		rejection = nil
-		fresh := freshScopeProven(tx, rows) || continuationScopeProven(tx, rows)
+		// The proof below runs before this transaction writes any raw row, so
+		// the transaction scope summary is valid (see withTxScopeSummary). Without
+		// it a ready odd index would still walk every hour-located legacy row.
+		proofCtx := withTxScopeSummary(context.Background(), tx)
+		fresh := freshScopeProvenContext(proofCtx, tx, rows) || continuationScopeProvenContext(proofCtx, tx, rows)
 		var err error
 		added, err = recordUsageBundleTx(tx, rows, keys, migrationErr)
 		if errors.Is(err, ErrUsageIdentityUnverified) || errors.Is(err, ErrUsageBundlePartial) {
@@ -547,10 +555,11 @@ func (s *UsageStore) Aggregate(filter usage.Filter, groupBy string, costs usage.
 		if err := checkUnresolvedUsageInScope(tx, clientKey, from, to, modelKey, nil); err != nil {
 			return err
 		}
-		if err := checkDirectQuotaEvidence(tx, filter, from, to, nil, nil); err != nil {
+		ctx := integrityReadContext(context.Background(), tx, from, to)
+		if err := checkDirectQuotaEvidenceContext(ctx, tx, filter, from, to, nil, nil); err != nil {
 			return err
 		}
-		if err := checkMissingFreshRoots(tx, filter, from, to); err != nil {
+		if err := checkMissingFreshRootsContext(ctx, tx, filter, from, to); err != nil {
 			return err
 		}
 		return aggIter(tx, from, to, func(hour time.Time, et, client, model, target string, cell AggCell) error {
@@ -711,6 +720,9 @@ var pruneBetweenTx func()
 // losslessly to quarantine instead of blocking subsequent batches. Their unknown
 // ownership invalidates indexed reads globally.
 func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, error) {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	if err := s.EnsureUsageReceipts(); err != nil {
 		return 0, err
 	}
@@ -808,6 +820,9 @@ func (s *UsageStore) PruneEventsBefore(cutoff time.Time, batchSize int) (int, er
 					}
 				}
 				if err := b.Delete(k); err != nil {
+					return err
+				}
+				if err := proofOddRemoveRaw(tx, k); err != nil {
 					return err
 				}
 				if err := bumpRawRevision(tx); err != nil {

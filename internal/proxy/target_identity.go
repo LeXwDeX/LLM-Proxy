@@ -2,7 +2,12 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"math/big"
 	"reflect"
+	"sort"
 	"strings"
 )
 
@@ -111,11 +116,154 @@ func sameStringMap(a, b map[string]string) bool {
 	return true
 }
 
+// sameAnyMap 按 JSON 语义比较自定义请求体，而不是比较 json.RawMessage 的字节。
+// 等价边界：对象键顺序无关；数组顺序有关；字符串按解码后的值比较（转义拼写
+// 无关，包括 HTML 转义；非法 UTF-8 与未配对代理项按 encoding/json 的行为解码
+// 为 U+FFFD 后比较）；数字按精确十进制值比较（不经过 float64，0.7 与 0.70、
+// 1e2 与 100 等价，任意精度整数不丢位）；重复键按 encoding/json 的后者覆盖前者
+// 处理。无法编码或不是合法 JSON 的值退回 reflect.DeepEqual，保持原来的严格性。
 func sameAnyMap(a, b map[string]any) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || !sameJSONValue(av, bv) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameJSONValue(a, b any) bool {
+	ac, aok := canonicalJSONValue(a)
+	bc, bok := canonicalJSONValue(b)
+	if aok && bok {
+		return ac == bc
 	}
 	return reflect.DeepEqual(a, b)
+}
+
+func canonicalJSONValue(value any) (string, bool) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	return canonicalJSONBytes(data)
+}
+
+// canonicalJSONBytes 用 UseNumber 解析后生成规范形式，保证数字 token 不经过
+// float64。json.Marshal 已会压缩空白并做 HTML 转义，这里再统一字符串转义与
+// 对象键顺序，避免持久化、配置来源或编码器差异被误判为身份变化。解码时
+// encoding/json 会把非法 UTF-8 与未配对代理项替换为 U+FFFD，对象重复键由 map
+// 保留最后一个；这些也属于本比较的等价边界。
+func canonicalJSONBytes(data []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return "", false
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return "", false
+	}
+	var b strings.Builder
+	writeCanonicalJSON(&b, value)
+	return b.String(), true
+}
+
+func writeCanonicalJSON(b *strings.Builder, value any) {
+	switch v := value.(type) {
+	case nil:
+		b.WriteString("null")
+	case bool:
+		if v {
+			b.WriteString("true")
+		} else {
+			b.WriteString("false")
+		}
+	case string:
+		writeCanonicalJSONString(b, v)
+	case json.Number:
+		// 与字符串形式区分，避免数字 1 与字符串 "1" 的规范形式相同。
+		b.WriteString("n:")
+		b.WriteString(canonicalJSONNumber(v.String()))
+	case []any:
+		b.WriteByte('[')
+		for i, item := range v {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			writeCanonicalJSON(b, item)
+		}
+		b.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		b.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			writeCanonicalJSONString(b, k)
+			b.WriteByte(':')
+			writeCanonicalJSON(b, v[k])
+		}
+		b.WriteByte('}')
+	default:
+		// UseNumber 解析只会产生上面的类型；保留显式标记，避免未来新增类型
+		// 与真实 JSON 值碰撞。
+		b.WriteString("unexpected:")
+		if t := reflect.TypeOf(value); t != nil {
+			b.WriteString(t.String())
+		}
+	}
+}
+
+func writeCanonicalJSONString(b *strings.Builder, value string) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		b.WriteString(`"�"`)
+		return
+	}
+	b.Write(encoded)
+}
+
+// canonicalJSONNumber 返回数字 token 的精确十进制规范形式：符号 + 有效数字 +
+// 十进制指数。只做十进制移位与去零，不解析为浮点数，因此任意精度整数和超大
+// 指数都不会丢位。
+func canonicalJSONNumber(token string) string {
+	original := token
+	sign := ""
+	if strings.HasPrefix(token, "-") {
+		sign = "-"
+		token = token[1:]
+	}
+	exp := new(big.Int)
+	if i := strings.IndexAny(token, "eE"); i >= 0 {
+		if _, ok := exp.SetString(token[i+1:], 10); !ok {
+			return "invalid-number:" + original
+		}
+		token = token[:i]
+	}
+	intPart, fracPart := token, ""
+	if i := strings.IndexByte(token, '.'); i >= 0 {
+		intPart, fracPart = token[:i], token[i+1:]
+	}
+	digits := strings.TrimLeft(intPart+fracPart, "0")
+	if digits == "" {
+		return "0"
+	}
+	if trimmed := strings.TrimRight(digits, "0"); len(trimmed) != len(digits) {
+		exp.Add(exp, big.NewInt(int64(len(digits)-len(trimmed))))
+		digits = trimmed
+	}
+	exp.Sub(exp, big.NewInt(int64(len(fracPart))))
+	return sign + digits + "e" + exp.String()
 }
 
 // shouldForkTargetHealth 判断同名目标新旧代际之间熔断状态是否须分叉，并给出原因。

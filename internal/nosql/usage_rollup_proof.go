@@ -254,19 +254,25 @@ func quotaProofBatchInScopeContext(ctx context.Context, tx *bolt.Tx, filter usag
 		return cells, ctx.Err()
 	}
 	prefix := append([]byte(BucketQuotaUsageAggHourly), 0)
-	cursor := proofs.Cursor()
-	for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
+	// Issue #125: a classification restricts the walks to the window's keys
+	// plus the anomalous objects. A skipped proof key has a parseable hour
+	// outside the window, so quotaKeyInScope answers (false, nil) and it is not
+	// a cell; skipped raw rows and receipts cannot reach a cell of the window
+	// (see rawRowWindowExempt and eventKeyWindowExempt).
+	ctx = integrityReadContext(ctx, tx, from, to)
+	fast := integrityFastFrom(ctx, tx)
+	visitProof := func(k []byte) error {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		key := string(k[len(prefix):])
 		inScope, scopeErr := quotaKeyInScope([]byte(key), filter, from, to, allow)
 		if scopeErr == nil && !inScope {
-			continue
+			return nil
 		}
 		state, ok := readRollupProofValue(tx, BucketQuotaUsageAggHourly, []byte(key))
 		if !ok {
-			continue
+			return nil
 		}
 		scope := backfillEvidenceScope(BucketQuotaUsageAggHourly, []byte(key))
 		cell := &quotaProofBatchCell{state: state, scope: scope, seen: make(map[string]string)}
@@ -274,10 +280,23 @@ func quotaProofBatchInScopeContext(ctx context.Context, tx *bolt.Tx, filter usag
 			hooks.proofCell()
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		cell.invalid = scope.Timestamp.IsZero() || strings.TrimSpace(scope.ClientName) == "" || strings.EqualFold(strings.TrimSpace(scope.ClientName), "unknown")
 		cells[key] = cell
+		return nil
+	}
+	if fast != nil {
+		if err := fast.eachQuotaProof(proofs, prefix, func(k, _ []byte) error { return visitProof(k) }); err != nil {
+			return nil, err
+		}
+	} else {
+		cursor := proofs.Cursor()
+		for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
+			if err := visitProof(k); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if len(cells) == 0 {
 		return cells, ctx.Err()
@@ -310,7 +329,7 @@ func quotaProofBatchInScopeContext(ctx context.Context, tx *bolt.Tx, filter usag
 		cell.count++
 		xorDigest(&cell.xor, rollupIdentityDigest(k, digest))
 	}
-	if err := raw.ForEach(func(k, data []byte) error {
+	if err := integrityEachEvent(fast, raw, func(k, data []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -362,7 +381,7 @@ func quotaProofBatchInScopeContext(ctx context.Context, tx *bolt.Tx, filter usag
 	}); err != nil {
 		return nil, err
 	}
-	if err := receipts.ForEach(func(k, _ []byte) error {
+	if err := integrityEachEvent(fast, receipts, func(k, _ []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

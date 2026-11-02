@@ -171,6 +171,9 @@ func collectClientIndexExceptions(index *bolt.Bucket) (keys, values [][]byte) {
 // non-canonical entries and drops the legacy marker. It only writes when the
 // stored set differs, so a clean database is not touched. Safe to repeat.
 func rebuildClientIndexExceptions(db *bolt.DB) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	needed := false
 	if err := db.View(func(tx *bolt.Tx) error {
 		if meta := tx.Bucket([]byte(BucketMeta)); meta != nil && meta.Get([]byte(usageClientIndexNonCanonicalKey)) != nil {

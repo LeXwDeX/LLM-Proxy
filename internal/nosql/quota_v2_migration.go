@@ -64,6 +64,9 @@ type QuotaV2Snapshot struct {
 // Client records themselves are NOT rewritten: deprecated personal-quota and
 // pool-quota fields stay dormant for rollback reference; evaluation ignores them.
 func MigrateQuotaV2(db *bolt.DB, snapshotDir string, logger *slog.Logger) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	var done bool
 	if err := db.View(func(tx *bolt.Tx) error {
 		if b := tx.Bucket([]byte(BucketMeta)); b != nil {

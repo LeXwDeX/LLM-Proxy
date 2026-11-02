@@ -36,6 +36,9 @@ func migrateUsageClientIndex(ctx context.Context, db *bolt.DB, batchSize int, af
 // The optional observer runs after committed build batches, never in a bolt
 // transaction. It is call-local instrumentation for recovery tests/benchmarks.
 func migrateUsageClientIndexObserved(ctx context.Context, db *bolt.DB, batchSize int, afterBatch func(time.Duration)) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	size := clientIndexBatchSize(batchSize)
 	var lost bool
 	if err := db.View(func(tx *bolt.Tx) error {
@@ -160,6 +163,9 @@ func migrateUsageClientIndexObserved(ctx context.Context, db *bolt.DB, batchSize
 // Rebuilding the old derived index is not v2 certification. Keep the source
 // loss marker and every v2 proof unchanged, so accounting cannot trust it.
 func rebuildLostV1ClientIndex(ctx context.Context, db *bolt.DB, size int, afterBatch func(time.Duration)) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -276,6 +282,9 @@ func verifyUsageClientIndex(ctx context.Context, db *bolt.DB, size int) error {
 }
 
 func verifyUsageClientIndexMode(ctx context.Context, db *bolt.DB, size int, untrustedV1 bool) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	var verifiedRecords uint64
 	err := scanIndexVerification(ctx, db, BucketUsageEvents, size, func(tx *bolt.Tx, k, v []byte) error {
 		var event usage.Event

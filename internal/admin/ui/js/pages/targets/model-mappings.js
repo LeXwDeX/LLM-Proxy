@@ -239,7 +239,8 @@ AdminApp.register("targetsMappings", function (app) {
       addCustomHeaderRow("", "");
     });
   function collectCustomHeaders() {
-    var headers = {};
+    // Null-prototype map: a field named "__proto__" must remain a data member.
+    var headers = Object.create(null);
     document
       .querySelectorAll("#custom-headers-container > div")
       .forEach(function (row) {
@@ -263,7 +264,8 @@ AdminApp.register("targetsMappings", function (app) {
       addCustomBodyRow("", "");
     });
   function collectCustomBody() {
-    var body = {};
+    // Null-prototype map: a field named "__proto__" must remain a data member.
+    var body = Object.create(null);
     document
       .querySelectorAll("#custom-body-container > div")
       .forEach(function (row) {
@@ -279,6 +281,28 @@ AdminApp.register("targetsMappings", function (app) {
         }
       });
     // 始终返回对象（含空 {}）：update 时让 handler 真正清空字段，create 时空 map 由 omitempty 省略
+    return body;
+  }
+  // collectCustomBodyRaw 只做 JSON 语法校验，保存原始输入文本。
+  // 不能使用 JSON.parse 的结果：超过 Number.MAX_SAFE_INTEGER 的整数会丢失精度。
+  // 无效 JSON 维持旧行为，按普通字符串提交。
+  function collectCustomBodyRaw() {
+    // Null-prototype map: a field named "__proto__" must remain a data member.
+    var body = Object.create(null);
+    document
+      .querySelectorAll("#custom-body-container > div")
+      .forEach(function (row) {
+        var inputs = row.querySelectorAll("input");
+        var name = inputs[0].value.trim();
+        var rawValue = inputs[1].value;
+        if (!name) return;
+        try {
+          JSON.parse(rawValue);
+          body[name] = rawValue;
+        } catch (e) {
+          body[name] = JSON.stringify(rawValue);
+        }
+      });
     return body;
   }
   var tgtModelDebounce = null;
@@ -313,6 +337,7 @@ AdminApp.register("targetsMappings", function (app) {
     collectCustomHeaders: collectCustomHeaders,
     addCustomBodyRow: addCustomBodyRow,
     collectCustomBody: collectCustomBody,
+    collectCustomBodyRaw: collectCustomBodyRaw,
     updateModelPrefixPreview: updateModelPrefixPreview,
   };
 });

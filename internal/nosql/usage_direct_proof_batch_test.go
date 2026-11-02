@@ -122,7 +122,13 @@ func TestDirectProofBatchNarrowScopeState(t *testing.T) {
 					t.Fatalf("%s: %v", dimension, err)
 				}
 				t.Logf("%s proofs=%d cells=%d identities=%d raw=%d receipts=%d", dimension, n, cells, identities, raw, receipts)
-				if cells != 1 || identities != 1 || raw != 0 || receipts != 2*n {
+				wantReceipts := 2 * n
+				if integrityForceFast.Load() && dimension == "hour" {
+					// Issue #125 fast path: the one-hour window's two walks visit
+					// only that hour's receipt; the other n-1 are outside it.
+					wantReceipts = 2
+				}
+				if cells != 1 || identities != 1 || raw != 0 || receipts != wantReceipts {
 					t.Fatalf("%s: cells=%d identities=%d raw=%d receipts=%d", dimension, cells, identities, raw, receipts)
 				}
 			}

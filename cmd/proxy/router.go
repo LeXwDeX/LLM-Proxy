@@ -23,11 +23,32 @@ type routeDependencies struct {
 	AccessLogger *slog.Logger
 }
 
+// queryMethod is the RFC 10008 QUERY method. chi 5.4.0 added it to its method
+// union, so every Mount() now matches it; chi 5.3.0 rejected it with 405 before
+// routing. Keep the external behavior unchanged: no authentication, session
+// middleware, or proxy forwarding for QUERY.
+const queryMethod = "QUERY"
+
+// rejectQueryMethod must run on the root mux, whose middleware executes before
+// route matching, so the request never reaches the mounted admin or protected
+// routers. It is registered after the logging middleware to preserve the
+// pre-upgrade access-log record for rejected requests.
+func rejectQueryMethod(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == queryMethod {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func newRouter(deps routeDependencies) chi.Router {
 	router := chi.NewRouter()
 	router.Use(appmiddleware.RequestID())
 	router.Use(appmiddleware.Recoverer(deps.AppLogger))
 	router.Use(appmiddleware.AccessLogger(deps.AccessLogger))
+	router.Use(rejectQueryMethod)
 
 	router.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

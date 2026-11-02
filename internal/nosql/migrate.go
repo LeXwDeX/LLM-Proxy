@@ -19,6 +19,9 @@ import (
 // It is idempotent: if the meta bucket contains a "migrated" key, migration is skipped.
 // Individual file failures are logged as warnings and do not abort the overall migration.
 func MigrateFromJSON(db *bolt.DB, dataFiles config.DataFiles) error {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	// Check if already migrated.
 	var alreadyMigrated bool
 	err := db.View(func(tx *bolt.Tx) error {
@@ -107,10 +110,15 @@ func migrateClients(db *bolt.DB, path string) {
 		return
 	}
 
+	imported := 0
 	err = db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(BucketClients))
 		for _, c := range clients {
 			c = normalizeClient(c)
+			if strings.EqualFold(c.Name, reservedClientName) {
+				slog.Warn("bbolt migration: skipping reserved client name", "name", c.Name, "path", path)
+				continue
+			}
 			key := strings.ToLower(c.Name)
 			data, err := json.Marshal(c)
 			if err != nil {
@@ -120,6 +128,7 @@ func migrateClients(db *bolt.DB, path string) {
 			if err := b.Put([]byte(key), data); err != nil {
 				return err
 			}
+			imported++
 		}
 		return nil
 	})
@@ -127,7 +136,7 @@ func migrateClients(db *bolt.DB, path string) {
 		slog.Warn("bbolt migration: failed to write clients", "err", err)
 		return
 	}
-	slog.Info("bbolt migration: migrated clients", "count", len(clients))
+	slog.Info("bbolt migration: migrated clients", "count", imported)
 }
 
 func migrateModelCosts(db *bolt.DB, path string) {
@@ -193,6 +202,9 @@ func migrateModelCosts(db *bolt.DB, path string) {
 }
 
 func migrateUsageEvents(db *bolt.DB, path string) {
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended.
+	defer integrityMutationBegin()()
 	if path == "" {
 		return
 	}
@@ -265,6 +277,9 @@ func migrateUsageEvents(db *bolt.DB, path string) {
 					continue
 				}
 				if err := b.Put([]byte(key), data); err != nil {
+					return err
+				}
+				if err := proofOddNoteRawEvent(tx, []byte(key), data, evt); err != nil {
 					return err
 				}
 				if err := addClientEventIndex(tx, evt, []byte(key), data); err != nil {

@@ -12,7 +12,7 @@ VERSION     := $(BUILD_DATE).$(BUILD_NUMBER)
 VERSION_PKG := github.com/LeXwDeX/LLM-Proxy/internal/version
 LDFLAGS     := -X $(VERSION_PKG).Version=$(VERSION)
 
-.PHONY: all build test test-proxy integration e2e ui-sim clean catalog docker version check-docs
+.PHONY: all build test test-proxy test-fast-integrity coverage-check integration e2e ui-sim clean catalog docker version check-docs
 
 all: test build
 
@@ -47,6 +47,30 @@ test: check-docs
 test-proxy:
 	@echo ">> running core proxy regression tests"
 	go test ./internal/proxy/...
+
+# Issue #125：用量完整性快速路径双模式。forcefastintegrity 标签只在测试构建中使用，
+# 让每次完整性读取都在同一读事务内先分类再走窗口化快速路径，nosql 与 quota 全部
+# 现有用例因此同时检验 Fast == Full。生产构建不带该标签。
+test-fast-integrity:
+	@echo ">> running nosql/quota tests with the forced fast integrity path"
+	go test -tags forcefastintegrity ./internal/nosql/... ./internal/quota/...
+
+# Issue #136：internal 覆盖率门禁。总覆盖率与关键包均不得低于 80%；
+# 脚本按语句数汇总 cover profile，profile 缺失指定包或格式损坏时失败。
+# 串行跑包（-p 1）：包间并行负载会让 internal/nosql 的 wall-clock 比值用例
+# （TestRecordBatchTimeDoesNotScaleWithRetainedEventsOnUpgradedLedger）偶发超阈值。
+# 不要改用 -race 规避，也不要删除或放宽该用例。
+coverage-check:
+	@echo ">> running Go coverage gate"
+	go test -p 1 -count=1 -coverprofile=coverage.out ./internal/...
+	python3 scripts/testing/check_go_coverage.py --profile coverage.out \
+		--min-total 80 \
+		--min-package internal/admin=80 \
+		--min-package internal/proxy=80 \
+		--min-package internal/nosql=80 \
+		--min-package internal/usage=80 \
+		--min-package internal/quota=80 \
+		--min-package internal/pricing=80
 
 # 校验共享 Agent 指引存在
 check-docs:

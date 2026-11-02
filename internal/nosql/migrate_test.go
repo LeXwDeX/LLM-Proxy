@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,6 +179,63 @@ func TestMigrateSkipsExisting(t *testing.T) {
 	}
 	if len(cl) != 1 || cl[0].Name != "existing" {
 		t.Fatalf("expected only pre-existing client, got %+v", cl)
+	}
+}
+
+// Issue #142: legacy clients.json may contain the reserved "unknown" name.
+// Import must skip just those rows, keep the remaining clients, and stay
+// idempotent.
+func TestMigrateClientsSkipsReservedUnknownNameIssue142(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "clients.json")
+	writeJSONFile(t, path, []config.Client{
+		{Name: "unknown", AccessKey: "k0"},
+		{Name: "Unknown", AccessKey: "k1"},
+		{Name: "team-a", AccessKey: "k2"},
+		{Name: "unknown-2", AccessKey: "k3"},
+	})
+
+	db := testDB(t)
+	dataFiles := config.DataFiles{ClientsFile: path}
+	if err := MigrateFromJSON(db, dataFiles); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	store := NewClientStore(db)
+	clients, err := store.List()
+	if err != nil {
+		t.Fatalf("list clients: %v", err)
+	}
+	if len(clients) != 2 {
+		t.Fatalf("expected 2 imported clients, got %+v", clients)
+	}
+	names := make(map[string]bool, len(clients))
+	for _, c := range clients {
+		names[strings.ToLower(c.Name)] = true
+	}
+	if !names["team-a"] || !names["unknown-2"] {
+		t.Fatalf("legal clients missing after migration: %+v", clients)
+	}
+	for _, reserved := range []string{"unknown", "UNKNOWN"} {
+		got, err := store.Get(reserved)
+		if err != nil {
+			t.Fatalf("get reserved name %q: %v", reserved, err)
+		}
+		if got != nil {
+			t.Fatalf("reserved client %q was imported: %+v", reserved, got)
+		}
+	}
+
+	// Re-running the migration is a no-op: no error, no duplicates.
+	if err := MigrateFromJSON(db, dataFiles); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	clients, err = store.List()
+	if err != nil {
+		t.Fatalf("list clients after second migrate: %v", err)
+	}
+	if len(clients) != 2 {
+		t.Fatalf("expected 2 clients after second migrate, got %+v", clients)
 	}
 }
 

@@ -5,7 +5,7 @@ target: dev
 language: zh
 validation:
   titles: true
-  labels: off
+  labels: kind
   bodies: true
 init_policy:
   required_checks: []

@@ -326,9 +326,19 @@ func normalizeClient(client config.Client) config.Client {
 	return client
 }
 
+// reservedClientName is the usage ledger's sentinel for unattributed rows
+// (see usage_fresh_attestation.go and usage_journal.go). A real client with
+// this name can never enter the freshness proof, so new client writes must
+// reject it. Existing rows are not deleted or renamed.
+const reservedClientName = "unknown"
+
 func validateClient(client config.Client) error {
-	if strings.TrimSpace(client.Name) == "" {
+	name := strings.TrimSpace(client.Name)
+	if name == "" {
 		return errors.New("name must not be empty")
+	}
+	if strings.EqualFold(name, reservedClientName) {
+		return fmt.Errorf("client name %q is reserved", name)
 	}
 	if strings.TrimSpace(client.AccessKey) == "" {
 		return errors.New("access_key must not be empty")

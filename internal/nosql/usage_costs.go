@@ -189,13 +189,19 @@ func validateQuotaKeys(ctx context.Context, tx *bolt.Tx, filter usage.Filter, fr
 	if b == nil {
 		return nil
 	}
-	return b.ForEach(func(k, _ []byte) error {
+	visit := func(k, _ []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		_, err := quotaKeyInScope(k, filter, from, to, allow)
 		return err
-	})
+	}
+	// Issue #125: keys outside the window with a parseable hour answer
+	// (false, nil); unparseable keys are anomalous and always visited.
+	if fast := integrityFastFrom(ctx, tx); fast != nil {
+		return fast.eachQuota(b, visit)
+	}
+	return b.ForEach(visit)
 }
 
 func quotaKeyInScope(key []byte, filter usage.Filter, from, to time.Time, allow costPairFilter) (bool, error) {
@@ -268,6 +274,25 @@ func readCostRollups(ctx context.Context, tx *bolt.Tx, filter usage.Filter, from
 	return result, nil
 }
 
+// sortedCostKeys orders mismatch reporting across both parity directions so
+// identical damage reports the same first error regardless of map iteration
+// order.
+func sortedCostKeys(expected, observed map[string]int64) []string {
+	seen := make(map[string]struct{}, len(expected)+len(observed))
+	keys := make([]string, 0, len(expected)+len(observed))
+	for key := range expected {
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	for key := range observed {
+		if _, ok := seen[key]; !ok {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // assembleCostUnits preserves bidirectional record-count parity (legacy cells
 // use Requests). Supplementary rows contribute records but no requests to this
 // contract. Even events outside precise bounds count towards boundary-hour
@@ -306,21 +331,21 @@ func assembleCostUnits(ctx context.Context, cells []TargetModelCell, events []us
 			Hour: event.Timestamp.UTC().Truncate(time.Hour), Client: strings.TrimSpace(event.ClientName), Target: strings.ToLower(strings.TrimSpace(event.Target)), Model: strings.ToLower(event.Model), AggCell: eventAggCell(event),
 		}, At: event.Timestamp, EventPriced: true, Event: &event})
 	}
-	for key, count := range expected {
+	// Walk the union of both parity directions in key order so the first report
+	// is the globally smallest quotaAggKey, not the smallest per direction.
+	for _, key := range sortedCostKeys(expected, observed) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if observed[key] != count {
-			return nil, fmt.Errorf("%w: raw record count %d differs from rollup count %d", ErrUsageHistoryIncomplete, observed[key], count)
+		expectedCount, expectedOK := expected[key]
+		observedCount := observed[key]
+		if observedCount == expectedCount {
+			continue
 		}
-	}
-	for key, count := range observed {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+		if expectedOK {
+			return nil, fmt.Errorf("%w: raw record count %d differs from rollup count %d", ErrUsageHistoryIncomplete, observedCount, expectedCount)
 		}
-		if expected[key] != count {
-			return nil, fmt.Errorf("%w: raw event lacks matching quota rollup", ErrUsageHistoryIncomplete)
-		}
+		return nil, fmt.Errorf("%w: raw event lacks matching quota rollup", ErrUsageHistoryIncomplete)
 	}
 	return units, nil
 }
@@ -363,8 +388,15 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 	filter.From, filter.To = &from, &to
 	start, end := from.Truncate(time.Hour), to.Truncate(time.Hour).Add(time.Hour)
 	result := costReadResult{}
+	// scopedApplied records that this attempt attached a client scope. Any
+	// error then replays the read without it (Issue #125 P2): the scoped walks
+	// may have reached a different first error than the exhaustive ones, and
+	// only the replay has the authoritative verdict.
+	scopedApplied := false
 	useIndex := needsExact && strings.TrimSpace(filter.ClientName) != "" && !from.IsZero() && !hooks.forceLegacy && (rawFrom != nil || strings.TrimSpace(filter.Model) == "" || usage.RequiresEventTimestampsForModel(resolver, filter.Model))
 	err := s.db.View(func(tx *bolt.Tx) error {
+		// Issue #125: decide the fast path once, after the transaction began.
+		ctx := integrityReadContext(ctx, tx, from, to)
 		refs := &indexRawReferences{tx: tx}
 		missing, err := missingUsageAggregateSources(tx)
 		if err != nil {
@@ -390,6 +422,7 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 			}
 		}
 		var progress *indexProgress
+		var scoped *clientScopedRead
 		scopeNeedsEvidence := rawFrom != nil || (needsExact && (strings.TrimSpace(filter.Model) == "" || usage.RequiresEventTimestampsForModel(resolver, filter.Model)))
 		if scopeNeedsEvidence {
 			progress, err = loadIndexProgress(tx)
@@ -401,6 +434,25 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 					return fmt.Errorf("%w: invalid client index progress: %v", ErrUsageHistoryIncomplete, err)
 				}
 				progress = p
+			}
+			// Issue #125 P2: a client-filtered quota read enumerates only that
+			// client's window through the index. The probe proves completeness
+			// before the walks below run scoped; otherwise the read stays
+			// exhaustive and records one countable fallback.
+			scopeEligible := useIndex && hooks.windowKeys && rawFrom == nil && allow == nil &&
+				strings.TrimSpace(filter.Model) == "" && !clientScopeDisabled(ctx)
+			if scopeEligible {
+				if fast := integrityFastFrom(ctx, tx); fast != nil {
+					if scoped = probeClientScopedRead(ctx, tx, filter.ClientName, start, end, progress, fast); scoped != nil {
+						ctx = withIntegrityClientScope(ctx, tx, scoped.scope)
+						scopedApplied = true
+					} else if ctx.Err() == nil {
+						// A probe that saw the cancellation declined without
+						// proving anything: the read returns ctx.Err() without
+						// data and never falls back, so it does not count.
+						integrityNoteFallback(integrityFallbackClientScope)
+					}
+				}
 			}
 			if err := refs.checkOrphans(ctx, progress, filter, from, to, allow); err != nil {
 				return err
@@ -435,6 +487,19 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 		if useIndex {
 			if hooks.scan != nil {
 				hooks.scan(true)
+			}
+			if scoped != nil {
+				// Issue #125 P2: the client's own hours only, with the same
+				// per-hour order, proof verification and assembly contract as
+				// the exhaustive block below. The evidence scan is skipped: the
+				// probe declined every shape in which it could change this
+				// client's verdict.
+				units, err := runClientScopedIndex(ctx, tx, filter, resolver, precise, refs, progress, scoped, hooks)
+				if err != nil {
+					return err
+				}
+				result.units = units
+				return nil
 			}
 			indexErr := requireClientIndex(tx)
 			for hour := start; indexErr == nil && hour.Before(end); hour = hour.Add(time.Hour) {
@@ -575,6 +640,16 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 	})
 	if ctx.Err() != nil {
 		return costReadResult{}, ctx.Err()
+	}
+	if err != nil && scopedApplied {
+		// Issue #125 P2: the scoped attempt is discarded; the replay runs the
+		// exhaustive read with scoping disabled and is authoritative. A replay
+		// is a client-scope fallback like a probe decline and is counted as one,
+		// so every read that did not finish on the scoped enumeration is
+		// visible in the fallback metrics.
+		integrityNoteFallback(integrityFallbackClientScope)
+		ctx = context.WithValue(ctx, noClientScopeKey{}, true)
+		return s.readCostUnitsInScope(ctx, filter, resolver, precise, rawFrom, hooks, allow)
 	}
 	if err != nil {
 		return costReadResult{}, err

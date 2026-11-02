@@ -1003,6 +1003,8 @@ func TestClientIndexWritersAreEnumerated(t *testing.T) {
 		"usage_client_index_migration.go": true, "usage_client_index_v2.go": true,
 		"usage_costs.go": true, "usage_fresh_attestation.go": true, "usage_proof_scan_cache.go": true,
 		"usage_receipts.go": true, "usage_rollup_proof.go": true, "usage_client_index_exceptions.go": true,
+		// Read-only: the #125 integrity classifier only reads index entries.
+		"usage_integrity_class.go": true,
 	}
 	files, _ := filepath.Glob("*.go")
 	for _, f := range files {

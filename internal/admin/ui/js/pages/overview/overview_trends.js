@@ -22,7 +22,7 @@ AdminApp.register("overviewTrends", function (app) {
   var inputTotal = app.bind("overviewUtil", "inputTotal");
   var isObject = app.bind("overviewUtil", "isObject");
   var offsetLabel = app.bind("overviewUtil", "offsetLabel");
-  var offsetMinutes = app.bind("overviewUtil", "offsetMinutes");
+  var offsetMinutes = app.bind("core", "offsetMinutes");
   var shortDate = app.bind("overviewUtil", "shortDate");
   var shortTime = app.bind("overviewUtil", "shortTime");
   var stackedBars = app.bind("overviewUtil", "stackedBars");
