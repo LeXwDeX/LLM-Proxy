@@ -132,6 +132,14 @@ func buildIntegrityFuzzDB(t testing.TB, rng *rand.Rand) *integrityFuzzDB {
 		e := fuzzEvent(rng)
 		_ = store.Record(e)
 	}
+	// Exercise the #114 persisted classification: plant an odd row first, then
+	// build the index before damage. Damage kinds that create non-canonical
+	// rows run after this point, so without the seed the index would contain no
+	// location entries and the hour-located fast path would never be used.
+	seedLegacyProofOddRow(t, f)
+	if err := MigrateUsageProofOddIndex(context.Background(), db, 2); err != nil {
+		f.note("migrate proof odd index: %v", err)
+	}
 	damage := rng.Intn(5)
 	for i := 0; i < damage; i++ {
 		applyIntegrityDamage(t, rng, f)
@@ -139,8 +147,42 @@ func buildIntegrityFuzzDB(t testing.TB, rng *rand.Rand) *integrityFuzzDB {
 	return f
 }
 
+// seedLegacyProofOddRow plants a pre-record-id raw row before the proof-odd
+// index is built. Its event has no record_id and its key stamp equals its
+// timestamp, so the P1.1 window exemption covers it, but the row is not
+// canonical: the persisted classification must locate it by key hour.
+func seedLegacyProofOddRow(t testing.TB, f *integrityFuzzDB) {
+	t.Helper()
+	at := integrityFuzzBase.Add(35*time.Hour + 30*time.Minute)
+	event := usage.Event{
+		Timestamp:    at,
+		ClientName:   "alice",
+		Target:       "anthropic",
+		Model:        "executor",
+		EndpointType: "claude",
+		RequestID:    "req-proof-odd-seed",
+		Path:         "/v1/messages",
+		StatusCode:   200,
+		InputTokens:  7,
+		OutputTokens: 3,
+	}
+	key := []byte(usageKey(at, "legacy-proof-odd-seed"))
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("seed legacy proof-odd row: %v", err)
+	}
+	if err := f.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketUsageEvents)).Put(key, data)
+	}); err != nil {
+		t.Fatalf("seed legacy proof-odd row: %v", err)
+	}
+	f.note("seed legacy proof-odd raw %s", key)
+	f.legacy++
+	f.legacyExempt = append(f.legacyExempt, bytes.Clone(key))
+}
+
 func applyIntegrityDamage(t testing.TB, rng *rand.Rand, f *integrityFuzzDB) {
-	kind := rng.Intn(26)
+	kind := rng.Intn(27)
 	err := f.db.Update(func(tx *bolt.Tx) error {
 		raw := tx.Bucket([]byte(BucketUsageEvents))
 		rawKeys := fuzzKeys(tx, BucketUsageEvents)
@@ -158,8 +200,15 @@ func applyIntegrityDamage(t testing.TB, rng *rand.Rand, f *integrityFuzzDB) {
 			}
 		case 2: // invalid UTF-8
 			if k := pickKey(rng, rawKeys); k != nil {
-				f.note("invalid utf8 raw %s", k)
 				v := bytes.Clone(raw.Get(k))
+				if len(v) == 0 {
+					// Damage 17 can plant a nested bucket in the raw bucket,
+					// and a bucket key has no value to truncate; the read
+					// paths must classify it without this damage applied.
+					f.note("invalid utf8 raw %s skipped: no value", k)
+					return nil
+				}
+				f.note("invalid utf8 raw %s", k)
 				return raw.Put(k, append(v[:len(v)-1], 0xff, '}'))
 			}
 		case 3: // move an unbound/bound row's time to another hour and lower that hour's quota cell
@@ -443,11 +492,81 @@ func applyIntegrityDamage(t testing.TB, rng *rand.Rand, f *integrityFuzzDB) {
 			f.note("legacy cross-hour raw %s event %v", key, e.Timestamp)
 			f.legacy++
 			return raw.Put(key, data)
+		case 26: // Issue #114 derived index: damage one location or pointer entry
+			index := tx.Bucket([]byte(bucketUsageProofOdd))
+			if index == nil || !proofOddIndexCurrent(tx) {
+				f.note("proof odd index not current; in-band damage skipped")
+				return nil
+			}
+			var keys [][]byte
+			for _, k := range fuzzKeys(tx, bucketUsageProofOdd) {
+				if len(k) > 0 && (k[0] == proofOddRawHour || k[0] == proofOddReceiptHour || k[0] == proofOddRawPointer || k[0] == proofOddReceiptPointer) {
+					keys = append(keys, k)
+				}
+			}
+			if len(keys) == 0 {
+				f.note("no proof odd entry to damage")
+				return nil
+			}
+			k := keys[rng.Intn(len(keys))]
+			if rng.Intn(2) == 0 {
+				f.note("delete proof odd entry %q", k)
+				return index.Delete(k)
+			}
+			f.note("garbage proof odd entry %q", k)
+			// A 32-byte digest-shaped value passes the length check but never
+			// matches the object, so the proof must fall back to its full scan.
+			return index.Put(k, make([]byte, 32))
 		}
 		return nil
 	})
 	if err != nil {
 		f.note("damage %d err %v", kind, err)
+	}
+}
+
+// TestApplyIntegrityDamageSkipsNestedRawKey pins the damage injector against
+// the shape its own nested-bucket damage leaves behind: a raw key that is a
+// bucket has no value, so truncating "the last value byte" used to panic the
+// differential harness before it could compare the two read paths.
+func TestApplyIntegrityDamageSkipsNestedRawKey(t *testing.T) {
+	db := testDB(t)
+	f := &integrityFuzzDB{db: db, store: NewUsageStore(db)}
+	nested := []byte("2026-10-20T01:00:00Z_nested")
+	if err := db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.Bucket([]byte(BucketUsageEvents)).CreateBucket(nested)
+		return err
+	}); err != nil {
+		t.Fatalf("plant nested bucket: %v", err)
+	}
+	seed := int64(-1)
+	for candidate := int64(0); candidate < 10000; candidate++ {
+		if rand.New(rand.NewSource(candidate)).Intn(27) == 2 {
+			seed = candidate
+			break
+		}
+	}
+	if seed < 0 {
+		t.Fatal("no seed draws the invalid-UTF-8 damage kind")
+	}
+	applyIntegrityDamage(t, rand.New(rand.NewSource(seed)), f)
+	reached := false
+	for _, line := range f.log {
+		if strings.Contains(line, "skipped: no value") {
+			reached = true
+			break
+		}
+	}
+	if !reached {
+		t.Fatalf("the invalid-UTF-8 damage did not reach the nested key: %v", f.log)
+	}
+	if err := db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket([]byte(BucketUsageEvents)).Bucket(nested) == nil {
+			return fmt.Errorf("nested bucket %q disappeared", nested)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -595,17 +714,10 @@ func compareIntegrityModes(t *testing.T, f *integrityFuzzDB, q integrityQuery) b
 		if full[i] == fast[i] {
 			continue
 		}
-		// Some exhaustive checks report the first failing cell of a Go map,
-		// so Full alone can pick different messages from run to run. Accept
-		// Fast's verdict when Full itself produces it.
-		matched := false
-		for retry := 0; retry < 20 && !matched; retry++ {
-			matched = runIntegrityQuery(f.db, q, false)[i] == fast[i]
-		}
-		if !matched {
-			t.Errorf("Fast != Full for %s\n full: %s\n fast: %s\n damage: %v", q, full[i], fast[i], f.log)
-			return false
-		}
+		// The exhaustive checks choose their first failure by sorted key, like
+		// the windowed path, so any difference is a real Fast/Full divergence.
+		t.Errorf("Fast != Full for %s\n full: %s\n fast: %s\n damage: %v", q, full[i], fast[i], f.log)
+		return false
 	}
 	return true
 }
@@ -669,12 +781,23 @@ func TestIntegrityFastEqualsFullFuzz(t *testing.T) {
 	t.Logf("legacy rows without record_id generated: %d", legacyRows)
 }
 
+// integrityMutationStats reports how many objects a mutation pass changed and
+// how many of them were entries of the #114 proof-odd index.
+type integrityMutationStats struct {
+	changed  int
+	proofOdd int
+}
+
 // integrityMutateOutside changes or deletes objects whose key hour is outside
 // [from, to] and that are not anomalous; it reports how many were changed.
-func integrityMutateOutside(t *testing.T, rng *rand.Rand, db *bolt.DB, class *integrityClassification, from, to time.Time) int {
+func integrityMutateOutside(t *testing.T, rng *rand.Rand, db *bolt.DB, class *integrityClassification, from, to time.Time) integrityMutationStats {
 	t.Helper()
 	from, to = from.UTC().Truncate(time.Hour), to.UTC().Truncate(time.Hour)
 	outside := func(hour time.Time) bool { return hour.Before(from) || hour.After(to) }
+	hourOutside := func(hour string) bool {
+		at, err := parseAggHour(hour)
+		return err == nil && outside(at.UTC().Truncate(time.Hour))
+	}
 	inSet := func(set [][]byte, key []byte) bool {
 		for _, k := range set {
 			if bytes.Equal(k, key) {
@@ -684,28 +807,29 @@ func integrityMutateOutside(t *testing.T, rng *rand.Rand, db *bolt.DB, class *in
 		return false
 	}
 	type candidate struct {
-		bucket string
-		key    []byte
+		bucket   string
+		key      []byte
+		proofOdd bool
 	}
-	changed := 0
+	stats := integrityMutationStats{}
 	_ = db.Update(func(tx *bolt.Tx) error {
 		var candidates []candidate
 		for _, name := range []string{BucketUsageEvents, rawOwnerBucket, BucketUsageReceipts, freshAttestationBucket, receiptOwnersBucket, indexProofsV2} {
 			for _, k := range fuzzKeys(tx, name) {
 				if hour, ok := canonicalEventKeyHour(k); ok && outside(hour) && !class.eventSet[string(k)] && tx.Bucket([]byte(name)).Get(k) != nil {
-					candidates = append(candidates, candidate{name, k})
+					candidates = append(candidates, candidate{name, k, false})
 				}
 			}
 		}
 		for _, k := range fuzzKeys(tx, BucketQuotaUsageAggHourly) {
 			if hour, ok := quotaKeyHour(k); ok && outside(hour) && !inSet(class.quota, k) {
-				candidates = append(candidates, candidate{BucketQuotaUsageAggHourly, k})
+				candidates = append(candidates, candidate{BucketQuotaUsageAggHourly, k, false})
 			}
 		}
 		for _, k := range fuzzKeys(tx, rollupProofBucket) {
 			if _, key, found := bytes.Cut(k, []byte{0}); found {
 				if hour, ok := quotaKeyHour(key); ok && outside(hour) && !inSet(class.proofs, k) {
-					candidates = append(candidates, candidate{rollupProofBucket, k})
+					candidates = append(candidates, candidate{rollupProofBucket, k, false})
 				}
 			}
 		}
@@ -715,7 +839,33 @@ func integrityMutateOutside(t *testing.T, rng *rand.Rand, db *bolt.DB, class *in
 				continue
 			}
 			if scope, ok := indexProofScope(k, []byte(parts[2])); ok && outside(scope.Timestamp.UTC().Truncate(time.Hour)) && !inSet(class.index, k) {
-				candidates = append(candidates, candidate{BucketUsageEventsByClient, k})
+				candidates = append(candidates, candidate{BucketUsageEventsByClient, k, false})
+			}
+		}
+		// Issue #114: the proof-odd index is a derived classification. Its
+		// hour-located entries and their pointers only matter to the hours a
+		// proof reads, so an entry of another hour may be changed or deleted
+		// without changing any verdict. Global entries are visited by every
+		// proof and are left alone.
+		if odd := tx.Bucket([]byte(bucketUsageProofOdd)); odd != nil {
+			for _, k := range fuzzKeys(tx, bucketUsageProofOdd) {
+				if len(k) == 0 {
+					continue
+				}
+				switch k[0] {
+				case proofOddRawHour, proofOddReceiptHour:
+					if len(k) <= 1+len(hourLayout) {
+						continue
+					}
+					if hourOutside(string(k[1 : 1+len(hourLayout)])) {
+						candidates = append(candidates, candidate{bucketUsageProofOdd, k, true})
+					}
+				case proofOddRawPointer, proofOddReceiptPointer:
+					kind, hour, ok := proofOddParsePointer(odd.Get(k))
+					if ok && proofOddPointerFor(kind) == k[0] && hourOutside(hour) {
+						candidates = append(candidates, candidate{bucketUsageProofOdd, k, true})
+					}
+				}
 			}
 		}
 		if len(candidates) == 0 {
@@ -734,11 +884,14 @@ func integrityMutateOutside(t *testing.T, rng *rand.Rand, db *bolt.DB, class *in
 			case 2:
 				_ = b.Put(c.key, []byte(`{"input_tokens":1,"requests":1,"record_count":1}`))
 			}
-			changed++
+			stats.changed++
+			if c.proofOdd {
+				stats.proofOdd++
+			}
 		}
 		return nil
 	})
-	return changed
+	return stats
 }
 
 func sameIntegrityAnomalies(a, b *integrityClassification) bool {
@@ -762,7 +915,7 @@ func sameIntegrityAnomalies(a, b *integrityClassification) bool {
 // bumps the epoch instead).
 func TestIntegrityFullIgnoresOutsideNonAnomalous(t *testing.T) {
 	iterations := integrityFuzzIterations(40)
-	checked, reclassified, notSkippable := 0, 0, 0
+	checked, reclassified, notSkippable, proofOddMutated := 0, 0, 0, 0
 	for seed := 0; seed < iterations; seed++ {
 		rng := rand.New(rand.NewSource(int64(1_000_000 + seed)))
 		for i := 0; i < 4; i++ {
@@ -774,9 +927,11 @@ func TestIntegrityFullIgnoresOutsideNonAnomalous(t *testing.T) {
 				continue
 			}
 			want := runIntegrityQuery(f.db, q, false)
-			if integrityMutateOutside(t, rng, f.db, before, q.from, q.to) == 0 {
+			stats := integrityMutateOutside(t, rng, f.db, before, q.from, q.to)
+			if stats.changed == 0 {
 				continue
 			}
+			proofOddMutated += stats.proofOdd
 			f.note("mutated objects outside %s", q)
 			var after *integrityClassification
 			_ = f.db.View(func(tx *bolt.Tx) error { after, _ = classifyUsageIntegrity(context.Background(), tx); return nil })
@@ -807,8 +962,11 @@ func TestIntegrityFullIgnoresOutsideNonAnomalous(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("invariance cases with A unchanged: %d; A changed and reclassified: %d; reclassification unavailable: %d", checked, reclassified, notSkippable)
+	t.Logf("invariance cases with A unchanged: %d; A changed and reclassified: %d; reclassification unavailable: %d; proof-odd index entries mutated outside: %d", checked, reclassified, notSkippable, proofOddMutated)
 	if checked < iterations || reclassified < iterations {
 		t.Fatalf("coverage too low: unchanged=%d reclassified=%d (want >= %d each)", checked, reclassified, iterations)
+	}
+	if proofOddMutated == 0 && iterations >= 10 {
+		t.Fatalf("no proof-odd index entry outside the window was mutated in %d iterations; the #114 derived-index mutation is not exercised", iterations)
 	}
 }

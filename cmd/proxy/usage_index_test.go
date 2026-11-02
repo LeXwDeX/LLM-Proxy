@@ -40,6 +40,65 @@ func TestUsageClientIndexStartupDoesNotMigrateSynchronously(t *testing.T) {
 	}
 }
 
+// TestUsageProofIndexStartupOrder pins the Issue #114 startup sequence inside
+// run(): the persistent odd-row proof index is built or resumed before the
+// proof cache is warmed, and both finish before journal replay so replayed
+// writes maintain an index that is already current.
+func TestUsageProofIndexStartupOrder(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runFn *ast.FuncDecl
+	for _, declaration := range file.Decls {
+		if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Name.Name == "run" {
+			runFn = fn
+		}
+	}
+	if runFn == nil {
+		t.Fatal("run() not found in main.go")
+	}
+	type startupCall struct {
+		receiver string
+		name     string
+	}
+	want := []startupCall{
+		{receiver: "nosql", name: "MigrateUsageProofOddIndex"},
+		{receiver: "nosql", name: "WarmUsageProofScanCache"},
+		{receiver: "usageJournal", name: "Replay"},
+	}
+	positions := make(map[startupCall]token.Pos, len(want))
+	ast.Inspect(runFn.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		receiver, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		key := startupCall{receiver: receiver.Name, name: selector.Sel.Name}
+		if _, seen := positions[key]; !seen {
+			positions[key] = call.Pos()
+		}
+		return true
+	})
+	for _, call := range want {
+		if _, ok := positions[call]; !ok {
+			t.Fatalf("startup call %s.%s not found in run()", call.receiver, call.name)
+		}
+	}
+	for i := 1; i < len(want); i++ {
+		if positions[want[i-1]] >= positions[want[i]] {
+			t.Errorf("startup order violated: %s.%s must precede %s.%s", want[i-1].receiver, want[i-1].name, want[i].receiver, want[i].name)
+		}
+	}
+}
+
 func TestUsageClientIndexMigrationRetriesWithoutRestart(t *testing.T) {
 	var attempts atomic.Int64
 	completed := make(chan struct{})

@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,81 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 	bolt "go.etcd.io/bbolt"
 )
+
+// directIntegrityVerdict runs the direct quota evidence check in one mode and
+// returns the reported failure text, or "ok".
+func directIntegrityVerdict(t *testing.T, db *bolt.DB, filter usage.Filter, from, to time.Time, fast bool) string {
+	t.Helper()
+	saved := integrityForceFast.Load()
+	integrityForceFast.Store(fast)
+	defer integrityForceFast.Store(saved)
+	var got error
+	if err := db.View(func(tx *bolt.Tx) error {
+		got = checkDirectQuotaEvidenceContext(context.Background(), tx, filter, from, to, nil, &directIntegrityHooks{windowKeys: true})
+		return nil
+	}); err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	if got == nil {
+		return "ok"
+	}
+	return got.Error()
+}
+
+// TestDirectQuotaFirstAggregationErrorIsDeterministic pins the first reported
+// usage-aggregation failure to the lexicographically smallest aggregation key.
+// Two cells in one scope fail in different ways; walking the Go map in its
+// random order picks either message, so the exhaustive and windowed reads (and
+// repeated reads of the same database) can disagree although every failure is
+// real.
+func TestDirectQuotaFirstAggregationErrorIsDeterministic(t *testing.T) {
+	const want = "usage history is incomplete for exact pricing: invalid usage aggregation"
+	base := fixedPlainEvent()
+	base.Components = nil
+	base.InputTokens = 1_000_000
+	advisor := base
+	advisor.RecordID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa01"
+	advisor.Model = "advisor"
+	executor := base
+	executor.RecordID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa02"
+	executor.Model = "executor"
+	advisorKey := aggKey(advisor.Timestamp, advisor.EndpointType, advisor.ClientName, advisor.Model, advisor.Target)
+	executorKey := aggKey(executor.Timestamp, executor.EndpointType, executor.ClientName, executor.Model, executor.Target)
+	if bytes.Compare(advisorKey, executorKey) >= 0 {
+		t.Fatalf("test keys not ordered: %q >= %q", advisorKey, executorKey)
+	}
+	from := advisor.Timestamp.Truncate(time.Hour)
+	to := from.Add(time.Hour - time.Nanosecond)
+	filter := usage.Filter{ClientName: advisor.ClientName, From: &from, To: &to}
+	for i := 0; i < 50; i++ {
+		db := testDB(t)
+		store := clockedStore(db)
+		events := []usage.Event{advisor, executor}
+		if i%2 == 1 {
+			events[0], events[1] = events[1], events[0]
+		}
+		for _, event := range events {
+			if err := store.Record(event); err != nil {
+				t.Fatalf("iteration %d record: %v", i, err)
+			}
+		}
+		if err := db.Update(func(tx *bolt.Tx) error {
+			agg := tx.Bucket([]byte(BucketUsageAggHourly))
+			if err := agg.Put(advisorKey, []byte(`{"input_tokens":"bad"}`)); err != nil {
+				return err
+			}
+			return agg.Put(executorKey, []byte(`{"requests":0}`))
+		}); err != nil {
+			t.Fatalf("iteration %d damage: %v", i, err)
+		}
+		if got := directIntegrityVerdict(t, db, filter, from, to, false); got != want {
+			t.Fatalf("iteration %d: exhaustive first error = %q, want %q", i, got, want)
+		}
+		if got := directIntegrityVerdict(t, db, filter, from, to, true); got != want {
+			t.Fatalf("iteration %d: windowed first error = %q, want %q", i, got, want)
+		}
+	}
+}
 
 func TestDirectQuotaReceiptEvidenceAfterPrune(t *testing.T) {
 	for _, damage := range []string{"missing", "null"} {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -234,12 +235,21 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 		}
 	}
 	if agg := tx.Bucket([]byte(BucketUsageAggHourly)); agg != nil {
-		for key, raw := range usageCells {
+		// Walk the aggregation cells in sorted key order so the first reported
+		// failure does not depend on Go's random map iteration. This is the same
+		// deterministic ordering sortedCostKeys gives assembleCostUnits.
+		for _, key := range sortedIntegrityCellKeys(usageCells) {
+			raw := usageCells[key]
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			inScope := false
+			quotaKeys := make([]string, 0, len(usageQuotaKeys[key]))
 			for quotaKey := range usageQuotaKeys[key] {
+				quotaKeys = append(quotaKeys, quotaKey)
+			}
+			sort.Strings(quotaKeys)
+			for _, quotaKey := range quotaKeys {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -404,6 +414,12 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 	}
 	if hooks != nil && hooks.windowKeys {
 		end := to.Truncate(time.Hour).Format(hourLayout) + "}"
+		if fast != nil && fast.scope != nil {
+			// Issue #125 P2: the calibration visit keeps its exact textual
+			// range; the scope adds the filter client's own cells (and the
+			// empty-owner cells) instead of every other client's.
+			return fast.eachQuotaWindowKeys(quota, string(hourPrefix(from)), end, visit)
+		}
 		c := quota.Cursor()
 		for k, v := c.Seek(hourPrefix(from)); k != nil && string(k) <= end; k, v = c.Next() {
 			if err := visit(k, v); err != nil {
@@ -418,6 +434,18 @@ func checkDirectQuotaEvidenceContext(ctx context.Context, tx *bolt.Tx, filter us
 		return fast.eachQuota(quota, visit)
 	}
 	return quota.ForEach(visit)
+}
+
+// sortedIntegrityCellKeys returns the aggregation keys in lexical order, the
+// same order sortedCostKeys gives assembleCostUnits, so the first reported
+// failure is deterministic rather than chosen by Go's random map iteration.
+func sortedIntegrityCellKeys(cells map[string]AggCell) []string {
+	keys := make([]string, 0, len(cells))
+	for key := range cells {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // integrityEachEvent is b.ForEach, or the windowed walk of a raw-identity

@@ -438,13 +438,17 @@ func writeUsageReceipt(tx *bolt.Tx, key []byte, digest string) error {
 		if existing.Digest != digest {
 			return fmt.Errorf("usage receipts: receipt already exists with different payload digest")
 		}
-		return nil
+		// Repair an entry missing after an out-of-band restore; idempotent.
+		return proofOddNoteReceipt(tx, key, bucket.Get(key))
 	}
 	data, err := json.Marshal(usageReceipt{Version: usageReceiptVersion, Digest: digest})
 	if err != nil {
 		return err
 	}
-	return bucket.Put(key, data)
+	if err := bucket.Put(key, data); err != nil {
+		return err
+	}
+	return proofOddNoteReceipt(tx, key, data)
 }
 
 // clientIndexReferencesKey probes for a canonical index entry that points at
@@ -804,7 +808,13 @@ func writeUsageRowTx(tx *bolt.Tx, event usage.Event, key string) error {
 	if err := b.Put([]byte(key), data); err != nil {
 		return err
 	}
+	// Write the owner first: the proof classification treats every odd row with
+	// a readable owner entry as global, and it must observe the owner this
+	// transaction commits, not the state before it.
 	if err := writeRawOwner(tx, []byte(key), event); err != nil {
+		return err
+	}
+	if err := proofOddNoteRawEvent(tx, []byte(key), data, event); err != nil {
 		return err
 	}
 	if err := bumpAgg(tx, event); err != nil {

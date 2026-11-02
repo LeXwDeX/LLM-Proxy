@@ -186,6 +186,22 @@ func run(args []string) int {
 	if err := usageStore.EnsureUsageReceipts(); err != nil {
 		appLogger.Error("usage receipt migration failed; explicit usage writes stay queued in the recovery journal until a retry succeeds", "error", err)
 	}
+	// Issue #114: build or resume the persistent odd-row classification before
+	// warm-up so proofs and warm-up scale with the proved scope instead of the
+	// whole history. A cancelled or failed run is safe: it leaves the ready
+	// marker unset and proofs keep the full-scan fallback. Supported writes
+	// advance the build's raw-revision snapshot in the same transaction that
+	// maintains the index, so a paused build resumes from its stored cursor in
+	// either phase; a writer that advances only the raw revision (an older
+	// binary or an out-of-band edit) makes the next start rebuild instead.
+	oddStarted := time.Now()
+	oddCtx, oddCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	if err := nosql.MigrateUsageProofOddIndex(oddCtx, db, 0); err != nil {
+		appLogger.Warn("usage proof odd index migration incomplete; the proof-cache warm-up and proof scans use the full-scan fallback; supported writes keep a paused build resumable and a later start resumes from its stored cursor, but an unsupported writer that advances the raw revision without maintaining the index makes that start rebuild", "error", err, "duration", time.Since(oddStarted).String())
+	} else {
+		appLogger.Info("usage proof odd index ready", "duration", time.Since(oddStarted).String())
+	}
+	oddCancel()
 	// Warm the legacy-row proof cache before the writer starts, so the first
 	// usage batch does not parse the whole history inside a write transaction.
 	warmStarted := time.Now()

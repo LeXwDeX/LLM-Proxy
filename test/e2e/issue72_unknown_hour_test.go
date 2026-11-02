@@ -7,10 +7,12 @@ package e2e
 // as complete, or as newly valid usage. The sidecar test injects rejected
 // historical evidence; this test owns a separate proxy and database and
 // injects an *unknown* raw row directly into usage_events while the proxy is
-// stopped. No raw-owner attestation, client index entry, hourly aggregation or
-// quota aggregation is written for it. (Live rows in a tracked database are
-// attested by the raw owner, client index and both cells; prune receipts and
-// fresh attestations only exist for older or untracked ledgers.)
+// stopped. The injected row has no raw owner record, no client index entry and
+// no hourly usage/quota aggregation cell -- those are exactly the identity
+// evidence a live row carries in a tracked database. Receipts and fresh
+// attestations are not written for live rows in a fresh tracked database
+// either (they only exist for pruned or untracked ledgers), so their absence is
+// not what makes this row unknown.
 //
 // Two windows are covered:
 //
@@ -24,6 +26,17 @@ package e2e
 //     time windows not to be blocked -- while the window that does include the
 //     row (an explicit from/to aggregate) fails closed instead of reporting
 //     zero or a complete total.
+//
+// Both scenarios are deterministic at any wall-clock time. Quota daily
+// counters reset at the UTC day boundary, so healthy expectations are derived
+// from the ledger rows inside the current UTC day on every poll rather than
+// compared against a fixed cumulative total. The current-hour scenario also
+// injects a sentinel unknown row exactly at the next UTC midnight: before
+// midnight it is outside every calibration window, while after midnight it
+// stays inside the window whose start moved to midnight. This keeps the
+// fail-closed premise when a run crosses midnight, including the rare midnight
+// that starts both an ISO week and a month and would otherwise move the
+// earliest quota period start past the current-hour row.
 
 import (
 	"bytes"
@@ -39,16 +52,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/fakellm"
+	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 	bolt "go.etcd.io/bbolt"
 )
 
-const issue72UnknownModel = "Issue72Model"
+const (
+	issue72UnknownModel = "Issue72Model"
+	// issue72InputPricePer1M is the flat input price configured below; every
+	// seeded request uses exactly 1M input tokens, so one request costs $2.
+	issue72InputPricePer1M = 2.0
+	// Record IDs of the raw rows this test writes directly into usage_events.
+	// They are not returned by the client index and carry no identity evidence.
+	issue72CurrentRecordID  = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa00e2"
+	issue72MidnightRecordID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa00e3"
+	// issue72BoundaryGrace only needs to exceed the gap between an event's
+	// durable timestamp and the quota increment's later clock read (the row is
+	// committed first). A row inside it may legitimately belong to either side
+	// of the UTC day boundary, so both daily totals are accepted.
+	issue72BoundaryGrace = time.Minute
+)
 
 func TestIssue72UnknownHourIdentityRestart(t *testing.T) {
 	t.Run("current_hour", func(t *testing.T) { runIssue72UnknownHourScenario(t, false) })
@@ -120,6 +149,49 @@ func (e *issue72UnknownEnv) logText() string {
 	return string(raw)
 }
 
+func (e *issue72UnknownEnv) errorLogText() string {
+	raw, _ := os.ReadFile(filepath.Join(e.dir, "error.log"))
+	return string(raw)
+}
+
+// waitErrorLogContains waits until one single log line after offset contains
+// every needle (not one needle per line) and returns the new log length. The
+// admin handler logs the error before writing the response, so this is direct
+// attribution evidence for a 500 rather than a heuristic. Offsets keep evidence
+// from an earlier restart from satisfying a later assertion.
+func (e *issue72UnknownEnv) waitErrorLogContains(offset int, needles ...string) int {
+	e.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		text := e.errorLogText()
+		if len(text) >= offset {
+			for _, line := range strings.Split(text[offset:], "\n") {
+				matched := true
+				for _, needle := range needles {
+					if !strings.Contains(line, needle) {
+						matched = false
+						break
+					}
+				}
+				if matched {
+					return len(text)
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("error log has no line containing %q; tail:\n%s", needles, tailOf(text, offset))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func tailOf(text string, offset int) string {
+	if offset >= 0 && offset <= len(text) {
+		return text[offset:]
+	}
+	return text
+}
+
 func (e *issue72UnknownEnv) start() {
 	e.t.Helper()
 	e.proc = exec.Command(e.bin, "-config", e.cfgPath)
@@ -147,7 +219,7 @@ func (e *issue72UnknownEnv) start() {
 }
 
 func (e *issue72UnknownEnv) stop() {
-	if e.proc == nil {
+	if e.proc == nil || e.proc.Process == nil {
 		return
 	}
 	proc := e.proc
@@ -187,7 +259,7 @@ func (e *issue72UnknownEnv) configure(clients []string) {
 	}, 201)
 	e.admin("POST", "/admin/data/pricing-templates", map[string]any{
 		"target": "target", "model": issue72UnknownModel, "mode": "flat",
-		"base_rates": usage.CostRates{InputPer1MTokens: 2},
+		"base_rates": usage.CostRates{InputPer1MTokens: issue72InputPricePer1M},
 	}, 201)
 	e.admin("POST", "/admin/data/model-groups", map[string]any{
 		"name": "models", "daily_usd": 100, "cost_coefficient": 1,
@@ -302,16 +374,107 @@ func (e *issue72UnknownEnv) quotaStatus(clientName string) map[string]any {
 	return decode(e.t, e.admin("GET", "/admin/data/quota/"+url.PathEscape(clientName), nil, 200))
 }
 
-func (e *issue72UnknownEnv) waitQuotaHealthy(clientName string, used float64) {
+// issue72EventCost applies the proxy's own cost formula to one ledger row
+// using the flat input price configured for this scenario.
+func issue72EventCost(ev usage.Event) float64 {
+	return usage.CostRates{InputPer1MTokens: issue72InputPricePer1M}.CostFor(
+		ev.InputTokens, ev.OutputTokens, ev.CachedTokens, ev.CacheCreationTokens)
+}
+
+// issue72RealEvents drops the unknown rows this test injected directly into the
+// ledger. They are exactly the rows the proxy must never treat as usage.
+func issue72RealEvents(events []usage.Event) []usage.Event {
+	real := make([]usage.Event, 0, len(events))
+	for _, ev := range events {
+		if ev.RecordID == issue72CurrentRecordID || ev.RecordID == issue72MidnightRecordID {
+			continue
+		}
+		real = append(real, ev)
+	}
+	return real
+}
+
+// issue72DailyUsedCandidates recomputes the quota daily counter implied by the
+// known-good rows at now. The daily window starts at 00:00 UTC, so a fixed
+// cumulative expectation would go stale if the run crosses a UTC day or month
+// boundary; callers evaluate this on every poll instead. A row timestamped just
+// before the day start may still have been charged to either period, because
+// the durable row is committed before the in-memory increment reads the clock;
+// such rows contribute to several candidate totals. Any other extra or missing
+// dollar still fails the assertion.
+func issue72DailyUsedCandidates(t *testing.T, events []usage.Event, now time.Time) []float64 {
+	t.Helper()
+	dayStart, _, err := quota.PeriodRange(quota.DimensionDaily, now)
+	if err != nil {
+		t.Fatalf("daily quota period: %v", err)
+	}
+	base := 0.0
+	var straddling []float64
+	for _, ev := range events {
+		at := ev.Timestamp.UTC()
+		cost := issue72EventCost(ev)
+		switch {
+		case !at.Before(dayStart):
+			base += cost
+		case !at.Before(dayStart.Add(-issue72BoundaryGrace)):
+			straddling = append(straddling, cost)
+		}
+	}
+	candidates := []float64{base}
+	for _, cost := range straddling {
+		n := len(candidates)
+		for i := 0; i < n; i++ {
+			candidates = append(candidates, candidates[i]+cost)
+		}
+	}
+	// Subset sums repeat when the base is zero; callers compare exact values.
+	unique := make([]float64, 0, len(candidates))
+	for _, candidate := range candidates {
+		duplicate := false
+		for _, kept := range unique {
+			if math.Abs(kept-candidate) <= 1e-9 {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			unique = append(unique, candidate)
+		}
+	}
+	return unique
+}
+
+// waitQuotaHealthy waits until calibration is healthy and the daily counter
+// matches the usage implied by the requests this test issued in the current UTC
+// day. requests is the exact number of known-good ledger rows expected for the
+// client, so a missing or synthesized row still fails rather than being folded
+// into the expectation. Both the expectation and the day window are recomputed
+// on every poll, which makes a restart or a boundary crossing deterministic.
+func (e *issue72UnknownEnv) waitQuotaHealthy(clientName string, requests int) {
 	e.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// Poll past calibrationRequestTimeout (15s) so a slow machine's calibration
+	// cannot fail a run that would become healthy.
+	deadline := time.Now().Add(45 * time.Second)
+	var status map[string]any
+	known := 0
 	for {
-		status := e.quotaStatus(clientName)
-		if dig(status, "calibration_error") == nil && dig(status, "groups/models/quotas/daily/used") == used {
-			return
+		events := issue72RealEvents(e.readEvents(clientName))
+		known = len(events)
+		if known == requests {
+			candidates := issue72DailyUsedCandidates(e.t, events, time.Now().UTC())
+			status = e.quotaStatus(clientName)
+			if dig(status, "calibration_error") == nil {
+				if used, ok := dig(status, "groups/models/quotas/daily/used").(float64); ok {
+					for _, want := range candidates {
+						if math.Abs(used-want) <= 1e-9 {
+							return
+						}
+					}
+				}
+			}
 		}
 		if time.Now().After(deadline) {
-			e.t.Fatalf("%s quota not healthy at used=%v: %+v", clientName, used, status)
+			e.t.Fatalf("%s quota not healthy: %d known request(s), want %d, status=%+v", clientName, known, requests, status)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -319,33 +482,47 @@ func (e *issue72UnknownEnv) waitQuotaHealthy(clientName string, used float64) {
 
 func (e *issue72UnknownEnv) waitQuotaCalibrationError(clientName string) {
 	e.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	var status map[string]any
+	// calibrationRequestTimeout is 15s and a request-path timeout writes its
+	// own calibration_error ("calibration timed out..."). Poll well past that
+	// timeout and require the incomplete-history prefix so a timeout can never
+	// satisfy the assertion.
+	const integrityPrefix = "usage history is incomplete"
+	deadline := time.Now().Add(45 * time.Second)
+	var msg string
 	for {
-		status = e.quotaStatus(clientName)
-		if msg, _ := dig(status, "calibration_error").(string); msg != "" {
+		status := e.quotaStatus(clientName)
+		msg, _ = dig(status, "calibration_error").(string)
+		if strings.Contains(msg, integrityPrefix) {
 			e.t.Logf("%s calibration_error: %s", clientName, msg)
 			return
 		}
 		if time.Now().After(deadline) {
-			e.t.Fatalf("%s quota has no calibration_error: %+v", clientName, status)
+			e.t.Fatalf("%s quota calibration_error %q does not contain %q: %+v", clientName, msg, integrityPrefix, status)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
 // issue72UnknownFixture records the exact bytes written while the proxy was
-// stopped and the pre-injection state of the cells that identity would share.
+// stopped and the pre-injection state of the derived objects the injected
+// identity would share. The raw row itself is the only thing written for the
+// unknown identity; every other object below must stay byte-identical (or
+// absent) across restarts.
 type issue72UnknownFixture struct {
-	rawKey       []byte
-	rawValue     []byte
-	originKey    []byte
-	originValue  []byte
-	quotaKey     []byte
-	quotaCell    []byte
-	quotaProof   []byte
-	usageAggKey  []byte
-	usageAggCell []byte
+	rawKey          []byte
+	rawValue        []byte
+	originKey       []byte
+	originValue     []byte
+	quotaKey        []byte
+	quotaCell       []byte
+	quotaProof      []byte
+	usageAggKey     []byte
+	usageAggCell    []byte
+	usageProof      []byte
+	clientHourKey   []byte
+	clientHourCell  []byte
+	quarantineValue []byte
+	quarantineCount []byte
 }
 
 func issue72HourKey(t time.Time) string {
@@ -371,6 +548,18 @@ func issue72UsageAggKey(evt usage.Event) []byte {
 
 func issue72RawKey(evt usage.Event) []byte {
 	return []byte(evt.Timestamp.UTC().Format(time.RFC3339Nano) + "_" + evt.RecordID)
+}
+
+// issue72ClientHourKey mirrors clientHourKey: hex(client)|hour.
+func issue72ClientHourKey(evt usage.Event) []byte {
+	return []byte(hex.EncodeToString([]byte(strings.TrimSpace(evt.ClientName))) + "|" +
+		evt.Timestamp.UTC().Truncate(time.Hour).Format("2006-01-02T15"))
+}
+
+// issue72ProofKey mirrors rollupProofKey: source + NUL + cell key.
+func issue72ProofKey(source string, key []byte) []byte {
+	out := append([]byte(source), 0)
+	return append(out, key...)
 }
 
 // inject copies a real, fully attested event to a new identity and writes it
@@ -400,14 +589,18 @@ func (e *issue72UnknownEnv) inject(event usage.Event, at time.Time, recordID str
 		receipts := tx.Bucket([]byte("usage_record_receipts_v1"))
 		owners := tx.Bucket([]byte("usage_raw_owners_v1"))
 		index := tx.Bucket([]byte("usage_events_by_client_v1"))
+		clientHours := tx.Bucket([]byte("usage_client_hours_v1"))
+		quarantine := tx.Bucket([]byte("usage_events_quarantine_v1"))
+		meta := tx.Bucket([]byte("meta"))
 		quota := tx.Bucket([]byte("quota_usage_agg_hourly"))
 		agg := tx.Bucket([]byte("usage_agg_hourly"))
-		if raw == nil || receipts == nil || owners == nil || index == nil || quota == nil || agg == nil {
+		if raw == nil || receipts == nil || owners == nil || index == nil || clientHours == nil || quarantine == nil || meta == nil || quota == nil || agg == nil {
 			var missing []string
 			for name, bucket := range map[string]*bolt.Bucket{
 				"usage_events": raw, "usage_record_receipts_v1": receipts, "usage_raw_owners_v1": owners,
-				"usage_events_by_client_v1": index, "quota_usage_agg_hourly": quota,
-				"usage_agg_hourly": agg,
+				"usage_events_by_client_v1": index, "usage_client_hours_v1": clientHours,
+				"usage_events_quarantine_v1": quarantine, "meta": meta,
+				"quota_usage_agg_hourly": quota, "usage_agg_hourly": agg,
 			} {
 				if bucket == nil {
 					missing = append(missing, name)
@@ -421,8 +614,9 @@ func (e *issue72UnknownEnv) inject(event usage.Event, at time.Time, recordID str
 		}
 		fx.originValue = bytes.Clone(origin)
 		// A live identity in a tracked database is attested by its raw owner,
-		// client index entry and both aggregation cells. (Prune receipts and
-		// fresh attestations only appear for older or untracked ledgers.)
+		// client index entry, client-hour counter and both aggregation cells.
+		// (Prune receipts and fresh attestations are not written for live rows
+		// in a new tracked database; see the header comment.)
 		if owners.Get(fx.originKey) == nil {
 			return fmt.Errorf("seeded raw owner missing")
 		}
@@ -438,6 +632,9 @@ func (e *issue72UnknownEnv) inject(event usage.Event, at time.Time, recordID str
 		if !indexed {
 			return fmt.Errorf("seeded raw row missing from the client index")
 		}
+		if clientHours.Get(issue72ClientHourKey(event)) == nil {
+			return fmt.Errorf("seeded client-hour counter missing")
+		}
 		if quota.Get(originQuotaKey) == nil {
 			return fmt.Errorf("seeded quota cell missing")
 		}
@@ -447,11 +644,22 @@ func (e *issue72UnknownEnv) inject(event usage.Event, at time.Time, recordID str
 		if receipts.Get(fx.rawKey) != nil || owners.Get(fx.rawKey) != nil {
 			return fmt.Errorf("injected identity is already attested")
 		}
+		// Snapshot every derived object keyed by the injected identity. The
+		// client-hour key equals the seeded one for the current-hour case and is
+		// absent for the future-hour case; both are compared byte-for-byte.
+		fx.clientHourKey = issue72ClientHourKey(copied)
+		fx.clientHourCell = bytes.Clone(clientHours.Get(fx.clientHourKey))
+		fx.quarantineValue = bytes.Clone(quarantine.Get(fx.rawKey))
+		fx.quarantineCount = bytes.Clone(meta.Get([]byte("usage_events_quarantine_count_v1")))
 		fx.quotaCell = bytes.Clone(quota.Get(fx.quotaKey))
-		if proofs := tx.Bucket([]byte("usage_rollup_proofs_v2")); proofs != nil {
-			fx.quotaProof = bytes.Clone(proofs.Get(append(append([]byte("quota_usage_agg_hourly"), 0), fx.quotaKey...)))
-		}
 		fx.usageAggCell = bytes.Clone(agg.Get(fx.usageAggKey))
+		// The proof bucket is created lazily and does not exist in a fresh
+		// tracked database until a proof is written, so snapshot both injected
+		// proof cells nil-safely.
+		if proofs := tx.Bucket([]byte("usage_rollup_proofs_v2")); proofs != nil {
+			fx.quotaProof = bytes.Clone(proofs.Get(issue72ProofKey("quota_usage_agg_hourly", fx.quotaKey)))
+			fx.usageProof = bytes.Clone(proofs.Get(issue72ProofKey("usage_agg_hourly", fx.usageAggKey)))
+		}
 		return raw.Put(fx.rawKey, fx.rawValue)
 	})
 	closeErr := db.Close()
@@ -481,10 +689,24 @@ func (e *issue72UnknownEnv) verifyInjected(fx issue72UnknownFixture) {
 		if got := raw.Get(fx.originKey); !bytes.Equal(got, fx.originValue) {
 			return fmt.Errorf("original raw row changed")
 		}
-		for _, name := range []string{
-			"usage_record_receipts_v1", "usage_raw_owners_v1",
-			"usage_receipt_owner_hashes_v1", "usage_fresh_commit_attestations_v1",
-		} {
+		// Receipts are created with the schema and raw owners by the seeded live
+		// writes (inject requires them too), so both buckets must exist; neither
+		// may gain an entry for the injected identity.
+		for _, name := range []string{"usage_record_receipts_v1", "usage_raw_owners_v1"} {
+			b := tx.Bucket([]byte(name))
+			if b == nil {
+				return fmt.Errorf("%s bucket missing", name)
+			}
+			if b.Get(fx.rawKey) != nil {
+				return fmt.Errorf("injected identity gained a %s entry", name)
+			}
+		}
+		// Receipt-owner hashes and fresh attestations are only written for pruned
+		// or untracked ledgers, so a fresh tracked database may never create these
+		// buckets; only assert that no entry for the injected identity appeared,
+		// and do not treat nil==nil as coverage. The client-hour, client-index,
+		// quota-cell and usage-cell checks below provide that coverage.
+		for _, name := range []string{"usage_receipt_owner_hashes_v1", "usage_fresh_commit_attestations_v1"} {
 			b := tx.Bucket([]byte(name))
 			if b == nil {
 				continue
@@ -505,6 +727,27 @@ func (e *issue72UnknownEnv) verifyInjected(fx issue72UnknownFixture) {
 		}); err != nil {
 			return err
 		}
+		clientHours := tx.Bucket([]byte("usage_client_hours_v1"))
+		if clientHours == nil {
+			return fmt.Errorf("client hours bucket missing")
+		}
+		if got := clientHours.Get(fx.clientHourKey); !bytes.Equal(got, fx.clientHourCell) {
+			return fmt.Errorf("injected client-hour counter changed: got %s want %s", got, fx.clientHourCell)
+		}
+		quarantine := tx.Bucket([]byte("usage_events_quarantine_v1"))
+		if quarantine == nil {
+			return fmt.Errorf("quarantine bucket missing")
+		}
+		if got := quarantine.Get(fx.rawKey); !bytes.Equal(got, fx.quarantineValue) {
+			return fmt.Errorf("injected raw row was quarantined: got %s want %s", got, fx.quarantineValue)
+		}
+		meta := tx.Bucket([]byte("meta"))
+		if meta == nil {
+			return fmt.Errorf("meta bucket missing")
+		}
+		if got := meta.Get([]byte("usage_events_quarantine_count_v1")); !bytes.Equal(got, fx.quarantineCount) {
+			return fmt.Errorf("quarantine count changed: got %s want %s", got, fx.quarantineCount)
+		}
 		quota := tx.Bucket([]byte("quota_usage_agg_hourly"))
 		if quota == nil {
 			return fmt.Errorf("quota aggregation bucket missing")
@@ -512,12 +755,18 @@ func (e *issue72UnknownEnv) verifyInjected(fx issue72UnknownFixture) {
 		if got := quota.Get(fx.quotaKey); !bytes.Equal(got, fx.quotaCell) {
 			return fmt.Errorf("injected quota cell changed: got %s want %s", got, fx.quotaCell)
 		}
-		var proof []byte
+		// The proof bucket is lazily created and may be absent; when present, no
+		// proof may have appeared for either cell of the injected identity.
+		var quotaProof, usageProof []byte
 		if proofs := tx.Bucket([]byte("usage_rollup_proofs_v2")); proofs != nil {
-			proof = proofs.Get(append(append([]byte("quota_usage_agg_hourly"), 0), fx.quotaKey...))
+			quotaProof = proofs.Get(issue72ProofKey("quota_usage_agg_hourly", fx.quotaKey))
+			usageProof = proofs.Get(issue72ProofKey("usage_agg_hourly", fx.usageAggKey))
 		}
-		if !bytes.Equal(proof, fx.quotaProof) {
-			return fmt.Errorf("injected quota proof changed: got %s want %s", proof, fx.quotaProof)
+		if !bytes.Equal(quotaProof, fx.quotaProof) {
+			return fmt.Errorf("injected quota proof changed: got %s want %s", quotaProof, fx.quotaProof)
+		}
+		if !bytes.Equal(usageProof, fx.usageProof) {
+			return fmt.Errorf("injected usage proof changed: got %s want %s", usageProof, fx.usageProof)
 		}
 		agg := tx.Bucket([]byte("usage_agg_hourly"))
 		if agg == nil {
@@ -536,7 +785,14 @@ func (e *issue72UnknownEnv) verifyInjected(fx issue72UnknownFixture) {
 	}
 }
 
+// issue72NextUTCMidnight returns the first 00:00 UTC strictly after now.
+func issue72NextUTCMidnight(now time.Time) time.Time {
+	now = now.UTC()
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+}
+
 func runIssue72UnknownHourScenario(t *testing.T, future bool) {
+	t.Helper()
 	env := newIssue72UnknownEnv(t)
 	env.start()
 	env.configure([]string{"alice", "bob"})
@@ -554,15 +810,27 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 	// Baseline: one attested request per client, cost 1M input tokens * $2/M.
 	env.assertAggregate("alice", 1, 1000000, 2)
 	env.assertAggregate("bob", 1, 1000000, 2)
-	env.waitQuotaHealthy("alice", 2)
-	env.waitQuotaHealthy("bob", 2)
+	env.waitQuotaHealthy("alice", 1)
+	env.waitQuotaHealthy("bob", 1)
 
-	injectedAt := time.Now().UTC().Truncate(time.Hour)
+	now := time.Now().UTC()
+	injectedAt := now.Truncate(time.Hour)
+	nextMidnight := issue72NextUTCMidnight(now)
 	if future {
-		injectedAt = time.Now().UTC().Add(48 * time.Hour)
+		injectedAt = now.Add(48 * time.Hour)
 	}
 	env.stop()
-	fx := env.inject(aliceEvent, injectedAt, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa00e2")
+	fixtures := []issue72UnknownFixture{
+		env.inject(aliceEvent, injectedAt, issue72CurrentRecordID),
+	}
+	if !future {
+		// Sentinel unknown row exactly at the upcoming UTC midnight. Before
+		// midnight it is outside every calibration window; afterwards it stays
+		// inside the window whose start just moved to midnight, even when that
+		// midnight also starts an ISO week and a month and the current-hour row
+		// would fall out of the earliest period start.
+		fixtures = append(fixtures, env.inject(aliceEvent, nextMidnight, issue72MidnightRecordID))
+	}
 	futureHour := injectedAt.UTC().Truncate(time.Hour)
 	futureEnd := futureHour.Add(time.Hour)
 
@@ -574,13 +842,17 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 			// counted as new usage (a synthesized row would add 1 request and $2
 			// per restart).
 			env.assertAggregate("alice", int64(1+restart), int64(1000000*(1+restart)), 2*float64(1+restart))
-			env.waitQuotaHealthy("alice", 2*float64(1+restart))
+			env.waitQuotaHealthy("alice", 1+restart)
 			// The window that contains the unknown row must fail closed rather
-			// than report a complete total of zero.
+			// than report a complete total of zero. Bind the 500 to the admin
+			// handler's own error log so a different internal failure cannot
+			// satisfy this assertion.
+			logOffset := len(env.errorLogText())
 			env.aggregate("alice", &futureHour, &futureEnd, 500)
+			env.waitErrorLogContains(logOffset, "failed to aggregate usage", "usage history is incomplete for exact pricing")
 			env.assertWindowEmpty("bob", futureHour, futureEnd)
 			env.assertAggregate("bob", int64(1+restart), int64(1000000*(1+restart)), 2*float64(1+restart))
-			env.waitQuotaHealthy("bob", 2*float64(1+restart))
+			env.waitQuotaHealthy("bob", 1+restart)
 			seq := env.fake.LastSeq()
 			if code, raw := env.call("alice"); code != 200 || env.fake.LastSeq() == seq {
 				t.Fatalf("future-hour evidence blocked today's admission: %d %s", code, raw)
@@ -592,11 +864,14 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 		} else {
 			// The row is inside the default aggregate and quota calibration
 			// windows: every read and admission must fail closed instead of
-			// returning the attested total or 2 as if the row were zero.
+			// returning the attested total as if the row were zero. The 500
+			// must be the incomplete-history error, not any other internal fault.
+			logOffset := len(env.errorLogText())
 			env.aggregate("alice", nil, nil, 500)
+			env.waitErrorLogContains(logOffset, "failed to aggregate usage", "usage history is incomplete for exact pricing")
 			env.waitQuotaCalibrationError("alice")
 			env.assertAggregate("bob", int64(1+restart), int64(1000000*(1+restart)), 2*float64(1+restart))
-			env.waitQuotaHealthy("bob", 2*float64(1+restart))
+			env.waitQuotaHealthy("bob", 1+restart)
 			seq := env.fake.LastSeq()
 			if code, raw := env.call("alice"); code != 503 || !strings.Contains(raw, "accounting_unavailable") {
 				t.Fatalf("affected admission: %d %s", code, raw)
@@ -609,6 +884,103 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 			}
 		}
 		env.stop()
-		env.verifyInjected(fx)
+		for _, fx := range fixtures {
+			env.verifyInjected(fx)
+		}
+	}
+}
+
+// issue72EarliestQuotaWindowStart mirrors quota.quotaPeriodStarts: a
+// calibration reads the daily, ISO-week and monthly dimensions from one union
+// window, so the earliest start decides whether a raw row is in scope.
+func issue72EarliestQuotaWindowStart(t *testing.T, now time.Time) time.Time {
+	t.Helper()
+	var earliest time.Time
+	for _, dim := range []string{quota.DimensionDaily, quota.DimensionWeekly, quota.DimensionMonthly} {
+		from, _, err := quota.PeriodRange(dim, now)
+		if err != nil {
+			t.Fatalf("%s quota period: %v", dim, err)
+		}
+		if earliest.IsZero() || from.Before(earliest) {
+			earliest = from
+		}
+	}
+	return earliest
+}
+
+// TestIssue72UnknownHourBoundaryWindows locks the wall-clock premises of the
+// scenario without starting a proxy. It proves that the daily quota expectation
+// follows the current UTC day instead of a stale cumulative total, and that the
+// current-hour row plus the next-midnight sentinel leave an unknown row inside
+// the quota calibration window for observation times across the boundary --
+// including the Monday month start where the current-hour row alone falls out.
+func TestIssue72UnknownHourBoundaryWindows(t *testing.T) {
+	const cost = issue72InputPricePer1M // one request uses exactly 1M input tokens
+	eventAt := func(at time.Time) usage.Event {
+		return usage.Event{Timestamp: at, InputTokens: 1000000}
+	}
+	// 2026-06-01 is both a Monday and a month start, the only kind of midnight
+	// that moves every quota period start to the new day.
+	dayStart := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		events []usage.Event
+		want   []float64
+	}{
+		{"before_boundary_outside_grace", []usage.Event{eventAt(dayStart.Add(-2 * time.Minute))}, []float64{0}},
+		{"straddling_one", []usage.Event{eventAt(dayStart.Add(-30 * time.Second))}, []float64{0, cost}},
+		{"straddling_two", []usage.Event{eventAt(dayStart.Add(-30 * time.Second)), eventAt(dayStart.Add(-10 * time.Second))}, []float64{0, cost, 2 * cost}},
+		{"straddling_plus_current", []usage.Event{eventAt(dayStart.Add(-30 * time.Second)), eventAt(dayStart.Add(time.Second))}, []float64{cost, 2 * cost}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := issue72DailyUsedCandidates(t, tc.events, dayStart.Add(time.Hour))
+			want := append([]float64(nil), tc.want...)
+			sort.Float64s(got)
+			sort.Float64s(want)
+			if len(got) != len(want) {
+				t.Fatalf("daily used candidates = %v, want %v", got, want)
+			}
+			for i := range want {
+				if math.Abs(got[i]-want[i]) > 1e-9 {
+					t.Fatalf("daily used candidates = %v, want %v", got, want)
+				}
+			}
+		})
+	}
+
+	// Simulate a current-hour injection 30s before the Monday month start. The
+	// current-hour row is inside the calibration window before midnight; after
+	// midnight only the midnight sentinel remains in scope.
+	injectNow := dayStart.Add(-30 * time.Second)
+	injectedAt := injectNow.Truncate(time.Hour)
+	sentinel := issue72NextUTCMidnight(injectNow)
+	if !sentinel.Equal(dayStart) {
+		t.Fatalf("next UTC midnight of %s = %s, want %s", injectNow, sentinel, dayStart)
+	}
+	for _, verify := range []time.Time{
+		injectNow,
+		dayStart.Add(-time.Second),
+		dayStart,
+		dayStart.Add(time.Second),
+		dayStart.Add(time.Minute),
+		dayStart.Add(12 * time.Hour),
+	} {
+		if verify.Before(injectNow) {
+			continue
+		}
+		earliest := issue72EarliestQuotaWindowStart(t, verify)
+		inside := func(at time.Time) bool {
+			return !at.Before(earliest) && !at.After(verify)
+		}
+		current, midnight := inside(injectedAt), inside(sentinel)
+		if !current && !midnight {
+			t.Fatalf("verify %s: neither injected row is in quota window %s..%s (current %s, sentinel %s)",
+				verify, earliest, verify, injectedAt, sentinel)
+		}
+		if verify.After(dayStart) && current {
+			t.Fatalf("verify %s: Monday month start should move the window past the current-hour row %s (earliest %s)",
+				verify, injectedAt, earliest)
+		}
 	}
 }

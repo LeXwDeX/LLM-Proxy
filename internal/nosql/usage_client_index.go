@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -232,6 +233,9 @@ func ReindexUsageEvent(tx *bolt.Tx, rawKey, before, after []byte) error {
 	if err := addClientEventIndex(tx, event, rawKey, after); err != nil {
 		return err
 	}
+	if err := proofOddNoteRaw(tx, rawKey, after); err != nil {
+		return err
+	}
 	// Issue #125: an offline rewrite may move the row to another hour.
 	integrityMarkTx(tx)
 	return bumpRawRevision(tx)
@@ -246,9 +250,17 @@ func rawRevision(tx *bolt.Tx) uint64 {
 }
 
 func bumpRawRevision(tx *bolt.Tx) error {
+	revision := rawRevision(tx) + 1
 	var data [8]byte
-	binary.BigEndian.PutUint64(data[:], rawRevision(tx)+1)
-	return tx.Bucket([]byte(BucketMeta)).Put([]byte(usageRawRevisionKey), data[:])
+	binary.BigEndian.PutUint64(data[:], revision)
+	if err := tx.Bucket([]byte(BucketMeta)).Put([]byte(usageRawRevisionKey), data[:]); err != nil {
+		return err
+	}
+	// Issue #114: keep the proof classification bound to the raw data it was
+	// built from. A writer that does not call this function (an older binary)
+	// advances the revision alone, so the persisted index reads as stale and
+	// proofs fall back instead of trusting a classification it did not update.
+	return proofOddFollowRawRevision(tx, revision)
 }
 
 func clientIndexBatchSize(size int) int {
@@ -272,21 +284,31 @@ func requireClientIndex(tx *bolt.Tx) error {
 	return nil
 }
 
-// readClientHourInTx reads a complete hour from a single accounting snapshot.
-func readClientHourInTx(ctx context.Context, tx *bolt.Tx, client string, hour time.Time, decoded func(), verify func([]byte, []byte, usage.Event) error) ([]usage.Event, error) {
+// clientIndexRow is one verified (or, for the client-scoped probe, one
+// count/digest-verified) client index entry: the raw key it points at and its
+// decoded event.
+type clientIndexRow struct {
+	key   []byte
+	event usage.Event
+}
+
+// readClientHourRowsInTx reads a complete hour from a single accounting
+// snapshot and hands every verified entry to collect with the index pointer it
+// came from. Callers that keep the raw key clone it in their collector, so the
+// exhaustive readers that discard keys do not copy them per row.
+func readClientHourRowsInTx(ctx context.Context, tx *bolt.Tx, client string, hour time.Time, decoded func(), verify func([]byte, []byte, usage.Event) error, collect func([]byte, usage.Event)) error {
 	state, err := loadClientHour(tx, clientHourKey(client, hour))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	start := []byte(clientIndexPrefix(client) + hour.Format(clientIndexTimeLayout))
 	end := []byte(clientIndexPrefix(client) + hour.Add(time.Hour).Format(clientIndexTimeLayout))
 	var count uint64
 	var digest [sha256.Size]byte
-	var events []usage.Event
 	cursor := tx.Bucket([]byte(BucketUsageEventsByClient)).Cursor()
 	for k, v := cursor.Seek(start); k != nil && bytes.Compare(k, end) < 0; k, v = cursor.Next() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 		data := tx.Bucket([]byte(BucketUsageEvents)).Get(v)
 		var event usage.Event
@@ -294,19 +316,31 @@ func readClientHourInTx(ctx context.Context, tx *bolt.Tx, client string, hour ti
 			decoded()
 		}
 		if data == nil || json.Unmarshal(data, &event) != nil || !bytes.Equal(k, clientEventIndexKey(event, v)) {
-			return nil, ErrUsageClientIndexIncomplete
+			return ErrUsageClientIndexIncomplete
 		}
 		if verify != nil {
 			if err := verify(v, data, event); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		count++
 		xorDigest(&digest, rawDigest(v, data))
-		events = append(events, event)
+		collect(v, event)
 	}
 	if count != state.Count || digest != state.Digest {
-		return nil, ErrUsageClientIndexIncomplete
+		return ErrUsageClientIndexIncomplete
+	}
+	return nil
+}
+
+// readClientHourInTx reads a complete hour from a single accounting snapshot.
+func readClientHourInTx(ctx context.Context, tx *bolt.Tx, client string, hour time.Time, decoded func(), verify func([]byte, []byte, usage.Event) error) ([]usage.Event, error) {
+	var events []usage.Event
+	err := readClientHourRowsInTx(ctx, tx, client, hour, decoded, verify, func(_ []byte, event usage.Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return events, nil
 }
@@ -344,7 +378,17 @@ func validateCostRawHourEvidence(ctx context.Context, tx *bolt.Tx, progress *ind
 		}
 	}
 	allValid := true
-	for key, observed := range evidence {
+	// Issue #125 P2: the walk stops at the first invalid hour, so it must visit
+	// the hours in sorted key order. A map walk returns whichever error the
+	// random iteration order reaches first, and the Fast vs Full differential
+	// fuzz compares the whole error text.
+	keys := make([]string, 0, len(evidence))
+	for key := range evidence {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		observed := evidence[key]
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}

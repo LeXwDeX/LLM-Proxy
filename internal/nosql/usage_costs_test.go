@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -153,5 +154,87 @@ func TestExactTargetModelCostsIsolateCorruptEventToItsClient(t *testing.T) {
 	// bob's own rollup still expects the event, so his history stays incomplete.
 	if _, err := store.SumTargetModelCostsRange(usage.Filter{From: &day, To: &to, ClientName: "bob"}, resolver); !errors.Is(err, ErrUsageHistoryIncomplete) {
 		t.Fatalf("corrupt own event was not detected: %v", err)
+	}
+}
+
+// TestAssembleCostUnitsParityErrorIsDeterministic pins which mismatch is
+// reported first. Rollup cells are collected in a map, so without an explicit
+// order two equally mismatched keys can swap between calls and differential
+// fuzzing sees full and fast reads disagree on the same state. The mismatch
+// for the lexicographically smallest quotaAggKey must always be reported.
+func TestAssembleCostUnitsParityErrorIsDeterministic(t *testing.T) {
+	hour := time.Date(2026, 10, 20, 13, 0, 0, 0, time.UTC)
+	cells := []TargetModelCell{
+		{Hour: hour, Client: "alice", Target: "anthropic", Model: "executor", AggCell: AggCell{RecordCount: 1}},
+		{Hour: hour, Client: "alice", Target: "openai", Model: "advisor", AggCell: AggCell{RecordCount: 2}},
+	}
+	firstKey := string(quotaAggKey(cells[0].Hour, cells[0].Client, cells[0].Target, cells[0].Model))
+	secondKey := string(quotaAggKey(cells[1].Hour, cells[1].Client, cells[1].Target, cells[1].Model))
+	if firstKey >= secondKey {
+		t.Fatalf("fixture keys are not ordered: %q >= %q", firstKey, secondKey)
+	}
+	want := fmt.Sprintf("%s: raw record count 0 differs from rollup count %d", ErrUsageHistoryIncomplete, cells[0].recordCount())
+	for i := 0; i < 64; i++ {
+		units, err := assembleCostUnits(context.Background(), cells, nil, usage.Filter{}, exactCostTable{replayCosts}, true, nil)
+		if len(units) != 0 || !errors.Is(err, ErrUsageHistoryIncomplete) {
+			t.Fatalf("iteration %d: units=%+v err=%v", i, units, err)
+		}
+		if got := err.Error(); got != want {
+			t.Fatalf("iteration %d: first mismatch is not the smallest quotaAggKey: got %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestAssembleCostUnitsParityReportsGlobalSmallestKey pins the first report
+// across both mismatch directions, not just within the rollup side. The two
+// walks used to run expected-first, so a smaller observed-only key was shadowed
+// by a larger missing-rollup key. Both precise modes must report the globally
+// smallest quotaAggKey.
+func TestAssembleCostUnitsParityReportsGlobalSmallestKey(t *testing.T) {
+	hour := time.Date(2026, 10, 20, 13, 0, 0, 0, time.UTC)
+	small := TargetModelCell{Hour: hour, Client: "alice", Target: "anthropic", Model: "executor", AggCell: AggCell{RecordCount: 2}}
+	large := TargetModelCell{Hour: hour, Client: "alice", Target: "openai", Model: "advisor", AggCell: AggCell{RecordCount: 2}}
+	smallEvent := usage.Event{Timestamp: hour.Add(10 * time.Minute), ClientName: "alice", Target: "anthropic", Model: "executor"}
+	largeEvent := usage.Event{Timestamp: hour.Add(20 * time.Minute), ClientName: "alice", Target: "openai", Model: "advisor"}
+	smallKey := string(quotaAggKey(small.Hour, small.Client, small.Target, small.Model))
+	largeKey := string(quotaAggKey(large.Hour, large.Client, large.Target, large.Model))
+	if smallKey >= largeKey {
+		t.Fatalf("fixture keys are not ordered: %q >= %q", smallKey, largeKey)
+	}
+	cases := []struct {
+		name   string
+		cells  []TargetModelCell
+		events []usage.Event
+		want   string
+	}{
+		{
+			// The observed-only key is smaller than the mismatched rollup key.
+			name:   "observed-only key smaller",
+			cells:  []TargetModelCell{large},
+			events: []usage.Event{smallEvent},
+			want:   fmt.Sprintf("%s: raw event lacks matching quota rollup", ErrUsageHistoryIncomplete),
+		},
+		{
+			// The rollup-only key is smaller, so its count mismatch still wins.
+			name:   "expected-only key smaller",
+			cells:  []TargetModelCell{small},
+			events: []usage.Event{largeEvent},
+			want:   fmt.Sprintf("%s: raw record count 0 differs from rollup count %d", ErrUsageHistoryIncomplete, small.recordCount()),
+		},
+	}
+	for _, tc := range cases {
+		for _, precise := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/precise=%t", tc.name, precise), func(t *testing.T) {
+				for i := 0; i < 64; i++ {
+					units, err := assembleCostUnits(context.Background(), tc.cells, tc.events, usage.Filter{}, exactCostTable{replayCosts}, precise, nil)
+					if len(units) != 0 || !errors.Is(err, ErrUsageHistoryIncomplete) {
+						t.Fatalf("iteration %d: units=%+v err=%v", i, units, err)
+					}
+					if got := err.Error(); got != tc.want {
+						t.Fatalf("iteration %d: first mismatch is not the smallest quotaAggKey: got %q, want %q", i, got, tc.want)
+					}
+				}
+			})
+		}
 	}
 }
