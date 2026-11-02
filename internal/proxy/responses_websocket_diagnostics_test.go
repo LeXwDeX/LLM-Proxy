@@ -82,13 +82,14 @@ func TestResponsesWebsocketDisconnectWithoutTerminalIsDiagnosed(t *testing.T) {
 	assertLogField(t, logs, `"last_event_type":"response.output_text.delta"`)
 	assertLogField(t, logs, `"last_event_sequence":"3"`)
 	assertLogField(t, logs, `"upstream_close_code":"1001"`)
-	assertLogField(t, logs, `"upstream_close_reason":"fixture upstream bye"`)
+	assertLogField(t, logs, `"upstream_close_reason_present":true`)
+	assertLogField(t, logs, `"upstream_close_reason_length":"20"`)
 	assertLogField(t, logs, `"copy_error":"unexpected_eof"`)
 	assertLogField(t, logs, `"usage_terminal":"false"`)
 	if strings.Contains(logs.String(), `"request_id":""`) {
 		t.Fatalf("diagnostic log lacks a request id:\n%s", logs.String())
 	}
-	for _, secret := range []string{"fixture prompt secret", "fixture response secret", "sk-test-key"} {
+	for _, secret := range []string{"fixture prompt secret", "fixture response secret", "fixture upstream bye", "sk-test-key"} {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("diagnostic log leaked %q:\n%s", secret, logs.String())
 		}
@@ -128,6 +129,9 @@ func TestResponsesWebsocketHTTPFallbackMissingTerminalIsDiagnosed(t *testing.T) 
 	assertLogField(t, logs, `"last_event_type":"response.output_text.delta"`)
 	assertLogField(t, logs, `"last_event_sequence":"7"`)
 	assertLogField(t, logs, `"upstream_close_code":"unknown"`)
+	assertLogField(t, logs, `"upstream_close_reason_present":false`)
+	assertLogField(t, logs, `"upstream_close_reason_length":"unknown"`)
+	assertLogField(t, logs, `"upstream_close_reason_hash":"unknown"`)
 	assertLogField(t, logs, `"copy_error":"none"`)
 	assertLogField(t, logs, `"usage_terminal":"false"`)
 	if strings.Contains(logs.String(), "fixture fallback secret") || strings.Contains(logs.String(), "fixture prompt secret") {
@@ -232,5 +236,71 @@ func TestResponsesWebsocketBodyPropagatesUpstreamCloseDetails(t *testing.T) {
 	}
 	if closeErr.Code != coderws.StatusGoingAway || closeErr.Reason != "fixture close reason" {
 		t.Fatalf("close details=%+v", closeErr)
+	}
+}
+
+func TestResponsesWebsocketUntrustedEventMetadataIsRedacted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&gorillaws.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		var request map[string]any
+		if conn.ReadJSON(&request) != nil {
+			return
+		}
+		if err := conn.WriteJSON(map[string]any{
+			"type":            "fixture secret type",
+			"sequence_number": map[string]any{"prompt": "fixture nested secret"},
+			"delta":           "fixture response secret",
+		}); err != nil {
+			t.Error(err)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		_ = conn.WriteControl(gorillaws.CloseMessage, gorillaws.FormatCloseMessage(gorillaws.CloseGoingAway, "fixture close reason"), time.Now().Add(time.Second))
+	}))
+	defer upstream.Close()
+	service, server, _ := websocketTestProxy(t, upstream.URL)
+	logs := captureWebsocketDiagnostics(t, service)
+	conn := dialWebsocketTest(t, server)
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "codex-fast", "input": "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if event := readWebsocketEvent(t, conn); event["type"] != "fixture secret type" {
+		t.Fatalf("forwarded event=%v", event)
+	}
+	if event := readWebsocketEvent(t, conn); event["type"] != "error" {
+		t.Fatalf("terminal event=%v", event)
+	}
+	waitWebsocketSlotsReleased(t, service)
+	assertLogField(t, logs, `"last_event_type":"other"`)
+	assertLogField(t, logs, `"last_event_sequence":"unknown"`)
+	assertLogField(t, logs, `"upstream_close_reason_present":true`)
+	for _, secret := range []string{"fixture secret type", "fixture nested secret", "fixture response secret", "fixture close reason"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("diagnostic log leaked %q:\n%s", secret, logs.String())
+		}
+	}
+}
+
+func TestResponsesWebsocketSessionDiagnosticsResetPerTurn(t *testing.T) {
+	session := &responsesWebsocketSession{}
+	session.recordCopyOutcome(coderws.CloseError{Code: coderws.StatusGoingAway, Reason: "first turn"}, &usageStream{terminal: true})
+	if session.closeCode != int(coderws.StatusGoingAway) || session.closeReason != "first turn" || !session.usageTerminal {
+		t.Fatalf("first turn diagnostics=%+v", session)
+	}
+	session.recordCopyOutcome(context.DeadlineExceeded, &usageStream{terminal: false})
+	if session.closeCode != 0 || session.closeReason != "" || session.usageKnown != true || session.usageTerminal {
+		t.Fatalf("later turn inherited close diagnostics: %+v", session)
+	}
+	if session.copyErrorDiagnostic() != "deadline_exceeded" || session.usageTerminalDiagnostic() != "false" {
+		t.Fatalf("later turn diagnostics=%s/%s", session.copyErrorDiagnostic(), session.usageTerminalDiagnostic())
+	}
+	session.recordCopyOutcome(nil, nil)
+	if session.usageKnown || session.copyErrorDiagnostic() != "none" || session.usageTerminalDiagnostic() != "unknown" {
+		t.Fatalf("clean turn diagnostics=%+v", session)
 	}
 }

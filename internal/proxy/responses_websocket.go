@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,9 +70,15 @@ type responsesWebsocketSession struct {
 // recordCopyOutcome keeps the copy failure category, the upstream close
 // details when the error carries them, and whether usage observed a terminal
 // event. It is the only writer of these fields before the terminal warning.
+// Every field is reset first: a later turn on the same session must not inherit
+// a previous turn's close details or usage state.
 func (s *responsesWebsocketSession) recordCopyOutcome(copyErr error, usage *usageStream) {
 	s.copyErrKnown = true
 	s.copyErrCategory = errorlog.ErrorCategory(copyErr)
+	s.usageKnown = false
+	s.usageTerminal = false
+	s.closeCode = 0
+	s.closeReason = ""
 	var closeErr coderwebsocket.CloseError
 	if errors.As(copyErr, &closeErr) {
 		s.closeCode, s.closeReason = int(closeErr.Code), closeErr.Reason
@@ -107,6 +114,52 @@ func (s *responsesWebsocketSession) closeCodeDiagnostic() string {
 		return "unknown"
 	}
 	return fmt.Sprintf("%d", s.closeCode)
+}
+
+// closeReasonDiagnostic exposes only a length and a short hash. The reason is
+// arbitrary upstream text and must not enter ordinary logs.
+func (s *responsesWebsocketSession) closeReasonDiagnostic() (length, hash string) {
+	if s.closeReason == "" {
+		return "unknown", "unknown"
+	}
+	sum := sha256.Sum256([]byte(s.closeReason))
+	return fmt.Sprintf("%d", len(s.closeReason)), hex.EncodeToString(sum[:6])
+}
+
+// websocketEventTypeDiagnostic keeps only known Responses event names. Any
+// other upstream string is reported as "other" so it cannot carry text.
+func websocketEventTypeDiagnostic(eventType string) string {
+	switch eventType {
+	case "response.created", "response.in_progress", "response.completed", "response.failed", "response.incomplete",
+		"response.output_item.added", "response.output_item.done", "response.content_part.added", "response.content_part.done",
+		"response.output_text.delta", "response.output_text.done", "response.output_text.annotation.added",
+		"response.function_call_arguments.delta", "response.function_call_arguments.done",
+		"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+		"response.refusal.delta", "response.refusal.done", "error":
+		return eventType
+	case "":
+		return "unknown"
+	default:
+		return "other"
+	}
+}
+
+// websocketSequenceDiagnostic accepts only a bounded JSON number. Any other
+// JSON value (object, string, oversized number) is reported as unknown so
+// upstream text cannot reach the warning.
+func websocketSequenceDiagnostic(raw []byte) string {
+	if len(raw) == 0 || len(raw) > 20 {
+		return "unknown"
+	}
+	for _, b := range raw {
+		switch {
+		case b >= '0' && b <= '9':
+		case b == '-', b == '+', b == '.', b == 'e', b == 'E':
+		default:
+			return "unknown"
+		}
+	}
+	return string(raw)
 }
 
 // responsesWebsocketError forbids failover after an ambiguous send and for local
@@ -340,8 +393,11 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 					status, code, message = 504, "upstream_timeout", "Responses generation timed out; it was not replayed"
 				}
 				// One terminal diagnostic per interrupted turn. Fields come from
-				// state already held here; unavailable values stay "unknown" and
-				// no prompt, response body, key or Authorization is logged.
+				// state already held here; unavailable values stay "unknown".
+				// Close reasons are hashed and event metadata is restricted to a
+				// bounded JSON number, so upstream text, prompts, response bodies,
+				// keys and Authorization never enter the log.
+				reasonLength, reasonHash := session.closeReasonDiagnostic()
 				s.logger.Warn("responses websocket ended without a terminal event",
 					"request_id", websocketDiagnosticValue(writer.header.Get(appmiddleware.HeaderRequestID)),
 					"target", websocketDiagnosticValue(session.target),
@@ -351,7 +407,9 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 					"last_event_type", websocketDiagnosticValue(writer.lastEventType),
 					"last_event_sequence", websocketDiagnosticValue(writer.lastEventSequence),
 					"upstream_close_code", session.closeCodeDiagnostic(),
-					"upstream_close_reason", websocketDiagnosticValue(session.closeReason),
+					"upstream_close_reason_present", session.closeReason != "",
+					"upstream_close_reason_length", reasonLength,
+					"upstream_close_reason_hash", reasonHash,
 					"copy_error", session.copyErrorDiagnostic(),
 					"usage_terminal", session.usageTerminalDiagnostic(),
 				)
@@ -482,8 +540,9 @@ func (w *responsesWebsocketWriter) finishSSELine() error {
 			return err
 		}
 		w.forwarded = true
-		w.lastEventType, _ = jsonStructString(w.members, "type")
-		w.lastEventSequence = string(jsonLast(w.members, "sequence_number"))
+		eventType, _ := jsonStructString(w.members, "type")
+		w.lastEventType = websocketEventTypeDiagnostic(eventType)
+		w.lastEventSequence = websocketSequenceDiagnostic(jsonLast(w.members, "sequence_number"))
 		return nil
 	}
 	field, value, found := bytes.Cut(line, []byte(":"))
