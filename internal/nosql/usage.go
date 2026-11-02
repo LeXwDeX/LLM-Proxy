@@ -97,7 +97,11 @@ func (s *UsageStore) RecordOnce(event usage.Event) (bool, error) {
 		// bbolt may retry this callback after a different batch member fails.
 		added = false
 		rejection = nil
-		fresh := freshScopeProven(tx, rows) || continuationScopeProven(tx, rows)
+		// The proof below runs before this transaction writes any raw row, so
+		// the transaction scope summary is valid (see withTxScopeSummary). Without
+		// it a ready odd index would still walk every hour-located legacy row.
+		proofCtx := withTxScopeSummary(context.Background(), tx)
+		fresh := freshScopeProvenContext(proofCtx, tx, rows) || continuationScopeProvenContext(proofCtx, tx, rows)
 		var err error
 		added, err = recordUsageBundleTx(tx, rows, keys, migrationErr)
 		if errors.Is(err, ErrUsageIdentityUnverified) || errors.Is(err, ErrUsageBundlePartial) {
