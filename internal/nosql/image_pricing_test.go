@@ -12,7 +12,9 @@ import (
 func TestImagePermanentRollupAndLegacyValues(t *testing.T) {
 	db := testDB(t)
 	store := NewUsageStore(db)
-	stamp := time.Now().UTC().Add(-2 * time.Hour)
+	// Pin inside an hour: the two events 1s apart must share one rollup hour
+	// even when the test runs just before a wall-clock hour boundary.
+	stamp := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Hour).Add(10 * time.Minute)
 	var legacy usage.Event
 	if err := json.Unmarshal([]byte(`{"client_name":"alice","target":"upstream","model":"image","input_tokens":1000000,"output_tokens":1000000,"cached_tokens":1000000,"status_code":200}`), &legacy); err != nil {
 		t.Fatal(err)
