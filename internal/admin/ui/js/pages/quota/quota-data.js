@@ -4,6 +4,7 @@ AdminApp.register("quotaData", function (app) {
   var state = app.state;
   var esc = app.bind("core", "esc");
   var api = app.bind("core", "api");
+  var usageWindowQuery = app.bind("core", "usageWindowQuery");
   var refreshUsageModelGroupFilter = app.bind("usage", "refreshUsageModelGroupFilter");
   var loadTargets = app.bind("targets", "loadTargets");
   var awaitSchedulingRefresh = app.bind("targets", "awaitSchedulingRefresh");
@@ -68,12 +69,7 @@ AdminApp.register("quotaData", function (app) {
     // The 30-day aggregate scans many usage events and is far slower than the rest, so it is
     // fetched in parallel but never blocks the first render.
     var usagePromise = api(
-      "/admin/data/usage/aggregate?group_by=day&from=" +
-        encodeURIComponent(
-          new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
-        ) +
-        "&to=" +
-        encodeURIComponent(new Date().toISOString()),
+      "/admin/data/usage/aggregate?group_by=day&" + usageWindowQuery(30),
       { timeoutMs: 60000 },
     ).then(
       function (data) {
@@ -125,19 +121,23 @@ AdminApp.register("quotaData", function (app) {
       return;
     }
     renderLoadedSections();
-    var usage = await usagePromise;
-    if (version !== shared.quotaLoadVersion) return;
-    state.clientUsage30d = {};
-    state.clientUsage30dPending = false;
-    state.clientUsage30dUnavailable = !!(usage && usage.unavailable);
-    ((usage && usage.by_client) || []).forEach(function (item) {
-      state.clientUsage30d[item.key] = item;
+    // Usage is consumed in a continuation nobody awaits: save locks await this function and must
+    // not stay locked for the slow aggregate. Tests and callers that need it await
+    // shared.quotaUsageRefresh.
+    shared.quotaUsageRefresh = usagePromise.then(function (usage) {
+      if (version !== shared.quotaLoadVersion) return;
+      state.clientUsage30d = {};
+      state.clientUsage30dPending = false;
+      state.clientUsage30dUnavailable = !!(usage && usage.unavailable);
+      ((usage && usage.by_client) || []).forEach(function (item) {
+        state.clientUsage30d[item.key] = item;
+      });
+      try {
+        renderQuotaSummary();
+      } catch (e) {
+        showLoadFailure("quotaSummaryBody", quotaDimensions.length + 7, e.message);
+      }
     });
-    try {
-      renderQuotaSummary();
-    } catch (e) {
-      showLoadFailure("quotaSummaryBody", quotaDimensions.length + 7, e.message);
-    }
   }
   async function loadDictOptions() {
     if (state.dictsLoaded) return;

@@ -66,6 +66,11 @@ func newReportCache(ttl time.Duration) *reportCache {
 // do returns the cached entry for key, or runs build once for all concurrent
 // callers and caches a 200 result for the TTL.
 func (c *reportCache) do(key string, build func() reportEntry) reportEntry {
+	return c.doTTL(key, 0, build)
+}
+
+// doTTL is do with a per-route TTL; ttl <= 0 uses the cache default.
+func (c *reportCache) doTTL(key string, ttl time.Duration, build func() reportEntry) reportEntry {
 	if e, ok := c.lookup(key); ok {
 		return e
 	}
@@ -76,7 +81,7 @@ func (c *reportCache) do(key string, build func() reportEntry) reportEntry {
 		}
 		e := build()
 		if e.status == http.StatusOK {
-			c.store(key, e)
+			c.storeTTL(key, e, ttl)
 		}
 		return e, nil
 	})
@@ -93,13 +98,18 @@ func (c *reportCache) lookup(key string) (reportEntry, bool) {
 	return e, true
 }
 
-func (c *reportCache) store(key string, e reportEntry) {
+func (c *reportCache) store(key string, e reportEntry) { c.storeTTL(key, e, 0) }
+
+func (c *reportCache) storeTTL(key string, e reportEntry, ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
 	size := len(e.body)
 	if size > c.maxEntryBytes {
 		return // shared with the in-flight callers, but not retained
 	}
 	now := c.now()
-	e.expires = now.Add(c.ttl)
+	e.expires = now.Add(ttl)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if old, ok := c.entries[key]; ok {
@@ -169,6 +179,15 @@ const reportFlightAttempts = 3
 // that were waiting on it retry as leader of a fresh flight instead of seeing
 // the abort.
 func (h *Handler) cachedReport(next http.HandlerFunc) http.HandlerFunc {
+	return h.cachedReportTTL(0, next)
+}
+
+// activityCacheTTL keeps /api/activity (polled every 5s per dashboard) from
+// rescanning recent usage on each poll while staying fresher than the poll.
+const activityCacheTTL = 2 * time.Second
+
+// cachedReportTTL is cachedReport with a per-route TTL (<= 0 = cache default).
+func (h *Handler) cachedReportTTL(ttl time.Duration, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cache := h.reportCache
 		if cache == nil || cache.ttl <= 0 || r.Method != http.MethodGet {
@@ -181,7 +200,7 @@ func (h *Handler) cachedReport(next http.HandlerFunc) http.HandlerFunc {
 		}
 		key := reportCacheKey(r)
 		for attempt := 0; attempt < reportFlightAttempts; attempt++ {
-			entry := cache.do(key, func() reportEntry {
+			entry := cache.doTTL(key, ttl, func() reportEntry {
 				rec := &bufferedResponse{header: make(http.Header)}
 				next(rec, r)
 				if rec.status == 0 && rec.body.Len() == 0 && r.Context().Err() != nil {

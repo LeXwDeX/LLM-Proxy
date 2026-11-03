@@ -540,6 +540,7 @@ AdminApp.register("targetsList", function (app) {
         showConfirm(
           "确认删除目标「" + name + "」？此操作不可恢复。",
           async function () {
+            if (!beginRowAction("delete:" + name)) return;
             try {
               var delResult = await api("/admin/data/targets/" + encodeURIComponent(name), {
                 method: "DELETE",
@@ -552,6 +553,8 @@ AdminApp.register("targetsList", function (app) {
                 success: "已删除目标: " + name,
                 check: function (fresh) { return !fresh; },
               });
+            } finally {
+              endRowAction("delete:" + name);
             }
           },
         );
@@ -563,6 +566,7 @@ AdminApp.register("targetsList", function (app) {
         showConfirm(
           "确认暂停目标「" + pauseName + "」？暂停后不会转发到该上游。",
           async function () {
+            if (!beginRowAction("pause:" + pauseName)) return;
             try {
               var pauseResult = await api(
                 "/admin/data/targets/" +
@@ -577,6 +581,8 @@ AdminApp.register("targetsList", function (app) {
                 success: "已暂停目标: " + pauseName,
                 check: function (fresh) { return !!fresh && fresh.paused === true; },
               });
+            } finally {
+              endRowAction("pause:" + pauseName);
             }
           },
         );

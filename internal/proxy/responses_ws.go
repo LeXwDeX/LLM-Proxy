@@ -59,11 +59,19 @@ const (
 	responsesWSAge       = 55 * time.Minute
 	responsesWSMax       = 128
 	responsesWSPerClient = 4
-	// A lane stops reading when its consumer leaves a frame unread this long.
-	responsesWSFrameBacklog = 30 * time.Second
 	// Upper bound of one upstream WebSocket handshake.
 	responsesWSDialTimeout = 5 * time.Second
 )
+
+// A lane stops reading when its consumer leaves a frame unread this long.
+// A variable so tests can shorten it.
+var responsesWSFrameBacklog = 30 * time.Second
+
+// errResponsesWSLaneClosed is reported when a lane's frames channel closes
+// without a final error frame: its consumer fell behind past
+// responsesWSFrameBacklog, or the pool closed. Neither is upstream failure
+// evidence, so the target is not marked failed.
+var errResponsesWSLaneClosed = errors.New("upstream WebSocket lane closed before the response finished; it was not replayed")
 
 type responsesWSFrame struct {
 	data []byte
@@ -76,6 +84,21 @@ type responsesWSHandshakeError struct{ err error }
 
 func (e *responsesWSHandshakeError) Error() string { return e.err.Error() }
 func (e *responsesWSHandshakeError) Unwrap() error { return e.err }
+
+// errResponsesWSHandshakeTimeout reports an upstream WebSocket upgrade that did
+// not complete within its own handshake timeout while the attempt was still
+// alive. No response.create frame can have been sent, so it carries no
+// inference or billing risk: isPreSendTransportError treats it like a dial
+// timeout (fail over once, mark the target). It still classifies as a
+// timeout (504) and never falls back to HTTP on the same target.
+var errResponsesWSHandshakeTimeout error = responsesWSHandshakeTimeoutError{}
+
+type responsesWSHandshakeTimeoutError struct{}
+
+func (responsesWSHandshakeTimeoutError) Error() string {
+	return "upstream WebSocket handshake timed out before any request was sent"
+}
+func (responsesWSHandshakeTimeoutError) Unwrap() error { return context.DeadlineExceeded }
 
 // Dial closes failed handshake bodies and retains only their first 1024 bytes.
 // Keep the original non-upgrade body out of Dial's ownership so the proxy can
@@ -134,6 +157,10 @@ type responsesWSConn struct {
 	pinging       bool
 	pinged        time.Time
 	responseID    string
+	// gen is the pool generation the lane was opened under. A lane from an
+	// older generation keeps serving its conversation but never reserves a
+	// spare: its credential may have been removed by the configuration save.
+	gen uint64
 	// dial is how another lane with this identity is opened in the background.
 	dial *responsesWSDialSpec
 	// prewarming marks a busy placeholder whose background dial is in flight;
@@ -234,6 +261,53 @@ func (p *responsesWSPool) invalidate(closeActive bool) {
 	// Shutdown waits for its closes; a configuration change must not stall
 	// behind them (it runs while the service holds its target lock).
 	closeResponsesWSConns(closing, !closeActive)
+}
+
+// invalidateForConfig handles a published configuration change (Issue #151).
+// It forgets unsupported and backoff memories so a fixed upstream is probed
+// again, cancels spares still being dialed and retires idle lanes without a
+// conversation. Lanes holding a responseID and lanes busy with a request keep
+// their lifecycle: a lane's key binds its URL and auth headers, so a changed
+// connection identity can never select it, while unrelated saves no longer
+// break pooled continuations. The new generation still discards handshakes
+// and background dials started under the old configuration.
+func (p *responsesWSPool) invalidateForConfig() {
+	p.mu.Lock()
+	p.generation++
+	p.unsupported = nil
+	p.prewarmBackoff = nil
+	var closing []*websocket.Conn
+	for e := range p.entries {
+		if e.prewarming || (!e.busy && e.responseID == "") {
+			closing = p.removeLocked(e, closing)
+		}
+	}
+	p.mu.Unlock()
+	closeResponsesWSConns(closing, true)
+}
+
+// retireLanesForCredentials retires every lane whose handshake carried one of
+// keys, including lanes holding a conversation, after a manual key block: the
+// blocked credential must never carry another turn. Idle lanes and spares are
+// dropped at once; a lane busy with a request stays owned by it and closes on
+// release.
+func (p *responsesWSPool) retireLanesForCredentials(keys []string) {
+	if p == nil || len(keys) == 0 {
+		return
+	}
+	var closing []*websocket.Conn
+	p.mu.Lock()
+	for e := range p.entries {
+		if e.dial == nil || !headersCarryCredential(e.dial.headers, keys) {
+			continue
+		}
+		e.retired = true
+		if !e.busy || e.prewarming {
+			closing = p.removeLocked(e, closing)
+		}
+	}
+	p.mu.Unlock()
+	closeResponsesWSConns(closing, true)
 }
 
 func (p *responsesWSPool) close() {
@@ -411,7 +485,9 @@ func (p *responsesWSPool) release(e *responsesWSConn, reusable bool) {
 	p.mu.Lock()
 	e.busy = false
 	e.used = time.Now()
-	if !reusable || e.retired || p.closed {
+	// A lane opened before a configuration save without a conversation to
+	// continue is retired like the idle fresh lanes the save already retired.
+	if !reusable || e.retired || p.closed || (e.gen != p.generation && e.responseID == "") {
 		closing = p.removeLocked(e, closing)
 	} else {
 		spare, closing = p.reserveSpareLocked(e, closing)
@@ -438,7 +514,9 @@ func (p *responsesWSPool) release(e *responsesWSConn, reusable bool) {
 // one spare per client: an unused spare of the client's other identity is
 // replaced by one for the identity just used. The caller holds p.mu.
 func (p *responsesWSPool) reserveSpareLocked(e *responsesWSConn, closing []*websocket.Conn) (*responsesWSConn, []*websocket.Conn) {
-	if !p.prewarm || p.closed || e.dial == nil || e.retired {
+	// A lane from an older generation may carry a credential the save removed;
+	// a spare would open a new handshake with it.
+	if !p.prewarm || p.closed || e.dial == nil || e.retired || e.gen != p.generation {
 		return nil, closing
 	}
 	count := 0
@@ -475,7 +553,7 @@ func (p *responsesWSPool) reserveSpareLocked(e *responsesWSConn, closing []*webs
 	if count >= responsesWSPerClient || len(p.entries) >= responsesWSMax {
 		return nil, closing
 	}
-	spare := &responsesWSConn{owner: e.owner, key: e.key, created: now, used: now, busy: true,
+	spare := &responsesWSConn{owner: e.owner, key: e.key, created: now, used: now, busy: true, gen: p.generation,
 		prewarming: true, ready: make(chan struct{}), dial: e.dial, frames: make(chan responsesWSFrame, 8)}
 	// The dial is bounded like a foreground one, and dropping the placeholder
 	// (configuration change, blocked key, capacity) cancels it.
@@ -780,7 +858,7 @@ selectLane:
 		unlock()
 		return nil, nil, true, nil
 	}
-	e := &responsesWSConn{owner: owner, key: key, created: now, used: now, busy: true, frames: make(chan responsesWSFrame, 8),
+	e := &responsesWSConn{owner: owner, key: key, created: now, used: now, busy: true, gen: p.generation, frames: make(chan responsesWSFrame, 8),
 		dial: &responsesWSDialSpec{client: client, url: req.URL.String(), host: req.Host, headers: identityHeaders}}
 	p.entries[e] = struct{}{}
 	gen := p.generation
@@ -826,7 +904,7 @@ selectLane:
 			_ = handshake.Body.Close()
 		}
 		p.release(e, false)
-		return nil, nil, false, context.DeadlineExceeded
+		return nil, nil, false, &responsesWSHandshakeError{errResponsesWSHandshakeTimeout}
 	}
 	if err != nil {
 		p.release(e, false)
@@ -840,7 +918,7 @@ selectLane:
 			if handshake != nil && handshake.Body != nil {
 				_ = handshake.Body.Close()
 			}
-			return nil, nil, false, context.DeadlineExceeded
+			return nil, nil, false, &responsesWSHandshakeError{errResponsesWSHandshakeTimeout}
 		}
 		if handshake != nil {
 			if handshake.StatusCode == 400 || handshake.StatusCode == 404 || handshake.StatusCode == 405 || handshake.StatusCode == 426 || handshake.StatusCode == 501 {
@@ -986,13 +1064,18 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 	}
 	var first responsesWSFrame
 	select {
-	case first = <-e.frames:
+	case frame, ok := <-e.frames:
+		first = frame
+		if !ok {
+			first.err = errResponsesWSLaneClosed
+		}
 	case <-req.Context().Done():
 		first.err = req.Context().Err()
 	}
 	if first.err != nil {
 		s.responsesWS.release(e, false)
-		return nil, true, &responsesWSSentError{err: first.err, stage: "wait_first_event"}
+		// Same classification as a close on any later frame.
+		return nil, true, &responsesWSSentError{err: wrapResponsesWSUpstreamClose(first.err), stage: "wait_first_event"}
 	}
 	var event struct {
 		Type   string          `json:"type"`
@@ -1039,7 +1122,11 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 		var members []jsonMember // reused per event; frame.data owns the bytes
 		for {
 			if frame.err != nil {
+				frame.err = wrapResponsesWSUpstreamClose(frame.err)
 				responseErr = frame.err
+				if errors.Is(frame.err, errResponsesWSLaneClosed) {
+					b.noMute.Store(true) // backlog or pool close: not the upstream
+				}
 				b.failed.Store(true)
 				_ = writer.CloseWithError(frame.err)
 				return
@@ -1124,7 +1211,11 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 				return
 			}
 			select {
-			case frame = <-e.frames:
+			case next, ok := <-e.frames:
+				frame = next
+				if !ok {
+					frame.err = errResponsesWSLaneClosed
+				}
 			case <-req.Context().Done():
 				frame = responsesWSFrame{err: req.Context().Err()}
 			}
@@ -1141,6 +1232,29 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 		}
 	}
 	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{ct}}, Body: b, Request: req}, true, nil
+}
+
+// wrapResponsesWSUpstreamClose gives an upstream close frame the same
+// io.ErrUnexpectedEOF classification as the native path while keeping the
+// websocket.CloseError (code/reason) reachable for diagnostics. Only a close
+// frame received from the upstream is a CloseError; the proxy's own CloseNow
+// surfaces as a different error and is left unchanged, as is anything else.
+func wrapResponsesWSUpstreamClose(err error) error {
+	var closeErr websocket.CloseError
+	if err == nil || errors.Is(err, io.ErrUnexpectedEOF) || !errors.As(err, &closeErr) {
+		return err
+	}
+	return fmt.Errorf("%w: upstream WebSocket read failed: %w", io.ErrUnexpectedEOF, err)
+}
+
+// responsesWSUpstreamCloseCode is the diagnostic value of an upstream close
+// code carried by err, or "unknown". The close reason is never logged.
+func responsesWSUpstreamCloseCode(err error) string {
+	var closeErr websocket.CloseError
+	if err == nil || !errors.As(err, &closeErr) {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", int(closeErr.Code))
 }
 
 func responsesWSVolatileHeader(name string) bool {

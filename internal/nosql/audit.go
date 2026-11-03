@@ -1,6 +1,7 @@
 package nosql
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -73,9 +74,10 @@ func (s *AuditStore) List(limit int) ([]AuditEvent, error) {
 		if b == nil {
 			return nil
 		}
-		events = scanRecentEvents(b, limit, nil, nil,
+		var err error
+		events, _, err = scanRecentEvents(context.Background(), b, limit, 0, nil, nil,
 			func(evt AuditEvent) time.Time { return evt.Timestamp }, nil)
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err

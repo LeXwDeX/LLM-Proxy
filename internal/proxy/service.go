@@ -92,6 +92,9 @@ type Service struct {
 	websocketIdleTimeout  time.Duration
 	websocketPingInterval time.Duration
 	websocketPerClient    int
+	// websocketPongTimeoutFloor is the minimum silence (no pong, no frame)
+	// after which a native session is treated as half-open (#153 B11).
+	websocketPongTimeoutFloor time.Duration
 }
 
 // Target represents an upstream endpoint with runtime metadata.
@@ -264,12 +267,13 @@ func NewService(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 		quietPeriod: defaultQuietPeriod(),
 		responsesWS: newResponsesWSPool(),
 
-		websocketIdleTimeout:  responsesWebsocketIdleTimeout,
-		websocketPingInterval: responsesWebsocketPingInterval,
-		websocketPerClient:    responsesWebsocketPerClient,
-		targetsByName:         make(map[string]*targetState),
-		affinity:              newAffinityMap(),
-		startTime:             time.Now(),
+		websocketIdleTimeout:      responsesWebsocketIdleTimeout,
+		websocketPingInterval:     responsesWebsocketPingInterval,
+		websocketPerClient:        responsesWebsocketPerClient,
+		websocketPongTimeoutFloor: responsesWebsocketPongTimeoutFloor,
+		targetsByName:             make(map[string]*targetState),
+		affinity:                  newAffinityMap(),
+		startTime:                 time.Now(),
 	}
 	service.responsesWS.automaticGzipTransport = wireTransport
 	service.setRequestTimeout(time.Duration(cfg.Server.RequestTimeoutSeconds) * time.Second)
@@ -335,8 +339,9 @@ func (s *Service) UpdateTargets(targets []config.Target) error {
 	}
 
 	s.mu.Lock()
-	s.replaceTargetsLocked(parsed, order)
+	logResets := s.replaceTargetsLocked(parsed, order)
 	s.mu.Unlock()
+	logResets()
 
 	return nil
 }
@@ -351,14 +356,29 @@ func (s *Service) advanceTargetRevisionLocked() {
 	}
 }
 
+// targetBreakerReset holds one breaker-fork log line, written after s.mu is
+// released so a slow log sink never extends the configuration write lock.
+type targetBreakerReset struct {
+	name, reason string
+	fields       []string
+	resumed      bool
+	phase        string
+	streak       int
+}
+
 // replaceTargetsLocked publishes new configuration while keeping the actual
-// occupancy of each surviving target. The caller holds s.mu for writing.
-func (s *Service) replaceTargetsLocked(parsed map[string]*targetState, order []*targetState) {
+// occupancy of each surviving target. The caller holds s.mu for writing and
+// calls the returned function after releasing it to write the breaker-reset
+// log lines collected under the lock.
+func (s *Service) replaceTargetsLocked(parsed map[string]*targetState, order []*targetState) func() {
 	s.advanceTargetRevisionLocked()
 	previous := s.targetsByName
 	if s.responsesWS != nil {
-		s.responsesWS.invalidate(false)
+		// Only lanes a save may affect are retired; conversation lanes stay
+		// continuable because their key binds URL and auth headers (#151).
+		s.responsesWS.invalidateForConfig()
 	}
+	var resets []targetBreakerReset
 	for name, next := range parsed {
 		if old := s.targetsByName[name]; old != nil {
 			// Surviving generations share breaker state so in-flight outcomes land
@@ -366,7 +386,7 @@ func (s *Service) replaceTargetsLocked(parsed map[string]*targetState, order []*
 			// resume starts a fresh state instead (#184); the old state stays with
 			// the old generation and late results never reach the new one.
 			if reason, fields, resumed := shouldForkTargetHealth(old.target, next.target); reason != "" {
-				s.logTargetBreakerReset(next.target.Name, reason, fields, resumed, old.Phase(time.Now()), old.Stats().ConsecutiveFailure)
+				resets = append(resets, targetBreakerReset{next.target.Name, reason, fields, resumed, old.Phase(time.Now()), old.Stats().ConsecutiveFailure})
 				next.targetHealthState = old.targetHealthState.forkForNewIdentity()
 			} else {
 				next.targetHealthState = old.targetHealthState
@@ -401,6 +421,11 @@ func (s *Service) replaceTargetsLocked(parsed map[string]*targetState, order []*
 	if manager := s.admissionManager.Load(); manager != nil {
 		for name, state := range parsed {
 			s.initAdmissionTargetLocked(manager, name, state, previous[name] == nil)
+		}
+	}
+	return func() {
+		for _, r := range resets {
+			s.logTargetBreakerReset(r.name, r.reason, r.fields, r.resumed, r.phase, r.streak)
 		}
 	}
 }
@@ -460,8 +485,9 @@ func (s *Service) CommitPrepared(p *PreparedConfig) {
 		return
 	}
 	s.mu.Lock()
-	s.replaceTargetsLocked(p.parsed, p.order)
+	logResets := s.replaceTargetsLocked(p.parsed, p.order)
 	s.mu.Unlock()
+	logResets()
 
 	s.setRequestTimeout(p.timeout)
 }
@@ -477,8 +503,9 @@ func (s *Service) applyConfig(cfg *config.Config, revision uint64) error {
 		s.mu.Unlock()
 		return ErrTargetSnapshotChanged
 	}
-	s.replaceTargetsLocked(prepared.parsed, prepared.order)
+	logResets := s.replaceTargetsLocked(prepared.parsed, prepared.order)
 	s.mu.Unlock()
+	logResets()
 
 	s.setRequestTimeout(prepared.timeout)
 	return nil
@@ -1830,6 +1857,7 @@ func (s *Service) setKeyBlocked(targetName string, index int, blocked bool, revi
 		s.mu.Unlock()
 		return fmt.Errorf("key index %d out of range", index)
 	}
+	blockedKey := state.keyPool.entries[index].key
 	if blocked {
 		state.keyPool.blockKey(index)
 	} else {
@@ -1838,7 +1866,9 @@ func (s *Service) setKeyBlocked(targetName string, index int, blocked bool, revi
 	s.advanceTargetRevisionLocked()
 	s.mu.Unlock()
 	if blocked && s.responsesWS != nil {
-		s.responsesWS.invalidate(false)
+		// Retire every lane of the blocked credential, conversations included;
+		// other credentials' lanes stay continuable (#151).
+		s.responsesWS.retireLanesForCredentials([]string{blockedKey})
 	}
 	return nil
 }
@@ -1889,7 +1919,7 @@ func (s *Service) SetKeyBlockedByValue(targetName, key string, occurrence int, b
 	}
 	s.mu.Unlock()
 	if blocked && s.responsesWS != nil {
-		s.responsesWS.invalidate(false)
+		s.responsesWS.retireLanesForCredentials([]string{key})
 	}
 	return nil
 }

@@ -150,3 +150,15 @@ func TestUsageReadHandlersStopOnClientAbort(t *testing.T) {
 		}
 	}
 }
+
+// Offsets beyond the cap are rejected instead of making the store size its
+// candidate buffers by an attacker-chosen number.
+func TestTraceListRejectsExcessiveOffset(t *testing.T) {
+	h := traceTestHandler(t, true)
+	if rec := traceGet(h, "/data/trace?offset=100000", true); rec.Code != http.StatusOK {
+		t.Fatalf("offset at cap: status %d", rec.Code)
+	}
+	if rec := traceGet(h, "/data/trace?offset=100001", true); rec.Code != http.StatusBadRequest {
+		t.Fatalf("offset above cap: status %d, want 400", rec.Code)
+	}
+}

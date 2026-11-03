@@ -4,6 +4,7 @@
 AdminApp.register("clients", function (app) {
   var state = app.state;
   var esc = app.bind("core", "esc");
+  var usageWindowQuery = app.bind("core", "usageWindowQuery");
   var fmtNum = app.bind("core", "fmtNum");
   var fmtMoney = app.bind("core", "fmtMoney");
   var totalTok = app.bind("core", "totalTok");
@@ -46,12 +47,7 @@ AdminApp.register("clients", function (app) {
           return { key: "clients", data: r };
         }),
         api(
-          "/admin/data/usage/aggregate?group_by=day&from=" +
-            encodeURIComponent(
-              new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
-            ) +
-            "&to=" +
-            encodeURIComponent(new Date().toISOString()),
+          "/admin/data/usage/aggregate?group_by=day&" + usageWindowQuery(30),
           { timeoutMs: 60000 }, // 30-day aggregate scans many usage events
         ).then(function (r) {
           return { key: "agg", data: r };
@@ -82,6 +78,34 @@ AdminApp.register("clients", function (app) {
     } catch (e) {
       if (version !== clientLoadVersion) return;
       toast("加载客户端失败: " + e.message, "error");
+    }
+  }
+  // After a write only the server-normalized client records are needed to unlock the UI; the slow
+  // 30-day aggregate refreshes in the background (dropped if a newer load starts meanwhile).
+  async function refreshClientsLight() {
+    var version = ++clientLoadVersion;
+    try {
+      var r = await api("/admin/data/clients");
+      if (version !== clientLoadVersion) return;
+      state.clients = Array.isArray(r.clients) ? r.clients : [];
+      renderClients();
+    } catch (e) {
+      if (version !== clientLoadVersion) return;
+      toast("加载客户端失败: " + e.message, "error");
+    }
+  }
+  async function refreshClientUsage() {
+    var version = clientLoadVersion;
+    try {
+      var r = await api("/admin/data/usage/aggregate?group_by=day&" + usageWindowQuery(30), { timeoutMs: 60000 });
+      if (version !== clientLoadVersion) return;
+      state.clientUsage = {};
+      ((r && r.by_client) || []).forEach(function (item) {
+        state.clientUsage[item.key] = item;
+      });
+      renderClients();
+    } catch (e) {
+      // Usage columns keep their previous values; the list itself is already current.
     }
   }
   function renderClients() {
@@ -193,7 +217,8 @@ AdminApp.register("clients", function (app) {
                 method: "DELETE",
               });
               toast("已删除客户端: " + name, "success");
-              await loadClients();
+              await refreshClientsLight();
+              refreshClientUsage();
             } catch (e) {
               toast("删除失败: " + e.message, "error");
             }
@@ -454,6 +479,7 @@ AdminApp.register("clients", function (app) {
       var saveVersion = clientOpenVersion;
       var saveRevision = clientDraftRevision;
       var wasEditing = !!state.editingClient;
+      var refreshUsageAfterSave = false;
       clientSaveInFlight = true;
       clientSavingName = name;
       // B3 按渠道分层限额：收集非空行（池名必填）
@@ -482,13 +508,15 @@ AdminApp.register("clients", function (app) {
           toast(wasEditing ? "请求时的内容已保存，后续修改尚未保存。" :
             "客户端已创建，后续修改未保存。请复制草稿并重新打开客户端编辑。", "error");
         }
-        await loadClients();
+        await refreshClientsLight();
+        refreshUsageAfterSave = true;
       } catch (e) {
         toast("保存失败: " + e.message, "error");
       } finally {
         clientSaveInFlight = false;
         clientSavingName = "";
       }
+      if (refreshUsageAfterSave) refreshClientUsage();
     });
 
   return {

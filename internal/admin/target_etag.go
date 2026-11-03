@@ -283,8 +283,8 @@ func (h *Handler) handleUnblockTargetKeyByID(w http.ResponseWriter, r *http.Requ
 // handleSetTargetKeyBlockedByID 按稳定 key ID 封禁/解封。它不需要也不检查任何 ETag，
 // 封禁只改运行时密钥状态，不改变目标配置，因此目标 ETag 不变。
 func (h *Handler) handleSetTargetKeyBlockedByID(w http.ResponseWriter, r *http.Request, blocked bool) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	name, err := targetNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -323,6 +323,6 @@ func (h *Handler) handleSetTargetKeyBlockedByID(w http.ResponseWriter, r *http.R
 	if blocked {
 		action = "block_target_key"
 	}
-	h.recordAudit(r, action, name, "success", "key_id="+chi.URLParam(r, "key_id"))
+	txn.audit(action, name, "success", "key_id="+chi.URLParam(r, "key_id"))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

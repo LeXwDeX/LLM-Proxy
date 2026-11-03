@@ -159,7 +159,10 @@ func TestResponsesWebsocketDrainClosesIdleSession(t *testing.T) {
 	if err := service.DrainResponsesWebsockets(ctx); err != nil {
 		t.Fatalf("idle drain: %v", err)
 	}
-	if time.Since(start) > time.Second {
+	// This client reads nothing until the drain returns, so it never answers the
+	// 1001 close: the session waits at most responsesWebsocketCloseWait for it
+	// (#153 B12) and never for the idle timeout.
+	if time.Since(start) > responsesWebsocketCloseWait+500*time.Millisecond {
 		t.Fatal("idle session delayed drain")
 	}
 	expectWebsocketClose(t, conn, websocket.CloseGoingAway)

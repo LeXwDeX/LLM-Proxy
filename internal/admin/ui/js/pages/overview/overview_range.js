@@ -54,7 +54,7 @@ AdminApp.register("overviewRange", function (app) {
     return {key: key, label: option.label, from: from, to: end ? new Date(end.getTime() - 1) : current, end: end || current, closed: !!end, granularity: granularity};
   }
   function aggregatePath(window) {
-    return "/admin/data/usage/aggregate?group_by=hour&from=" + encodeURIComponent(window.from.toISOString()) + "&to=" + encodeURIComponent(window.to.toISOString());
+    return "/admin/data/usage/aggregate?group_by=hour&from=" + encodeURIComponent(window.from.toISOString()) + "&to=" + encodeURIComponent(new Date(window.closed ? window.to.getTime() : Math.floor(window.to.getTime() / 60000) * 60000).toISOString());
   }
   function emptySlot(start, end) {
     return {start: start, end: end, requests: 0, input: 0, output: 0, cost: 0, incompleteUsage: 0, incompleteCost: 0, buckets: 0, empty: true, missing: false};

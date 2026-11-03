@@ -42,8 +42,7 @@ func (h *Handler) handleListPools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleCreatePool(w http.ResponseWriter, r *http.Request) {
-	txn := h.lockConfig(r)
-	defer txn.Unlock()
+	limitConfigBody(w, r)
 	var body struct {
 		Name        string `json:"name"`
 		DisplayName string `json:"display_name"`
@@ -70,6 +69,8 @@ func (h *Handler) handleCreatePool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	cfg, err := h.currentConfig()
 	if err != nil {
 		h.writeInternalError(w, "failed to load config", err)
@@ -108,8 +109,7 @@ func (h *Handler) handleCreatePool(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
-	txn := h.lockConfig(r)
-	defer txn.Unlock()
+	limitConfigBody(w, r)
 	name, err := poolNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -138,6 +138,8 @@ func (h *Handler) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	cfg, err := h.currentConfig()
 	if err != nil {
 		h.writeInternalError(w, "failed to load config", err)

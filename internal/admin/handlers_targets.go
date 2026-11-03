@@ -163,8 +163,7 @@ func readonlyTargetEndpoint(raw string) string {
 }
 
 func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
-	txn := h.lockConfig(r)
-	defer txn.Unlock()
+	limitConfigBody(w, r)
 	var body struct {
 		Name                        string                     `json:"name"`
 		EndpointType                string                     `json:"endpoint_type"`
@@ -229,6 +228,8 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse("api_key must not be empty when allow_bearer_passthrough is false"))
 		return
 	}
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	pool := strings.ToLower(strings.TrimSpace(body.Pool))
 	if pool != "" {
 		if err := h.validatePoolExists(pool); err != nil {
@@ -324,8 +325,7 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
-	txn := h.lockConfig(r)
-	defer txn.Unlock()
+	limitConfigBody(w, r)
 	name, err := targetNameParam(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -423,6 +423,8 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	cfg, err := h.currentConfig()
 	if err != nil {
 		h.writeInternalError(w, "failed to load config", err)
@@ -854,6 +856,7 @@ func (h *Handler) handleUnblockTargetKey(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) handleSetTargetKeyBlocked(w http.ResponseWriter, r *http.Request, blocked bool) {
+	// 旧的按序号路径：审计保留在锁内，成功令牌的计算必须与运行时变更互斥（Issue #68）。
 	h.configMu.Lock()
 	defer h.configMu.Unlock()
 	name, nameErr := targetNameParam(r)

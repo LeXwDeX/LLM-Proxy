@@ -10,8 +10,8 @@ import (
 )
 
 func (h *Handler) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	txn := h.lockConfig(r)
+	defer txn.Unlock()
 	path := h.configManager.Path()
 	prev, _ := h.configManager.Current()
 
@@ -85,11 +85,11 @@ func (h *Handler) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 		h.costCache.Invalidate()
 	}
 	h.noteQuotaConfigChange()
-	h.warmCostCache()
+	// 计价缓存预热由 configTxn.Unlock 在释放 configMu 之后完成。
 	// m11：同步 admin_session 配置（secret/ttl），否则 reload 返回 ok 但 sessionManager
 	// 仍持旧 secret，运维轮换 secret 后状态不一致。
 	h.sessionManager.UpdateConfig(cfg.AdminSession)
-	h.recordAudit(r, "config_reload", path, "success", fmt.Sprintf("targets=%d clients=%d", len(cfg.Targets), len(clients)))
+	txn.audit("config_reload", path, "success", fmt.Sprintf("targets=%d clients=%d", len(cfg.Targets), len(clients)))
 	h.logger.Info("configuration reloaded via admin endpoint",
 		"path", path,
 		"targets", len(cfg.Targets),

@@ -1343,7 +1343,7 @@ test("range data comes from one hourly aggregate request with local boundaries",
   const first = new URL(aggregates()[0].url, "http://local");
   assert.equal(first.searchParams.get("group_by"), "hour");
   assert.equal(first.searchParams.get("from"), new Date(2026, 9, 26).toISOString());
-  assert.equal(first.searchParams.get("to"), new Date(2026, 9, 26, 11, 15, 30).toISOString());
+  assert.equal(first.searchParams.get("to"), new Date(2026, 9, 26, 11, 15).toISOString(), "open range end is floored to the minute");
   assert.equal(ranges[0].attrs["aria-pressed"], "true");
   assert.ok(h.calls.every(c => !c.url.includes("group_by=day")));
   await ranges[1].fire("click"); await h.advance(0);

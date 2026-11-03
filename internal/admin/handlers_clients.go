@@ -59,13 +59,14 @@ func (h *Handler) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 
 // createClientLocked 在 configMu 内完成校验、落库与 auth 重载；失败时已写好响应并返回 false。
 func (h *Handler) createClientLocked(w http.ResponseWriter, r *http.Request) (config.Client, bool) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	limitConfigBody(w, r)
 	var req config.Client
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid json body"))
 		return req, false
 	}
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
 
 	if err := h.validateClientPoolQuotas(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
@@ -100,8 +101,7 @@ func (h *Handler) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) updateClientLocked(w http.ResponseWriter, r *http.Request) (string, config.Client, bool) {
-	h.configMu.Lock()
-	defer h.configMu.Unlock()
+	limitConfigBody(w, r)
 	var req config.Client
 	name := pathParam(r, "name")
 	if strings.TrimSpace(name) == "" {
@@ -113,6 +113,8 @@ func (h *Handler) updateClientLocked(w http.ResponseWriter, r *http.Request) (st
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid json body"))
 		return name, req, false
 	}
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
 
 	if err := h.validateClientPoolQuotas(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))

@@ -22,6 +22,8 @@ type PricingCache struct {
 	ptr                 atomic.Pointer[Resolver]
 	gen                 atomic.Uint64 // bumped by Invalidate; guards against stale lazy-rebuild Store
 	publicationMu       sync.Mutex    // serializes generation check + publication with Invalidate
+	inflightMu          sync.Mutex    // guards inflight (miss path only)
+	inflight            *rebuildCall  // the rebuild concurrent misses of its generation share
 
 	logger             atomic.Pointer[slog.Logger]
 	templateLoadFailed atomic.Bool // a template load failure has been reported and not yet recovered
@@ -66,8 +68,51 @@ func (c *PricingCache) GetChecked() (*Resolver, error) {
 		return p, nil
 	}
 
-	// Lazy build.
+	// Lazy build. Concurrent misses of one generation (typically right after
+	// Invalidate) join a single in-flight rebuild and share its resolver AND its
+	// error, so a persistently failing load runs once per wave instead of once
+	// per queued caller. A miss after Invalidate sees a newer generation and
+	// starts its own rebuild rather than joining a pre-Invalidate one. The hit
+	// path above takes no lock.
+	c.inflightMu.Lock()
+	if p := c.ptr.Load(); p != nil {
+		c.inflightMu.Unlock()
+		return p, nil
+	}
 	gen := c.gen.Load()
+	if call := c.inflight; call != nil && call.gen == gen {
+		c.inflightMu.Unlock()
+		<-call.done
+		return call.r, call.err
+	}
+	// err stays set only if rebuild panics, so waiters never see (nil, nil).
+	call := &rebuildCall{gen: gen, done: make(chan struct{}), err: errors.New("pricing rebuild aborted")}
+	c.inflight = call
+	c.inflightMu.Unlock()
+	defer func() {
+		c.inflightMu.Lock()
+		if c.inflight == call {
+			c.inflight = nil
+		}
+		c.inflightMu.Unlock()
+		close(call.done)
+	}()
+	call.r, call.err = c.rebuild(gen)
+	return call.r, call.err
+}
+
+// rebuildCall is one in-flight rebuild shared by the concurrent misses of its
+// generation; r and err are written before done is closed.
+type rebuildCall struct {
+	gen  uint64
+	done chan struct{}
+	r    *Resolver
+	err  error
+}
+
+// rebuild loads the sources and builds a resolver for generation gen,
+// publishing it only if gen is still current and the load succeeded.
+func (c *PricingCache) rebuild(gen uint64) (*Resolver, error) {
 	var templates []PricingTemplate
 	var loadErr error
 	if c.load != nil {

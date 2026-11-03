@@ -168,6 +168,7 @@ test("the summary renders before the 30-day usage arrives, then fills in", async
   assert.match(field(h, "modelGroupsBody").innerHTML, /shared/);
   release();
   await load;
+  await app.modules.quotaModel.shared.quotaUsageRefresh;
   assert.match(field(h, "quotaSummaryBody").innerHTML, /1,?200/);
   assert.equal(app.state.clientUsage30dUnavailable, false);
 });

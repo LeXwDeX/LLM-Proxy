@@ -384,7 +384,7 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 	// transport errors retain the defensive, non-replayable error path below.
 	var nativeHandshakeErr *responsesWebsocketHandshakeError
 	if errors.As(err, &nativeHandshakeErr) && nativeHandshakeErr.complete {
-		keyFailure := s.observeResponsesKeyFailure(state, target, extractModel(r, body), ResolveProtocol(r.URL.Path), keyIndex, nativeHandshakeErr.status, nativeHandshakeErr.body)
+		keyFailure := s.observeResponsesKeyFailure(state, target, extractModel(r, body), ResolveProtocol(r.URL.Path), keyIndex, nativeHandshakeErr.status, nativeHandshakeErr.body, false)
 		rejection := &responsesWebsocketRejectionBody{
 			Reader: bytes.NewReader(nativeHandshakeErr.body), envelope: nativeHandshakeErr.body,
 			unhealthy: !keyFailure && isUpstreamFailureStatus(nativeHandshakeErr.status),
@@ -524,7 +524,8 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 			retryable = false
 			transportStatus = websocketErr.status
 			if session, ok := r.Context().Value(responsesWebsocketContextKey{}).(*responsesWebsocketSession); ok {
-				session.failure = websocketErr.Error()
+				session.failure = websocketErr.clientMessage()
+				session.failureCode = websocketErr.code
 			}
 		}
 		var nativeHandshakeErr *responsesWebsocketHandshakeError
@@ -544,7 +545,7 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 			}
 			state.releaseProbe(lease)
 			if session, ok := r.Context().Value(responsesWebsocketContextKey{}).(*responsesWebsocketSession); ok {
-				session.failure = nativeHandshakeErr.Error()
+				session.failure = nativeHandshakeErr.clientMessage()
 			}
 		}
 		if sentErr != nil {
@@ -578,6 +579,7 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 				"client_status_channel", clientStatusChannel,
 				"possibly_sent", true,
 				"replayed", false,
+				"upstream_close_code", responsesWSUpstreamCloseCode(err),
 			)
 		}
 		return nil, nil, keyIndex, &forwardAttemptError{
@@ -925,8 +927,8 @@ func (s *Service) writeResponse(
 	}
 	traceEnabled := s.traceStore.Enabled()
 	var capture *limitedCaptureWriter
-	if responseCaptureNeeded(traceEnabled, resp.StatusCode, wsBody != nil, websocketResponse) {
-		capture = &limitedCaptureWriter{limit: 2 * 1024 * 1024}
+	if responseCaptureNeeded(traceEnabled, resp.StatusCode) {
+		capture = &limitedCaptureWriter{limit: responseCaptureLimit}
 	}
 	capturedBody := func() []byte {
 		if capture == nil {
@@ -963,7 +965,7 @@ func (s *Service) writeResponse(
 		claudeGuard = &claudeStreamGuard{writer: writer}
 		downstream = claudeGuard
 	}
-	_, copyErr := copyClientFirst(downstream, resp.Body, observer)
+	copied, copyErr := copyClientFirst(downstream, resp.Body, observer)
 	if copyErr == nil && claudeGuard != nil {
 		copyErr = claudeGuard.flush()
 	}
@@ -991,7 +993,7 @@ func (s *Service) writeResponse(
 			if state.keyPool != nil && keyIndex >= 0 && state.keyPool.exhaustReasonAt(keyIndex) != "" {
 				unhealthy = accountLevelFailure
 			}
-		} else if s.observeResponsesKeyFailure(state, target, upstreamModel, ResolveProtocol(r.URL.Path), keyIndex, status, errorBody) {
+		} else if s.observeResponsesKeyFailure(state, target, upstreamModel, ResolveProtocol(r.URL.Path), keyIndex, status, errorBody, true) {
 			unhealthy = (copyErr != nil && !wsBody.noMute.Load()) || accountLevelFailure
 		}
 		// Streaming headers may already be committed, but accounting and traces
@@ -1027,7 +1029,7 @@ func (s *Service) writeResponse(
 			unhealthy := upstreamCopyFailed || isUpstreamFailureStatus(status)
 			// Observe key-specific failures once, after sending. Never replay a
 			// WS create: only the next client turn may choose another key.
-			if s.observeResponsesKeyFailure(state, target, upstreamModel, ResolveProtocol(r.URL.Path), keyIndex, status, websocketSession.turnErrorBody) {
+			if s.observeResponsesKeyFailure(state, target, upstreamModel, ResolveProtocol(r.URL.Path), keyIndex, status, websocketSession.turnErrorBody, true) {
 				unhealthy = upstreamCopyFailed
 			}
 			recordOutcome(websocketSession.turnFailed || copyErr != nil, unhealthy)
@@ -1043,11 +1045,16 @@ func (s *Service) writeResponse(
 	} else if err := copyErr; err != nil &&
 		!errors.Is(err, context.Canceled) &&
 		!errors.Is(err, context.DeadlineExceeded) {
-		s.logger.Warn("stream copy failed",
+		attrs := []any{
 			"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 			"target", targetName(target),
 			"error", errorlog.ErrorCategory(err),
-		)
+		}
+		if wsBody := responseWSBody(resp); wsBody != nil && wsBody.generationSent {
+			// Pooled WS stream ended by an upstream close frame (#153 B6).
+			attrs = append(attrs, "upstream_close_code", responsesWSUpstreamCloseCode(err))
+		}
+		s.logger.Warn("stream copy failed", attrs...)
 	}
 
 	var tokens usageTokens
@@ -1089,7 +1096,13 @@ func (s *Service) writeResponse(
 	// 上游 4xx/5xx：写结构化错误日志（旁路 access/error log，便于事后 grep）。
 	// 触发条件覆盖 4xx 与 5xx 完整范围；用户主动 abort 由 io.Copy err 分支拦截不入此路径。
 	if resp.StatusCode >= 400 {
-		writeUpstreamErrorLog(r, target, resp, capturedBody(), startedAt)
+		// A WS turn can become a terminal error after a 200 start, which is not
+		// captured: count the forwarded bytes (bounded like the capture).
+		respBytes := len(capturedBody())
+		if capture == nil {
+			respBytes = int(min(copied, int64(responseCaptureLimit)))
+		}
+		writeUpstreamErrorLogBytes(r, target, resp, respBytes, startedAt)
 	}
 
 	// DEBUG 模式：记录完整 trace（请求/响应 META + body）
@@ -1117,7 +1130,11 @@ func (s *Service) writeResponse(
 
 // Observe a Responses key failure without replaying the current generation.
 // Both native WS and the HTTP adapter use the same provider-aware ordering.
-func (s *Service) observeResponsesKeyFailure(state *targetState, target *Target, model string, protocol config.ProtocolType, keyIndex, status int, body []byte) bool {
+// signalAIMD follows the HTTP rule: a pre-generation (handshake) rejection
+// enters the key loop, which signals AIMD only once every key is exhausted,
+// so it passes false; a rejection after generation was sent is never retried
+// and signals here.
+func (s *Service) observeResponsesKeyFailure(state *targetState, target *Target, model string, protocol config.ProtocolType, keyIndex, status int, body []byte, signalAIMD bool) bool {
 	if state.keyPool == nil || keyIndex < 0 {
 		return false
 	}
@@ -1133,7 +1150,7 @@ func (s *Service) observeResponsesKeyFailure(state *targetState, target *Target,
 	} else {
 		state.keyPool.markExhaustedWithError(keyIndex, "rate_limited", string(body))
 	}
-	if am := s.admissionManager.Load(); am != nil {
+	if am := s.admissionManager.Load(); signalAIMD && am != nil {
 		am.OnLimit(target.Name)
 	}
 	return true
@@ -1142,6 +1159,11 @@ func (s *Service) observeResponsesKeyFailure(state *targetState, target *Target,
 // writeUpstreamErrorLog 在 writeResponse 写完响应体后落一条 NDJSON 错误日志。
 // Body bytes are counted for diagnostics but never stored in default logs.
 func writeUpstreamErrorLog(r *http.Request, target *Target, resp *http.Response, body []byte, startedAt time.Time) {
+	writeUpstreamErrorLogBytes(r, target, resp, len(body), startedAt)
+}
+
+// writeUpstreamErrorLogBytes records only the response size, never its bytes.
+func writeUpstreamErrorLogBytes(r *http.Request, target *Target, resp *http.Response, respBytes int, startedAt time.Time) {
 	kind := errorlog.KindUpstream4xx
 	if resp.StatusCode >= 500 {
 		kind = errorlog.KindUpstream5xx
@@ -1156,9 +1178,9 @@ func writeUpstreamErrorLog(r *http.Request, target *Target, resp *http.Response,
 		UpstreamStatus: resp.StatusCode,
 		DurationMS:     time.Since(startedAt).Milliseconds(),
 		ReqBytes:       int(r.ContentLength),
-		RespBytes:      len(body),
+		RespBytes:      respBytes,
 	}
-	if len(body) > 0 {
+	if respBytes > 0 {
 		entry.RespExcerpt = "[redacted]"
 	}
 	if target != nil {
@@ -1614,13 +1636,16 @@ func (w *streamingWriter) downstreamWriteFailed() bool {
 	return w.writeErr != nil
 }
 
+// responseCaptureLimit bounds the head/tail response capture.
+const responseCaptureLimit = 2 * 1024 * 1024
+
 // responseCaptureNeeded reports whether writeResponse keeps the 2 MiB
-// head/tail capture. It feeds traces, 4xx/5xx error logs and WS turn error
-// bodies. WS outcomes can turn a 200 into a terminal error after copying, so
-// WS responses always capture; other responses below 400 without trace never
-// read the capture and skip it.
-func responseCaptureNeeded(traceEnabled bool, status int, upstreamWS, nativeWS bool) bool {
-	return traceEnabled || status >= 400 || upstreamWS || nativeWS
+// head/tail capture. It feeds traces, 4xx/5xx error logs and HTTP-fallback WS
+// turn error bodies (status >= 400 at the start). Successful WS turns never
+// read it: a WS 200 that ends in a terminal error takes its error body from
+// the terminal event, and its error log counts the forwarded bytes instead.
+func responseCaptureNeeded(traceEnabled bool, status int) bool {
+	return traceEnabled || status >= 400
 }
 
 // copyBufferPool recycles the 32 KiB response copy buffers (io.Copy's size).
@@ -1698,10 +1723,15 @@ const StatusClientClosedRequest = 499
 // it has ended, the parent's cancellation or deadline (or the attempt
 // timeout) caused the failure, which never qualifies (#163). Otherwise a dial
 // error qualifies even when it matches context.DeadlineExceeded, as the
-// dialer's own timeout does (#156).
+// dialer's own timeout does (#156), and so does an upstream WebSocket upgrade
+// handshake timeout (errResponsesWSHandshakeTimeout, #153).
 func isPreSendTransportError(ctx context.Context, err error) bool {
 	if err == nil || (ctx != nil && ctx.Err() != nil) || errors.Is(err, context.Canceled) {
 		return false
+	}
+	// An upstream WebSocket upgrade that timed out sent no response.create.
+	if errors.Is(err, errResponsesWSHandshakeTimeout) {
+		return true
 	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Op == "dial" {

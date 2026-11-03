@@ -38,9 +38,6 @@ type usageAdapterMigrationWrite struct {
 // unknown/legacy fields. Records and targets commit together. No done flag is
 // used, so a later legacy import can be converted without losing old records.
 func MigrateUsageAdapterExplicit(db *bolt.DB, logger *slog.Logger) error {
-	// Issue #125: a maintenance write; the integrity classification is stale
-	// from here until a rebuild that starts after this write ended.
-	defer integrityMutationBegin()()
 	// Admin reads call this on every request. Plan in a read transaction first
 	// so the common no-op case never waits on bbolt's single writer or fsyncs.
 	var pending bool
@@ -55,6 +52,10 @@ func MigrateUsageAdapterExplicit(db *bolt.DB, logger *slog.Logger) error {
 	}); err != nil || !pending {
 		return err
 	}
+	// Issue #125: a maintenance write; the integrity classification is stale
+	// from here until a rebuild that starts after this write ended. Only a
+	// real write brackets it: the no-op path above must not bump the epoch.
+	defer integrityMutationBegin()()
 	var writes []usageAdapterMigrationWrite
 	err := db.Update(func(tx *bolt.Tx) error {
 		var err error

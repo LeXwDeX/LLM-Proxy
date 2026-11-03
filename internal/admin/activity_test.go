@@ -143,6 +143,15 @@ func TestActivityStorageAndCancellationFailures(t *testing.T) {
 			}
 			response := httptest.NewRecorder()
 			h.handleActivity(response, req)
+			if mode == "canceled" {
+				// A gone client gets nothing written (no zero/partial payload), so the
+				// shared report cache treats the computation as aborted and its
+				// waiters rejoin instead of inheriting an unrelated 500.
+				if response.Body.Len() != 0 {
+					t.Fatalf("canceled activity read wrote a payload: %d %s", response.Code, response.Body.String())
+				}
+				return
+			}
 			if response.Code != 500 || strings.TrimSpace(response.Body.String()) != `{"error":"internal server error"}` {
 				t.Fatalf("failed activity read must not return zero/partial payload: %d %s", response.Code, response.Body.String())
 			}

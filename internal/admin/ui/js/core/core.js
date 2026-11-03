@@ -597,7 +597,20 @@ AdminApp.register("core", function (app) {
       if (button) button.disabled = false;
     }
   }
+  // Aggregate windows are floored to the minute so repeated loads within the same minute share
+  // one backend report-cache key (the server key includes the raw from/to strings).
+  function floorToMinute(ms) {
+    return Math.floor(ms / 60000) * 60000;
+  }
+  function usageWindowQuery(days, now) {
+    var end = floorToMinute(now === undefined ? Date.now() : Number(now));
+    var start = end - days * 24 * 3600 * 1000;
+    return "from=" + encodeURIComponent(new Date(start).toISOString()) +
+      "&to=" + encodeURIComponent(new Date(end).toISOString());
+  }
   return {
+    floorToMinute: floorToMinute,
+    usageWindowQuery: usageWindowQuery,
     runGuarded: runGuarded,
     esc: esc,
     fmtNum: fmtNum,
