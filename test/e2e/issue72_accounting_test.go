@@ -83,7 +83,7 @@ func TestIssue72SidecarAccountingRestart(t *testing.T) {
 	start := func() *world {
 		proc = exec.Command(bin, "-config", cfgPath)
 		proc.Dir = dir
-		proc.Env = append(os.Environ(), "ADMIN_PASSWORD="+adminPassword, "LOG_LEVEL=warn", "UPSTREAM_ERROR_LOG_PATH="+filepath.Join(dir, "upstream-error.log"), "TRACE_STORE_ENABLED=false")
+		proc.Env = append(os.Environ(), "ADMIN_PASSWORD="+adminPassword, "LOG_LEVEL=warn", "UPSTREAM_ERROR_LOG_PATH="+filepath.Join(dir, "upstream-error.log"), "TRACE_STORE_ENABLED=false", "SERVER_BIND="+fmt.Sprintf("127.0.0.1:%d", port))
 		proc.Stdout, proc.Stderr = logs, logs
 		if err := proc.Start(); err != nil {
 			t.Fatal(err)

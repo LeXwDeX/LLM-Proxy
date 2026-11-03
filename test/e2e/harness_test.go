@@ -118,7 +118,8 @@ func run(m *testing.M) (int, error) {
 	proc.Dir = dir
 	proc.Env = append(os.Environ(), "ADMIN_PASSWORD="+adminPassword, "LOG_LEVEL=warn",
 		"UPSTREAM_ERROR_LOG_PATH="+filepath.Join(dir, "upstream-error.log"), "TRACE_STORE_ENABLED=false",
-		"USAGE_INTEGRITY_CLASSIFICATION_INTERVAL_SECONDS=2")
+		"USAGE_INTEGRITY_CLASSIFICATION_INTERVAL_SECONDS=2",
+		"SERVER_BIND="+fmt.Sprintf("127.0.0.1:%d", port))
 	proc.Stdout, proc.Stderr = logFile, logFile
 	if err := proc.Start(); err != nil {
 		return 0, err
