@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -113,25 +114,27 @@ func TestResponsesWSBlockKeyKeepsOtherCredentialLanes(t *testing.T) {
 	}
 }
 
-// invalidateForConfig keeps conversation and busy lanes, drops fresh idle
-// lanes and in-flight spares, and forgets unsupported/backoff memories.
+// invalidateForConfig keeps conversation and busy lanes of live targets and
+// keys, drops fresh idle lanes and in-flight spares, and forgets
+// unsupported/backoff memories.
 func TestResponsesWSInvalidateForConfigKeepsConversations(t *testing.T) {
 	p := newResponsesWSPool()
 	defer p.close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	conversation := &responsesWSConn{responseID: "resp_1"}
-	busy := &responsesWSConn{busy: true}
-	fresh := &responsesWSConn{}
-	spare := &responsesWSConn{prewarmed: true}
-	dialing := &responsesWSConn{busy: true, prewarming: true, cancelDial: cancel}
+	liveDial := &responsesWSDialSpec{target: "openai", headers: http.Header{"Authorization": {"Bearer key-a"}}}
+	conversation := &responsesWSConn{responseID: "resp_1", dial: liveDial}
+	busy := &responsesWSConn{busy: true, dial: liveDial}
+	fresh := &responsesWSConn{dial: liveDial}
+	spare := &responsesWSConn{prewarmed: true, dial: liveDial}
+	dialing := &responsesWSConn{busy: true, prewarming: true, cancelDial: cancel, dial: liveDial}
 	for _, e := range []*responsesWSConn{conversation, busy, fresh, spare, dialing} {
 		p.entries[e] = struct{}{}
 	}
 	p.unsupported = map[[32]byte]time.Time{{1}: time.Now()}
 	p.prewarmBackoff = map[[32]byte]time.Time{{1}: time.Now()}
 	gen := p.generation
-	p.invalidateForConfig()
+	p.invalidateForConfig(map[string][]string{"openai": {"key-a", "key-b"}})
 	if p.generation == gen || p.unsupported != nil || p.prewarmBackoff != nil {
 		t.Fatalf("generation/memories not reset: gen=%d unsupported=%v backoff=%v", p.generation, p.unsupported, p.prewarmBackoff)
 	}
@@ -251,10 +254,11 @@ func TestResponsesWSBusyLaneAcrossSaveDoesNotPrewarmOldCredentials(t *testing.T)
 func TestResponsesWSReleaseRetiresPreSaveFreshLane(t *testing.T) {
 	p := newResponsesWSPool()
 	defer p.close()
-	fresh := &responsesWSConn{busy: true, gen: p.generation, dial: &responsesWSDialSpec{client: http.DefaultClient, url: "ws://127.0.0.1:1"}}
-	conversation := &responsesWSConn{busy: true, gen: p.generation, owner: [32]byte{2}, dial: &responsesWSDialSpec{client: http.DefaultClient, url: "ws://127.0.0.1:1"}}
+	dial := &responsesWSDialSpec{client: http.DefaultClient, url: "ws://127.0.0.1:1", target: "openai", headers: http.Header{"Authorization": {"Bearer key-a"}}}
+	fresh := &responsesWSConn{busy: true, gen: p.generation, dial: dial}
+	conversation := &responsesWSConn{busy: true, gen: p.generation, owner: [32]byte{2}, dial: dial}
 	p.entries[fresh], p.entries[conversation] = struct{}{}, struct{}{}
-	p.invalidateForConfig()
+	p.invalidateForConfig(map[string][]string{"openai": {"key-a"}})
 	conversation.responseID = "resp_1"
 	p.release(fresh, true)
 	p.release(conversation, true)
@@ -268,5 +272,201 @@ func TestResponsesWSReleaseRetiresPreSaveFreshLane(t *testing.T) {
 	}
 	if len(p.entries) != 1 {
 		t.Fatalf("entries=%d, want no spare reserved for a pre-save lane", len(p.entries))
+	}
+}
+
+// wsLanesOf snapshots the pool's lanes under its lock.
+func wsLanesOf(s *Service) []*responsesWSConn {
+	s.responsesWS.mu.Lock()
+	defer s.responsesWS.mu.Unlock()
+	lanes := make([]*responsesWSConn, 0, len(s.responsesWS.entries))
+	for e := range s.responsesWS.entries {
+		lanes = append(lanes, e)
+	}
+	return lanes
+}
+
+func wsOtherTarget() config.Target {
+	return config.Target{Name: "other", EndpointType: "openai", Endpoint: "http://127.0.0.1:1", APIKey: "other-key",
+		ModelMappings: []config.ModelMapping{{Upstream: "other-model", Fallback: "other-alias"}}}
+}
+
+// Deleting a target closes its idle conversation lane at once: no remaining
+// configuration can select it, so it must not stay connected until the reaper.
+func TestResponsesWSDeletedTargetClosesIdleConversationLane(t *testing.T) {
+	u := &wsPrewarmUpstream{}
+	server := httptest.NewServer(http.HandlerFunc(u.serve))
+	defer server.Close()
+	s := newWSTestService(t, server.URL, true)
+	s.responsesWS.prewarm = false
+	if w := wsTestRequest(t, s, "client", "/v1/responses", wsPrewarmBody); w.Code != 200 {
+		t.Fatalf("first: %d %s", w.Code, w.Body.String())
+	}
+	if lanes := wsLanesOf(s); len(lanes) != 1 || lanes[0].responseID == "" {
+		t.Fatalf("want one conversation lane before the save, got %d", len(lanes))
+	}
+	if err := s.UpdateTargets([]config.Target{wsOtherTarget()}); err != nil {
+		t.Fatal(err)
+	}
+	if lanes := wsLanesOf(s); len(lanes) != 0 {
+		t.Fatalf("lanes=%d, want the deleted target's conversation lane retired", len(lanes))
+	}
+	waitForWS(t, "the deleted target's upstream socket to close", func() bool { return u.active.Load() == 0 })
+}
+
+// A lane busy when its target is deleted stays owned by its request and
+// closes when released.
+func TestResponsesWSDeletedTargetClosesBusyLaneOnRelease(t *testing.T) {
+	u := &wsPrewarmUpstream{}
+	server := httptest.NewServer(http.HandlerFunc(u.serve))
+	defer server.Close()
+	s := newWSTestService(t, server.URL, true)
+	s.responsesWS.prewarm = false
+	if w := wsTestRequest(t, s, "client", "/v1/responses", wsPrewarmBody); w.Code != 200 {
+		t.Fatalf("first: %d %s", w.Code, w.Body.String())
+	}
+	lanes := wsLanesOf(s)
+	if len(lanes) != 1 {
+		t.Fatalf("lanes=%d before the save", len(lanes))
+	}
+	lane := lanes[0]
+	s.responsesWS.mu.Lock()
+	lane.busy = true // a request owns the lane while the save lands
+	s.responsesWS.mu.Unlock()
+	if err := s.UpdateTargets([]config.Target{wsOtherTarget()}); err != nil {
+		t.Fatal(err)
+	}
+	s.responsesWS.mu.Lock()
+	_, present := s.responsesWS.entries[lane]
+	retired := lane.retired
+	s.responsesWS.mu.Unlock()
+	if !present || !retired {
+		t.Fatalf("busy lane of a deleted target: present=%v retired=%v, want owned by its request and retired", present, retired)
+	}
+	if u.active.Load() != 1 {
+		t.Fatal("busy lane was closed under its request")
+	}
+	s.responsesWS.release(lane, true)
+	if lanes := wsLanesOf(s); len(lanes) != 0 {
+		t.Fatalf("lanes=%d after release, want the deleted target's lane gone", len(lanes))
+	}
+	waitForWS(t, "the released lane's upstream socket to close", func() bool { return u.active.Load() == 0 })
+}
+
+// Removing one key from a surviving target retires that key's conversation
+// lanes; lanes on its remaining keys stay and continue on their socket.
+func TestResponsesWSRemovedKeyRetiresOnlyItsConversationLanes(t *testing.T) {
+	u := &wsPrewarmUpstream{}
+	server := httptest.NewServer(http.HandlerFunc(u.serve))
+	defer server.Close()
+	s := wsTwoKeyService(t, server.URL)
+	s.responsesWS.prewarm = false
+	// Separate clients own separate lanes; continue until both keys carry one.
+	seen := map[string]bool{}
+	for i := 0; i < 8 && len(seen) < 2; i++ {
+		if w := wsTestRequest(t, s, fmt.Sprintf("client-%d", i), "/v1/responses", wsPrewarmBody); w.Code != 200 {
+			t.Fatalf("request %d: %d %s", i, w.Code, w.Body.String())
+		}
+		u.mu.Lock()
+		seen[u.authOf[int32(i+1)]] = true
+		u.mu.Unlock()
+	}
+	if len(seen) != 2 {
+		t.Fatalf("lanes did not cover both keys: %v", seen)
+	}
+	var keptID string
+	for _, e := range wsLanesOf(s) {
+		if e.dial != nil && headersCarryCredential(e.dial.headers, []string{"prewarm-key-a"}) && e.responseID != "" {
+			keptID = e.responseID
+		}
+	}
+	if keptID == "" {
+		t.Fatal("no conversation lane on the kept key")
+	}
+	activeBefore := u.active.Load()
+	removed := int32(0)
+	for _, e := range wsLanesOf(s) {
+		if e.dial != nil && headersCarryCredential(e.dial.headers, []string{"prewarm-key-b"}) {
+			removed++
+		}
+	}
+	target := config.Target{Name: "openai", EndpointType: "openai", Endpoint: server.URL, APIKey: "prewarm-key-a",
+		PreferWebSocket: true, ModelMappings: []config.ModelMapping{{Upstream: "UpstreamCase", Fallback: "openai-test"}}}
+	if err := s.UpdateTargets([]config.Target{target}); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range wsLanesOf(s) {
+		if e.dial == nil || headersCarryCredential(e.dial.headers, []string{"prewarm-key-b"}) {
+			t.Fatal("a lane of the removed key survived the save")
+		}
+	}
+	waitForWS(t, "the removed key's sockets to close", func() bool { return u.active.Load() == activeBefore-removed })
+	u.mu.Lock()
+	producedOn := u.producedOn[keptID]
+	owner := -1
+	for attempt, auth := range u.authOf {
+		if attempt == producedOn && strings.HasSuffix(auth, "prewarm-key-a") {
+			owner = int(attempt)
+		}
+	}
+	u.mu.Unlock()
+	if owner < 0 {
+		t.Fatalf("response %s was not produced on a kept-key handshake", keptID)
+	}
+	var client string
+	for i := 0; i < 8; i++ {
+		if int32(i+1) == producedOn {
+			client = fmt.Sprintf("client-%d", i)
+		}
+	}
+	attempts := u.attempts.Load()
+	w := wsTestRequest(t, s, client, "/v1/responses", `{"model":"openai-test","input":"again","previous_response_id":"`+keptID+`"}`)
+	if w.Code != 200 {
+		t.Fatalf("continuation on the kept key: %d %s", w.Code, w.Body.String())
+	}
+	u.mu.Lock()
+	continuedOn := u.continuedOn[keptID]
+	u.mu.Unlock()
+	if continuedOn != producedOn || u.attempts.Load() != attempts {
+		t.Fatalf("continuation ran on handshake %d (attempts %d→%d), want original socket %d", continuedOn, attempts, u.attempts.Load(), producedOn)
+	}
+}
+
+// invalidateForConfig retires lanes of a deleted target or a removed key,
+// conversation or not: idle ones at once, busy ones on release.
+func TestResponsesWSInvalidateForConfigRetiresDeadIdentities(t *testing.T) {
+	p := newResponsesWSPool()
+	defer p.close()
+	dial := func(target, key string) *responsesWSDialSpec {
+		return &responsesWSDialSpec{target: target, headers: http.Header{"Authorization": {"Bearer " + key}}}
+	}
+	kept := &responsesWSConn{responseID: "resp_kept", dial: dial("openai", "key-a")}
+	keptBusy := &responsesWSConn{busy: true, dial: dial("openai", "key-a")}
+	removedKey := &responsesWSConn{responseID: "resp_b", dial: dial("openai", "key-b")}
+	deleted := &responsesWSConn{responseID: "resp_gone", dial: dial("gone", "key-a")}
+	deletedBusy := &responsesWSConn{busy: true, responseID: "resp_gone_busy", dial: dial("gone", "key-a")}
+	removedKeyBusy := &responsesWSConn{busy: true, dial: dial("openai", "key-b")}
+	for _, e := range []*responsesWSConn{kept, keptBusy, removedKey, deleted, deletedBusy, removedKeyBusy} {
+		p.entries[e] = struct{}{}
+	}
+	p.invalidateForConfig(map[string][]string{"openai": {"key-a"}})
+	for _, e := range []*responsesWSConn{kept, keptBusy} {
+		if _, ok := p.entries[e]; !ok || e.retired {
+			t.Fatalf("live lane %+v retired", e)
+		}
+	}
+	for _, e := range []*responsesWSConn{removedKey, deleted} {
+		if _, ok := p.entries[e]; ok {
+			t.Fatalf("idle lane %+v of a dead identity survived", e)
+		}
+	}
+	for _, e := range []*responsesWSConn{deletedBusy, removedKeyBusy} {
+		if _, ok := p.entries[e]; !ok || !e.retired {
+			t.Fatalf("busy lane %+v must stay owned by its request and be retired", e)
+		}
+		p.release(e, true)
+		if _, ok := p.entries[e]; ok {
+			t.Fatalf("busy lane %+v of a dead identity survived release", e)
+		}
 	}
 }

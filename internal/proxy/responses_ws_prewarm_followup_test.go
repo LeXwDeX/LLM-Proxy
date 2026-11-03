@@ -157,7 +157,7 @@ func TestResponsesWSForegroundTakesSlotFromInflightSpare(t *testing.T) {
 				}
 				p.entries[e] = struct{}{}
 			}
-			e, resp, fallback, err := p.acquire(context.Background(), nil, wsLockTestRequest(t, server.URL), owner, "")
+			e, resp, fallback, err := p.acquire(context.Background(), nil, wsLockTestRequest(t, server.URL), "openai", owner, "")
 			if err != nil || resp != nil || fallback || e == nil {
 				t.Fatalf("foreground request lost its slot: conn=%v resp=%v fallback=%v err=%v", e, resp, fallback, err)
 			}

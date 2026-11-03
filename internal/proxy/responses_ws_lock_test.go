@@ -72,7 +72,7 @@ func TestResponsesWSPoolClosesConnectionsOutsideLock(t *testing.T) {
 	}
 	// A request releasing an unusable lane closes it itself, but other pool
 	// users are not blocked meanwhile.
-	e, resp, fallback, err := s.responsesWS.acquire(t.Context(), s.httpClient, wsLockTestRequest(t, upstream.URL), [32]byte{9}, "")
+	e, resp, fallback, err := s.responsesWS.acquire(t.Context(), s.httpClient, wsLockTestRequest(t, upstream.URL), "openai", [32]byte{9}, "")
 	if err != nil || resp != nil || fallback || e == nil {
 		t.Fatalf("acquire: conn=%v resp=%v fallback=%v err=%v", e, resp, fallback, err)
 	}

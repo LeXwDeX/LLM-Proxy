@@ -180,6 +180,9 @@ type responsesWSDialSpec struct {
 	url     string
 	host    string
 	headers http.Header
+	// target names the configured target the lane was opened for, so a
+	// configuration save can retire lanes of a deleted target.
+	target string
 }
 
 type responsesWSPool struct {
@@ -263,15 +266,18 @@ func (p *responsesWSPool) invalidate(closeActive bool) {
 	closeResponsesWSConns(closing, !closeActive)
 }
 
-// invalidateForConfig handles a published configuration change (Issue #151).
-// It forgets unsupported and backoff memories so a fixed upstream is probed
+// invalidateForConfig handles a published configuration change. live maps
+// each target name of the new configuration to its current API keys. It
+// forgets unsupported and backoff memories so a fixed upstream is probed
 // again, cancels spares still being dialed and retires idle lanes without a
-// conversation. Lanes holding a responseID and lanes busy with a request keep
-// their lifecycle: a lane's key binds its URL and auth headers, so a changed
-// connection identity can never select it, while unrelated saves no longer
+// conversation. It also retires every lane, conversation or not, whose target
+// is gone or whose handshake credential is no longer among its target's keys:
+// nothing can select such a lane again. Idle ones close now; a lane busy with
+// a request stays owned by it and closes on release. Other lanes holding a
+// responseID and busy lanes keep their lifecycle, so unrelated saves do not
 // break pooled continuations. The new generation still discards handshakes
 // and background dials started under the old configuration.
-func (p *responsesWSPool) invalidateForConfig() {
+func (p *responsesWSPool) invalidateForConfig(live map[string][]string) {
 	p.mu.Lock()
 	p.generation++
 	p.unsupported = nil
@@ -280,10 +286,32 @@ func (p *responsesWSPool) invalidateForConfig() {
 	for e := range p.entries {
 		if e.prewarming || (!e.busy && e.responseID == "") {
 			closing = p.removeLocked(e, closing)
+			continue
+		}
+		if responsesWSLaneLive(e, live) {
+			continue
+		}
+		e.retired = true
+		if !e.busy {
+			closing = p.removeLocked(e, closing)
 		}
 	}
 	p.mu.Unlock()
 	closeResponsesWSConns(closing, true)
+}
+
+// responsesWSLaneLive reports whether a lane's target survives in live and its
+// handshake still authenticates with one of that target's keys. A lane with
+// no recorded dial identity cannot be proven live.
+func responsesWSLaneLive(e *responsesWSConn, live map[string][]string) bool {
+	if e.dial == nil {
+		return false
+	}
+	keys, ok := live[e.dial.target]
+	if !ok {
+		return false
+	}
+	return len(keys) == 0 || headersCarryCredential(e.dial.headers, keys)
 }
 
 // retireLanesForCredentials retires every lane whose handshake carried one of
@@ -709,7 +737,7 @@ func (p *responsesWSPool) read(e *responsesWSConn) {
 }
 
 // acquire reserves one exclusive request lane before any generation is sent.
-func (p *responsesWSPool) acquire(ctx context.Context, client *http.Client, req *http.Request, owner [32]byte, previous string) (*responsesWSConn, *http.Response, bool, error) {
+func (p *responsesWSPool) acquire(ctx context.Context, client *http.Client, req *http.Request, target string, owner [32]byte, previous string) (*responsesWSConn, *http.Response, bool, error) {
 	headers := req.Header.Clone()
 	for _, h := range []string{"Content-Type", "Content-Length", "Accept", "Accept-Encoding", "X-Request-Id", "User-Agent", "Sec-Websocket-Key", "Sec-Websocket-Version", "Sec-Websocket-Extensions", "Sec-Websocket-Protocol"} {
 		headers.Del(h)
@@ -859,7 +887,7 @@ selectLane:
 		return nil, nil, true, nil
 	}
 	e := &responsesWSConn{owner: owner, key: key, created: now, used: now, busy: true, gen: p.generation, frames: make(chan responsesWSFrame, 8),
-		dial: &responsesWSDialSpec{client: client, url: req.URL.String(), host: req.Host, headers: identityHeaders}}
+		dial: &responsesWSDialSpec{client: client, url: req.URL.String(), host: req.Host, headers: identityHeaders, target: target}}
 	p.entries[e] = struct{}{}
 	gen := p.generation
 	unlock()
@@ -1045,7 +1073,7 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 	}, nil)
 	principal, _ := auth.PrincipalFromContext(r.Context())
 	owner := sha256.Sum256([]byte(principal.Name + "\x00" + principal.AccessKey + "\x00" + target.Name))
-	e, resp, fallback, err := s.responsesWS.acquire(req.Context(), s.httpClient, req, owner, previous)
+	e, resp, fallback, err := s.responsesWS.acquire(req.Context(), s.httpClient, req, target.Name, owner, previous)
 	if fallback {
 		return nil, false, nil
 	}

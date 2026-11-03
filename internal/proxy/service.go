@@ -374,9 +374,14 @@ func (s *Service) replaceTargetsLocked(parsed map[string]*targetState, order []*
 	s.advanceTargetRevisionLocked()
 	previous := s.targetsByName
 	if s.responsesWS != nil {
-		// Only lanes a save may affect are retired; conversation lanes stay
-		// continuable because their key binds URL and auth headers (#151).
-		s.responsesWS.invalidateForConfig()
+		// Lanes of deleted targets or removed keys are retired; other
+		// conversation lanes stay continuable because their key binds URL and
+		// auth headers.
+		live := make(map[string][]string, len(parsed))
+		for _, next := range parsed {
+			live[next.target.Name] = next.target.APIKeys
+		}
+		s.responsesWS.invalidateForConfig(live)
 	}
 	var resets []targetBreakerReset
 	for name, next := range parsed {

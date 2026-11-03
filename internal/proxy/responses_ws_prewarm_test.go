@@ -352,7 +352,7 @@ func TestResponsesWSHandshakeHeaderChangeSample(t *testing.T) {
 		req.Header.Set("Authorization", auth)
 		req.Header.Set("X-Feature", "same")
 		req.Header.Set("Traceparent", fmt.Sprint("trace-", i))
-		e, resp, fallback, err := s.responsesWS.acquire(context.Background(), s.httpClient, req, owner, "")
+		e, resp, fallback, err := s.responsesWS.acquire(context.Background(), s.httpClient, req, "openai", owner, "")
 		if err != nil || resp != nil || fallback || e == nil {
 			t.Fatalf("acquire %d: conn=%v resp=%v fallback=%v err=%v", i, e, resp, fallback, err)
 		}
