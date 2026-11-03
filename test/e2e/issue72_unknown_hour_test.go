@@ -197,7 +197,8 @@ func (e *issue72UnknownEnv) start() {
 	e.proc = exec.Command(e.bin, "-config", e.cfgPath)
 	e.proc.Dir = e.dir
 	e.proc.Env = append(os.Environ(), "ADMIN_PASSWORD="+adminPassword, "LOG_LEVEL=warn",
-		"UPSTREAM_ERROR_LOG_PATH="+filepath.Join(e.dir, "upstream-error.log"), "TRACE_STORE_ENABLED=false")
+		"UPSTREAM_ERROR_LOG_PATH="+filepath.Join(e.dir, "upstream-error.log"), "TRACE_STORE_ENABLED=false",
+		"SERVER_BIND="+strings.TrimPrefix(e.base, "http://"))
 	e.proc.Stdout, e.proc.Stderr = e.logs, e.logs
 	if err := e.proc.Start(); err != nil {
 		e.t.Fatal(err)

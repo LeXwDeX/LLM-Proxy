@@ -352,3 +352,26 @@ func TestResponsesWebsocketSessionDiagnosticsResetPerTurn(t *testing.T) {
 		t.Fatalf("clean turn diagnostics=%+v", session)
 	}
 }
+
+// Production uses slog.TextHandler; a client-controlled model must stay on one
+// physical line even when it contains newlines or control characters.
+func TestResponsesWebsocketDiagnosticTextHandlerEscapesModel(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	logger.Warn(responsesWebsocketTerminalDiagnostic,
+		"request_id", "req-1",
+		"model", websocketBoundedDiagnosticValue("bad\nname\r\x00\x1b", 128),
+		"status", 502,
+	)
+	if got := strings.Count(logs.String(), "\n"); got != 1 {
+		t.Fatalf("diagnostic emitted %d physical lines:\n%s", got, logs.String())
+	}
+	for _, raw := range []string{"\r", "\x00", "\x1b"} {
+		if strings.Contains(logs.String(), raw) {
+			t.Fatalf("diagnostic leaked raw %q:\n%s", raw, logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "model=") || !strings.Contains(logs.String(), `bad\nname`) {
+		t.Fatalf("escaped model missing:\n%s", logs.String())
+	}
+}
