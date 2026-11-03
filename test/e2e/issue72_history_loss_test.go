@@ -39,6 +39,8 @@ func TestIssue72HistoryEvidenceLoss(t *testing.T) {
 
 	rawKey := issue72RawKey(aliceEvent)
 	quotaKey := issue72QuotaKey(aliceEvent)
+	usageKey := issue72UsageAggKey(aliceEvent)
+	var ownerBefore, quotaBefore, usageBefore []byte
 	db, err := bolt.Open(e.dbPath, 0o600, &bolt.Options{Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +58,13 @@ func TestIssue72HistoryEvidenceLoss(t *testing.T) {
 		if quota == nil || quota.Get(quotaKey) == nil {
 			return fmt.Errorf("quota cell %q missing before injection", quotaKey)
 		}
+		usageAgg := tx.Bucket([]byte("usage_agg_hourly"))
+		if usageAgg == nil || usageAgg.Get(usageKey) == nil {
+			return fmt.Errorf("usage cell %q missing before injection", usageKey)
+		}
+		ownerBefore = append([]byte(nil), owners.Get(rawKey)...)
+		quotaBefore = append([]byte(nil), quota.Get(quotaKey)...)
+		usageBefore = append([]byte(nil), usageAgg.Get(usageKey)...)
 		if err := raw.Delete(rawKey); err != nil {
 			return err
 		}
@@ -108,11 +117,14 @@ func TestIssue72HistoryEvidenceLoss(t *testing.T) {
 		if raw := tx.Bucket([]byte("usage_events")); raw == nil || raw.Get(rawKey) != nil {
 			return fmt.Errorf("raw row %q was recreated", rawKey)
 		}
-		if owners := tx.Bucket([]byte("usage_raw_owners_v1")); owners == nil || owners.Get(rawKey) == nil {
-			return fmt.Errorf("raw owner %q was removed", rawKey)
+		if owners := tx.Bucket([]byte("usage_raw_owners_v1")); owners == nil || !bytes.Equal(owners.Get(rawKey), ownerBefore) {
+			return fmt.Errorf("raw owner %q changed", rawKey)
 		}
-		if quota := tx.Bucket([]byte("quota_usage_agg_hourly")); quota == nil || quota.Get(quotaKey) == nil {
-			return fmt.Errorf("quota cell %q was removed", quotaKey)
+		if quota := tx.Bucket([]byte("quota_usage_agg_hourly")); quota == nil || !bytes.Equal(quota.Get(quotaKey), quotaBefore) {
+			return fmt.Errorf("quota cell %q changed", quotaKey)
+		}
+		if usageAgg := tx.Bucket([]byte("usage_agg_hourly")); usageAgg == nil || !bytes.Equal(usageAgg.Get(usageKey), usageBefore) {
+			return fmt.Errorf("usage cell %q changed", usageKey)
 		}
 		return nil
 	})
@@ -165,8 +177,15 @@ func TestIssue72RecheckAuditPermission(t *testing.T) {
 	if result["status"] != "insufficient_evidence" {
 		t.Fatalf("recheck result: %+v", result)
 	}
-	if !auditHasEvent(t, e, "usage_recheck", operationID, "") {
+	if !auditHasEvent(t, e, "usage_recheck", operationID, "insufficient_evidence") {
 		t.Fatal("successful recheck was not audited")
+	}
+	retry := decode(t, e.admin("POST", "/admin/data/usage/recheck", request, 200))
+	if retry["status"] != result["status"] {
+		t.Fatalf("idempotent retry changed result: first=%+v retry=%+v", result, retry)
+	}
+	if !auditHasEvent(t, e, "usage_recheck", operationID, "retry_insufficient_evidence") {
+		t.Fatal("idempotent retry was not audited")
 	}
 
 	name := "issue72-readonly"
