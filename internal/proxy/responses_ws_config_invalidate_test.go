@@ -190,3 +190,83 @@ func (h *lockProbeHandler) Handle(_ context.Context, r slog.Record) error {
 }
 func (h *lockProbeHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *lockProbeHandler) WithGroup(string) slog.Handler      { return h }
+
+// A lane busy during a configuration save may hold a credential the save
+// removed. On release it must not reserve a spare and dial a new upstream
+// handshake with that credential, while its conversation stays continuable
+// (A5). A busy pre-save lane without a conversation is retired on release.
+func TestResponsesWSBusyLaneAcrossSaveDoesNotPrewarmOldCredentials(t *testing.T) {
+	u := &wsPrewarmUpstream{}
+	server := httptest.NewServer(http.HandlerFunc(u.serve))
+	defer server.Close()
+	s := newWSTestService(t, server.URL, true)
+	if w := wsTestRequest(t, s, "client", "/v1/responses", wsPrewarmBody); w.Code != 200 {
+		t.Fatalf("first: %d %s", w.Code, w.Body.String())
+	}
+	waitForWS(t, "the first spare", func() bool { return s.MetricsSnapshot().ResponsesWS.PrewarmDialOK == 1 })
+	var conversation *responsesWSConn
+	s.responsesWS.mu.Lock()
+	for e := range s.responsesWS.entries {
+		if e.responseID == "resp_1" {
+			conversation = e
+		}
+	}
+	if conversation == nil {
+		s.responsesWS.mu.Unlock()
+		t.Fatal("no lane holds resp_1")
+	}
+	conversation.busy = true // a request owns the lane while the save lands
+	s.responsesWS.mu.Unlock()
+	if err := s.UpdateTargets([]config.Target{wsLifecycleTarget(server.URL, "upstream-test-key")}); err != nil {
+		t.Fatal(err)
+	}
+	attempts := u.attempts.Load()
+	s.responsesWS.release(conversation, true)
+	time.Sleep(100 * time.Millisecond)
+	if got := u.attempts.Load(); got != attempts {
+		t.Fatalf("release of a pre-save lane dialed %d new handshake(s) with its old credentials", got-attempts)
+	}
+	s.responsesWS.mu.Lock()
+	for e := range s.responsesWS.entries {
+		if e.prewarming {
+			s.responsesWS.mu.Unlock()
+			t.Fatal("a pre-save lane reserved a spare after the save")
+		}
+	}
+	s.responsesWS.mu.Unlock()
+	w := wsTestRequest(t, s, "client", "/v1/responses", `{"model":"openai-test","input":"again","previous_response_id":"resp_1"}`)
+	if w.Code != 200 {
+		t.Fatalf("continuation of a pre-save lane: %d %s", w.Code, w.Body.String())
+	}
+	u.mu.Lock()
+	continuedOn := u.continuedOn["resp_1"]
+	u.mu.Unlock()
+	if continuedOn != 1 {
+		t.Fatalf("continuation ran on handshake %d, want the original socket 1", continuedOn)
+	}
+}
+
+// A busy pre-save lane without a conversation is retired when released, like
+// the idle fresh lanes the save already retired.
+func TestResponsesWSReleaseRetiresPreSaveFreshLane(t *testing.T) {
+	p := newResponsesWSPool()
+	defer p.close()
+	fresh := &responsesWSConn{busy: true, gen: p.generation, dial: &responsesWSDialSpec{client: http.DefaultClient, url: "ws://127.0.0.1:1"}}
+	conversation := &responsesWSConn{busy: true, gen: p.generation, owner: [32]byte{2}, dial: &responsesWSDialSpec{client: http.DefaultClient, url: "ws://127.0.0.1:1"}}
+	p.entries[fresh], p.entries[conversation] = struct{}{}, struct{}{}
+	p.invalidateForConfig()
+	conversation.responseID = "resp_1"
+	p.release(fresh, true)
+	p.release(conversation, true)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.entries[fresh]; ok {
+		t.Fatal("pre-save fresh lane survived release")
+	}
+	if _, ok := p.entries[conversation]; !ok || conversation.retired {
+		t.Fatal("pre-save conversation lane must stay continuable")
+	}
+	if len(p.entries) != 1 {
+		t.Fatalf("entries=%d, want no spare reserved for a pre-save lane", len(p.entries))
+	}
+}

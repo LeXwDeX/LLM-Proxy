@@ -253,3 +253,41 @@ func TestPricingCacheCoalescesConcurrentMissesAfterInvalidate(t *testing.T) {
 		}
 	}
 }
+
+// Failed loads are not cached, but concurrent misses during one failing load
+// must share the leader's result and error instead of queuing up and each
+// repeating the full load.
+func TestPricingCacheSharesFailingRebuildWithConcurrentWaiters(t *testing.T) {
+	var loads atomic.Int32
+	entered := make(chan struct{}, 64)
+	release := make(chan struct{})
+	c := NewPricingCache(func() ([]PricingTemplate, error) {
+		loads.Add(1)
+		entered <- struct{}{}
+		<-release
+		return nil, errors.New("bbolt unavailable")
+	}, nil)
+	const callers = 16
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); _, errs[i] = c.GetChecked() }(i)
+	}
+	<-entered
+	time.Sleep(50 * time.Millisecond) // let the other callers join the in-flight load
+	close(release)
+	wg.Wait()
+	if n := loads.Load(); n != 1 {
+		t.Fatalf("one wave of %d failing misses caused %d loads, want 1", callers, n)
+	}
+	for i, err := range errs {
+		if err == nil {
+			t.Fatalf("caller %d got no error from the shared failing load", i)
+		}
+	}
+	// The failure is not cached: the next wave retries.
+	if _, err := c.GetChecked(); err == nil || loads.Load() != 2 {
+		t.Fatalf("next wave did not retry: err=%v loads=%d", err, loads.Load())
+	}
+}

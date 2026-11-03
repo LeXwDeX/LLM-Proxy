@@ -157,6 +157,10 @@ type responsesWSConn struct {
 	pinging       bool
 	pinged        time.Time
 	responseID    string
+	// gen is the pool generation the lane was opened under. A lane from an
+	// older generation keeps serving its conversation but never reserves a
+	// spare: its credential may have been removed by the configuration save.
+	gen uint64
 	// dial is how another lane with this identity is opened in the background.
 	dial *responsesWSDialSpec
 	// prewarming marks a busy placeholder whose background dial is in flight;
@@ -481,7 +485,9 @@ func (p *responsesWSPool) release(e *responsesWSConn, reusable bool) {
 	p.mu.Lock()
 	e.busy = false
 	e.used = time.Now()
-	if !reusable || e.retired || p.closed {
+	// A lane opened before a configuration save without a conversation to
+	// continue is retired like the idle fresh lanes the save already retired.
+	if !reusable || e.retired || p.closed || (e.gen != p.generation && e.responseID == "") {
 		closing = p.removeLocked(e, closing)
 	} else {
 		spare, closing = p.reserveSpareLocked(e, closing)
@@ -508,7 +514,9 @@ func (p *responsesWSPool) release(e *responsesWSConn, reusable bool) {
 // one spare per client: an unused spare of the client's other identity is
 // replaced by one for the identity just used. The caller holds p.mu.
 func (p *responsesWSPool) reserveSpareLocked(e *responsesWSConn, closing []*websocket.Conn) (*responsesWSConn, []*websocket.Conn) {
-	if !p.prewarm || p.closed || e.dial == nil || e.retired {
+	// A lane from an older generation may carry a credential the save removed;
+	// a spare would open a new handshake with it.
+	if !p.prewarm || p.closed || e.dial == nil || e.retired || e.gen != p.generation {
 		return nil, closing
 	}
 	count := 0
@@ -545,7 +553,7 @@ func (p *responsesWSPool) reserveSpareLocked(e *responsesWSConn, closing []*webs
 	if count >= responsesWSPerClient || len(p.entries) >= responsesWSMax {
 		return nil, closing
 	}
-	spare := &responsesWSConn{owner: e.owner, key: e.key, created: now, used: now, busy: true,
+	spare := &responsesWSConn{owner: e.owner, key: e.key, created: now, used: now, busy: true, gen: p.generation,
 		prewarming: true, ready: make(chan struct{}), dial: e.dial, frames: make(chan responsesWSFrame, 8)}
 	// The dial is bounded like a foreground one, and dropping the placeholder
 	// (configuration change, blocked key, capacity) cancels it.
@@ -850,7 +858,7 @@ selectLane:
 		unlock()
 		return nil, nil, true, nil
 	}
-	e := &responsesWSConn{owner: owner, key: key, created: now, used: now, busy: true, frames: make(chan responsesWSFrame, 8),
+	e := &responsesWSConn{owner: owner, key: key, created: now, used: now, busy: true, gen: p.generation, frames: make(chan responsesWSFrame, 8),
 		dial: &responsesWSDialSpec{client: client, url: req.URL.String(), host: req.Host, headers: identityHeaders}}
 	p.entries[e] = struct{}{}
 	gen := p.generation
@@ -1066,7 +1074,8 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 	}
 	if first.err != nil {
 		s.responsesWS.release(e, false)
-		return nil, true, &responsesWSSentError{err: first.err, stage: "wait_first_event"}
+		// Same classification as a close on any later frame.
+		return nil, true, &responsesWSSentError{err: wrapResponsesWSUpstreamClose(first.err), stage: "wait_first_event"}
 	}
 	var event struct {
 		Type   string          `json:"type"`

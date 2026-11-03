@@ -76,20 +76,25 @@ func scanRecentEvents[T any](ctx context.Context, b *bolt.Bucket, limit int, max
 				return nil, false, err
 			}
 		}
+		// Completeness breaks come before the budget check: a budget exhausted
+		// exactly where the result is already complete is not truncation.
+		second := ""
+		if len(k) >= len(eventSecondLayout) {
+			second = string(k[:len(eventSecondLayout)])
+			if lower != "" && second < lower {
+				break
+			}
+			if len(h) == limit && second < h[0].at.UTC().Format(eventSecondLayout) {
+				break
+			}
+		}
 		if maxScan > 0 && scanned >= maxScan {
 			truncated = true
 			break
 		}
 		scanned++
-		if len(k) < len(eventSecondLayout) {
+		if second == "" {
 			continue
-		}
-		second := string(k[:len(eventSecondLayout)])
-		if lower != "" && second < lower {
-			break
-		}
-		if len(h) == limit && second < h[0].at.UTC().Format(eventSecondLayout) {
-			break
 		}
 		var event T
 		if json.Unmarshal(v, &event) != nil {

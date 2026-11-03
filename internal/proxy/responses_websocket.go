@@ -257,10 +257,13 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 		}
 	}()
 	// lastHeard (Unix ns) advances on every pong and every client frame. A
-	// client silent past the liveness window is half-open: end the session so
-	// it does not hold its per-client slot until the idle timeout. There is no
-	// hard read deadline; the 15-minute idle semantics are unchanged.
+	// client silent past the liveness window WHILE A TURN IS IN PROGRESS is
+	// half-open: it gets a 1001 close frame and the session ends, so it does
+	// not hold its per-client slot or upstream work. Between turns silence is
+	// not evidence (many WS libraries answer pings only while the application
+	// reads); there only the 15-minute idle timer applies. No hard read deadline.
 	var lastHeard atomic.Int64
+	var inTurn atomic.Bool
 	lastHeard.Store(time.Now().UnixNano())
 	conn.SetPongHandler(func(string) error {
 		lastHeard.Store(time.Now().UnixNano())
@@ -270,6 +273,12 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 	if livenessWindow < s.websocketPongTimeoutFloor {
 		livenessWindow = s.websocketPongTimeoutFloor
 	}
+	idle := time.NewTimer(s.websocketIdleTimeout)
+	defer idle.Stop()
+	// WriteControl is safe alongside the single data writer (the turn loop).
+	closeWith := func(code int, reason string) {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
+	}
 	go func() {
 		ticker := time.NewTicker(s.websocketPingInterval)
 		defer ticker.Stop()
@@ -278,7 +287,8 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			case <-ctx.Done():
 				return
 			case now := <-ticker.C:
-				if now.Sub(time.Unix(0, lastHeard.Load())) > livenessWindow {
+				if inTurn.Load() && now.Sub(time.Unix(0, lastHeard.Load())) > livenessWindow {
+					closeWith(websocket.CloseGoingAway, "client unresponsive")
 					cancel()
 					return
 				}
@@ -288,11 +298,6 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}()
-	idle := time.NewTimer(s.websocketIdleTimeout)
-	defer idle.Stop()
-	closeWith := func(code int, reason string) {
-		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
-	}
 	// gracefulClose is used only for the drain (1001) and idle (1000) closes:
 	// after the close frame it waits briefly for the client's close (the reader
 	// then ends and cancels ctx) or ctx, instead of dropping TCP at once.
@@ -339,6 +344,7 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			return
 		default:
 		}
+		inTurn.Store(false) // every turn, including rejected messages, ends here
 		idle.Reset(s.websocketIdleTimeout)
 		select {
 		case <-ctx.Done():
@@ -350,6 +356,9 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			gracefulClose(websocket.CloseNormalClosure, "idle timeout")
 			return
 		case payload := <-messages:
+			// The liveness window starts with the turn, not with older silence.
+			lastHeard.Store(time.Now().UnixNano())
+			inTurn.Store(true)
 			// A drain that raced with this message wins: nothing was sent upstream.
 			select {
 			case <-drain:

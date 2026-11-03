@@ -68,3 +68,31 @@ func TestListContextHonorsCancellation(t *testing.T) {
 		t.Fatal("cancelled scan returned no error")
 	}
 }
+
+// A scan whose budget runs out exactly where the result is already complete
+// (heap full with older rows next, or the next row below From) is not
+// truncation: the completeness breaks must be checked before the budget.
+func TestListContextScanBudgetBoundaryIsNotTruncation(t *testing.T) {
+	db := testDB(t)
+	store := NewUsageStore(db)
+	seedRawUsageRows(t, db, 300, "other")
+	old := usageListScanBudget
+	usageListScanBudget = 10
+	defer func() { usageListScanBudget = old }()
+
+	events, truncated, err := store.ListContext(context.Background(), usage.Filter{ClientName: "other", Limit: 10})
+	if err != nil || truncated || len(events) != 10 {
+		t.Fatalf("heap-full boundary: truncated=%v events=%d err=%v, want complete 10", truncated, len(events), err)
+	}
+	from := time.Date(2026, 10, 1, 0, 0, 290, 0, time.UTC)
+	events, truncated, err = store.ListContext(context.Background(), usage.Filter{ClientName: "other", Limit: 100, From: &from})
+	if err != nil || truncated || len(events) != 10 {
+		t.Fatalf("lower-bound boundary: truncated=%v events=%d err=%v, want complete 10", truncated, len(events), err)
+	}
+	// One more matching row beyond the budget is still reported as truncation.
+	from = from.Add(-time.Second)
+	events, truncated, err = store.ListContext(context.Background(), usage.Filter{ClientName: "other", Limit: 100, From: &from})
+	if err != nil || !truncated || len(events) != 10 {
+		t.Fatalf("over budget: truncated=%v events=%d err=%v, want truncated 10", truncated, len(events), err)
+	}
+}

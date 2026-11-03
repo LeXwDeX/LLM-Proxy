@@ -13,9 +13,14 @@ import (
 
 func websocketLivenessProxy(t *testing.T, configure func(*Service)) (*Service, *httptest.Server) {
 	t.Helper()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return websocketLivenessProxyWith(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unused", 500)
-	}))
+	}, configure)
+}
+
+func websocketLivenessProxyWith(t *testing.T, handler http.HandlerFunc, configure func(*Service)) (*Service, *httptest.Server) {
+	t.Helper()
+	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 	service, _, _ := websocketTestProxy(t, upstream.URL)
 	configure(service)
@@ -43,21 +48,84 @@ func dialLiveness(t *testing.T, server *httptest.Server) *websocket.Conn {
 	return conn
 }
 
-// Issue #153 B11: a half-open client that never answers pings is ended once
-// no pong or frame arrived for the liveness window, releasing its slot.
-func TestResponsesWebsocketHalfOpenClientEndsSession(t *testing.T) {
-	s, server := websocketLivenessProxy(t, func(s *Service) {
+// Issue #153 B11: a client that goes half-open DURING a turn (no pong, no
+// frame for the liveness window) is ended: it receives a 1001 close frame
+// where it can still read, and the session releases its slot.
+func TestResponsesWebsocketHalfOpenClientDuringTurnEndsSession(t *testing.T) {
+	upstreamDone := make(chan struct{})
+	t.Cleanup(func() { close(upstreamDone) })
+	s, server := websocketLivenessProxyWith(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "no websocket here", http.StatusNotFound) // falls back to HTTP
+			return
+		}
+		// The turn stays in progress: headers flushed, no event ever sent.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-upstreamDone:
+		}
+	}, func(s *Service) {
 		s.websocketPingInterval = 20 * time.Millisecond
 		s.websocketPongTimeoutFloor = 100 * time.Millisecond
 	})
 	conn := dialLiveness(t, server)
-	// Never read: gorilla answers pings only while reading, so no pong is sent.
-	_ = conn
+	// A half-open peer never answers pings; reading only to observe the close.
+	conn.SetPingHandler(func(string) error { return nil })
+	closed := make(chan error, 1)
 	waitForWS(t, "the session to register", func() bool { return websocketSessionCount(s) == 1 })
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"codex-fast","input":"hi"}`)); err != nil {
+		t.Fatal(err)
+	}
 	started := time.Now()
-	waitForWS(t, "the half-open session to end", func() bool { return websocketSessionCount(s) == 0 })
+	go func() {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				closed <- err
+				return
+			}
+		}
+	}()
+	var err error
+	select {
+	case err = <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("half-open client was not ended during the turn")
+	}
 	if elapsed := time.Since(started); elapsed < 50*time.Millisecond {
 		t.Fatalf("session ended after %v, before the liveness window", elapsed)
+	}
+	if ce, ok := err.(*websocket.CloseError); !ok || ce.Code != websocket.CloseGoingAway {
+		t.Fatalf("half-open client got %v, want a 1001 close frame", err)
+	}
+	waitForWS(t, "the half-open session to end", func() bool { return websocketSessionCount(s) == 0 })
+}
+
+// Between turns a healthy client may stop reading (many WS libraries answer
+// pings only while the application reads). Silence then is not half-open:
+// the session survives past the liveness window and ends only by the idle
+// timer with its normal 1000 close.
+func TestResponsesWebsocketQuietClientBetweenTurnsSurvivesUntilIdle(t *testing.T) {
+	s, server := websocketLivenessProxy(t, func(s *Service) {
+		s.websocketPingInterval = 20 * time.Millisecond
+		s.websocketPongTimeoutFloor = 100 * time.Millisecond
+		s.websocketIdleTimeout = 600 * time.Millisecond
+	})
+	conn := dialLiveness(t, server)
+	waitForWS(t, "the session to register", func() bool { return websocketSessionCount(s) == 1 })
+	started := time.Now()
+	time.Sleep(400 * time.Millisecond) // 4x the liveness window, never reading
+	if websocketSessionCount(s) != 1 {
+		t.Fatal("a quiet client between turns was dropped by the liveness check")
+	}
+	_, _, err := conn.ReadMessage()
+	if ce, ok := err.(*websocket.CloseError); !ok || ce.Code != websocket.CloseNormalClosure {
+		t.Fatalf("expected the idle close 1000, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 550*time.Millisecond {
+		t.Fatalf("session closed after %v, before the idle timeout", elapsed)
 	}
 }
 
