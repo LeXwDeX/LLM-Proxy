@@ -10,6 +10,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -30,14 +31,28 @@ func TestUsageIntegrityMetricsReadback(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	if code, body := w.adminDo("GET", "/admin/data/usage/aggregate?group_by=hour", nil); code != 200 {
-		t.Fatalf("aggregate readback: %d %s", code, body)
+	before := fastReads(t)
+	var after float64
+	for attempt := 0; attempt < 10; attempt++ {
+		now := time.Now().UTC()
+		q := url.Values{
+			"group_by": {"hour"},
+			"from":     {now.Add(-time.Hour + time.Duration(attempt)*time.Second).Format(time.RFC3339)},
+			"to":       {now.Format(time.RFC3339)},
+		}
+		if code, body := w.adminDo("GET", "/admin/data/usage/aggregate?"+q.Encode(), nil); code != 200 {
+			t.Fatalf("aggregate readback: %d %s", code, body)
+		}
+		after = fastReads(t)
+		if after > before {
+			break
+		}
+	}
+	if after <= before {
+		t.Fatalf("usage_integrity.fast_reads did not increase: before=%v after=%v", before, after)
 	}
 	metrics := readMetrics(t)
 	integrity := metrics["usage_integrity"].(map[string]any)
-	if fast, _ := integrity["fast_reads"].(float64); fast <= 0 {
-		t.Fatalf("usage_integrity.fast_reads=%v after aggregate readback", integrity["fast_reads"])
-	}
 	fallbacks, ok := integrity["fallback_reads"].(map[string]any)
 	if !ok {
 		t.Fatalf("usage_integrity.fallback_reads missing: %v", integrity["fallback_reads"])
@@ -61,4 +76,11 @@ func readMetrics(t *testing.T) map[string]any {
 		t.Fatalf("decode /admin/metrics: %v", err)
 	}
 	return metrics
+}
+
+func fastReads(t *testing.T) float64 {
+	t.Helper()
+	integrity, _ := readMetrics(t)["usage_integrity"].(map[string]any)
+	fast, _ := integrity["fast_reads"].(float64)
+	return fast
 }
