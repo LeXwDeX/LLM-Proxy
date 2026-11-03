@@ -158,6 +158,9 @@ func TestResponsesWebsocketFallbackPreSendErrorFailsOver(t *testing.T) {
 			return
 		}
 		posts.Add(1)
+		// No keep-alive: turn 2 must dial a fresh (refused) connection, not
+		// reuse a pooled one that a.Close() turns into a post-write EOF.
+		w.Header().Set("Connection", "close")
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, paritySSECompleted)
 	}))

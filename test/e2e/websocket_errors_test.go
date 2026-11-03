@@ -287,7 +287,12 @@ func TestWSErrPooledUpstreamCloseNotReplayed(t *testing.T) {
 // target within the same turn.
 func TestWSErrNativeFallbackConnectionRefusedFailsOver(t *testing.T) {
 	fakeC := fakellm.New(fakellm.Options{Name: "fake-c"})
-	srvC := httptest.NewServer(fakeC)
+	// No keep-alive: the failing turn must dial a fresh (refused) connection,
+	// not reuse a pooled one that srvC.Close() turns into a post-write EOF.
+	srvC := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Connection", "close")
+		fakeC.ServeHTTP(rw, r)
+	}))
 	defer srvC.Close()
 	p := pool(t)
 	alias := uniq("wsrefused")
