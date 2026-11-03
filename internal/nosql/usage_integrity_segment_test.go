@@ -192,6 +192,9 @@ func TestIntegrityClassificationSegmentIndexProgressChange(t *testing.T) {
 	if integrityEpoch.Load() != epoch || calls != 1 || after.Complete || after.LastDiscardReason != integrityFallbackIndexProgressChanged || after.FallbackReads[integrityFallbackIndexProgressChanged] != before.FallbackReads[integrityFallbackIndexProgressChanged]+1 {
 		t.Fatalf("index change did not discard round: calls=%d before=%+v after=%+v", calls, before, after)
 	}
+	if after.SegmentMaxTxMS <= 0 {
+		t.Fatalf("early index-progress exit was not timed: %+v", after)
+	}
 }
 
 func TestIntegrityClassificationSegmentsCancelKeepsPreviousClass(t *testing.T) {
@@ -230,6 +233,18 @@ func TestIntegrityClassificationDiscardStallAndBackoff(t *testing.T) {
 	recordClassificationAttempt(context.Background(), db, &attempt)
 	if stats := UsageIntegrityStats(db); stats.DiscardedRounds != 0 || stats.ClassificationStalled {
 		t.Fatalf("incomplete counted as stall: %+v", stats)
+	}
+
+	// A non-consistency failure must reset the consecutive streak.
+	attempt = classificationAttempt{reason: integrityFallbackEpochChanged}
+	recordClassificationAttempt(context.Background(), db, &attempt)
+	if stats := UsageIntegrityStats(db); stats.DiscardedRounds != 1 {
+		t.Fatalf("first consistency discard: %+v", stats)
+	}
+	attempt = classificationAttempt{reason: integrityFallbackIncomplete}
+	recordClassificationAttempt(context.Background(), db, &attempt)
+	if stats := UsageIntegrityStats(db); stats.DiscardedRounds != 0 || stats.ClassificationStalled {
+		t.Fatalf("incomplete did not reset consecutive streak: %+v", stats)
 	}
 
 	for i, wantDelay := range []time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second} {
@@ -413,8 +428,8 @@ func TestIntegrityClassificationSegmentDurations(t *testing.T) {
 	if stats.WriterLockMaxMS <= 0 {
 		t.Fatalf("writer_lock_max_ms=%v, want >0", stats.WriterLockMaxMS)
 	}
-	if stats.SegmentMaxTxMS < 0 {
-		t.Fatalf("segment_max_tx_ms=%v, want >=0", stats.SegmentMaxTxMS)
+	if stats.SegmentMaxTxMS <= 0 {
+		t.Fatalf("segment_max_tx_ms=%v, want >0", stats.SegmentMaxTxMS)
 	}
 }
 
