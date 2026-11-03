@@ -234,9 +234,11 @@ func TestResponsesWSHandshakeTimeoutAndCapacityDoNotFallback(t *testing.T) {
 				s.responsesWS.mu.Unlock()
 			}
 			w := wsTestRequest(t, s, "client", "/v1/responses", `{"model":"openai-test","input":"hello"}`)
-			// A handshake timeout never falls back; a full pool sends nothing over
-			// WS, so it uses HTTP for this request instead.
-			want, wantPosts := 504, int32(0)
+			// A handshake timeout never falls back to HTTP on the same target; a
+			// full pool sends nothing over WS, so it uses HTTP for this request
+			// instead. Like an HTTP dial timeout (#153), the timeout fails over;
+			// with no other target the selection error (503) ends the request.
+			want, wantPosts := 503, int32(0)
 			if capacity {
 				want, wantPosts = 200, 1
 			}

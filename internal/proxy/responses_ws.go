@@ -59,11 +59,19 @@ const (
 	responsesWSAge       = 55 * time.Minute
 	responsesWSMax       = 128
 	responsesWSPerClient = 4
-	// A lane stops reading when its consumer leaves a frame unread this long.
-	responsesWSFrameBacklog = 30 * time.Second
 	// Upper bound of one upstream WebSocket handshake.
 	responsesWSDialTimeout = 5 * time.Second
 )
+
+// A lane stops reading when its consumer leaves a frame unread this long.
+// A variable so tests can shorten it.
+var responsesWSFrameBacklog = 30 * time.Second
+
+// errResponsesWSLaneClosed is reported when a lane's frames channel closes
+// without a final error frame: its consumer fell behind past
+// responsesWSFrameBacklog, or the pool closed. Neither is upstream failure
+// evidence, so the target is not marked failed.
+var errResponsesWSLaneClosed = errors.New("upstream WebSocket lane closed before the response finished; it was not replayed")
 
 type responsesWSFrame struct {
 	data []byte
@@ -76,6 +84,21 @@ type responsesWSHandshakeError struct{ err error }
 
 func (e *responsesWSHandshakeError) Error() string { return e.err.Error() }
 func (e *responsesWSHandshakeError) Unwrap() error { return e.err }
+
+// errResponsesWSHandshakeTimeout reports an upstream WebSocket upgrade that did
+// not complete within its own handshake timeout while the attempt was still
+// alive. No response.create frame can have been sent, so it carries no
+// inference or billing risk: isPreSendTransportError treats it like a dial
+// timeout (fail over once, mark the target). It still classifies as a
+// timeout (504) and never falls back to HTTP on the same target.
+var errResponsesWSHandshakeTimeout error = responsesWSHandshakeTimeoutError{}
+
+type responsesWSHandshakeTimeoutError struct{}
+
+func (responsesWSHandshakeTimeoutError) Error() string {
+	return "upstream WebSocket handshake timed out before any request was sent"
+}
+func (responsesWSHandshakeTimeoutError) Unwrap() error { return context.DeadlineExceeded }
 
 // Dial closes failed handshake bodies and retains only their first 1024 bytes.
 // Keep the original non-upgrade body out of Dial's ownership so the proxy can
@@ -826,7 +849,7 @@ selectLane:
 			_ = handshake.Body.Close()
 		}
 		p.release(e, false)
-		return nil, nil, false, context.DeadlineExceeded
+		return nil, nil, false, &responsesWSHandshakeError{errResponsesWSHandshakeTimeout}
 	}
 	if err != nil {
 		p.release(e, false)
@@ -840,7 +863,7 @@ selectLane:
 			if handshake != nil && handshake.Body != nil {
 				_ = handshake.Body.Close()
 			}
-			return nil, nil, false, context.DeadlineExceeded
+			return nil, nil, false, &responsesWSHandshakeError{errResponsesWSHandshakeTimeout}
 		}
 		if handshake != nil {
 			if handshake.StatusCode == 400 || handshake.StatusCode == 404 || handshake.StatusCode == 405 || handshake.StatusCode == 426 || handshake.StatusCode == 501 {
@@ -986,7 +1009,11 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 	}
 	var first responsesWSFrame
 	select {
-	case first = <-e.frames:
+	case frame, ok := <-e.frames:
+		first = frame
+		if !ok {
+			first.err = errResponsesWSLaneClosed
+		}
 	case <-req.Context().Done():
 		first.err = req.Context().Err()
 	}
@@ -1040,6 +1067,9 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 		for {
 			if frame.err != nil {
 				responseErr = frame.err
+				if errors.Is(frame.err, errResponsesWSLaneClosed) {
+					b.noMute.Store(true) // backlog or pool close: not the upstream
+				}
 				b.failed.Store(true)
 				_ = writer.CloseWithError(frame.err)
 				return
@@ -1124,7 +1154,11 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 				return
 			}
 			select {
-			case frame = <-e.frames:
+			case next, ok := <-e.frames:
+				frame = next
+				if !ok {
+					frame.err = errResponsesWSLaneClosed
+				}
 			case <-req.Context().Done():
 				frame = responsesWSFrame{err: req.Context().Err()}
 			}

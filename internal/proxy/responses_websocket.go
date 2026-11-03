@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,7 @@ type responsesWebsocketSession struct {
 	target        string
 	established   bool
 	failure       string
+	failureCode   string
 	turnFailed    bool
 	turnStatus    int
 	turnErrorBody []byte
@@ -167,6 +169,23 @@ func websocketSequenceDiagnostic(raw []byte) string {
 type responsesWebsocketError struct {
 	status int
 	err    error
+	// code is the client-facing error code; empty means proxy_request_failed.
+	code string
+	// message is client-facing text for proxy-authored errors. Transport
+	// errors leave it empty: their text can name the upstream host, port and
+	// path, so the client gets a fixed message with the error category only.
+	message string
+}
+
+func newResponsesWebsocketLocalError(status int, code, message string) *responsesWebsocketError {
+	return &responsesWebsocketError{status: status, err: errors.New(message), code: code, message: message}
+}
+
+func (e *responsesWebsocketError) clientMessage() string {
+	if e.message != "" {
+		return e.message
+	}
+	return "upstream request failed and was not replayed (" + errorlog.ErrorCategory(e.err) + ")"
 }
 
 func (e *responsesWebsocketError) Error() string { return e.err.Error() }
@@ -180,6 +199,13 @@ type responsesWebsocketHandshakeError struct {
 	header   http.Header
 	complete bool
 	err      error
+	// upstreamStatus is the status the upstream actually returned.
+	upstreamStatus int
+}
+
+// clientMessage omits the read error, whose text can name the upstream.
+func (e *responsesWebsocketHandshakeError) clientMessage() string {
+	return fmt.Sprintf("upstream WebSocket handshake rejected (HTTP %d)", e.upstreamStatus)
 }
 
 func (e *responsesWebsocketHandshakeError) Error() string { return e.err.Error() }
@@ -359,6 +385,7 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			}
 			request = request.WithContext(auth.WithPrincipal(request.Context(), principal))
 			session.failure = ""
+			session.failureCode = ""
 			session.httpFallback = false
 			session.turnFailed = false
 			session.turnStatus = 0
@@ -366,25 +393,27 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			session.turnHandshake = false
 			writer := &responsesWebsocketWriter{conn: conn, session: session, header: make(http.Header)}
 			appmiddleware.RequestID()(http.HandlerFunc(s.ServeHTTP)).ServeHTTP(writer, request)
-			if writer.err != nil || ctx.Err() != nil {
+			if ctx.Err() != nil || writer.clientErr {
 				return
 			}
+			if writer.err != nil {
+				// The adapter rejected upstream content. The client socket is
+				// healthy: end this turn with an error event and keep the session.
+				if writer.rejectCode == "" {
+					return
+				}
+				message := "upstream sent an invalid event; it was not replayed"
+				if writer.rejectCode == "upstream_event_too_large" {
+					message = "upstream event exceeds the native WebSocket message limit; it was not replayed"
+				}
+				if writeResponsesWebsocketError(conn, http.StatusBadGateway, writer.rejectCode, message) != nil {
+					return
+				}
+				continue
+			}
 			if writer.status >= 400 {
-				var envelope struct {
-					Error json.RawMessage `json:"error"`
-				}
-				if (session.httpFallback || session.turnHandshake) && json.Unmarshal(writer.buffer.Bytes(), &envelope) == nil && len(envelope.Error) > 0 {
-					conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-					if conn.WriteJSON(map[string]any{"type": "error", "status": writer.status, "error": envelope.Error}) != nil {
-						return
-					}
-					continue
-				}
-				message := strings.TrimSpace(writer.buffer.String())
-				if session.failure != "" {
-					message = session.failure
-				}
-				if writeResponsesWebsocketError(conn, writer.status, "proxy_request_failed", message) != nil {
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if conn.WriteJSON(responsesWebsocketTurnErrorEvent(session, writer)) != nil {
 					return
 				}
 			} else if !writer.terminal {
@@ -421,9 +450,46 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// responsesWebsocketTurnErrorEvent converts a turn the HTTP pipeline answered
+// with status >= 400 into one native error event. A recorded session failure
+// keeps its proxy error; otherwise a JSON error object (upstream fallback or
+// handshake rejections, and proxy-local quota/limit responses alike) passes
+// through unchanged. Retry-After is exposed as retry_after (seconds).
+func responsesWebsocketTurnErrorEvent(session *responsesWebsocketSession, writer *responsesWebsocketWriter) map[string]any {
+	var event map[string]any
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	switch {
+	case session.failure != "":
+		code := session.failureCode
+		if code == "" {
+			code = "proxy_request_failed"
+		}
+		event = responsesWebsocketProxyErrorEvent(writer.status, code, session.failure)
+	case json.Unmarshal(writer.buffer.Bytes(), &envelope) == nil && len(envelope.Error) > 0 &&
+		(session.httpFallback || session.turnHandshake || envelope.Error[0] == '{'):
+		event = map[string]any{"type": "error", "status": writer.status, "error": envelope.Error}
+	default:
+		message := strings.TrimSpace(writer.buffer.String())
+		if message == "" {
+			message = http.StatusText(writer.status)
+		}
+		event = responsesWebsocketProxyErrorEvent(writer.status, "proxy_request_failed", message)
+	}
+	if seconds, err := strconv.Atoi(strings.TrimSpace(writer.header.Get("Retry-After"))); err == nil && seconds >= 0 {
+		event["retry_after"] = seconds
+	}
+	return event
+}
+
+func responsesWebsocketProxyErrorEvent(status int, code, message string) map[string]any {
+	return map[string]any{"type": "error", "status": status, "error": map[string]string{"type": "proxy_error", "code": code, "message": message}}
+}
+
 func writeResponsesWebsocketError(conn *websocket.Conn, status int, code, message string) error {
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	return conn.WriteJSON(map[string]any{"type": "error", "status": status, "error": map[string]string{"type": "proxy_error", "code": code, "message": message}})
+	return conn.WriteJSON(responsesWebsocketProxyErrorEvent(status, code, message))
 }
 
 func websocketDiagnosticValue(value string) string {
@@ -456,6 +522,9 @@ type responsesWebsocketWriter struct {
 	// clientErr marks a failed write to the downstream socket, as opposed to
 	// upstream content the adapter rejected.
 	clientErr bool
+	// rejectCode names the upstream content the adapter rejected (an event or
+	// error body over the native message limit, or invalid event JSON).
+	rejectCode string
 }
 
 func (w *responsesWebsocketWriter) Header() http.Header { return w.header }
@@ -476,6 +545,7 @@ func (w *responsesWebsocketWriter) Write(data []byte) (int, error) {
 	if w.status >= 400 {
 		if len(data) > responsesWebsocketMaxMessage-w.buffer.Len() {
 			w.err = errors.New("upstream error exceeds native WebSocket message limit")
+			w.rejectCode = "upstream_event_too_large"
 			return 0, w.err
 		}
 		w.buffer.Write(data)
@@ -493,6 +563,7 @@ func (w *responsesWebsocketWriter) Write(data []byte) (int, error) {
 		w.eventLen++
 		if w.eventLen > responsesWebsocketMaxMessage {
 			w.err = errors.New("SSE event exceeds native WebSocket message limit")
+			w.rejectCode = "upstream_event_too_large"
 			return 0, w.err
 		}
 		if b != '\r' && b != '\n' {
@@ -526,6 +597,7 @@ func (w *responsesWebsocketWriter) finishSSELine() error {
 		}
 		terminal, valid := responsesWebsocketEventTerminal(&w.members, event)
 		if !valid {
+			w.rejectCode = "upstream_invalid_event"
 			return errors.New("invalid JSON in upstream SSE event")
 		}
 		if terminal {
@@ -583,7 +655,14 @@ func (session *responsesWebsocketSession) httpFallbackTurn(s *Service, req *http
 	}
 	fallback, err := s.doGenerationHTTP(req)
 	if err != nil {
-		return nil, &responsesWebsocketError{classifyTransportError(err), err}
+		// A failure provably before any request byte (dial, TLS handshake)
+		// fails over like the native dial path; anything later may have reached
+		// the upstream and is never replayed.
+		if isPreSendTransportError(req.Context(), err) {
+			session.httpFallback = false
+			return nil, err
+		}
+		return nil, &responsesWebsocketError{status: classifyTransportError(err), err: err}
 	}
 	// Native frames and usage must consume the same decoded stream.
 	// Explicit Accept-Encoding or a custom transport can prevent the
@@ -644,18 +723,18 @@ func responsesWebsocketEventTerminal(members *[]jsonMember, data []byte) (termin
 func (session *responsesWebsocketSession) do(req *http.Request, target *Target, s *Service) (*http.Response, error) {
 	session.httpFallback = false
 	if target.EndpointType != config.EndpointTypeOpenAI && target.EndpointType != config.EndpointTypeDualProtocol {
-		return nil, &responsesWebsocketError{400, errors.New("Responses WebSocket requires an openai or dual_protocol target")}
+		return nil, newResponsesWebsocketLocalError(400, "", "Responses WebSocket requires an openai or dual_protocol target")
 	}
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		return nil, &responsesWebsocketError{400, err}
+		return nil, &responsesWebsocketError{status: 400, err: err}
 	}
 	payload, ok := scanJSONObject(nil, body)
 	if !ok {
-		return nil, &responsesWebsocketError{400, errors.New("Responses WebSocket request body is not a JSON object")}
+		return nil, newResponsesWebsocketLocalError(400, "", "Responses WebSocket request body is not a JSON object")
 	}
 	if jsonHas(payload, "stream_id") {
-		return nil, &responsesWebsocketError{400, errors.New("named streams and parallel responses are not supported")}
+		return nil, newResponsesWebsocketLocalError(400, "", "named streams and parallel responses are not supported")
 	}
 	previousID, _ := jsonString(jsonLast(payload, "previous_response_id"))
 	// Edit only the transport members; the rest keeps its original bytes.
@@ -687,7 +766,7 @@ func (session *responsesWebsocketSession) do(req *http.Request, target *Target, 
 		}
 	}()
 	if session.established && previousID != "" && (session.identity != identity || (session.conn == nil && !session.httpSession)) {
-		return nil, &responsesWebsocketError{409, errors.New("WebSocket session changed; restart with full input and without previous_response_id")}
+		return nil, newResponsesWebsocketLocalError(409, "websocket_session_changed", "WebSocket session changed; restart with full input and without previous_response_id")
 	}
 	if session.conn != nil && session.identity != identity {
 		session.conn.Close()
@@ -701,7 +780,7 @@ func (session *responsesWebsocketSession) do(req *http.Request, target *Target, 
 		case "https":
 			upstreamURL.Scheme = "wss"
 		default:
-			return nil, &responsesWebsocketError{400, errors.New("unsupported upstream WebSocket URL scheme")}
+			return nil, newResponsesWebsocketLocalError(400, "", "unsupported upstream WebSocket URL scheme")
 		}
 		unsupported, gen := s.responsesWS.knownUnsupported(identity)
 		if unsupported {
@@ -742,8 +821,12 @@ func (session *responsesWebsocketSession) do(req *http.Request, target *Target, 
 					}
 				}()
 			}
+			if err := req.Context().Err(); err != nil {
+				return nil, err // the attempt or parent ended: never a failover
+			}
 			if dialCtx.Err() != nil {
-				return nil, dialCtx.Err()
+				// Only the handshake's own timeout expired: nothing was sent.
+				return nil, errResponsesWSHandshakeTimeout
 			}
 			if response != nil {
 				status := response.StatusCode
@@ -763,7 +846,7 @@ func (session *responsesWebsocketSession) do(req *http.Request, target *Target, 
 				if status < 400 {
 					status = http.StatusBadGateway
 				}
-				handshake := &responsesWebsocketHandshakeError{status: status, header: response.Header.Clone(), complete: response.Body == nil, err: fmt.Errorf("upstream WebSocket handshake rejected (HTTP %d)", response.StatusCode)}
+				handshake := &responsesWebsocketHandshakeError{status: status, header: response.Header.Clone(), complete: response.Body == nil, upstreamStatus: response.StatusCode, err: fmt.Errorf("upstream WebSocket handshake rejected (HTTP %d)", response.StatusCode)}
 				if response.Body != nil {
 					// A configured transport may not honor context cancellation. Own
 					// the original body's close once, independently of the saved body.
@@ -828,7 +911,8 @@ func (session *responsesWebsocketSession) do(req *http.Request, target *Target, 
 		session.conn = nil
 		// The frame may have partly reached the upstream: account it as an
 		// incomplete generation, exactly like the pooled path, and never replay.
-		return nil, &responsesWebsocketError{502, &responsesWSSentError{err: fmt.Errorf("WebSocket send failed; response was not replayed: %w", err), stage: "send"}}
+		return nil, &responsesWebsocketError{status: 502, err: &responsesWSSentError{err: fmt.Errorf("WebSocket send failed; response was not replayed: %w", err), stage: "send"},
+			message: "WebSocket send failed; response was not replayed (" + errorlog.ErrorCategory(err) + ")"}
 	}
 	reader := &responsesWebsocketBody{session: session, conn: conn, ctx: req.Context(), stop: stop}
 	handedOff = true // the body ends the turn when it closes

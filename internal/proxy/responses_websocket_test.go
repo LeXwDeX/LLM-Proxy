@@ -467,6 +467,9 @@ func TestResponsesWebsocketContinuationDoesNotChangeCredential(t *testing.T) {
 	if !strings.Contains(details["message"].(string), "full input") {
 		t.Fatalf("recovery instruction missing: %v", event)
 	}
+	if details["code"] != "websocket_session_changed" {
+		t.Fatalf("session change code=%v", details["code"])
+	}
 	if connections.Load() != 1 || requests.Load() != 1 {
 		t.Fatal("continuation crossed credential boundary")
 	}

@@ -141,7 +141,7 @@ func TestSelectedGLMErrorPolicyOnGeminiProtocol(t *testing.T) {
 			defer svc.Close()
 			state := svc.targetsByName["test"]
 			body := []byte(`{"error":{"code":"1308","message":"quota exhausted"}}`)
-			if !svc.observeResponsesKeyFailure(state, state.Target(), "unlisted-model", config.ProtocolGemini, 0, 429, body) {
+			if !svc.observeResponsesKeyFailure(state, state.Target(), "unlisted-model", config.ProtocolGemini, 0, 429, body, true) {
 				t.Fatal("429 did not update key state")
 			}
 			want := "rate_limited"

@@ -54,21 +54,21 @@ func serveTraceCapture(s *Service, principal *auth.Principal) *httptest.Response
 }
 
 func TestResponseCaptureOnlyWhenNeeded(t *testing.T) {
+	// WS turns follow the same rule (#153): a successful turn never reads the
+	// capture, so upstream and native WS 2xx turns skip it too.
 	for _, tc := range []struct {
-		name                          string
-		trace                         bool
-		status                        int
-		upstreamWS, nativeWS, capture bool
+		name    string
+		trace   bool
+		status  int
+		capture bool
 	}{
-		{"2xx without trace", false, 200, false, false, false},
-		{"3xx without trace", false, 304, false, false, false},
-		{"2xx with trace", true, 200, false, false, true},
-		{"4xx without trace", false, 404, false, false, true},
-		{"5xx without trace", false, 503, false, false, true},
-		{"upstream WS", false, 200, true, false, true},
-		{"native WS turn", false, 200, false, true, true},
+		{"2xx without trace (HTTP, upstream WS or native WS turn)", false, 200, false},
+		{"3xx without trace", false, 304, false},
+		{"2xx with trace", true, 200, true},
+		{"4xx without trace", false, 404, true},
+		{"5xx without trace", false, 503, true},
 	} {
-		if got := responseCaptureNeeded(tc.trace, tc.status, tc.upstreamWS, tc.nativeWS); got != tc.capture {
+		if got := responseCaptureNeeded(tc.trace, tc.status); got != tc.capture {
 			t.Errorf("%s: capture=%v want %v", tc.name, got, tc.capture)
 		}
 	}
