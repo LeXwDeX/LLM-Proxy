@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -47,5 +48,29 @@ func TestCachedReportTTLOverridesDefault(t *testing.T) {
 	serveReport(next, "/api/activity", nil)
 	if n.Load() != 2 {
 		t.Fatalf("not recomputed after ttl: %d", n.Load())
+	}
+}
+
+type statusTrackingWriter struct {
+	header http.Header
+	status int
+	body   int
+}
+
+func (w *statusTrackingWriter) Header() http.Header         { return w.header }
+func (w *statusTrackingWriter) WriteHeader(code int)        { w.status = code }
+func (w *statusTrackingWriter) Write(b []byte) (int, error) { w.body += len(b); return len(b), nil }
+
+// The shared report cache treats a computation as aborted only when the
+// handler wrote nothing; a disconnected leader must not hand its waiters a 500.
+func TestActivityClientAbortWritesNothing(t *testing.T) {
+	entry, _, _ := newNamedTargetUpdateTestHandler(t, t.TempDir(), "local", []string{"local-test"})
+	h := entry.(*Handler)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := &statusTrackingWriter{header: make(http.Header)}
+	h.handleActivity(w, httptest.NewRequest(http.MethodGet, "/api/activity", nil).WithContext(ctx))
+	if w.status != 0 || w.body != 0 {
+		t.Fatalf("aborted activity wrote status=%d body=%d bytes", w.status, w.body)
 	}
 }
