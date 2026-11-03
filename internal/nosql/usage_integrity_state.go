@@ -132,6 +132,18 @@ type classificationAttempt struct {
 	measured      bool
 }
 
+func (a *classificationAttempt) observeSegment(d time.Duration) {
+	if d > a.segmentMax {
+		a.segmentMax = d
+	}
+}
+
+func (a *classificationAttempt) observeWriterLock(d time.Duration) {
+	if d > a.writerLockMax {
+		a.writerLockMax = d
+	}
+}
+
 func runClassificationAttempt(ctx context.Context, db *bolt.DB) (attempt classificationAttempt) {
 	var started time.Time
 	defer func() {
@@ -154,9 +166,7 @@ func runClassificationAttempt(ctx context.Context, db *bolt.DB) (attempt classif
 		epoch := integrityEpoch.Load()
 		inflight := integrityInflight.Load()
 		if inflight != 0 || (build != nil && epoch != build.epoch) {
-			if d := time.Since(lockStarted); d > attempt.writerLockMax {
-				attempt.writerLockMax = d
-			}
+			attempt.observeWriterLock(time.Since(lockStarted))
 			_ = writer.Rollback()
 			attempt.reason = integrityFallbackEpochChanged
 			if build == nil {
@@ -164,21 +174,20 @@ func runClassificationAttempt(ctx context.Context, db *bolt.DB) (attempt classif
 			}
 			return
 		}
+		txStarted := time.Now()
 		tx, err := db.Begin(false)
-		if d := time.Since(lockStarted); d > attempt.writerLockMax {
-			attempt.writerLockMax = d
-		}
+		attempt.observeWriterLock(time.Since(lockStarted))
 		_ = writer.Rollback()
 		if err != nil {
 			attempt.err = err
 			return
 		}
-		segmentStarted := time.Now()
 		if build == nil {
 			started = time.Now()
 			attempt.measured = true
 			build, attempt.reason = newClassificationBuild(tx)
 			if build == nil {
+				attempt.observeSegment(time.Since(txStarted))
 				_ = tx.Rollback()
 				return
 			}
@@ -186,15 +195,14 @@ func runClassificationAttempt(ctx context.Context, db *bolt.DB) (attempt classif
 		} else {
 			progress, classified := classificationIndexProgress(tx)
 			if classified != build.indexClassified || !sameIndexProgress(progress, build.indexProgress) {
+				attempt.observeSegment(time.Since(txStarted))
 				_ = tx.Rollback()
 				attempt.reason = integrityFallbackIndexProgressChanged
 				return
 			}
 		}
 		build.runSegment(ctx, tx, integrityClassifySegmentBudget, integrityClassifySegmentDuration)
-		if d := time.Since(segmentStarted); d > attempt.segmentMax {
-			attempt.segmentMax = d
-		}
+		attempt.observeSegment(time.Since(txStarted))
 		_ = tx.Rollback()
 		if integrityClassifySegmentBoundary != nil {
 			integrityClassifySegmentBoundary()
@@ -222,9 +230,9 @@ func recordClassificationAttempt(ctx context.Context, db *bolt.DB, attempt *clas
 		// Validate and install while holding the writer lock, so progress cannot
 		// change between the final snapshot and publication.
 		var writer *bolt.Tx
+		installStarted := time.Now()
 		writer, attempt.err = db.Begin(true)
 		if attempt.err == nil {
-			defer writer.Rollback()
 			if attempt.err = ctx.Err(); attempt.err == nil {
 				if integrityEpoch.Load() != attempt.epoch || integrityInflight.Load() != 0 {
 					attempt.class, attempt.reason = nil, integrityFallbackEpochChanged
@@ -243,6 +251,8 @@ func recordClassificationAttempt(ctx context.Context, db *bolt.DB, attempt *clas
 					}
 				}
 			}
+			attempt.observeWriterLock(time.Since(installStarted))
+			_ = writer.Rollback()
 		}
 	}
 	integrityState.Lock()
@@ -254,6 +264,7 @@ func recordClassificationAttempt(ctx context.Context, db *bolt.DB, attempt *clas
 		integrityState.lastWriterLockMax = attempt.writerLockMax
 	}
 	if attempt.err != nil {
+		integrityState.discardedRounds = 0
 		return integrityState.discardedRounds
 	}
 	if attempt.measured {
@@ -264,6 +275,8 @@ func recordClassificationAttempt(ctx context.Context, db *bolt.DB, attempt *clas
 		integrityState.fallbacks[attempt.reason]++
 		if consistencyDiscardReason(attempt.reason) {
 			integrityState.discardedRounds++
+		} else {
+			integrityState.discardedRounds = 0
 		}
 		integrityState.lastDiscardReason = attempt.reason
 		return integrityState.discardedRounds
@@ -387,8 +400,8 @@ func UsageIntegrityStats(db *bolt.DB) UsageIntegrityMetrics {
 		ClassificationStalled: integrityState.discardedRounds >= 3,
 		DiscardedRounds:       integrityState.discardedRounds,
 		LastDiscardReason:     integrityState.lastDiscardReason,
-		SegmentMaxTxMS:        float64(integrityState.lastSegmentMax.Microseconds()) / 1000,
-		WriterLockMaxMS:       float64(integrityState.lastWriterLockMax.Microseconds()) / 1000,
+		SegmentMaxTxMS:        float64(integrityState.lastSegmentMax.Nanoseconds()) / 1e6,
+		WriterLockMaxMS:       float64(integrityState.lastWriterLockMax.Nanoseconds()) / 1e6,
 	}
 	for _, reason := range []string{integrityFallbackIncomplete, integrityFallbackEpochChanged, integrityFallbackIndexProgressChanged, integrityFallbackOverflow, integrityFallbackPartialRefs, integrityFallbackClientScope} {
 		m.FallbackReads[reason] = integrityState.fallbacks[reason]
