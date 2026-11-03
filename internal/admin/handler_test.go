@@ -3610,7 +3610,7 @@ func TestHandlerMetricsAndHealthzExposeCapacity(t *testing.T) {
 			t.Fatalf("/admin/metrics usage_integrity missing %s: %s", key, recentRec.Body.String())
 		}
 	}
-	if len(integrityRaw.UsageIntegrity) != 7 {
+	if len(integrityRaw.UsageIntegrity) != 12 {
 		t.Fatalf("/admin/metrics usage_integrity has unexpected fields: %s", recentRec.Body.String())
 	}
 	// The shared observation decode budget: capacity, bytes in use and

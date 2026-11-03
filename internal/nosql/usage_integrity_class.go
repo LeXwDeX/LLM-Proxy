@@ -478,6 +478,228 @@ func sameIndexProgress(a, b *indexProgress) bool {
 // between two cancellation checks.
 const integrityClassifyCheckEvery = 1024
 
+var integrityClassifySegmentBudget = 2048
+var integrityClassifySegmentDuration = 50 * time.Millisecond
+
+type classificationStage uint8
+
+const (
+	classifyRawOwner classificationStage = iota
+	classifyRaw
+	classifyReceipts
+	classifyAttestations
+	classifyQuota
+	classifyProofs
+	classifyIndex
+	classifyDone
+)
+
+type classificationBuild struct {
+	class           *integrityClassification
+	stage           classificationStage
+	cursor          []byte // next unprocessed key in stage
+	prefix          []byte
+	indexComplete   bool
+	indexProgress   *indexProgress
+	indexClassified bool
+	epoch           uint64
+	started         time.Time
+	visited         int
+	overflow        bool
+	canceled        bool
+}
+
+func newClassificationBuild(tx *bolt.Tx) (*classificationBuild, string) {
+	if _, err := rawOwnerSource(tx); err != nil {
+		return nil, integrityFallbackIncomplete
+	}
+	class := &integrityClassification{db: tx.DB(), txid: tx.ID(), eventSet: make(map[string]bool)}
+	if class.db != nil {
+		class.path = class.db.Path()
+	}
+	b := &classificationBuild{
+		class: class, started: time.Now(),
+		prefix: append([]byte(BucketQuotaUsageAggHourly), 0),
+	}
+	if meta := tx.Bucket([]byte(BucketMeta)); meta != nil &&
+		meta.Get([]byte(usageClientIndexDone)) != nil &&
+		meta.Get([]byte(usageClientIndexSourceMissing)) == nil && meta.Bucket([]byte(usageClientIndexSourceMissing)) == nil &&
+		!hasUsageQuarantine(tx) {
+		b.indexComplete = tx.Bucket([]byte(BucketUsageEventsByClient)) != nil
+	}
+	b.indexProgress, b.indexClassified = classificationIndexProgress(tx)
+	if b.indexClassified {
+		class.indexProgress, class.indexClassified = b.indexProgress, true
+	}
+	return b, ""
+}
+
+func (b *classificationBuild) addEvent(key []byte) {
+	if !b.class.eventSet[string(key)] {
+		b.class.eventSet[string(key)] = true
+		b.class.anomalous++
+	}
+	b.overflow = b.class.anomalous > integrityAnomalyLimit
+}
+
+// scan classifies one object. All cross-bucket reads use the current snapshot.
+func (b *classificationBuild) scan(tx *bolt.Tx, key, value []byte) {
+	class := b.class
+	canonical := func() bool { _, ok := canonicalEventKeyHour(key); return ok }
+	retained := func() bool {
+		raw, receipts, quarantine := tx.Bucket([]byte(BucketUsageEvents)), tx.Bucket([]byte(BucketUsageReceipts)), tx.Bucket([]byte(BucketUsageEventsQuarantine))
+		return (raw != nil && raw.Get(key) != nil) || (receipts != nil && receipts.Get(key) != nil) || (quarantine != nil && quarantine.Get(key) != nil)
+	}
+	switch b.stage {
+	case classifyRawOwner:
+		_, _, err := readRawOwner(tx, key)
+		if value == nil || !canonical() || err != nil || !retained() {
+			b.addEvent(key)
+		}
+	case classifyRaw:
+		if value == nil || !canonical() {
+			b.addEvent(key)
+			break
+		}
+		event, exempt := rawRowWindowExempt(tx, key, value)
+		if !exempt {
+			b.addEvent(key)
+			break
+		}
+		if b.indexComplete {
+			index := tx.Bucket([]byte(BucketUsageEventsByClient))
+			if index == nil || !bytes.Equal(index.Get(clientEventIndexKey(event, key)), key) {
+				class.rawUnindexed = true
+			}
+			if prefix, ok := staleForeignProof(tx, b.indexProgress, key, event); ok {
+				class.foreignProofs.addPrefix(prefix)
+			}
+		}
+	case classifyReceipts:
+		if value == nil || !canonical() {
+			b.addEvent(key)
+		}
+	case classifyAttestations:
+		if value == nil || !canonical() || !retained() {
+			b.addEvent(key)
+		}
+	case classifyQuota:
+		if _, ok := quotaKeyHour(key); value == nil || !ok || !quotaKeyOwnerWindowNeutral(key) {
+			class.quota = append(class.quota, bytes.Clone(key))
+			class.anomalous++
+		}
+	case classifyProofs:
+		if _, ok := quotaKeyHour(key[len(b.prefix):]); value == nil || !ok {
+			class.proofs = append(class.proofs, bytes.Clone(key))
+			class.anomalous++
+		}
+	case classifyIndex:
+		entry := classifyIndexEntry(tx, b.indexProgress, key, value, func(k []byte) bool { return class.eventSet[string(k)] })
+		if !entry.exempt {
+			class.index = append(class.index, bytes.Clone(key))
+			class.anomalous++
+		} else {
+			class.noteForeignScopes(entry, key)
+		}
+	}
+	b.overflow = class.anomalous > integrityAnomalyLimit
+}
+
+// runSegment saves the next unprocessed key before returning. A zero budget or
+// duration disables that limit for the one-transaction test entry point.
+func (b *classificationBuild) runSegment(ctx context.Context, tx *bolt.Tx, budget int, duration time.Duration) {
+	started := time.Now()
+	count := 0
+	b.class.txid = tx.ID()
+	for b.stage < classifyDone && !b.overflow && !b.canceled {
+		if ctx.Err() != nil {
+			b.canceled = true
+			return
+		}
+		var bucket *bolt.Bucket
+		switch b.stage {
+		case classifyRawOwner:
+			bucket = tx.Bucket([]byte(rawOwnerBucket))
+		case classifyRaw:
+			bucket = tx.Bucket([]byte(BucketUsageEvents))
+		case classifyReceipts:
+			bucket = tx.Bucket([]byte(BucketUsageReceipts))
+		case classifyAttestations:
+			bucket = tx.Bucket([]byte(freshAttestationBucket))
+		case classifyQuota:
+			bucket = tx.Bucket([]byte(BucketQuotaUsageAggHourly))
+		case classifyProofs:
+			bucket, _ = rollupProofSource(tx)
+		case classifyIndex:
+			if b.indexClassified && b.indexProgress != nil {
+				bucket = tx.Bucket([]byte(BucketUsageEventsByClient))
+			}
+		}
+		if bucket == nil {
+			b.stage++
+			b.cursor = nil
+			continue
+		}
+		c := bucket.Cursor()
+		var key, value []byte
+		switch {
+		case b.cursor != nil:
+			key, value = c.Seek(b.cursor)
+		case b.stage == classifyProofs:
+			key, value = c.Seek(b.prefix)
+		default:
+			key, value = c.First()
+		}
+		for key != nil && (b.stage != classifyProofs || bytes.HasPrefix(key, b.prefix)) {
+			b.visited++
+			if b.visited%integrityClassifyCheckEvery == 1 {
+				if integrityClassifyStep != nil {
+					integrityClassifyStep()
+				}
+				if ctx.Err() != nil {
+					b.canceled = true
+					return
+				}
+			}
+			b.scan(tx, key, value)
+			count++
+			key, value = c.Next()
+			if b.overflow {
+				return
+			}
+			if (budget > 0 && count >= budget) || (duration > 0 && time.Since(started) >= duration) {
+				if key == nil || (b.stage == classifyProofs && !bytes.HasPrefix(key, b.prefix)) {
+					b.stage++
+					b.cursor = nil
+				} else {
+					b.cursor = bytes.Clone(key)
+				}
+				return
+			}
+		}
+		b.stage++
+		b.cursor = nil
+	}
+}
+
+func (b *classificationBuild) finish() (*integrityClassification, string) {
+	if b.canceled {
+		return nil, integrityFallbackIncomplete
+	}
+	if b.overflow {
+		return nil, integrityFallbackOverflow
+	}
+	if b.stage != classifyDone {
+		return nil, integrityFallbackIncomplete
+	}
+	for key := range b.class.eventSet {
+		b.class.events = append(b.class.events, []byte(key))
+	}
+	sort.Slice(b.class.events, func(i, j int) bool { return bytes.Compare(b.class.events[i], b.class.events[j]) < 0 })
+	b.class.duration = time.Since(b.started)
+	return b.class, ""
+}
+
 // classifyUsageIntegrity builds A from one read transaction. It does not call
 // read hooks and does not change the read context or verdict, so tests can
 // build it in front of every read (with context.Background(), never the
@@ -487,165 +709,12 @@ const integrityClassifyCheckEvery = 1024
 // It checks ctx periodically; a canceled build returns nil. It returns nil and
 // a fallback reason when the fast path cannot be used for this snapshot.
 func classifyUsageIntegrity(ctx context.Context, tx *bolt.Tx) (*integrityClassification, string) {
-	started := time.Now()
-	visited := 0
-	canceled := false
-	step := func() bool {
-		if visited++; visited%integrityClassifyCheckEvery != 1 {
-			return !canceled
-		}
-		if integrityClassifyStep != nil {
-			integrityClassifyStep()
-		}
-		canceled = canceled || ctx.Err() != nil
-		return !canceled
+	b, reason := newClassificationBuild(tx)
+	if b == nil {
+		return nil, reason
 	}
-	class := &integrityClassification{db: tx.DB(), txid: tx.ID(), eventSet: make(map[string]bool)}
-	if class.db != nil {
-		class.path = class.db.Path()
-	}
-	overflow := false
-	addEvent := func(key []byte) {
-		if !class.eventSet[string(key)] {
-			class.eventSet[string(key)] = true
-			class.anomalous++
-		}
-	}
-	if _, err := rawOwnerSource(tx); err != nil {
-		return nil, integrityFallbackIncomplete
-	}
-	visitEvents := func(bucket string, exempt func(k, v []byte) bool) {
-		b := tx.Bucket([]byte(bucket))
-		if b == nil {
-			return
-		}
-		c := b.Cursor()
-		for k, v := c.First(); k != nil && !overflow && step(); k, v = c.Next() {
-			if v == nil || !exempt(k, v) {
-				addEvent(k)
-				overflow = class.anomalous > integrityAnomalyLimit
-			}
-		}
-	}
-	canonical := func(k, _ []byte) bool {
-		_, ok := canonicalEventKeyHour(k)
-		return ok
-	}
-	// Issue #125 P2: an owner row is only neutral outside its hour when the
-	// owner walk's existence shortcut ends it. An orphan owner (no raw row,
-	// receipt or quarantined row) is checked against the client filter inside
-	// its hour and errors for its own client, so it must stay anomalous even
-	// for client-scoped reads that cannot reach it through the client index.
-	retained := func(k []byte) bool {
-		raw, receipts, quarantine := tx.Bucket([]byte(BucketUsageEvents)), tx.Bucket([]byte(BucketUsageReceipts)), tx.Bucket([]byte(BucketUsageEventsQuarantine))
-		return (raw != nil && raw.Get(k) != nil) || (receipts != nil && receipts.Get(k) != nil) || (quarantine != nil && quarantine.Get(k) != nil)
-	}
-	visitEvents(rawOwnerBucket, func(k, _ []byte) bool {
-		_, _, err := readRawOwner(tx, k)
-		return canonical(k, nil) && err == nil && retained(k)
-	})
-	// Issue #125 P2: the client-scoped enumeration reaches a raw row only
-	// through its client index entry. When the index claims completion, record
-	// every window-exempt row whose entry is missing or points elsewhere, and
-	// every stale proof that names another client's index space; the scoped
-	// probe then declines instead of returning a verdict that ignored the row
-	// or the client it implicates. Other anomalous rows are covered by A (they
-	// are always visited).
-	index := tx.Bucket([]byte(BucketUsageEventsByClient))
-	indexComplete := false
-	if meta := tx.Bucket([]byte(BucketMeta)); meta != nil &&
-		meta.Get([]byte(usageClientIndexDone)) != nil &&
-		meta.Get([]byte(usageClientIndexSourceMissing)) == nil && meta.Bucket([]byte(usageClientIndexSourceMissing)) == nil &&
-		!hasUsageQuarantine(tx) {
-		indexComplete = index != nil
-	}
-	progress, indexClassified := classificationIndexProgress(tx)
-	if indexClassified {
-		class.indexProgress, class.indexClassified = progress, true
-	}
-	visitEvents(BucketUsageEvents, func(k, v []byte) bool {
-		if !canonical(k, v) {
-			return false
-		}
-		event, exempt := rawRowWindowExempt(tx, k, v)
-		if !exempt {
-			return false
-		}
-		if indexComplete {
-			if !bytes.Equal(index.Get(clientEventIndexKey(event, k)), k) {
-				class.rawUnindexed = true
-			}
-			if prefix, ok := staleForeignProof(tx, progress, k, event); ok {
-				class.foreignProofs.addPrefix(prefix)
-			}
-		}
-		return true
-	})
-	visitEvents(BucketUsageReceipts, canonical)
-	// A fresh attestation without its raw row or receipt errors for its client
-	// inside its hour; a client-scoped read cannot reach it through the index,
-	// so it must be visited by every read.
-	visitEvents(freshAttestationBucket, func(k, _ []byte) bool {
-		return canonical(k, nil) && retained(k)
-	})
-	if overflow {
-		return nil, integrityFallbackOverflow
-	}
-	if quota := tx.Bucket([]byte(BucketQuotaUsageAggHourly)); quota != nil {
-		c := quota.Cursor()
-		for k, v := c.First(); k != nil && !overflow && step(); k, v = c.Next() {
-			if _, ok := quotaKeyHour(k); v == nil || !ok || !quotaKeyOwnerWindowNeutral(k) {
-				class.quota = append(class.quota, bytes.Clone(k))
-				class.anomalous++
-				overflow = class.anomalous > integrityAnomalyLimit
-			}
-		}
-	}
-	if proofs, err := rollupProofSource(tx); err == nil && proofs != nil {
-		prefix := append([]byte(BucketQuotaUsageAggHourly), 0)
-		c := proofs.Cursor()
-		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) && !overflow && step(); k, v = c.Next() {
-			if _, ok := quotaKeyHour(k[len(prefix):]); v == nil || !ok {
-				class.proofs = append(class.proofs, bytes.Clone(k))
-				class.anomalous++
-				overflow = class.anomalous > integrityAnomalyLimit
-			}
-		}
-	}
-	if indexClassified {
-		if index := tx.Bucket([]byte(BucketUsageEventsByClient)); index != nil && progress != nil {
-			anomalous := func(key []byte) bool { return class.eventSet[string(key)] }
-			c := index.Cursor()
-			for k, v := c.First(); k != nil && !overflow && step(); k, v = c.Next() {
-				entry := classifyIndexEntry(tx, progress, k, v, anomalous)
-				if !entry.exempt {
-					class.index = append(class.index, bytes.Clone(k))
-					class.anomalous++
-					overflow = class.anomalous > integrityAnomalyLimit
-					continue
-				}
-				// Issue #125 P2: a window-exempt entry is skipped by a
-				// client-scoped walk. If its readable proof names a client that
-				// checkOrphans fails closed for, the scoped probe must decline
-				// for that client instead. Scopes are judged with
-				// unresolvedScopeInRange, so empty and "unknown" owners, which
-				// are relevant to every client, decline too.
-				class.noteForeignScopes(entry, k)
-			}
-		}
-	}
-	if canceled {
-		return nil, integrityFallbackIncomplete
-	}
-	if overflow {
-		return nil, integrityFallbackOverflow
-	}
-	for key := range class.eventSet {
-		class.events = append(class.events, []byte(key))
-	}
-	sort.Slice(class.events, func(i, j int) bool { return bytes.Compare(class.events[i], class.events[j]) < 0 })
-	class.duration = time.Since(started)
-	return class, ""
+	b.runSegment(ctx, tx, 0, 0)
+	return b.finish()
 }
 
 // integrityRealtimeRowAnomalous reports whether a row the realtime writer
