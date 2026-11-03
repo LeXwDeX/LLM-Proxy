@@ -230,9 +230,9 @@ func recordClassificationAttempt(ctx context.Context, db *bolt.DB, attempt *clas
 		// Validate and install while holding the writer lock, so progress cannot
 		// change between the final snapshot and publication.
 		var writer *bolt.Tx
-		installStarted := time.Now()
 		writer, attempt.err = db.Begin(true)
 		if attempt.err == nil {
+			installStarted := time.Now()
 			if attempt.err = ctx.Err(); attempt.err == nil {
 				if integrityEpoch.Load() != attempt.epoch || integrityInflight.Load() != 0 {
 					attempt.class, attempt.reason = nil, integrityFallbackEpochChanged
