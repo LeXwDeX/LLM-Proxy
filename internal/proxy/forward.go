@@ -579,6 +579,7 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 				"client_status_channel", clientStatusChannel,
 				"possibly_sent", true,
 				"replayed", false,
+				"upstream_close_code", responsesWSUpstreamCloseCode(err),
 			)
 		}
 		return nil, nil, keyIndex, &forwardAttemptError{
@@ -1044,11 +1045,16 @@ func (s *Service) writeResponse(
 	} else if err := copyErr; err != nil &&
 		!errors.Is(err, context.Canceled) &&
 		!errors.Is(err, context.DeadlineExceeded) {
-		s.logger.Warn("stream copy failed",
+		attrs := []any{
 			"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 			"target", targetName(target),
 			"error", errorlog.ErrorCategory(err),
-		)
+		}
+		if wsBody := responseWSBody(resp); wsBody != nil && wsBody.generationSent {
+			// Pooled WS stream ended by an upstream close frame (#153 B6).
+			attrs = append(attrs, "upstream_close_code", responsesWSUpstreamCloseCode(err))
+		}
+		s.logger.Warn("stream copy failed", attrs...)
 	}
 
 	var tokens usageTokens

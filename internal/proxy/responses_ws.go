@@ -259,6 +259,53 @@ func (p *responsesWSPool) invalidate(closeActive bool) {
 	closeResponsesWSConns(closing, !closeActive)
 }
 
+// invalidateForConfig handles a published configuration change (Issue #151).
+// It forgets unsupported and backoff memories so a fixed upstream is probed
+// again, cancels spares still being dialed and retires idle lanes without a
+// conversation. Lanes holding a responseID and lanes busy with a request keep
+// their lifecycle: a lane's key binds its URL and auth headers, so a changed
+// connection identity can never select it, while unrelated saves no longer
+// break pooled continuations. The new generation still discards handshakes
+// and background dials started under the old configuration.
+func (p *responsesWSPool) invalidateForConfig() {
+	p.mu.Lock()
+	p.generation++
+	p.unsupported = nil
+	p.prewarmBackoff = nil
+	var closing []*websocket.Conn
+	for e := range p.entries {
+		if e.prewarming || (!e.busy && e.responseID == "") {
+			closing = p.removeLocked(e, closing)
+		}
+	}
+	p.mu.Unlock()
+	closeResponsesWSConns(closing, true)
+}
+
+// retireLanesForCredentials retires every lane whose handshake carried one of
+// keys, including lanes holding a conversation, after a manual key block: the
+// blocked credential must never carry another turn. Idle lanes and spares are
+// dropped at once; a lane busy with a request stays owned by it and closes on
+// release.
+func (p *responsesWSPool) retireLanesForCredentials(keys []string) {
+	if p == nil || len(keys) == 0 {
+		return
+	}
+	var closing []*websocket.Conn
+	p.mu.Lock()
+	for e := range p.entries {
+		if e.dial == nil || !headersCarryCredential(e.dial.headers, keys) {
+			continue
+		}
+		e.retired = true
+		if !e.busy || e.prewarming {
+			closing = p.removeLocked(e, closing)
+		}
+	}
+	p.mu.Unlock()
+	closeResponsesWSConns(closing, true)
+}
+
 func (p *responsesWSPool) close() {
 	p.mu.Lock()
 	p.closed = true
@@ -1066,6 +1113,7 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 		var members []jsonMember // reused per event; frame.data owns the bytes
 		for {
 			if frame.err != nil {
+				frame.err = wrapResponsesWSUpstreamClose(frame.err)
 				responseErr = frame.err
 				if errors.Is(frame.err, errResponsesWSLaneClosed) {
 					b.noMute.Store(true) // backlog or pool close: not the upstream
@@ -1175,6 +1223,29 @@ func (s *Service) tryResponsesWS(r, req *http.Request, target *Target, body []by
 		}
 	}
 	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{ct}}, Body: b, Request: req}, true, nil
+}
+
+// wrapResponsesWSUpstreamClose gives an upstream close frame the same
+// io.ErrUnexpectedEOF classification as the native path while keeping the
+// websocket.CloseError (code/reason) reachable for diagnostics. Only a close
+// frame received from the upstream is a CloseError; the proxy's own CloseNow
+// surfaces as a different error and is left unchanged, as is anything else.
+func wrapResponsesWSUpstreamClose(err error) error {
+	var closeErr websocket.CloseError
+	if err == nil || errors.Is(err, io.ErrUnexpectedEOF) || !errors.As(err, &closeErr) {
+		return err
+	}
+	return fmt.Errorf("%w: upstream WebSocket read failed: %w", io.ErrUnexpectedEOF, err)
+}
+
+// responsesWSUpstreamCloseCode is the diagnostic value of an upstream close
+// code carried by err, or "unknown". The close reason is never logged.
+func responsesWSUpstreamCloseCode(err error) string {
+	var closeErr websocket.CloseError
+	if err == nil || !errors.As(err, &closeErr) {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", int(closeErr.Code))
 }
 
 func responsesWSVolatileHeader(name string) bool {

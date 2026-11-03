@@ -33,6 +33,12 @@ var (
 	responsesWebsocketPingInterval = 30 * time.Second
 	// Concurrent native sessions per client credential.
 	responsesWebsocketPerClient = 64
+	// A session with no pong and no frame from the client for
+	// max(4 x ping interval, this floor) is half-open and is ended (#153 B11).
+	responsesWebsocketPongTimeoutFloor = 2 * time.Minute
+	// After an idle or drain close frame, wait this long for the client's
+	// close before dropping TCP (#153 B12).
+	responsesWebsocketCloseWait = time.Second
 	// Between turns an upstream socket idle this long is pinged, so provider
 	// idle cutoffs do not end a session that may still be continued.
 	responsesWebsocketUpstreamPingAfter   = 30 * time.Second
@@ -250,6 +256,20 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			session.conn.Close()
 		}
 	}()
+	// lastHeard (Unix ns) advances on every pong and every client frame. A
+	// client silent past the liveness window is half-open: end the session so
+	// it does not hold its per-client slot until the idle timeout. There is no
+	// hard read deadline; the 15-minute idle semantics are unchanged.
+	var lastHeard atomic.Int64
+	lastHeard.Store(time.Now().UnixNano())
+	conn.SetPongHandler(func(string) error {
+		lastHeard.Store(time.Now().UnixNano())
+		return nil
+	})
+	livenessWindow := 4 * s.websocketPingInterval
+	if livenessWindow < s.websocketPongTimeoutFloor {
+		livenessWindow = s.websocketPongTimeoutFloor
+	}
 	go func() {
 		ticker := time.NewTicker(s.websocketPingInterval)
 		defer ticker.Stop()
@@ -257,7 +277,11 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case now := <-ticker.C:
+				if now.Sub(time.Unix(0, lastHeard.Load())) > livenessWindow {
+					cancel()
+					return
+				}
 				// WriteControl may run concurrently with the turn writer. A slow
 				// client can delay it past the deadline; skip that ping only.
 				_ = conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
@@ -269,6 +293,18 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 	closeWith := func(code int, reason string) {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
 	}
+	// gracefulClose is used only for the drain (1001) and idle (1000) closes:
+	// after the close frame it waits briefly for the client's close (the reader
+	// then ends and cancels ctx) or ctx, instead of dropping TCP at once.
+	gracefulClose := func(code int, reason string) {
+		closeWith(code, reason)
+		wait := time.NewTimer(responsesWebsocketCloseWait)
+		defer wait.Stop()
+		select {
+		case <-ctx.Done():
+		case <-wait.C:
+		}
+	}
 	messages := make(chan []byte, 1)
 	var fields []jsonMember // reused across turns; payload owns the bytes
 	// Read independently so a disconnected client cancels an active inference.
@@ -279,6 +315,7 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			if err != nil {
 				return
 			}
+			lastHeard.Store(time.Now().UnixNano())
 			if kind != websocket.TextMessage {
 				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseUnsupportedData, "expected JSON text events"), time.Now().Add(time.Second))
 				return
@@ -298,7 +335,7 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 		// A drain lets the turn in progress finish, then ends the session.
 		select {
 		case <-drain:
-			closeWith(websocket.CloseGoingAway, "server is restarting")
+			gracefulClose(websocket.CloseGoingAway, "server is restarting")
 			return
 		default:
 		}
@@ -307,16 +344,16 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 		case <-ctx.Done():
 			return
 		case <-drain:
-			closeWith(websocket.CloseGoingAway, "server is restarting")
+			gracefulClose(websocket.CloseGoingAway, "server is restarting")
 			return
 		case <-idle.C:
-			closeWith(websocket.CloseNormalClosure, "idle timeout")
+			gracefulClose(websocket.CloseNormalClosure, "idle timeout")
 			return
 		case payload := <-messages:
 			// A drain that raced with this message wins: nothing was sent upstream.
 			select {
 			case <-drain:
-				closeWith(websocket.CloseGoingAway, "server is restarting")
+				gracefulClose(websocket.CloseGoingAway, "server is restarting")
 				return
 			default:
 			}
