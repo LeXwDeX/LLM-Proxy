@@ -13,6 +13,7 @@ import (
 const (
 	traceDefaultLimit = 50
 	traceMaxLimit     = 5000
+	traceMaxOffset    = tracestore.MaxListOffset
 )
 
 // handleTraceStats 只报告 trace store 是否启用及计数器：不读取记录、不扫描磁盘，
@@ -80,6 +81,10 @@ func (h *Handler) handleListTrace(w http.ResponseWriter, r *http.Request) {
 	offset := 0
 	if o := r.URL.Query().Get("offset"); o != "" {
 		if n, err := strconv.Atoi(o); err == nil && n >= 0 {
+			if n > traceMaxOffset {
+				writeJSON(w, http.StatusBadRequest, errorResponse("offset too large"))
+				return
+			}
 			offset = n
 		}
 	}

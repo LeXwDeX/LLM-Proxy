@@ -159,7 +159,9 @@ func TestIntegrityEpochAdvancesOnMaintenanceWrites(t *testing.T) {
 		{"quota-v2", func(_ *testing.T, db *bolt.DB, _ *UsageStore, _ usage.Event) error {
 			return MigrateQuotaV2(db, t.TempDir(), logger)
 		}},
-		{"adapter", func(_ *testing.T, db *bolt.DB, _ *UsageStore, _ usage.Event) error {
+		{"adapter", func(t *testing.T, db *bolt.DB, _ *UsageStore, _ usage.Event) error {
+			// A pending legacy target makes the migration really write.
+			seedAdapterRaw(t, db, "legacy", `{"name":"Legacy","endpoint":"https://api.deepseek.com","usage_adapter":"auto"}`)
 			return MigrateUsageAdapterExplicit(db, logger)
 		}},
 		{"realtime-anomaly", func(_ *testing.T, _ *bolt.DB, store *UsageStore, base usage.Event) error {
@@ -269,5 +271,25 @@ func TestIntegrityClassificationLoopStops(t *testing.T) {
 	stop()
 	if UsageIntegrityStats(db).Complete {
 		t.Fatal("stopped classifier left its classification installed")
+	}
+}
+
+// Admin reads call the adapter migration on every request; a no-op must not
+// bump the integrity epoch or invalidate the classification.
+func TestAdapterMigrationNoopKeepsIntegrityClassification(t *testing.T) {
+	db, _, _ := integrityFixture(t)
+	seedAdapterRaw(t, db, "explicit", `{"name":"E","endpoint":"https://x.example.com","usage_adapter":"standard"}`)
+	classifyNow(t, db)
+	epoch := integrityEpoch.Load()
+	for i := 0; i < 3; i++ {
+		if err := MigrateUsageAdapterExplicit(db, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := integrityEpoch.Load(); got != epoch {
+		t.Fatalf("no-op migration bumped epoch %d -> %d", epoch, got)
+	}
+	if !UsageIntegrityStats(db).Complete {
+		t.Fatal("no-op migration invalidated classification")
 	}
 }

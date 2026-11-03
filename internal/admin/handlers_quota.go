@@ -136,8 +136,13 @@ func (h *Handler) handleSyncQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.quotaManager != nil {
 		h.quotaManager.NoteConfigChange()
-		for _, name := range names {
-			h.quotaManager.Evaluate(name)
+		// 有界并发，但仍等待全部完成：响应返回时各目标的新 plan 已生效。
+		if many, ok := h.quotaManager.(interface{ EvaluateMany([]string) }); ok {
+			many.EvaluateMany(names)
+		} else {
+			for _, name := range names {
+				h.quotaManager.Evaluate(name)
+			}
 		}
 	}
 	h.recordAudit(r, "quota_sync", source, "success", strings.Join(names, ","))

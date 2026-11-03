@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -290,7 +291,7 @@ func TestStoreConcurrent(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < numRecordsPerGoroutine; j++ {
 				store.Get("concurrent-0-0")
-store.List(0, 10)
+				store.List(0, 10)
 				store.Stats()
 			}
 		}()
@@ -978,5 +979,37 @@ func TestStoreListOffsetFromDisk(t *testing.T) {
 	records = store2.List(10, 5)
 	if len(records) != 0 {
 		t.Errorf("expected 0 records with offset=10 from disk, got %d", len(records))
+	}
+}
+
+// A huge offset must neither preallocate offset-sized buffers nor scan: the
+// store clamps it and the disk ring grows with actual lines only.
+func TestStoreListHugeOffsetDoesNotAllocate(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{Enabled: true, RingBufferSize: 3, MaxBodySize: 1024, DiskPath: filepath.Join(dir, "trace.log"),
+		DiskMaxSizeMB: 10, DiskMaxBackups: 3, DiskTTLHours: 24, ChannelBuffer: 10}
+	store := New(cfg, nil)
+	defer store.Close()
+	for i := 0; i < 5; i++ {
+		store.Record(&TraceRecord{TraceID: fmt.Sprintf("huge-%d", i), Timestamp: time.Now().Add(time.Duration(i) * time.Second)})
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	start := time.Now()
+	if got := store.List(1<<30, 50); len(got) != 0 {
+		t.Fatalf("huge offset returned %d records", len(got))
+	}
+	// Even the in-range path must not size buffers by offset+limit.
+	if got := store.readLastNFromFile(cfg.DiskPath, 1<<28); len(got) > 5 {
+		t.Fatalf("unexpected records: %d", len(got))
+	}
+	runtime.ReadMemStats(&after)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("huge offset list took %v", d)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 32<<20 {
+		t.Fatalf("huge offset allocated %d bytes", alloc)
 	}
 }

@@ -426,10 +426,28 @@ func normalizeUsageEvent(event *usage.Event) (string, error) {
 	return usageKey(event.Timestamp, event.RecordID), nil
 }
 
+// usageListScanBudget bounds the rows ListContext visits (a variable so tests
+// can shrink it). A barely-matching filter without From would otherwise reverse
+// scan the whole bucket inside one read transaction.
+var usageListScanBudget = 200000
+
 // List returns events matching the filter, sorted by timestamp descending.
 //
 // Scans complete seconds so historical RFC3339Nano keys retain correct ordering.
+// It has no scan budget; request paths use ListContext.
 func (s *UsageStore) List(filter usage.Filter) ([]usage.Event, error) {
+	events, _, err := s.listEvents(context.Background(), filter, 0)
+	return events, err
+}
+
+// ListContext is List with cancellation and a scan budget. truncated reports
+// that the budget ended the scan before every candidate row was visited, so the
+// result may be missing older matches.
+func (s *UsageStore) ListContext(ctx context.Context, filter usage.Filter) (events []usage.Event, truncated bool, err error) {
+	return s.listEvents(ctx, filter, usageListScanBudget)
+}
+
+func (s *UsageStore) listEvents(ctx context.Context, filter usage.Filter, maxScan int) ([]usage.Event, bool, error) {
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 200
@@ -442,21 +460,23 @@ func (s *UsageStore) List(filter usage.Filter) ([]usage.Event, error) {
 	modelKey := strings.ToLower(strings.TrimSpace(filter.Model))
 
 	events := make([]usage.Event, 0, limit)
+	var truncated bool
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(BucketUsageEvents))
 		if b == nil {
 			return nil
 		}
-		events = scanRecentEvents(b, limit, filter.From, filter.To,
+		var err error
+		events, truncated, err = scanRecentEvents(ctx, b, limit, maxScan, filter.From, filter.To,
 			func(evt usage.Event) time.Time { return evt.Timestamp },
 			func(evt usage.Event) bool { return usageFilterMatch(evt, filter, clientKey, modelKey) })
-		return nil
+		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// Sorted by actual timestamp, including legacy fractional-second keys.
-	return events, nil
+	return events, truncated, nil
 }
 
 // Count returns total and success request counts within the given time range.

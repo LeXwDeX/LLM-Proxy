@@ -22,6 +22,7 @@ type PricingCache struct {
 	ptr                 atomic.Pointer[Resolver]
 	gen                 atomic.Uint64 // bumped by Invalidate; guards against stale lazy-rebuild Store
 	publicationMu       sync.Mutex    // serializes generation check + publication with Invalidate
+	rebuildMu           sync.Mutex    // coalesces concurrent misses into one rebuild (miss path only)
 
 	logger             atomic.Pointer[slog.Logger]
 	templateLoadFailed atomic.Bool // a template load failure has been reported and not yet recovered
@@ -66,7 +67,15 @@ func (c *PricingCache) GetChecked() (*Resolver, error) {
 		return p, nil
 	}
 
-	// Lazy build.
+	// Lazy build. Concurrent misses (typically right after Invalidate) queue on
+	// rebuildMu and re-check the cache, so one rebuild serves them all. The hit
+	// path above takes no lock; the re-check only sees pointers published for a
+	// still-current generation, so a pre-Invalidate resolver is never served.
+	c.rebuildMu.Lock()
+	defer c.rebuildMu.Unlock()
+	if p := c.ptr.Load(); p != nil {
+		return p, nil
+	}
 	gen := c.gen.Load()
 	var templates []PricingTemplate
 	var loadErr error

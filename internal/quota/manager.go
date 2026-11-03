@@ -617,6 +617,8 @@ func (m *Manager) evaluateOnce(clientName string) bool {
 		m.calibrationFailed(clientName, err)
 		return true
 	}
+	// 各阶段耗时仅在 Debug 级别输出（校准路径，非 RecordUsage 热路径）。
+	phaseStart := time.Now()
 	// Journal writes already count in memory. Never replace counters until
 	// queued writes are drained and the entire accounting window is complete.
 	if m.usageJournal != nil {
@@ -625,6 +627,7 @@ func (m *Manager) evaluateOnce(clientName string) bool {
 			return true
 		}
 	}
+	drainDur := time.Since(phaseStart)
 	// Fetch client config.
 	qc, err := m.findQuotaConfig(clientName)
 	if err != nil {
@@ -650,12 +653,17 @@ func (m *Manager) evaluateOnce(clientName string) bool {
 		return true
 	}
 
+	readStart := time.Now()
 	cc, err := calibratedCounters(clientName, qc, now, func(filter usage.Filter) ([]nosql.CostUnit, error) {
 		return m.usageStore.ReadQuotaCostUnits(context.Background(), filter, resolver, true)
 	})
 	if err != nil {
 		m.calibrationFailed(clientName, err)
 		return true
+	}
+	if m.logger.Enabled(context.Background(), slog.LevelDebug) {
+		m.logger.Debug("quota.Manager: evaluate phases", "client", clientName,
+			"drain", drainDur, "config", readStart.Sub(phaseStart)-drainDur, "read_usage", time.Since(readStart))
 	}
 	if m.afterConfigRead != nil {
 		m.afterConfigRead(clientName)

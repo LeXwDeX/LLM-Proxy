@@ -19,7 +19,7 @@ func (h *Handler) routes() chi.Router {
 	r.Get("/metrics", h.handleMetrics)
 	r.Get("/api/me", h.handleMe)
 	r.Get("/api/overview", h.cachedReport(h.handleOverview))
-	r.Get("/api/activity", h.handleActivity)
+	r.Get("/api/activity", h.cachedReportTTL(activityCacheTTL, h.handleActivity))
 	// change-password is allowed for all authenticated users (including readonly)
 	r.Post("/api/change-password", h.handleChangePassword)
 

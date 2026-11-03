@@ -17,16 +17,25 @@ func (h *Handler) handleListUsageEvents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	events, err := h.usageStore.List(filter)
+	events, truncated, err := h.usageStore.ListContext(r.Context(), filter)
 	if err != nil {
+		if clientAborted(r, err) {
+			return
+		}
 		h.writeInternalError(w, "failed to list usage events", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"events": events,
 		"count":  len(events),
-	})
+	}
+	if truncated {
+		// The scan budget ended before older rows were visited: narrow the
+		// time range. Never present a budget-limited result as complete.
+		response["truncated"] = true
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) handleAggregateUsage(w http.ResponseWriter, r *http.Request) {

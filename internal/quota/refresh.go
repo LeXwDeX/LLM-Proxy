@@ -29,7 +29,8 @@ const (
 
 // calibrationRequestTimeout 是请求路径等待校准完成的上限。超时按校准失败处理
 // （拒绝准入并退避重试），后台校准继续并在完成后自动恢复。
-// 一次 evaluate 本身需要 2.5-3s，上限太小会把「慢」变成「拒绝」。
+// 单次 evaluate 的耗时随历史用量规模变化：完整性分类已安装时走快路径（#125），
+// 否则退回全量扫描，可达数秒；上限太小会把「慢」变成「拒绝」。
 var calibrationRequestTimeout = 15 * time.Second
 
 var errCalibrationTimeout = errors.New("calibration timed out on request path; retrying in background")
@@ -233,6 +234,12 @@ func (m *Manager) affectedClients(b refreshSet) []string {
 		names = append(names, n)
 	}
 	return names
+}
+
+// EvaluateMany 以有界并发同步评估 names，全部完成后才返回（不受 Stop 取消）。
+// 供需要「响应返回时新状态已生效」的批量写使用，如额度同步。
+func (m *Manager) EvaluateMany(names []string) {
+	m.evaluateMany(names, preloadConcurrency, nil, false)
 }
 
 // evaluateMany 以有界并发评估 names；done 关闭后不再启动新的评估。

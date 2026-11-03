@@ -219,3 +219,37 @@ func TestPricingCacheGetCheckedReportsSourceErrorsWithoutCachingThem(t *testing.
 		})
 	}
 }
+
+// Issue #151: after Invalidate, concurrent misses must coalesce into one
+// rebuild instead of each loading the templates.
+func TestPricingCacheCoalescesConcurrentMissesAfterInvalidate(t *testing.T) {
+	var loads atomic.Int32
+	entered := make(chan struct{}, 64)
+	release := make(chan struct{})
+	c := NewPricingCache(func() ([]PricingTemplate, error) {
+		loads.Add(1)
+		entered <- struct{}{}
+		<-release
+		return nil, nil
+	}, nil)
+	c.Invalidate()
+	const callers = 16
+	var wg sync.WaitGroup
+	results := make([]*Resolver, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); results[i] = c.Get() }(i)
+	}
+	<-entered
+	time.Sleep(50 * time.Millisecond) // let the other callers reach the miss branch
+	close(release)
+	wg.Wait()
+	if n := loads.Load(); n != 1 {
+		t.Fatalf("%d concurrent misses caused %d loads, want 1", n, n)
+	}
+	for _, r := range results {
+		if r == nil || r != results[0] {
+			t.Fatal("callers did not share the single rebuilt resolver")
+		}
+	}
+}

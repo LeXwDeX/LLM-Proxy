@@ -474,23 +474,6 @@ func TestIssue68ReadonlySnapshotCannotWrite(t *testing.T) {
 	}
 }
 
-type issue68BlockedBody struct {
-	ready   chan struct{}
-	release chan struct{}
-	data    *bytes.Reader
-}
-
-func (b *issue68BlockedBody) Read(p []byte) (int, error) {
-	select {
-	case <-b.ready:
-	default:
-		close(b.ready)
-		<-b.release
-	}
-	return b.data.Read(p)
-}
-func (b *issue68BlockedBody) Close() error { return nil }
-
 type issue68BlockedWriter struct {
 	*httptest.ResponseRecorder
 	ready   chan struct{}
@@ -548,7 +531,7 @@ func TestIssue68GetAndKeyActionsWaitForPut(t *testing.T) {
 	for _, action := range []string{"get", "block", "unblock"} {
 		t.Run(action, func(t *testing.T) {
 			keys := []string{"sk-primary-0001", "sk-second-0002"}
-			h, _, service := issue68Handler(t, keys)
+			h, stores, service := issue68Handler(t, keys)
 			if action == "unblock" {
 				if err := service.BlockKey("target-1", 1); err != nil {
 					t.Fatal(err)
@@ -556,11 +539,16 @@ func TestIssue68GetAndKeyActionsWaitForPut(t *testing.T) {
 			}
 			old := issue68Snapshot(t, h)
 			payload, _ := json.Marshal(targetUpdateBody(keys[0], []string{"sk-replacement-0003"}))
-			body := &issue68BlockedBody{ready: make(chan struct{}), release: make(chan struct{}), data: bytes.NewReader(payload)}
-			req := httptest.NewRequest(http.MethodPut, "http://example.com/data/targets/target-1", body)
+			// The body is read before configMu is taken (Issue #151), so hold the
+			// PUT inside the lock by blocking its store write behind a bbolt writer.
+			tx, err := stores.db.Begin(true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPut, "http://example.com/data/targets/target-1", bytes.NewReader(payload))
 			putDone := make(chan int, 1)
 			go func() { rec := httptest.NewRecorder(); h.ServeHTTP(rec, req); putDone <- rec.Code }()
-			<-body.ready
+			time.Sleep(100 * time.Millisecond) // PUT now holds configMu, waiting on the writer
 			done := make(chan *httptest.ResponseRecorder, 1)
 			go func() {
 				rec := httptest.NewRecorder()
@@ -580,7 +568,9 @@ func TestIssue68GetAndKeyActionsWaitForPut(t *testing.T) {
 				t.Errorf("%s completed during blocked PUT: %d", action, rec.Code)
 			case <-time.After(75 * time.Millisecond):
 			}
-			close(body.release)
+			if err := tx.Rollback(); err != nil {
+				t.Fatal(err)
+			}
 			if code := <-putDone; code != http.StatusOK {
 				t.Fatalf("put status=%d", code)
 			}
@@ -602,8 +592,6 @@ func TestIssue68GetAndKeyActionsWaitForPut(t *testing.T) {
 		})
 	}
 }
-
-var _ io.ReadCloser = (*issue68BlockedBody)(nil)
 
 func TestReviewSnapshotAfterEmptyFieldsPersist(t *testing.T) {
 	h, stores, service := issue68Handler(t, []string{"fixture-primary", "fixture-second"})

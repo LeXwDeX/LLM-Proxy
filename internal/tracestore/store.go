@@ -401,6 +401,9 @@ func (s *Store) searchInFile(filePath, traceID string, matchPattern []byte) *Tra
 	return nil
 }
 
+// MaxListOffset 是 List 接受的 offset/limit 上限，超出直接返回空。
+const MaxListOffset = 100000
+
 // List 列出最近 N 条记录（按时间倒序），支持 offset 分页。
 // offset=0, limit=50 → 最新 50 条
 // offset=50, limit=50 → 第 51-100 条（更早的记录）
@@ -414,6 +417,10 @@ func (s *Store) List(offset, limit int) []*TraceRecord {
 	}
 	if offset < 0 {
 		offset = 0
+	}
+	// 防御：超出上限的 offset 不可能有有意义的结果，也不应按其大小分配。
+	if offset > MaxListOffset || limit > MaxListOffset {
+		return nil
 	}
 
 	totalNeeded := offset + limit
@@ -434,7 +441,7 @@ func (s *Store) List(offset, limit int) []*TraceRecord {
 	s.mu.Unlock()
 
 	// 从内存 ring buffer 加载记录
-	seen := make(map[string]bool, totalNeeded*2)
+	seen := make(map[string]bool, len(memKeys)*2)
 	var merged []*TraceRecord
 	for _, key := range memKeys {
 		if v, ok := s.ring.Load(key); ok {
@@ -518,8 +525,8 @@ func (s *Store) readLastNFromFile(filePath string, n int) []*TraceRecord {
 	}
 	defer f.Close()
 
-	// 环形缓冲区：只保留最后 N 行
-	ring := make([]string, n)
+	// 环形缓冲区：只保留最后 N 行。按实际行数增长，n 很大时不预分配。
+	ring := make([]string, 0, min(n, 64))
 	ringHead := 0
 	ringCount := 0
 
@@ -535,10 +542,13 @@ func (s *Store) readLastNFromFile(filePath string, n int) []*TraceRecord {
 		if len(line) == 0 {
 			break
 		}
-		ring[ringHead] = line
-		ringHead = (ringHead + 1) % n
-		if ringCount < n {
-			ringCount++
+		if len(ring) < n {
+			ring = append(ring, line)
+			ringHead = len(ring) % n
+			ringCount = len(ring)
+		} else {
+			ring[ringHead] = line
+			ringHead = (ringHead + 1) % n
 		}
 	}
 

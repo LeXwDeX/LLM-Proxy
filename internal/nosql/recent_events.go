@@ -2,6 +2,7 @@ package nosql
 
 import (
 	"container/heap"
+	"context"
 	"encoding/json"
 	"sort"
 	"time"
@@ -39,9 +40,16 @@ func (h *recentEvents[T]) Pop() any {
 // Legacy RFC3339Nano keys sort by second, but NOT within a second: both missing
 // fractions and trimmed trailing zeroes invert their chronological order.
 // No key migration is needed; exact timestamps decide bounds and result order.
-func scanRecentEvents[T any](b *bolt.Bucket, limit int, from, to *time.Time, timestamp func(T) time.Time, matches func(T) bool) []T {
+//
+// ctx is checked every 128 rows. maxScan > 0 bounds the rows visited; when it is
+// exhausted before the scan completes, the partial result is returned with
+// truncated=true so callers can report it (never silently).
+func scanRecentEvents[T any](ctx context.Context, b *bolt.Bucket, limit int, maxScan int, from, to *time.Time, timestamp func(T) time.Time, matches func(T) bool) (result []T, truncated bool, err error) {
 	if b == nil {
-		return nil
+		return nil, false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
 	}
 	c := b.Cursor()
 	var k, v []byte
@@ -61,7 +69,18 @@ func scanRecentEvents[T any](b *bolt.Bucket, limit int, from, to *time.Time, tim
 		lower = from.UTC().Format(eventSecondLayout)
 	}
 	h := make(recentEvents[T], 0, limit)
+	scanned := 0
 	for ; k != nil; k, v = c.Prev() {
+		if scanned%128 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, false, err
+			}
+		}
+		if maxScan > 0 && scanned >= maxScan {
+			truncated = true
+			break
+		}
+		scanned++
 		if len(k) < len(eventSecondLayout) {
 			continue
 		}
@@ -89,9 +108,9 @@ func scanRecentEvents[T any](b *bolt.Bucket, limit int, from, to *time.Time, tim
 		}
 	}
 	sort.Slice(h, func(i, j int) bool { return h.Less(j, i) })
-	result := make([]T, len(h))
+	result = make([]T, len(h))
 	for i := range h {
 		result[i] = h[i].value
 	}
-	return result
+	return result, truncated, nil
 }

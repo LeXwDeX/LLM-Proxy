@@ -136,6 +136,14 @@ type auditArgs struct {
 	at                             time.Time
 }
 
+// maxConfigWriteBody 是目标/部署池/客户端写请求体的上限；读取与解码在取 configMu 之前完成。
+const maxConfigWriteBody = 16 << 20
+
+// limitConfigBody 给写请求体加上大小上限。
+func limitConfigBody(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxConfigWriteBody)
+}
+
 // lockConfig 获取 configMu 并返回事务；用法 `txn := h.lockConfig(r); defer txn.Unlock()`。
 func (h *Handler) lockConfig(r *http.Request) *configTxn {
 	h.configMu.Lock()
