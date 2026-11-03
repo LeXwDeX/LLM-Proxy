@@ -88,10 +88,7 @@ func TestIssue72HistoryEvidenceLoss(t *testing.T) {
 		if bob.Totals.Requests != wantBob || bob.Totals.InputTokens != 1000000*wantBob || math.Abs(bob.Totals.EstimatedCost-2*float64(wantBob)) > 1e-9 {
 			t.Fatalf("restart %d unrelated aggregate: %+v", restart, bob.Totals)
 		}
-		status := e.quotaStatus("bob")
-		if dig(status, "calibration_error") != nil || dig(status, "groups/models/quotas/daily/used") != float64(2*wantBob) {
-			t.Fatalf("restart %d unrelated quota: %+v", restart, status)
-		}
+		e.waitQuotaHealthy("bob", int(wantBob))
 		if code, raw := e.call("bob"); code != 200 {
 			t.Fatalf("restart %d unrelated admission: %d %s", restart, code, raw)
 		}
