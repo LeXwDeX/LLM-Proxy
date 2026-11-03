@@ -117,7 +117,8 @@ func run(m *testing.M) (int, error) {
 	proc := exec.CommandContext(ctx, bin, "-config", cfgPath)
 	proc.Dir = dir
 	proc.Env = append(os.Environ(), "ADMIN_PASSWORD="+adminPassword, "LOG_LEVEL=warn",
-		"UPSTREAM_ERROR_LOG_PATH="+filepath.Join(dir, "upstream-error.log"), "TRACE_STORE_ENABLED=false")
+		"UPSTREAM_ERROR_LOG_PATH="+filepath.Join(dir, "upstream-error.log"), "TRACE_STORE_ENABLED=false",
+		"USAGE_INTEGRITY_CLASSIFICATION_INTERVAL_SECONDS=2")
 	proc.Stdout, proc.Stderr = logFile, logFile
 	if err := proc.Start(); err != nil {
 		return 0, err

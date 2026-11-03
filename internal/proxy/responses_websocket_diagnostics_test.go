@@ -34,6 +34,45 @@ func assertLogField(t *testing.T, logs *bytes.Buffer, want string) {
 	}
 }
 
+func assertLogDuration(t *testing.T, logs *bytes.Buffer) {
+	t.Helper()
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, responsesWebsocketTerminalDiagnostic) {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode diagnostic log: %v", err)
+		}
+		duration, ok := entry["duration_ms"].(float64)
+		if !ok || duration < 0 {
+			t.Fatalf("diagnostic duration_ms=%v", entry["duration_ms"])
+		}
+		return
+	}
+	t.Fatalf("diagnostic log missing terminal entry:\n%s", logs.String())
+}
+
+func TestWebsocketBoundedDiagnosticValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: "", want: "unknown"},
+		{name: "short", value: "codex-fast", want: "codex-fast"},
+		{name: "long ascii", value: strings.Repeat("a", 129), want: strings.Repeat("a", 128)},
+		{name: "utf8 boundary", value: strings.Repeat("a", 127) + "界", want: strings.Repeat("a", 127)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := websocketBoundedDiagnosticValue(tc.value, 128); got != tc.want {
+				t.Fatalf("bounded value=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResponsesWebsocketDisconnectWithoutTerminalIsDiagnosed(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := (&gorillaws.Upgrader{}).Upgrade(w, r, nil)
@@ -78,6 +117,9 @@ func TestResponsesWebsocketDisconnectWithoutTerminalIsDiagnosed(t *testing.T) {
 	assertLogField(t, logs, `"msg":"`+responsesWebsocketTerminalDiagnostic+`"`)
 	assertLogField(t, logs, `"status":502`)
 	assertLogField(t, logs, `"code":"upstream_disconnected"`)
+	assertLogField(t, logs, `"model":"codex-fast"`)
+	assertLogField(t, logs, `"failure_stage":"wait_terminal_event"`)
+	assertLogDuration(t, logs)
 	assertLogField(t, logs, `"forwarded":true`)
 	assertLogField(t, logs, `"last_event_type":"response.output_text.delta"`)
 	assertLogField(t, logs, `"last_event_sequence":"3"`)
@@ -125,6 +167,9 @@ func TestResponsesWebsocketHTTPFallbackMissingTerminalIsDiagnosed(t *testing.T) 
 	waitWebsocketSlotsReleased(t, service)
 	assertLogField(t, logs, `"msg":"`+responsesWebsocketTerminalDiagnostic+`"`)
 	assertLogField(t, logs, `"status":502`)
+	assertLogField(t, logs, `"model":"codex-fast"`)
+	assertLogField(t, logs, `"failure_stage":"wait_terminal_event"`)
+	assertLogDuration(t, logs)
 	assertLogField(t, logs, `"forwarded":true`)
 	assertLogField(t, logs, `"last_event_type":"response.output_text.delta"`)
 	assertLogField(t, logs, `"last_event_sequence":"7"`)
@@ -171,6 +216,9 @@ func TestResponsesWebsocketTimeoutIsDiagnosed(t *testing.T) {
 	assertLogField(t, logs, `"msg":"`+responsesWebsocketTerminalDiagnostic+`"`)
 	assertLogField(t, logs, `"status":504`)
 	assertLogField(t, logs, `"code":"upstream_timeout"`)
+	assertLogField(t, logs, `"model":"codex-fast"`)
+	assertLogField(t, logs, `"failure_stage":"wait_first_event"`)
+	assertLogDuration(t, logs)
 	assertLogField(t, logs, `"forwarded":false`)
 	assertLogField(t, logs, `"last_event_type":"unknown"`)
 	assertLogField(t, logs, `"copy_error":"deadline_exceeded"`)

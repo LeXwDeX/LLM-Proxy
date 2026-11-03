@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
@@ -437,7 +438,7 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			session.turnStatus = 0
 			session.turnErrorBody = nil
 			session.turnHandshake = false
-			writer := &responsesWebsocketWriter{conn: conn, session: session, header: make(http.Header)}
+			writer := &responsesWebsocketWriter{conn: conn, session: session, header: make(http.Header), startedAt: time.Now(), model: extractModel(request, body)}
 			appmiddleware.RequestID()(http.HandlerFunc(s.ServeHTTP)).ServeHTTP(writer, request)
 			if ctx.Err() != nil || writer.clientErr {
 				return
@@ -473,11 +474,18 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 				// bounded JSON number, so upstream text, prompts, response bodies,
 				// keys and Authorization never enter the log.
 				reasonLength, reasonHash := session.closeReasonDiagnostic()
+				failureStage := "wait_first_event"
+				if writer.forwarded {
+					failureStage = "wait_terminal_event"
+				}
 				s.logger.Warn("responses websocket ended without a terminal event",
 					"request_id", websocketDiagnosticValue(writer.header.Get(appmiddleware.HeaderRequestID)),
 					"target", websocketDiagnosticValue(session.target),
+					"model", websocketBoundedDiagnosticValue(writer.model, 128),
 					"status", status,
 					"code", code,
+					"failure_stage", failureStage,
+					"duration_ms", time.Since(writer.startedAt).Milliseconds(),
 					"forwarded", writer.forwarded,
 					"last_event_type", websocketDiagnosticValue(writer.lastEventType),
 					"last_event_sequence", websocketDiagnosticValue(writer.lastEventSequence),
@@ -545,6 +553,20 @@ func websocketDiagnosticValue(value string) string {
 	return value
 }
 
+// websocketBoundedDiagnosticValue keeps a client-controlled value within a
+// byte budget without splitting UTF-8.
+func websocketBoundedDiagnosticValue(value string, limit int) string {
+	value = websocketDiagnosticValue(value)
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
 // responsesWebsocketWriter converts the existing response writer's SSE back to
 // native events. Usage observation and durable accounting stay in writeResponse.
 type responsesWebsocketWriter struct {
@@ -565,6 +587,8 @@ type responsesWebsocketWriter struct {
 	forwarded         bool
 	lastEventType     string
 	lastEventSequence string
+	startedAt         time.Time
+	model             string
 	// clientErr marks a failed write to the downstream socket, as opposed to
 	// upstream content the adapter rejected.
 	clientErr bool
