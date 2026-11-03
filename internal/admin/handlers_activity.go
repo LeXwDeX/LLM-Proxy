@@ -84,6 +84,9 @@ func (h *Handler) handleActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	recent, err := h.usageStore.RecentActivity(r.Context(), runtime.From, runtime.To, proxy.ActivityStep)
 	if err != nil {
+		if clientAborted(r, err) {
+			return
+		}
 		h.writeInternalError(w, "failed to read recent activity usage", err)
 		return
 	}
