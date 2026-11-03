@@ -144,20 +144,20 @@ func runClassificationAttempt(ctx context.Context, db *bolt.DB) (attempt classif
 		if attempt.err = ctx.Err(); attempt.err != nil {
 			return
 		}
-		lockStarted := time.Now()
 		writer, err := db.Begin(true)
 		if err != nil {
 			attempt.err = err
 			return
 		}
+		lockStarted := time.Now()
 		// The in-flight count is incremented before the maintenance epoch.
 		epoch := integrityEpoch.Load()
 		inflight := integrityInflight.Load()
 		if inflight != 0 || (build != nil && epoch != build.epoch) {
-			_ = writer.Rollback()
 			if d := time.Since(lockStarted); d > attempt.writerLockMax {
 				attempt.writerLockMax = d
 			}
+			_ = writer.Rollback()
 			attempt.reason = integrityFallbackEpochChanged
 			if build == nil {
 				attempt.reason = integrityFallbackIncomplete
@@ -165,14 +165,15 @@ func runClassificationAttempt(ctx context.Context, db *bolt.DB) (attempt classif
 			return
 		}
 		tx, err := db.Begin(false)
-		_ = writer.Rollback()
 		if d := time.Since(lockStarted); d > attempt.writerLockMax {
 			attempt.writerLockMax = d
 		}
+		_ = writer.Rollback()
 		if err != nil {
 			attempt.err = err
 			return
 		}
+		segmentStarted := time.Now()
 		if build == nil {
 			started = time.Now()
 			attempt.measured = true
@@ -190,12 +191,11 @@ func runClassificationAttempt(ctx context.Context, db *bolt.DB) (attempt classif
 				return
 			}
 		}
-		segmentStarted := time.Now()
 		build.runSegment(ctx, tx, integrityClassifySegmentBudget, integrityClassifySegmentDuration)
-		_ = tx.Rollback()
 		if d := time.Since(segmentStarted); d > attempt.segmentMax {
 			attempt.segmentMax = d
 		}
+		_ = tx.Rollback()
 		if integrityClassifySegmentBoundary != nil {
 			integrityClassifySegmentBoundary()
 		}
@@ -247,22 +247,24 @@ func recordClassificationAttempt(ctx context.Context, db *bolt.DB, attempt *clas
 	}
 	integrityState.Lock()
 	defer integrityState.Unlock()
-	if attempt.err != nil {
-		return integrityState.discardedRounds
-	}
-	if attempt.measured {
-		integrityState.lastDuration = attempt.duration
-	}
 	if attempt.segmentMax > integrityState.lastSegmentMax {
 		integrityState.lastSegmentMax = attempt.segmentMax
 	}
 	if attempt.writerLockMax > integrityState.lastWriterLockMax {
 		integrityState.lastWriterLockMax = attempt.writerLockMax
 	}
+	if attempt.err != nil {
+		return integrityState.discardedRounds
+	}
+	if attempt.measured {
+		integrityState.lastDuration = attempt.duration
+	}
 	if attempt.class == nil {
 		delete(integrityState.classes, db)
 		integrityState.fallbacks[attempt.reason]++
-		integrityState.discardedRounds++
+		if consistencyDiscardReason(attempt.reason) {
+			integrityState.discardedRounds++
+		}
 		integrityState.lastDiscardReason = attempt.reason
 		return integrityState.discardedRounds
 	}
@@ -312,7 +314,7 @@ func StartUsageIntegrityClassification(ctx context.Context, db *bolt.DB, interva
 				logger.Warn("usage integrity classification failed; integrity reads stay exhaustive", "error", attempt.err)
 			}
 			delay := interval
-			if attempt.err == nil && !attempt.installed {
+			if attempt.err == nil && !attempt.installed && consistencyDiscardReason(attempt.reason) {
 				delay = classificationDiscardDelay(discarded, interval)
 			}
 			timer := time.NewTimer(delay)
@@ -331,16 +333,25 @@ func StartUsageIntegrityClassification(ctx context.Context, db *bolt.DB, interva
 }
 
 func classificationDiscardDelay(discarded uint64, interval time.Duration) time.Duration {
-	delay := 5 * time.Second
-	if discarded == 2 {
+	var delay time.Duration
+	switch discarded {
+	case 1:
+		delay = 5 * time.Second
+	case 2:
 		delay = 15 * time.Second
-	} else if discarded >= 3 {
+	case 3:
 		delay = 45 * time.Second
+	default:
+		return interval
 	}
 	if delay > interval {
 		return interval
 	}
 	return delay
+}
+
+func consistencyDiscardReason(reason string) bool {
+	return reason == integrityFallbackEpochChanged || reason == integrityFallbackIndexProgressChanged
 }
 
 // UsageIntegrityMetrics is the exported, key-free state of the classifier.

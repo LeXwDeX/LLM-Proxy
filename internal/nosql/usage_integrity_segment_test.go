@@ -219,29 +219,44 @@ func TestIntegrityClassificationSegmentsCancelKeepsPreviousClass(t *testing.T) {
 func TestIntegrityClassificationDiscardStallAndBackoff(t *testing.T) {
 	productionIntegrityMode(t)
 	db, _, _ := integrityFixture(t)
-	classifyNow(t, db)
-	lastDuration := UsageIntegrityStats(db).LastDurationMS
-	end := integrityMutationBegin()
-	defer end()
-	for i, wantDelay := range []time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second, 45 * time.Second} {
-		if err := RunClassificationOnce(context.Background(), db); err != nil {
-			t.Fatal(err)
-		}
+	ForgetUsageIntegrityClassification(db)
+	integrityState.Lock()
+	integrityState.discardedRounds = 0
+	integrityState.lastDiscardReason = ""
+	integrityState.Unlock()
+
+	// A non-consistency failure (incomplete) must not be labelled as stalled.
+	attempt := classificationAttempt{reason: integrityFallbackIncomplete}
+	recordClassificationAttempt(context.Background(), db, &attempt)
+	if stats := UsageIntegrityStats(db); stats.DiscardedRounds != 0 || stats.ClassificationStalled {
+		t.Fatalf("incomplete counted as stall: %+v", stats)
+	}
+
+	for i, wantDelay := range []time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second} {
+		attempt = classificationAttempt{reason: integrityFallbackEpochChanged}
+		recordClassificationAttempt(context.Background(), db, &attempt)
 		stats := UsageIntegrityStats(db)
-		if stats.DiscardedRounds != uint64(i+1) || stats.ClassificationStalled != (i >= 2) || stats.LastDiscardReason != integrityFallbackIncomplete {
-			t.Fatalf("discard %d: %+v", i+1, stats)
-		}
-		if stats.LastDurationMS != lastDuration {
-			t.Fatalf("discard before scanning changed last duration: %v -> %v", lastDuration, stats.LastDurationMS)
+		if stats.DiscardedRounds != uint64(i+1) || stats.ClassificationStalled != (i >= 2) || stats.LastDiscardReason != integrityFallbackEpochChanged {
+			t.Fatalf("consistency discard %d: %+v", i+1, stats)
 		}
 		if got := classificationDiscardDelay(stats.DiscardedRounds, time.Minute); got != wantDelay {
 			t.Fatalf("discard %d delay: %s, want %s", i+1, got, wantDelay)
 		}
-		if got := classificationDiscardDelay(stats.DiscardedRounds, time.Second); got != time.Second {
-			t.Fatalf("discard %d delay exceeded interval: %s", i+1, got)
-		}
 	}
-	end()
+	if got := classificationDiscardDelay(4, time.Minute); got != time.Minute {
+		t.Fatalf("discard 4 delay=%s, want interval", got)
+	}
+	if got := classificationDiscardDelay(1, time.Second); got != time.Second {
+		t.Fatalf("delay exceeded interval: %s", got)
+	}
+
+	// Index progress changes are the other consistency discard reason.
+	attempt = classificationAttempt{reason: integrityFallbackIndexProgressChanged}
+	recordClassificationAttempt(context.Background(), db, &attempt)
+	if stats := UsageIntegrityStats(db); stats.DiscardedRounds != 4 || !stats.ClassificationStalled || stats.LastDiscardReason != integrityFallbackIndexProgressChanged {
+		t.Fatalf("index progress discard: %+v", stats)
+	}
+
 	classifyNow(t, db)
 	stats := UsageIntegrityStats(db)
 	if stats.DiscardedRounds != 0 || stats.ClassificationStalled || stats.LastDiscardReason != "" {
