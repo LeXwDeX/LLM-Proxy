@@ -302,7 +302,7 @@ func TestResponsesWSReclaimPreservesBusyCapacity(t *testing.T) {
 				p.entries[e] = struct{}{}
 			}
 			req, _ := http.NewRequest(http.MethodPost, u.URL+"/v1/responses", nil)
-			e, resp, fallback, err := p.acquire(req.Context(), http.DefaultClient, req, owner, "")
+			e, resp, fallback, err := p.acquire(req.Context(), http.DefaultClient, req, "openai", owner, "")
 			if mode == "global_idle" {
 				if err != nil || resp != nil || fallback || e == nil || upgrades.Load() != 1 {
 					t.Fatalf("idle global capacity not reclaimed: conn=%v response=%v fallback=%v err=%v upgrades=%d", e, resp, fallback, err, upgrades.Load())
