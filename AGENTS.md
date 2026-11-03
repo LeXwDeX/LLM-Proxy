@@ -17,7 +17,7 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 
 ## 架构方向：原厂规则 + Patch 规则
 
-已确定的方向（2026-10-12 确立，2026-10-13 补充 OpenRouter、MiniMax）：
+架构要求（适用于全部原厂协议与 Patch，含 OpenRouter、MiniMax）：
 
 - **原厂规则**：OpenAI（Chat、Responses、Images 等）、Anthropic Messages、Gemini 是原厂协议。它们的认证、路径、用量解析和错误分类写在通用代码中，作为默认行为。
 - **Patch 规则**：第三方基于原厂协议的扩展视为 Patch。当前 Patch 分类为 `qwen`、`glm`、`deepseek`、`kimi`、`openrouter`、`minimax`。Patch 只描述与原厂的差异，例如额外的用量字段、厂商错误码、HTTP 200 中的错误体。
@@ -34,7 +34,7 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 - 用途：`make e2e` 在进程内启动 fakellm 并运行真实代理二进制；`make ui-sim` 用它作为管理页面模拟的上游；`cmd/fakellm -legacy-mock` 提供兼容旧 mock 合同的模式。它们都不调用真实模型。
 - 行为通过请求内指令、按 key 规则或全局场景（`/_control`）控制。flavor 模拟厂商的线格式；preset 是按官方文档建模的厂商错误快照（如 `glm_1302`、`kimi_quota`、`openrouter_403_budget`、`minimax_1008`），包含用于反例的形态。
 - fakellm 是 Patch 规则的测试基座：每条 Patch 判据都应有对应 preset。preset 只代表文档合同，不能替代真实厂商验收，也不能作为扩大测试授权的理由。
-- MiniMax 仅实现官方有据的形态：错误 Patch 只读非流式 Chat Completions HTTP 200 JSON 的 `base_resp`；流式、非 2xx、Anthropic Messages 与 Responses 走原厂规则。fakellm 的 MiniMax 流式 chunk 无 `base_resp`，`include_usage` 默认 false，此时所有 chunk 均为 `usage: null`；显式请求用量时沿用 OpenAI 原厂末尾空 choices 用量块，位置为原厂形态推定，MiniMax 官方未示例。Anthropic 错误复用标准协议 preset。来源为 [Chat OpenAPI](https://platform.minimaxi.com/docs/api-reference/text-chat-openai)、[Anthropic 协议](https://platform.minimaxi.com/docs/api-reference/text-chat-anthropic) 与 [错误码页](https://platform.minimaxi.com/docs/api-reference/errorcode)，核对日期 2026-10-13；文档核对不等于真实 API 验收。
+- MiniMax 仅实现官方有据的形态：错误 Patch 只读非流式 Chat Completions HTTP 200 JSON 的 `base_resp`；流式、非 2xx、Anthropic Messages 与 Responses 走原厂规则。fakellm 的 MiniMax 流式 chunk 无 `base_resp`，`include_usage` 默认 false，此时所有 chunk 均为 `usage: null`；显式请求用量时沿用 OpenAI 原厂末尾空 choices 用量块，位置为原厂形态推定，MiniMax 官方未示例。Anthropic 错误复用标准协议 preset。来源为 [Chat OpenAPI](https://platform.minimaxi.com/docs/api-reference/text-chat-openai)、[Anthropic 协议](https://platform.minimaxi.com/docs/api-reference/text-chat-anthropic) 与 [错误码页](https://platform.minimaxi.com/docs/api-reference/errorcode)，依据为上述官方文档；文档依据不等于真实 API 验收。
 
 ## 信息来源与工作区保护
 
@@ -143,8 +143,8 @@ GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推
 
 ```sh
 make test                 # check-docs + go test ./...
-make test-fast-integrity  # nosql/quota 用例在强制完整性快速路径下再跑一轮（Issue #125）
-make coverage-check       # internal 覆盖率门禁（串行跑包；总覆盖率与六个核心包均不低于 80%，Issue #136）
+make test-fast-integrity  # nosql/quota 用例在强制完整性快速路径下再跑一轮
+make coverage-check       # internal 覆盖率门禁（串行跑包；总覆盖率与六个核心包均不低于 80%）
 go vet ./...
 go vet -tags=e2e ./test/e2e/
 go build ./...            # 与 CI 一致的编译检查

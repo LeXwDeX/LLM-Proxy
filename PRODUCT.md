@@ -37,8 +37,8 @@ web
 - 内嵌前端：internal/admin/ui/index.html、internal/admin/ui/js/overview.js。
 - 请求生命周期：internal/proxy/service.go、internal/proxy/responses_websocket.go。
 - 用量合同：internal/usage/store.go、internal/nosql/usage.go。
-- Issue #40 的总览重设计范围、数据边界和验收条件；当前实现以 `overview.js`、`overview.test.cjs` 和 `admin_ui_sim_flows.cjs` 为准。
-- 用户确认：2026-10-14 以全站汇总及客户端明细展示实时活动和近五分钟 Token，并直接制作可交互页面。
+- 需求依据：Issue #40 的总览重设计范围、数据边界和验收条件；当前实现以 `overview.js`、`overview.test.cjs` 和 `admin_ui_sim_flows.cjs` 为准。
+- 需求依据：总览必须以全站汇总及客户端明细展示实时活动和近五分钟 Token，并交付可交互页面。
 
 ## Product Principles
 
