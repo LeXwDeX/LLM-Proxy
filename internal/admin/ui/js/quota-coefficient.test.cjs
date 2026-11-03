@@ -299,6 +299,7 @@ test("a failed 30-day aggregate load is explicit while quota rows still load", a
     quotaClient("alice", {shared: {in_plan: true, quotas: finiteQuotas(100, 1)}}, finiteQuotas(100, 1)),
   ]});
   await quota.loadQuotaManagement();
+  await app.modules.quotaModel.shared.quotaUsageRefresh;
   assert.equal(app.state.clientUsage30dUnavailable, true);
   assert.match(harness.ids.get("quotaSummaryBody").innerHTML, /alice/);
   assert.match(statusRow(harness, "alice"), /30 天用量加载失败/);
