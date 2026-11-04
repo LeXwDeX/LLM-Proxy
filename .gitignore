@@ -80,6 +80,10 @@ WINDSURF.md
 .impeccable/
 .codebase-memory/
 
+# Impeccable 生成的产品/设计描述文件（仅本地保留，不进入公共仓库）
+/PRODUCT.md
+/DESIGN.md
+
 # One-time migration scripts (not part of the project)
 migrate-to-bbolt.sh
 
