@@ -44,6 +44,7 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 4. 用户要求只改文档时，不改业务代码、配置或部署行为；用户明确说不跑测试时，不运行测试。
 5. 当前受维护的说明是 [`README.md`](README.md)（英文主文档）及其中文版 [`README.zh-CN.md`](README.zh-CN.md)、本文件、[`internal/proxy/AGENTS.md`](internal/proxy/AGENTS.md)、[`internal/admin/AGENTS.md`](internal/admin/AGENTS.md) 及 [`scripts/testing/README.md`](scripts/testing/README.md)。不要添加指向不存在文件的链接；只有用户明确要求时才新建或重建指定文档。修改 README 时，英文版与中文版须在同一改动中同步，章节结构保持一致。
 6. 发现文档与源码不一致时，核对相关用例并修正文档中的实现说明。已确定的策略仍是约束，不能因代码未落实就删除策略或扩大权限。
+7. SpecGit 与本地工具生成的声明、Skill、hooks、缓存和索引（如 `.specgit.yaml`、`.agents/`、`.claude/`、`.serena/`、`.codebase-memory/`）不提交、不跟踪；`AGENTS.md`（含 scoped `AGENTS.md`）是唯一例外。
 
 ## 多 Agent 与代码证据
 
@@ -62,7 +63,7 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 
 ### 范围与兼容
 
-- 先明确问题、改动范围、验收条件和直接消费者。使用隔离的功能分支，分支命名不绑定特定工具。不要在同一改动中顺带重构无关模块。
+- 先明确问题、改动范围、验收条件和直接消费者。直接在 `main` 实施，不创建隔离功能分支。不要在同一改动中顺带重构无关模块。
 - 保留现有 API 路径、错误码、JSON 字段、配置读取与默认值语义。确需破坏兼容时，先说明影响，并提供迁移步骤和验证方案。
 - 修改 `internal/proxy/` 或 `internal/admin/` 前，先阅读对应目录的 `AGENTS.md`。目录级实现说明也须与当前源码和用例核对。
 
@@ -115,18 +116,18 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 
 ## 开发与测试流程
 
-1. 先查重并明确问题、范围和验收条件，再在隔离分支实施；保留当前工作区的用户改动。
-2. 规格用 GitHub Issue 记录（SpecGit 管理）：每个可独立验证的目标对应一个 Issue，正文使用“原因 / 范围 / 方案 / 验收”小节，进度、阻塞与证据链接也记在 Issue；PR/MR 正文使用“原因 / 变更 / 证据 / 检查清单”小节，用 `Closes #N` 或 `Refs #N` 关联，关闭引用须独立成行并填写实际编号。
+1. 先查重并明确问题、范围和验收条件，再直接在 `main` 实施；保留当前工作区的用户改动。
+2. 规格用 GitHub Issue 记录（SpecGit 管理）：每个可独立验证的目标对应一个 Issue，正文使用“原因 / 范围 / 方案 / 验收”小节，进度、阻塞与证据链接也记在 Issue；如使用 PR/MR，正文使用“原因 / 变更 / 证据 / 检查清单”小节，用 `Closes #N` 或 `Refs #N` 关联，关闭引用须独立成行并填写实际编号。
    Issue 与 PR/MR 的标题和正文使用中文；专有名词、命令、代码、必要类型前缀和关联引用可保留英文。SpecGit 仅机械检查标题含汉字和正文小节结构，不能自动判断自然语言是否全面使用中文，仍须人工核对。
 3. 按 TDD 验证本地行为：行为变更必须先建立能复现问题、且因正确原因失败的用例，再修改实现并确认通过；验证范围覆盖受影响行为及直接消费者。保持行为不变的重构与仅文档改动不需要人为制造失败用例，但要写明已跑的检查。
 4. 运行本地项目门禁；本地可运行的必需门禁不得留给远端 CI 首次发现。本地使用 `go.mod` 声明的 Go 版本，与 CI 一致。
-5. 功能分支以 Pull Request 合入 `dev`，不直接推送 `dev` 或 `main`。PR 按 [`.github/pull_request_template.md`](.github/pull_request_template.md) 填写说明、关联 Issue、TDD 证据（先失败的测试与修复后的通过）、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
-6. `dev` 验收通过后，`main` 只以 fast-forward 前进到已验收的 `dev` 提交，不在 `main` 上单独提交或产生合并提交。tag 与 GitHub Release 必须最后做：测试环境全量验收和生产环境同一镜像发布冒烟都通过后才打 tag，绝不提前。
+5. 改动直接在 `main` 提交并推送，不创建功能分支，也不等待 CI 作为发布门禁。提交信息使用“原因 / 变更 / 证据 / 检查清单”小节，并按 SpecGit guard 要求使用 `Issue: #N` 关联 Issue。如确需 PR/MR，按 [`.github/pull_request_template.md`](.github/pull_request_template.md) 填写说明、关联 Issue、TDD 证据（先失败的测试与修复后的通过）、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
+6. `main` 是唯一交付分支；推送前按影响范围完成本地检查。tag 与 GitHub Release 仍最后做：测试环境全量验收和生产环境同一镜像发布冒烟都通过后才打 tag，绝不提前。
 7. 发布镜像时，部署与已验证提交完全一致的不可变镜像，不以 `latest` 或重新构建的镜像替代已验证制品。上线前备份配置与 bbolt 数据库；若新实例已写入数据，不能用旧数据库覆盖新数据。
 
-### CI 必需检查
+### CI 检查
 
-GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推送到 `dev`、`main` 以及目标为 `dev`、`main` 的 PR 上运行。只用 GitHub 托管 runner，不读取任何 secret；同一 ref 的新运行会取消旧运行。下列 job 名称是 `dev` 与 `main` 分支保护的必需检查，须保持稳定；改名或拆分时同步分支保护与本节：
+GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推送到 `dev`、`main` 以及目标为 `dev`、`main` 的 PR 上运行。只用 GitHub 托管 runner，不读取任何 secret；同一 ref 的新运行会取消旧运行。下列 job 名称是 `dev` 与 `main` 分支保护的必需检查，须保持稳定；改名或拆分时同步分支保护与本节。当前交付流程只使用 `main`，推送后不等待 CI 作为发布门禁；CI 结果用于事后核验，本地检查仍按影响范围执行：
 
 | job | 命令 |
 |---|---|
