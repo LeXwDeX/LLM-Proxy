@@ -75,6 +75,8 @@ WINDSURF.md
 .serena/
 .agents/
 .specgit/
+# SpecGit 生成的声明文件；AGENTS.md 作为项目指引仍由仓库跟踪
+.specgit.yaml
 .impeccable/
 .codebase-memory/
 
