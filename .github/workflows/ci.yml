@@ -3,7 +3,8 @@
 # job 名称是分支保护的必需检查名，保持稳定：test、race、e2e、integration、admin-ui、scripts。
 # 改名或拆分 job 时须同步分支保护与 README / AGENTS.md 中的检查列表。
 #
-# 约束：只用 GitHub 托管 runner，不读取任何 secret；action 固定到提交 SHA（注释为对应版本）。
+# 约束：高负载的 test / race 在可信事件上走 Azure runner，其余 job 用 GitHub 托管 runner；
+# 不读取任何 secret；action 固定到提交 SHA（注释为对应版本）。
 # 每个 job 的命令都可在本地以同一命令复现（Go 版本取自 go.mod）。
 # docker-build.yml 是可选的手动镜像构建，不承担验收职责。
 name: CI
@@ -24,7 +25,7 @@ permissions:
 jobs:
   test:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "X64", "azure-f16"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,7 +61,7 @@ jobs:
 
   race:
     name: race
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "X64", "azure-f16"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
