@@ -109,3 +109,6 @@ graphify-out/
 
 # SpecGit 与本地 Agent 生成的本地资产（不追踪）
 /CLAUDE.md
+
+# 自建 CI 的 Dockerfile、compose 与运行脚本（本地使用，不入库）
+/ci/
