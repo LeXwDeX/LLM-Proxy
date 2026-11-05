@@ -121,13 +121,15 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
    Issue 与 PR/MR 的标题和正文使用中文；专有名词、命令、代码、必要类型前缀和关联引用可保留英文。SpecGit 仅机械检查标题含汉字和正文小节结构，不能自动判断自然语言是否全面使用中文，仍须人工核对。
 3. 按 TDD 验证本地行为：行为变更必须先建立能复现问题、且因正确原因失败的用例，再修改实现并确认通过；验证范围覆盖受影响行为及直接消费者。保持行为不变的重构与仅文档改动不需要人为制造失败用例，但要写明已跑的检查。
 4. 运行本地项目门禁；本地可运行的必需门禁不得留给远端 CI 首次发现。本地使用 `go.mod` 声明的 Go 版本，与 CI 一致。
-5. 改动直接在 `main` 提交并推送，不创建功能分支，也不等待 CI 作为发布门禁。提交信息使用“原因 / 变更 / 证据 / 检查清单”小节，并按 SpecGit guard 要求使用 `Issue: #N` 关联 Issue。如确需 PR/MR，按 [`.github/pull_request_template.md`](.github/pull_request_template.md) 填写说明、关联 Issue、TDD 证据（先失败的测试与修复后的通过）、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
-6. `main` 是唯一交付分支；推送前按影响范围完成本地检查。tag 与 GitHub Release 仍最后做：测试环境全量验收和生产环境同一镜像发布冒烟都通过后才打 tag，绝不提前。
-7. 发布镜像时，部署与已验证提交完全一致的不可变镜像，不以 `latest` 或重新构建的镜像替代已验证制品。上线前备份配置与 bbolt 数据库；若新实例已写入数据，不能用旧数据库覆盖新数据。
+5. 开发阶段使用自建 CI（仅 Linux）：在测试机器上的“项目目录/ci”内创建 CI Docker（Dockerfile、compose 与运行脚本均留在该目录，不入库），同步代码后在容器内跑下文“CI 检查”表中的全部 job。开发期间反复在自建 CI 中迭代，直到所有问题解决、全部 job 通过。
+6. 自建 CI 全绿后，再推送到 GitHub 触发最终的 GitHub runner；GitHub runner 是对已在自建 CI 通过的提交做最终确认，不作为首次发现问题的手段。改动直接在 `main` 提交，不创建功能分支。提交信息使用“原因 / 变更 / 证据 / 检查清单”小节，并按 SpecGit guard 要求使用 `Issue: #N` 关联 Issue。如确需 PR/MR，按 [`.github/pull_request_template.md`](.github/pull_request_template.md) 填写说明、关联 Issue、TDD 证据（先失败的测试与修复后的通过）、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
+7. GitHub runner 通过后，将同一提交对应的不可变镜像发往生产机器做人类 review（Review 阶段按上线冒烟对待，遵守生产环境约束）。人类 review 通过后才打 tag 并创建 GitHub Release，绝不提前。
+8. 测试机器与生产机器的地址、目录、登录方式等只记录在不追踪的 `local/` 文件中，本文件及其他受跟踪文件、提交信息、Issue、PR 不写具体 IP，只描述流程。
+9. 发布镜像时，部署与已验证提交完全一致的不可变镜像，不以 `latest` 或重新构建的镜像替代已验证制品。上线前备份配置与 bbolt 数据库；若新实例已写入数据，不能用旧数据库覆盖新数据。
 
 ### CI 检查
 
-GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推送到 `dev`、`main` 以及目标为 `dev`、`main` 的 PR 上运行。只用 GitHub 托管 runner，不读取任何 secret；同一 ref 的新运行会取消旧运行。下列 job 名称是 `dev` 与 `main` 分支保护的必需检查，须保持稳定；改名或拆分时同步分支保护与本节。当前交付流程只使用 `main`，推送后不等待 CI 作为发布门禁；CI 结果用于事后核验，本地检查仍按影响范围执行：
+GitHub Actions（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推送到 `dev`、`main` 以及目标为 `dev`、`main` 的 PR 上运行。只用 GitHub 托管 runner，不读取任何 secret；同一 ref 的新运行会取消旧运行。下列 job 名称是 `dev` 与 `main` 分支保护的必需检查，须保持稳定；改名或拆分时同步分支保护与本节。当前交付流程只使用 `main`：开发阶段以测试机器上的自建 CI（内容与下表一致，仅 Linux）为准，全绿后再推送，由 GitHub runner 做最终确认；两者都通过才进入人类 review 与发布。本地检查仍按影响范围执行：
 
 | job | 命令 |
 |---|---|
