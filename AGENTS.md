@@ -1,6 +1,6 @@
 # 项目 Agent 指引
 
-本文件约束本仓库的二次开发与 Agent 工作。仓库实现以当前源码、用例和脚本为准。文中的价格口径、访问策略与验证要求是开发约束，不表示任何部署环境已按此配置或已验收。涉及运行中实例的状态、发布状态或模型 ACL（访问控制）时，须在授权范围内实际回读，并记录核验日期。
+本文件只描述本项目自身与 SpecGit 约定。开发、测试、CI 环境与发布流程见用户全局提示词，本文件不记录。仓库实现以当前源码、用例和脚本为准；文中的价格口径、访问策略与验证要求是开发约束，不表示任何部署环境已按此配置或已验收。涉及运行中实例的状态、发布状态或模型 ACL（访问控制）时，须在授权范围内实际回读，并记录核验日期。
 
 ## 项目概况
 
@@ -36,26 +36,11 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 - fakellm 是 Patch 规则的测试基座：每条 Patch 判据都应有对应 preset。preset 只代表文档合同，不能替代真实厂商验收，也不能作为扩大测试授权的理由。
 - MiniMax 仅实现官方有据的形态：错误 Patch 只读非流式 Chat Completions HTTP 200 JSON 的 `base_resp`；流式、非 2xx、Anthropic Messages 与 Responses 走原厂规则。fakellm 的 MiniMax 流式 chunk 无 `base_resp`，`include_usage` 默认 false，此时所有 chunk 均为 `usage: null`；显式请求用量时沿用 OpenAI 原厂末尾空 choices 用量块，位置为原厂形态推定，MiniMax 官方未示例。Anthropic 错误复用标准协议 preset。来源为 [Chat OpenAPI](https://platform.minimaxi.com/docs/api-reference/text-chat-openai)、[Anthropic 协议](https://platform.minimaxi.com/docs/api-reference/text-chat-anthropic) 与 [错误码页](https://platform.minimaxi.com/docs/api-reference/errorcode)。
 
-## 信息来源与工作区保护
+## 文档与仓库约定
 
-1. 当前用户在本轮给出的明确要求优先于旧记录。代码和脚本只能证明当前实现，不能证明任何部署环境的状态。
-2. 将“期望策略”“仓库当前实现”“运行实例回读结果”分开陈述。没有执行或读取到的状态，不写成已完成或已验收。
-3. 开始编辑前检查 `git status` 和 diff。保留已有改动、未跟踪文件及用户删除；不使用 `git reset --hard`、`git clean` 或其他会丢失用户内容的命令。
-4. 用户要求只改文档时，不改业务代码、配置或部署行为。
-5. 当前受维护的说明是 [`README.md`](README.md)（英文主文档）及其中文版 [`README.zh-CN.md`](README.zh-CN.md)、本文件、[`internal/proxy/AGENTS.md`](internal/proxy/AGENTS.md)、[`internal/admin/AGENTS.md`](internal/admin/AGENTS.md) 及 [`scripts/testing/README.md`](scripts/testing/README.md)。不要添加指向不存在文件的链接；只有用户明确要求时才新建或重建指定文档。修改 README 时，英文版与中文版须在同一改动中同步，章节结构保持一致。
-6. 发现文档与源码不一致时，核对相关用例并修正文档中的实现说明。已确定的策略仍是约束，不能因代码未落实就删除策略或扩大权限。
-7. SpecGit 与本地工具生成的声明、Skill、hooks、缓存和索引（如 `.specgit.yaml`、`.agents/`、`.claude/`、`.serena/`、`.codebase-memory/`）不提交、不跟踪；`AGENTS.md`（含 scoped `AGENTS.md`）是唯一例外。
-
-## 多 Agent 与代码证据
-
-- 每项任务必须使用多 Agent。主 Agent 负责调度、撰写方案、集成和会审；编码实施优先委派编码 Agent；简单探索、文档和重复检查委派探索 Agent；重大方案决策交给能力最强的决策 Agent。主 Agent 沿用用户当前选择的模型。具体 Agent 类型和工具名称按所用工具的实际能力选择，本文件不绑定特定工具。
-- 代码交付在问题全部处理完毕、进入测试环境验收之前，须派遣当前可用的最强模型做一次全面代码审核（本文件不固定模型名称，按当时可用模型选择），审核发现的问题修复后再进入验收和生产晋级。
-- 主 Agent 为子 Agent 明确文件范围和职责。共享工作区时不得覆盖或撤销他人的改动。终审发现问题后，由实施 Agent 修复，再提交终审。
-- 结构探索优先使用代码图谱或索引类工具（如可用）。每次会话开始或上下文压缩恢复后，先确认项目及索引状态与代次。
-- 默认做中等深度核验：按符号查找定义，追踪调用关系，读取关键实现片段；复杂关系用多跳查询，整体结构用架构概览。处理相关结果的分页。
-- 找到证据文件后，检查索引对全部证据路径的覆盖。否定或穷尽结论还须检查对应范围。覆盖无缺口记录不等于完整性证明；覆盖不全或已过期时，直接读取遗漏源码。
-- 字面量、配置、脚本和非代码文档可用文本搜索与直接读取。索引工具不足或不可用时回退源码，并说明证据限制。
-- 委派前，主 Agent 先完成相关结构查询及覆盖检查。交接项目、索引代次、证据层级、范围、符号、路径、调用关系、分页进度、覆盖缺口和待核实问题。子 Agent 没有索引工具时，只能使用已交接证据和直接源码，不能声称做过图谱核验。
+- 当前受维护的说明是 [`README.md`](README.md)（英文主文档）及其中文版 [`README.zh-CN.md`](README.zh-CN.md)、本文件、[`internal/proxy/AGENTS.md`](internal/proxy/AGENTS.md)、[`internal/admin/AGENTS.md`](internal/admin/AGENTS.md) 及 [`scripts/testing/README.md`](scripts/testing/README.md)。不要添加指向不存在文件的链接；只有用户明确要求时才新建或重建指定文档。修改 README 时，英文版与中文版须在同一改动中同步，章节结构保持一致。
+- 发现文档与源码不一致时，核对相关用例并修正文档中的实现说明。已确定的策略仍是约束，不能因代码未落实就删除策略或扩大权限。
+- SpecGit 与本地工具生成的声明、Skill、hooks、缓存和索引（如 `.specgit.yaml`、`.agents/`、`.claude/`、`.serena/`、`.codebase-memory/`）不提交、不跟踪；`AGENTS.md`（含 scoped `AGENTS.md`）是唯一例外。仓库根目录的 `ci/` 是自建 CI 工作目录，已被 `.gitignore` 忽略，不入库。
 
 ## 二次开发要求
 
@@ -89,14 +74,15 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 - 保留用量恢复日志与数据库的一致性。备份或恢复方案须说明数据库、恢复日志及迁移快照的处理，不能覆盖新实例已产生的数据。
 - 新增 `/admin/*` 接口须经过会话中间件。写操作使用 `ReadonlyGuard`，用户管理额外校验管理员角色，并沿用审计记录。保留已有修改本人密码接口的角色例外，不能把例外扩展到其他写操作。
 - 管理页面改动须检查内嵌资源、接口和页面行为。弹层、Tooltip 和 JS 模块加载遵循 [`internal/admin/AGENTS.md`](internal/admin/AGENTS.md)，不能只凭编译通过验收 UI。
+- 升级运行中的实例或执行迁移前，先备份其配置与 bbolt 数据库（含用量恢复日志与迁移快照）。
 
-### 验证与交付
+### 验证
 
-- 代码行为变化按 TDD 实施，要求见“开发与发布流程”。
+- 按 TDD 验证本地行为：行为变更必须先建立能复现问题、且因正确原因失败的用例，再修改实现并确认通过；验证范围覆盖受影响行为、失败边界及直接消费者，不要写只复述实现的测试。保持行为不变的重构与仅文档改动不需要人为制造失败用例，但要写明已跑的检查。
+- 运行本地项目门禁；本地可运行的必需门禁不得留给远端 CI 首次发现；本地使用 `go.mod` 声明的 Go 版本，与 CI 一致。
 - 代理改动验证 `internal/proxy`；权限或 UI 改动验证 `internal/admin`；计费改动联查 `pricing`、`usage`、`quota`、`nosql` 及相关后台消费者。并发改动按影响范围增加 race 检查。
 - 涉及协议、Patch、用量、计价或响应编码的改动，在 `make e2e` 中补充或运行对应的 fakellm 成功与失败用例，覆盖适用的 JSON、SSE、WS、显式 Patch 与 `standard` 反例，并回读用量、费用及不完整诊断。
 - 仅文档任务检查路径、命令、事实来源和 diff，执行 `make check-docs` 与 `git diff --check`。
-- 交付说明写清改动、已执行检查、未验证范围和环境状态。提交、推送、部署与发布是不同阶段，不能互相代替验收。
 
 ## 模型名称、协议和上游转发
 
@@ -112,29 +98,9 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 - 官方以人民币标价时，按部署方选定的固定汇率换算为美元后填写，同一价表使用同一口径；官方美元价直接使用，不再次换汇。按每百万 token 存储的价格保留小数点后 6 位。
 - 分时段价格（如 DeepSeek 峰时、谷时）按官方价格和对应生效时段分别配置；不能合并成单一价，也不能把价率与免费系数混为一谈。
 
-## 开发与发布流程
+## CI 检查与本地门禁
 
-通用发布流程（自建 CI → GitHub Runner → 人工 Review → tag + GitHub Release）见用户全局提示词；本节只记录本项目特有的要求。
-
-### 通用约定
-
-- 先查重并按“范围与兼容”明确问题，再直接在 `main` 实施，不创建功能分支。
-- 规格用 GitHub Issue 记录（SpecGit 管理）：每个可独立验证的目标对应一个 Issue，正文使用“原因 / 范围 / 方案 / 验收”小节，进度、阻塞与证据链接也记在 Issue；如使用 PR/MR，正文使用“原因 / 变更 / 证据 / 检查清单”小节，用 `Closes #N` 或 `Refs #N` 关联，关闭引用须独立成行并填写实际编号。
-  Issue 与 PR/MR 的标题和正文使用中文；专有名词、命令、代码、必要类型前缀和关联引用可保留英文。SpecGit 仅机械检查标题含汉字和正文小节结构，不能自动判断自然语言是否全面使用中文，仍须人工核对。
-- 按 TDD 验证本地行为：行为变更必须先建立能复现问题、且因正确原因失败的用例，再修改实现并确认通过；验证范围覆盖受影响行为、失败边界及直接消费者，不要写只复述实现的测试。保持行为不变的重构与仅文档改动不需要人为制造失败用例，但要写明已跑的检查。
-- 运行本地项目门禁；本地可运行的必需门禁不得留给远端 CI 首次发现。本地使用 `go.mod` 声明的 Go 版本，与 CI 一致。
-- 提交信息使用“原因 / 变更 / 证据 / 检查清单”小节，并按 SpecGit guard 要求使用 `Issue: #N` 关联 Issue。如确需 PR/MR，按 [`.github/pull_request_template.md`](.github/pull_request_template.md) 填写说明、关联 Issue、TDD 证据（先失败的测试与修复后的通过）、已跑门禁、未验证范围，以及是否影响计费、协议或兼容性。
-
-### 各阶段的项目要求
-
-- **开发阶段**：自建 CI 用 Docker 运行，Dockerfile、compose 与运行脚本不入库。同步代码后在容器内跑下文“CI 检查”表中的全部 job。
-- **人工 Review**：发往生产机器的是同一提交对应的不可变镜像，不以 `latest` 或重新构建的镜像替代已验证制品。Review 阶段按上线冒烟对待。
-- **上线**：上线前备份配置与 bbolt 数据库，处理要求见“持久化与管理权限”。
-- **Release**：发布默认只附源码包。
-
-### CI 检查
-
-GitHub 侧的触发条件、job 划分和 Runner 选择以 [`.github/workflows/`](.github/workflows/) 为准，本文件不复述。GitHub 侧 workflow 不读取任何 secret。下列 job 名称是 `dev` 与 `main` 分支保护的必需检查，须保持稳定；改名或拆分时同步分支保护与本节。当前交付流程只使用 `main`，自建 CI 的内容与下表一致：
+GitHub 侧的触发条件、job 划分和 Runner 选择以 [`.github/workflows/`](.github/workflows/) 为准，本文件不复述。`ci.yml` 不读取任何 secret。下列 job 名称是 `dev` 与 `main` 分支保护的必需检查，须保持稳定；改名或拆分时同步分支保护与本节。自建 CI 的 job 与下表一致：
 
 | job | 命令 |
 |---|---|
@@ -165,15 +131,24 @@ python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_im
 
 改动行为后按影响范围执行相应门禁。仅在用户明确说不跑测试时才跳过，并如实说明未验证范围。`scripts/check-agents-docs.sh` 检查 `AGENTS.md` 存在；不要求存在 `CLAUDE.md`。
 
+Release 产物：GitHub Release 默认只附 GitHub 自动生成的源码包，不附镜像归档。`docker-build.yml` 是可选的手动镜像归档工具，已在 Actions 设置中停用，不是必需检查。
+
 ## 安全与边界
 
 - 安全检查限定为模型层的业务与代码审计，以及可预见的安全处理。
 - 不得将真实 provider key、客户端 key、管理员密码、生产快照或含凭据的 `.env` 提交到 Git，也不得把密钥值写入文档、命令回显、日志或截图。密钥只能从指定的环境变量或安全凭据入口读取；环境文件仅保存在各自机器并限制权限。
-- 私有部署资料（地址、主机、部署脚本、环境说明等）只放在仓库根目录的 `local/`，环境细节与服务器操作规则见用户全局提示词（claude.md）。`local/` 已被 `.gitignore` 与 `.dockerignore` 忽略，并带有独立 `go.mod`，不参与根模块构建。不得把其中的内容复制进受跟踪的文件、提交信息、Issue 或 PR 描述。
+- 私有部署资料（地址、主机、部署脚本、环境说明等）只放在仓库根目录的 `local/`，环境细节与服务器操作规则见用户全局提示词。`local/` 已被 `.gitignore` 与 `.dockerignore` 忽略，并带有独立 `go.mod`，不参与根模块构建。不得把其中的内容复制进受跟踪的文件、提交信息、Issue 或 PR 描述。
 - 默认测试使用 fakellm，不调用真实模型。需要调用真实上游模型时，先取得用户对该模型测试的明确同意；不得从“发布”“回归”或已有密钥推断授权。
 - 测试环境和正式环境使用各自的配置、数据库及卷；禁止共用 bbolt 文件或为了测试停止正式服务。
 - 不执行删除数据卷、清理用户文件、重置管理员、覆盖生产数据库等破坏性操作，除非用户对该具体操作给出明确授权。
 
+## SpecGit 项目约定
+
+- 本项目的 SpecGit 声明是 `.specgit.yaml`（本地文件，不入库）。声明使用 `language: zh`，目标分支为 `main`，并开启标题、`kind` 类型标签和正文小节校验。
+- Issue：每个可独立验证的目标对应一个 GitHub Issue。正文使用“原因 / 范围 / 方案 / 验收”小节。进度、阻塞与证据链接也记在 Issue 中。
+- PR：正文使用“原因 / 变更 / 证据 / 检查清单”小节，按 [`.github/pull_request_template.md`](.github/pull_request_template.md) 填写，包括 TDD 证据（先失败的测试与修复后通过）、未验证范围，以及是否影响计费、协议或兼容性。用 `Closes #N` 或 `Refs #N` 关联 Issue，关闭引用须独立成行，并填写实际编号。
+- 语言：Issue 与 PR/MR 的标题和正文使用中文；专有名词、命令、代码、必要类型前缀和关联引用可保留英文。SpecGit 仅机械检查标题含汉字和正文小节结构，不能自动判断自然语言是否全面使用中文，仍须人工核对。
+- 提交信息：使用“原因 / 变更 / 证据 / 检查清单”小节，并按 SpecGit guard 的要求带 `Issue: #N` trailer 关联 Issue。
 
 <!-- specgit:project:v2:start -->
 ## SpecGit 2
