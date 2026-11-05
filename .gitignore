@@ -106,3 +106,6 @@ graphify-out/
 
 # 本地私有资料（部署说明、环境脚本等），不纳入版本管理
 /local/
+
+# SpecGit 与本地 Agent 生成的本地资产（不追踪）
+/CLAUDE.md
