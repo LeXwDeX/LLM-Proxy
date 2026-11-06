@@ -762,6 +762,9 @@ func (c *Config) Validate() error {
 			problems = append(problems, fmt.Sprintf("pools[%d].name %q is duplicate (case-insensitive)", i, pool.Name))
 		}
 		poolNames[key] = struct{}{}
+		if strategy := strings.ToLower(strings.TrimSpace(pool.RoutingStrategy)); !IsValidPoolRoutingStrategy(strategy) {
+			problems = append(problems, fmt.Sprintf("pools[%d].routing_strategy %q is not supported", i, pool.RoutingStrategy))
+		}
 	}
 
 	if strings.TrimSpace(c.AdminSession.CookieName) == "" {

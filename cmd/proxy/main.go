@@ -28,6 +28,7 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/pricing"
 	"github.com/LeXwDeX/LLM-Proxy/internal/proxy"
 	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
+	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -411,6 +412,14 @@ func run(args []string) int {
 		return providers, nil
 	})
 	pricingCache.SetLogger(appLogger)
+	// cost 部署池按计价模板分流；价格源出错时选路退回负载均衡。
+	proxyService.SetRateResolverSource(func() (usage.RateResolver, error) {
+		resolver, err := pricingCache.GetChecked()
+		if err != nil {
+			return nil, err
+		}
+		return resolver, nil
+	})
 	quotaMgr, quotaMgrErr := quota.New(quota.Options{
 		Catalog:          modelCatalog,
 		CostStore:        modelCostStore,

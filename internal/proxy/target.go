@@ -339,6 +339,7 @@ const (
 	selectionAffinityHit                      // 粘连命中，目标健康可用
 	selectionRoundRobin                       // 无粘连记录，轮询选出（首次或过期后）
 	selectionFailover                         // 有粘连记录但目标不可用，failover 到其他目标
+	selectionCostRebind                       // cost 池：粘连目标不在当前最便宜层，改选并改绑
 )
 
 func (s *Service) selectTarget(
@@ -392,6 +393,8 @@ func (s *Service) selectTarget(
 	// S3 容量门：命中的粘连节点还须归一化负载低于软上限(affinitySoftCapRatio)才回粘；
 	// 超限时不改写记录，走下方 failover 式分流，负载回落 (<) 后自动回粘。
 	hadAffinity := false
+	costRebind := false
+	ranker := s.newCostRanker(model, now)
 	if principal != nil && len(attempted) == 0 {
 		affinityTarget, affOK := sessionBoundTarget, sessionBoundTarget != ""
 		sessionHit := affOK
@@ -414,7 +417,9 @@ func (s *Service) selectTarget(
 				if !allowedOK {
 					_, allowedOK = allowed[nameKey]
 				}
-				if t != nil && allowedOK && !t.Paused && modelAllowed(t, model) && t.SupportsPath(path) && (sessionHit || state.belowAffinitySoftCap()) {
+				if t != nil && allowedOK && !t.Paused && modelAllowed(t, model) && t.SupportsPath(path) && s.cheaperTierAvailable(ranker, state, allowed, model, path, now) {
+					costRebind = true
+				} else if t != nil && allowedOK && !t.Paused && modelAllowed(t, model) && t.SupportsPath(path) && (sessionHit || state.belowAffinitySoftCap()) {
 					if decision, lease := state.admitWithProbeState(now); decision == admitOpen {
 						state.affinityHits.Add(1) // S5 可观测：粘连回粘命中计数
 						state.runtimeWindow.record(now, 0, 1, 0)
@@ -425,11 +430,13 @@ func (s *Service) selectTarget(
 		}
 	}
 
-	candidate, lease, unavailableFallback := s.findAvailableTargetWithModel(principal, allowed, attempted, model, path, now)
+	candidate, lease, unavailableFallback := s.findAvailableTargetWithModelRanked(ranker, allowed, attempted, model, path, now)
 	if candidate != nil {
 		// 如果之前有粘连记录但目标不可用，这是 failover；否则是首次轮询。
 		kind := selectionRoundRobin
-		if hadAffinity {
+		if costRebind {
+			kind = selectionCostRebind
+		} else if hadAffinity {
 			kind = selectionFailover
 		}
 		return candidate, lease, kind, nil
@@ -564,6 +571,12 @@ func (s *Service) hasModelCandidateIgnoringPath(allowed map[string]struct{}, att
 }
 
 func (s *Service) findAvailableTargetWithModel(principal *auth.Principal, allowed map[string]struct{}, attempted map[string]struct{}, model string, path string, now time.Time) (*targetState, *probeLease, *targetState) {
+	return s.findAvailableTargetWithModelRanked(s.newCostRanker(model, now), allowed, attempted, model, path, now)
+}
+
+// findAvailableTargetWithModelRanked is the availability-first selector; a
+// non-nil ranker only narrows the admitted candidates (cost_routing.go).
+func (s *Service) findAvailableTargetWithModelRanked(ranker *costRanker, allowed map[string]struct{}, attempted map[string]struct{}, model string, path string, now time.Time) (*targetState, *probeLease, *targetState) {
 	var mutedCandidate *targetState
 	var capacityFallback *targetState
 	var recoveringCandidate *targetState
@@ -668,6 +681,9 @@ func (s *Service) findAvailableTargetWithModel(principal *auth.Principal, allowe
 		}
 		return nil, nil, recoveringCandidate
 	}
+
+	// 成本分层（仅 cost 池）：在已准入候选中收窄到最便宜层，不减少可用性。
+	candidates = cheapestTier(ranker, candidates, func(c targetWithKeys) *targetState { return c.state })
 
 	// S2 容量感知调度：非亲和路径选归一化负载最低的健康节点；
 	// 负载并列时按存活 key 权重轮询打散（全员并列即退化为旧加权轮询，冷启动零回归）。

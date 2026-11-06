@@ -29,6 +29,7 @@ type AdminSchema struct {
 	QuotaScopes              []config.EnumOption         `json:"quota_scopes"`
 	QuotaSyncModes           []config.EnumOption         `json:"quota_sync_modes"`
 	TargetPhases             []config.EnumOption         `json:"target_phases"`
+	PoolRoutingStrategies    []config.EnumOption         `json:"pool_routing_strategies"`
 	Defaults                 SchemaDefaults              `json:"defaults"`
 	StreamUsageRequestSchema config.RequestSchema        `json:"stream_usage_request_schema"`
 }
@@ -45,6 +46,7 @@ type SchemaDefaults struct {
 	AnthropicPrefix             string `json:"anthropic_prefix"`
 	SupportsResponses           bool   `json:"supports_responses"`
 	RequestStreamUsageIfMissing bool   `json:"request_stream_usage_if_missing"`
+	PoolRoutingStrategy         string `json:"pool_routing_strategy"`
 }
 
 func (h *Handler) handleSchema(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +73,8 @@ func (h *Handler) handleSchema(w http.ResponseWriter, r *http.Request) {
 			{Value: "project_group", Label: "到整个项目组"},
 			{Value: "job_level", Label: "到整个职级"},
 		},
-		TargetPhases: proxy.AllTargetPhaseOptions(),
+		TargetPhases:          proxy.AllTargetPhaseOptions(),
+		PoolRoutingStrategies: config.AllPoolRoutingStrategyOptions(),
 		Defaults: SchemaDefaults{
 			EndpointType:                config.NormalizeEndpointType(""),
 			UsageAdapter:                "", // No default: the administrator must select a policy.
@@ -84,6 +87,7 @@ func (h *Handler) handleSchema(w http.ResponseWriter, r *http.Request) {
 			AnthropicPrefix:             config.DefaultDualProtocolAnthropicPrefix,
 			SupportsResponses:           config.DefaultDualProtocolSupportsResponses,
 			RequestStreamUsageIfMissing: config.DefaultRequestStreamUsageIfMissing,
+			PoolRoutingStrategy:         config.PoolRoutingLoad,
 		},
 	})
 }

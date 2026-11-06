@@ -62,6 +62,7 @@ AdminApp.register("schema", function (app) {
       "quota_sync_modes",
       "quota_dimensions",
       "target_phases",
+      "pool_routing_strategies",
     ].forEach(function (key) {
       if (!Array.isArray(data[key]) || !data[key].length)
         throw new Error("Schema 缺少 " + key);
@@ -109,6 +110,7 @@ AdminApp.register("schema", function (app) {
       auth_mode: "auth_modes",
       pricing_mode: "pricing_modes",
       role: "roles",
+      pool_routing_strategy: "pool_routing_strategies",
     };
     Object.keys(defaults).forEach(function (key) {
       var list = data[defaults[key]],
@@ -185,6 +187,7 @@ AdminApp.register("schema", function (app) {
       image_operations: "image_operation",
       roles: "role",
       pricing_modes: "pricing_mode",
+      pool_routing_strategies: "pool_routing_strategy",
     };
     document
       .querySelectorAll("select[data-schema-options]")

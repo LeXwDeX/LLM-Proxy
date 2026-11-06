@@ -18,6 +18,9 @@ AdminApp.register("pools", function (app) {
   var validPoolRoster = app.bind("targets", "validPoolRoster");
   var targetPoolsAvailable = app.bind("targets", "targetPoolsAvailable");
   /* ===== Pools ===== */
+  function poolRoutingStrategy(pool) {
+    return (pool && pool.routing_strategy) || state.schema.defaults.pool_routing_strategy;
+  }
   function poolDisplayName(pool) {
     if (typeof pool === "string") {
       var key = pool.toLowerCase();
@@ -157,6 +160,11 @@ AdminApp.register("pools", function (app) {
         var pauseBadge = p.paused
           ? "<span class='quota-badge over'>已暂停（成员等效暂停）</span>"
           : "<span class='quota-badge ok'>运行中</span>";
+        if (poolRoutingStrategy(p) !== state.schema.defaults.pool_routing_strategy)
+          pauseBadge +=
+            " <span class='quota-badge'>" +
+            esc(schemaLabel("pool_routing_strategies", poolRoutingStrategy(p))) +
+            "</span>";
         var pauseButton = p.paused
           ? "<button class='btn btn-sm readonly-hide' data-resume-pool='" +
             esc(p.name) +
@@ -276,6 +284,7 @@ AdminApp.register("pools", function (app) {
     document.getElementById("poolDescription").value =
       p && p.description ? p.description : "";
     document.getElementById("poolPaused").checked = p ? !!p.paused : false;
+    document.getElementById("poolRoutingStrategy").value = poolRoutingStrategy(p);
     openModal("poolModal");
   }
   document.getElementById("newPoolBtn").addEventListener("click", function () {
@@ -292,6 +301,7 @@ AdminApp.register("pools", function (app) {
       var name = document.getElementById("poolName").value.trim();
       var description = document.getElementById("poolDescription").value.trim();
       var paused = document.getElementById("poolPaused").checked;
+      var routingStrategy = document.getElementById("poolRoutingStrategy").value;
       if (!name) {
         toast("请填写池名称", "error");
         return;
@@ -307,6 +317,7 @@ AdminApp.register("pools", function (app) {
               display_name: name,
               description: description,
               paused: paused,
+              routing_strategy: routingStrategy,
             },
           });
           toast("部署池已更新", "success");
@@ -317,6 +328,7 @@ AdminApp.register("pools", function (app) {
               name: name,
               description: description,
               paused: paused,
+              routing_strategy: routingStrategy,
             },
           });
           toast("部署池已创建", "success");

@@ -44,10 +44,11 @@ func (h *Handler) handleListPools(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleCreatePool(w http.ResponseWriter, r *http.Request) {
 	limitConfigBody(w, r)
 	var body struct {
-		Name        string `json:"name"`
-		DisplayName string `json:"display_name"`
-		Description string `json:"description"`
-		Paused      bool   `json:"paused"`
+		Name            string `json:"name"`
+		DisplayName     string `json:"display_name"`
+		Description     string `json:"description"`
+		Paused          bool   `json:"paused"`
+		RoutingStrategy string `json:"routing_strategy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
@@ -68,6 +69,10 @@ func (h *Handler) handleCreatePool(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse("pool display name may only change letter casing"))
 		return
 	}
+	strategy, ok := parsePoolRoutingStrategy(w, body.RoutingStrategy)
+	if !ok {
+		return
+	}
 
 	txn := h.lockConfig(r)
 	defer txn.Unlock()
@@ -85,10 +90,11 @@ func (h *Handler) handleCreatePool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pool := config.DeploymentPool{
-		Name:        name,
-		DisplayName: displayName,
-		Description: strings.TrimSpace(body.Description),
-		Paused:      body.Paused,
+		Name:            name,
+		DisplayName:     displayName,
+		Description:     strings.TrimSpace(body.Description),
+		Paused:          body.Paused,
+		RoutingStrategy: strategy,
 	}
 	cfg.Pools = append(cfg.Pools, pool)
 
@@ -117,10 +123,11 @@ func (h *Handler) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name        string  `json:"name"`
-		DisplayName *string `json:"display_name"`
-		Description *string `json:"description"`
-		Paused      *bool   `json:"paused"`
+		Name            string  `json:"name"`
+		DisplayName     *string `json:"display_name"`
+		Description     *string `json:"description"`
+		Paused          *bool   `json:"paused"`
+		RoutingStrategy *string `json:"routing_strategy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid request body"))
@@ -136,6 +143,13 @@ func (h *Handler) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
 	if body.DisplayName != nil && strings.ToLower(strings.TrimSpace(*body.DisplayName)) != strings.ToLower(name) {
 		writeJSON(w, http.StatusBadRequest, errorResponse("pool display name may only change letter casing"))
 		return
+	}
+	var strategy string
+	if body.RoutingStrategy != nil {
+		var ok bool
+		if strategy, ok = parsePoolRoutingStrategy(w, *body.RoutingStrategy); !ok {
+			return
+		}
 	}
 
 	txn := h.lockConfig(r)
@@ -158,6 +172,9 @@ func (h *Handler) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
 			}
 			if body.Paused != nil {
 				cfg.Pools[i].Paused = *body.Paused
+			}
+			if body.RoutingStrategy != nil {
+				cfg.Pools[i].RoutingStrategy = strategy
 			}
 			updatedPool = cfg.Pools[i]
 			found = true
@@ -304,6 +321,17 @@ func (h *Handler) handleSetPoolPaused(w http.ResponseWriter, r *http.Request, pa
 
 // poolStore returns the deployment-pool store view sharing the target store's
 // db handle. Derived from targetStore so NewHandler's signature stays unchanged.
+// parsePoolRoutingStrategy normalizes and validates a requested strategy,
+// writing the 400 response itself when the value is not a public option.
+func parsePoolRoutingStrategy(w http.ResponseWriter, raw string) (string, bool) {
+	strategy := strings.ToLower(strings.TrimSpace(raw))
+	if !config.IsValidPoolRoutingStrategy(strategy) {
+		writeJSON(w, http.StatusBadRequest, errorResponse(fmt.Sprintf("unsupported routing_strategy %q", raw)))
+		return "", false
+	}
+	return strategy, true
+}
+
 func (h *Handler) poolStore() *nosql.PoolStore {
 	if h.targetStore == nil {
 		return nil
