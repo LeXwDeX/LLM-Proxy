@@ -65,6 +65,11 @@ type Service struct {
 
 	affinity *affinityMap
 
+	// costPools 是 routing_strategy=cost 的池名集合；rateSource 提供计价解析器。
+	// 二者任一缺失时选路退回现行负载均衡（见 cost_routing.go）。
+	costPools  atomic.Pointer[map[string]struct{}]
+	rateSource atomic.Pointer[func() (usage.RateResolver, error)]
+
 	// Trace store for DEBUG mode (nil = disabled)
 	traceStore *tracestore.Store
 
@@ -454,9 +459,10 @@ func (s *Service) ApplyConfigIfTargetRevision(cfg *config.Config, revision uint6
 // PreparedConfig 是 PrepareConfig 构建好、尚未发布的运行时配置。
 // 它只能由 PrepareConfig 产生，并只应提交一次。
 type PreparedConfig struct {
-	parsed  map[string]*targetState
-	order   []*targetState
-	timeout time.Duration
+	parsed    map[string]*targetState
+	order     []*targetState
+	timeout   time.Duration
+	costPools map[string]struct{}
 }
 
 // PrepareConfig 校验并构建新配置的运行时状态（物化池暂停、解析目标、请求超时），
@@ -478,9 +484,10 @@ func (s *Service) PrepareConfig(cfg *config.Config) (*PreparedConfig, error) {
 		return nil, err
 	}
 	return &PreparedConfig{
-		parsed:  parsed,
-		order:   order,
-		timeout: time.Duration(cfg.Server.RequestTimeoutSeconds) * time.Second,
+		parsed:    parsed,
+		order:     order,
+		timeout:   time.Duration(cfg.Server.RequestTimeoutSeconds) * time.Second,
+		costPools: costPoolSet(cfg.Pools),
 	}, nil
 }
 
@@ -494,6 +501,7 @@ func (s *Service) CommitPrepared(p *PreparedConfig) {
 	s.mu.Unlock()
 	logResets()
 
+	s.costPools.Store(&p.costPools)
 	s.setRequestTimeout(p.timeout)
 }
 
@@ -512,6 +520,7 @@ func (s *Service) applyConfig(cfg *config.Config, revision uint64) error {
 	s.mu.Unlock()
 	logResets()
 
+	s.costPools.Store(&prepared.costPools)
 	s.setRequestTimeout(prepared.timeout)
 	return nil
 }
@@ -1455,13 +1464,15 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !accountLevelFailure && principal != nil && target != nil {
 			now := time.Now()
 			targetName := strings.ToLower(target.Name)
-			if selKind == selectionAffinityHit || selKind == selectionRoundRobin {
+			if selKind == selectionAffinityHit || selKind == selectionRoundRobin || selKind == selectionCostRebind {
 				s.affinity.Set(affinityKey(clientIP(r), principal.Name, upstreamModel), targetName, now)
 			}
 			// Session writes are independent of the final selection kind: refresh
 			// the original target, or rebind only if it is permanently invalid.
 			// A temporary forwarding failover must not even refresh its TTL.
-			if sessionKey != "" && (sessionBoundTarget == "" || strings.EqualFold(sessionBoundTarget, targetName) || s.sessionTargetInvalid(sessionBoundTarget, allowed, model)) {
+			// Exception: a cost pool moved this request to a cheaper tier, so the
+			// binding follows it from the next request on (cost_routing.go).
+			if sessionKey != "" && (sessionBoundTarget == "" || selKind == selectionCostRebind || strings.EqualFold(sessionBoundTarget, targetName) || s.sessionTargetInvalid(sessionBoundTarget, allowed, model)) {
 				s.affinity.SetWithTTL(sessionKey, targetName, now, sessionAffinityTTL)
 			}
 		}

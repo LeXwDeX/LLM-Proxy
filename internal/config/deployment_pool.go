@@ -12,6 +12,37 @@ type DeploymentPool struct {
 	DisplayName string `json:"display_name,omitempty"`
 	Description string `json:"description,omitempty"`
 	Paused      bool   `json:"paused,omitempty"`
+	// RoutingStrategy 选择池成员间的分流方式：空值与 load 为现行负载均衡；
+	// cost 在可用成员中按各自计价模板于请求时刻的估算成本优先（见 internal/proxy/cost_routing.go）。
+	RoutingStrategy string `json:"routing_strategy,omitempty"`
+}
+
+const (
+	PoolRoutingLoad = "load"
+	PoolRoutingCost = "cost"
+)
+
+var poolRoutingStrategyOptions = []EnumOption{
+	{PoolRoutingLoad, "负载均衡（默认）"},
+	{PoolRoutingCost, "成本优先（按计价模板分流）"},
+}
+
+// AllPoolRoutingStrategyOptions 经 /admin/data/schema 下发，前端不重复声明。
+func AllPoolRoutingStrategyOptions() []EnumOption {
+	return cloneEnumOptions(poolRoutingStrategyOptions)
+}
+
+// IsValidPoolRoutingStrategy 接受空值（旧数据，等同 load）与公开枚举。
+func IsValidPoolRoutingStrategy(strategy string) bool {
+	return strategy == "" || enumContains(poolRoutingStrategyOptions, strategy)
+}
+
+// EffectiveRoutingStrategy 返回生效策略，空值按 load 处理。
+func (p DeploymentPool) EffectiveRoutingStrategy() string {
+	if p.RoutingStrategy == "" {
+		return PoolRoutingLoad
+	}
+	return p.RoutingStrategy
 }
 
 // NormalizeDeploymentPool 规范化池标识并保留显示大小写；旧配置使用 Name 显示。
@@ -22,5 +53,6 @@ func NormalizeDeploymentPool(pool DeploymentPool) DeploymentPool {
 	}
 	pool.Name = strings.ToLower(strings.TrimSpace(pool.Name))
 	pool.Description = strings.TrimSpace(pool.Description)
+	pool.RoutingStrategy = strings.ToLower(strings.TrimSpace(pool.RoutingStrategy))
 	return pool
 }

@@ -25,6 +25,7 @@
 | `response_observation.go` | HTTP 响应观察副本的 identity/gzip/deflate/zstd/br 解码；用量与 trace 共用，保持原始转发字节 |
 | `custom_inject.go` | 目标级自定义 Header/Body 注入 |
 | `pool.go` | 部署池：池成员调度与 `X-Proxy-Pool` 头来源 |
+| `cost_routing.go` | 部署池 `routing_strategy=cost` 的成本分层：在已准入候选中按成员计价模板（`pricing.Resolver.RateFor`，固定参考 token 组合）估算成本收窄，成本相差 5% 内为同层；价格不可用或最便宜层达软上限时退回负载均衡 |
 | `model_rewrite.go` / `request_path.go` | 请求体/URL 模型名改写（大小写保留契约）与请求路径识别（`unknown_request_path`、`invalid_responses_path` 等错误码实现处） |
 | `json_members.go` | 唯一的顶层 JSON 成员扫描器（all/last/lastFold 查询与受保护成员规范化），HTTP 与 WS 共用 |
 | `no_official_usage.go` | 未取得官方最终用量时的统一结算（`settleNoOfficialUsage`）：0 token 事件、诊断、Warn 日志与计数，各协议/传输共用 |
@@ -53,6 +54,7 @@
    - 改动前先跑 `go test ./internal/proxy/ -run 'Retry|Timeout|Failover|GLM|Admission' -v -count=1`；改动后完成本目录全量回归。
 2. **路径感知路由**：目标选择顺序是「model 过滤 → 请求 schema 过滤」；调整 `internal/config/endpoint_type.go` 的 `RequestSchemas` 能力声明或 `path_capability.go` 的请求 schema 分类，会直接改变线上路由结果，必须补对应测试。
 3. **连接粘连降级**：粘连目标不可用或路径不兼容时必须降级为轮询，不能让请求失败。
+   - `cost` 池例外：池内粘连目标（IP 亲和或会话绑定）在存在更便宜层（不在 5% 同层内）的可用、健康且有余量的目标时让出，该请求为 `selectionCostRebind`，成功后 IP 亲和与会话绑定一并迁到新目标；同层内粘连不变。这是“会话绑定只随永久配置变更而变”的受控例外，仅限 `cost` 池，`load` 池保持原规则。守卫用例：`TestCostRoutingAffinityFollowsCheapestTier`、`TestCostRoutingNextRequestRebindsSession`；`TestCostRoutingNeverReducesAvailability` 守卫“价格不得降低可用性”（价格只收窄已准入候选，不得移除最后一个可用项）。
 4. **净化仅限 Azure**：`sanitize.go` 的字段白名单只对 `azure_openai` 生效；给其他 endpoint_type 加请求体改写要走 `provider_profile.go` / `custom_inject.go`，不要扩散白名单逻辑。
 5. **配置热更新与目标熔断**：同名目标的上游连接身份变化，或生效后的 `Paused` 从 true 变 false（含池恢复），须分叉新的 `targetHealthState`，清除冷却、连续失败和探针租约，保留分叉时的累计计数及成功/失败观测时间。身份字段为 `endpoint_type`、`endpoint`、`auth_mode`、`allow_bearer_passthrough`、合并去重后的凭据集合、`custom_headers`、`custom_body`、`model_prefix`、`openai_prefix`、`anthropic_prefix`、`prefer_websocket`；仅重排凭据不重置，路径前缀按现有归一化结果比较。`usage_adapter`、`model_mappings`、`max_concurrency`、`pool`、`key_reset_time` 等非身份编辑、暂停及编辑其他目标继续共享原熔断状态；池恢复但目标仍暂停时不重置。旧代际在途结果只结算其原 health 对象，不得重新静默新身份或释放新身份探针；同身份代际仍须保留迟到结果及 successor 探针保护。keyPool、并发占用、runtimeWindow 与 AIMD 沿用原共享规则，不新增重试。新增 `Target` 导出字段须在 `TestHealthIdentityFieldClassificationExhaustive` 分类，并验证对应的重置或保留边界。
 
