@@ -107,8 +107,26 @@ graphify-out/
 # 本地私有资料（部署说明、环境脚本等），不纳入版本管理
 /local/
 
-# SpecGit 与本地 Agent 生成的本地资产（不追踪）
-/CLAUDE.md
+# Agent 相关内容一律不追踪；AGENTS.md（含各目录 scoped AGENTS.md）是唯一例外
+CLAUDE.md
+CLAUDE.local.md
+AGENT.md
+.mcp.json
+opencode.json
+opencode.jsonc
+.cursorrules
+.windsurfrules
+.clinerules
+.windsurf/
+.kiro/
+.junie/
+.trae/
+.kilocode/
+.augment/
+.github/instructions/
+.github/prompts/
+.github/chatmodes/
+!AGENTS.md
 
 # 自建 CI 的 Dockerfile、compose 与运行脚本（本地使用，不入库）
 /ci/
