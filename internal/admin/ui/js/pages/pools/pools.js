@@ -162,7 +162,7 @@ AdminApp.register("pools", function (app) {
           : "<span class='quota-badge ok'>运行中</span>";
         if (poolRoutingStrategy(p) !== state.schema.defaults.pool_routing_strategy)
           pauseBadge +=
-            " <span class='quota-badge'>" +
+            " <span class='quota-badge strategy'>" +
             esc(schemaLabel("pool_routing_strategies", poolRoutingStrategy(p))) +
             "</span>";
         var pauseButton = p.paused
