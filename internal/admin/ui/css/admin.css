@@ -521,6 +521,8 @@
     .pool-member-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .pool-member-name { min-width: 0; overflow-wrap: anywhere; }
     .pool-member-load { color: var(--ink-3); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+    .pool-alias-groups { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .pool-alias-group { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; background: var(--accent-soft); color: var(--accent); overflow-wrap: anywhere; }
 
     /* ===== Toast ===== */
     .toast-container {

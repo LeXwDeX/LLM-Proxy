@@ -126,7 +126,7 @@ make integration          # go test -tags=integration ./test/...
 make e2e                  # 真实代理二进制 + 进程内虚假上游 internal/fakellm，不调用真实模型
 node scripts/testing/admin_ui_test.cjs # 管理前端模块行为门禁
 (cd internal/admin/ui && node --test) # 管理前端子树单元测试
-python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_image_tag
+python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_image_tag scripts.testing.test_check_go_coverage
 ```
 
 改动行为后按影响范围执行相应门禁。仅在用户明确说不跑测试时才跳过，并如实说明未验证范围。`scripts/check-agents-docs.sh` 检查 `AGENTS.md` 存在；不要求存在 `CLAUDE.md`。

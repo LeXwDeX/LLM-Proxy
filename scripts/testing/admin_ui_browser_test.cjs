@@ -135,7 +135,7 @@ async function main() {
       "/admin/data/usage/aggregate": aggregateFixture(),
       "/admin/data/targets": { targets: [target, {...target, name: "z-fixture-target", model_prefix: "Other/"}] },
       "/admin/data/pools": {
-        pools: [{ name: "fixture-pool", display_name: "Fixture-POOL", description: "Fixture pool" }],
+        pools: [{ name: "fixture-pool", display_name: "Fixture-POOL", description: "Fixture pool", routing_strategy: "cost" }],
       },
       "/admin/metrics": {
         uptime_seconds: 60,
@@ -733,6 +733,19 @@ async function main() {
     mutations.length = 0;
     await page.locator("#targetsPoolsTab").click();
     await page.locator("#targetsPoolsPanel").waitFor();
+    // Issue #179: the cost-pool runtime view is alias-first. Read it back from
+    // the real DOM, not only from the Node VM fixture.
+    const memberTip = await page.locator("#targetsPoolsPanel .pool-member-chip").first().getAttribute("title");
+    assert.match(
+      memberTip,
+      /qwen-max（上游 Qwen-MixedCase-Long-Model-Name-To-Show-Full-Tooltip）/,
+    );
+    const aliasGroup = page.locator("#targetsPoolsPanel .pool-alias-group", { hasText: "qwen-max" }).first();
+    assert.match(await aliasGroup.textContent(), /qwen-max · fixture-target、z-fixture-target/);
+    assert.match(
+      await aliasGroup.getAttribute("title"),
+      /上游：fixture-target → Qwen-MixedCase-Long-Model-Name-To-Show-Full-Tooltip/,
+    );
     const desktopPools = await tableLayout("#targetsPoolsPanel .table-wrap");
     assert.ok(
       ["auto", "scroll"].includes(desktopPools.overflowX),

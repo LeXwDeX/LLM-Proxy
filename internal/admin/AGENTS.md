@@ -72,6 +72,7 @@
 - 针对某页面脚本的检查使用 `adminUIPageScripts(t, "<page>")`（Go）或 `scripts/testing/admin_ui_scripts.cjs` 的 `pageSource("<page>")`（Node），它们拼接该目录下全部文件，目录为空或内容为空时失败；不要把测试写死到单个文件路径。脚本清单（Go：`adminUIScriptManifest()`，Node：`manifest()`）从装配后的 HTML 推导，不要再维护硬编码列表。
 - 装配拒绝：同一 partial 被 include 两次（会产生重复 DOM id）、任何被引文件含 UTF-8 BOM。
 - 样式写入 `ui/css/admin.css`；`index.html` 内除 boot watchdog 外不得新增内联脚本；watchdog 位于 `<head>`、早于全部 `/admin/ui/js/` 脚本，并以捕获阶段 `error` 监听把加载失败或加载期报错的脚本路径记入 `window.__adminBootFailures`，`bootstrap.js` 的启动横幅据此列出“以下脚本加载失败”，不得按模块名猜测路径。
+- **部署池成本视图的展示边界**：目标编辑器、目标列表和目标详情保持 `upstream (alias)` 的上游优先顺序；仅 `routing_strategy=cost` 的部署池运行时视图按别名优先（成员 chip hover 为 `alias（上游 upstream）`，逗号分隔 fallback 拆成多个标签，paused 映射标注“已暂停”，无映射标“模型 不限”，暂停 target 额外标“目标已暂停”），并按客户端可接受请求名显示可见分组徽标 `请求名 · 成员1、成员2`：fallback 别名组在前，可直请的 upstream 名作为次要分组在后，同一请求名的成员合并，其 title 给出成员 → 上游名；暂停池不显示分组。`load` 池保持原 chips-only 视图。展示不改变路由、计费或准入。
 
 ## 拆分约定（硬性规则）
 
