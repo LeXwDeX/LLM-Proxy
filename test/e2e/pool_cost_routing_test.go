@@ -207,8 +207,12 @@ func TestPoolCostRoutingComparesByClientAliasE2E(t *testing.T) {
 	// Turning A into the cheaper member would require editing a template, which
 	// also reprices history, so the test keeps prices fixed and exercises the
 	// counter-example in the other direction.
-	idA, _ := priceTemplateWithID(t, currentPeakPrice(a, upstreamA, 10, 1))
-	idB, _ := priceTemplateWithID(t, flatPrice(b, upstreamB, 5, 5))
+	specA := currentPeakPrice(a, upstreamA, 10, 1)
+	specA["version"] = 7
+	idA, _ := priceTemplateWithID(t, specA)
+	specB := flatPrice(b, upstreamB, 5, 5)
+	specB["version"] = 7
+	idB, _ := priceTemplateWithID(t, specB)
 	ruleFor := map[string]string{a: idA, b: idB}
 	upstreamFor := map[string]string{a: upstreamA, b: upstreamB}
 
@@ -218,8 +222,8 @@ func TestPoolCostRoutingComparesByClientAliasE2E(t *testing.T) {
 	if events[0].Target != b || events[0].Model != strings.ToLower(upstreamB) {
 		t.Fatalf("alias request served by %s/%s, want %s/%s", events[0].Target, events[0].Model, b, strings.ToLower(upstreamB))
 	}
-	if events[0].PricingRuleID != idB {
-		t.Fatalf("pricing rule = %q, want serving member's template %q", events[0].PricingRuleID, idB)
+	if events[0].PricingRuleID != idB || events[0].PricingRuleVersion != 7 {
+		t.Fatalf("pricing rule = %q v%d, want serving member's template %q v7", events[0].PricingRuleID, events[0].PricingRuleVersion, idB)
 	}
 	if got := lastRecord(t, w.fakeB, "/v1/chat/completions").Model; got != upstreamB {
 		t.Fatalf("fake B received model %q, want configured spelling %q", got, upstreamB)
@@ -259,8 +263,8 @@ func TestPoolCostRoutingComparesByClientAliasE2E(t *testing.T) {
 		if ev.Model != strings.ToLower(wantUpstream) {
 			t.Fatalf("event model = %q, want lower-cased member upstream %q", ev.Model, strings.ToLower(wantUpstream))
 		}
-		if ev.PricingRuleID != ruleFor[ev.Target] {
-			t.Fatalf("event target %s pricing rule = %q, want %q", ev.Target, ev.PricingRuleID, ruleFor[ev.Target])
+		if ev.PricingRuleID != ruleFor[ev.Target] || ev.PricingRuleVersion != 7 {
+			t.Fatalf("event target %s pricing rule = %q v%d, want %q v7", ev.Target, ev.PricingRuleID, ev.PricingRuleVersion, ruleFor[ev.Target])
 		}
 		switch ev.Target {
 		case a:

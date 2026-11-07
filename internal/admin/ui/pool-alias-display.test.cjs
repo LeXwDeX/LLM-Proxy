@@ -83,10 +83,23 @@ test("cost pool shows alias groups with upstreams as secondary info", async () =
     "an upstream name that clients may request is a secondary group",
   );
   assert.match(rows, />deepseek-chat · agg</);
+  assert.ok(
+    rows.indexOf(">ds-v4-flash ·") < rows.indexOf(">DeepSeek-V4.1-Flash ·"),
+    "fallback alias groups render before upstream-name groups",
+  );
+  assert.ok(
+    rows.indexOf(">alpha-1 ·") < rows.indexOf(">deepseek-chat ·"),
+    "all fallback alias groups render before upstream-only groups",
+  );
   assert.doesNotMatch(
     rows,
     />legacy-alias · /,
     "a paused mapping does not compete and is not grouped",
+  );
+  assert.doesNotMatch(
+    rows,
+    />不限 · /,
+    "a member without model_mappings is not assigned to a concrete group",
   );
 });
 
