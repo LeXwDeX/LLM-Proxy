@@ -46,9 +46,107 @@ AdminApp.register("pools", function (app) {
   function poolMemberCount(poolName) {
     return poolMemberCounter()(poolName);
   }
+  // splitAliases mirrors config.SplitFallbackAliases: comma-separated,
+  // trimmed, empty entries ignored, configured spelling preserved.
+  function splitAliases(fallback) {
+    return String(fallback || "")
+      .split(",")
+      .map(function (alias) {
+        return alias.trim();
+      })
+      .filter(Boolean);
+  }
+  // poolMemberModelTip 以成本选路的比较单位——客户端别名——为主展示成员的
+  // 模型映射：alias（上游 upstream）。别名按逗号拆分；没有 model_mappings
+  // 的成员接受任意模型，显式标为「不限」；已暂停映射仍展示但标注「已暂停」。
+  function poolMemberModelTip(t) {
+    var mappings = Array.isArray(t.model_mappings) ? t.model_mappings : [];
+    var labels = [];
+    mappings.forEach(function (m) {
+      var upstream = String((m && m.upstream) || "").trim();
+      var aliases = splitAliases(m && m.fallback);
+      if (!aliases.length && upstream) aliases = [""];
+      aliases.forEach(function (alias) {
+        var label = alias
+          ? esc(alias) + "（上游 " + esc(upstream || alias) + "）"
+          : esc(upstream);
+        if (label) labels.push(m && m.paused ? "已暂停 " + label : label);
+      });
+    });
+    return labels.length ? labels.join("、") : "不限";
+  }
+  // poolAliasGroups 只聚合启用中的 cost 池成员：以客户端别名为组，成员名
+  // 可见，上游名作为次要信息放在 title。已暂停的 target 或映射不参与路由，
+  // 因此不进入分组；没有 model_mappings 的成员无法归入某个别名。
+  function poolAliasGroups(poolName) {
+    var key = String(poolName || "").toLowerCase();
+    var groups = Object.create(null);
+    var order = [];
+    (state.targets || []).forEach(function (t) {
+      if (!t || t.paused) return;
+      if (!t.pool || String(t.pool).toLowerCase() !== key) return;
+      var name = String(t.name || "");
+      (Array.isArray(t.model_mappings) ? t.model_mappings : []).forEach(function (m) {
+        if (!m || m.paused) return;
+        var upstream = String(m.upstream || "").trim();
+        var aliases = splitAliases(m.fallback);
+        if (!aliases.length && upstream) aliases = [upstream];
+        aliases.forEach(function (alias) {
+          var groupKey = alias.toLowerCase();
+          var group = groups[groupKey];
+          if (!group) {
+            group = groups[groupKey] = {
+              alias: alias,
+              members: [],
+              upstreams: Object.create(null),
+            };
+            order.push(groupKey);
+          }
+          if (group.members.indexOf(name) === -1) group.members.push(name);
+          if (upstream) {
+            var ups = group.upstreams[name] || (group.upstreams[name] = []);
+            if (ups.indexOf(upstream) === -1) ups.push(upstream);
+          }
+        });
+      });
+    });
+    return order.sort().map(function (groupKey) {
+      return groups[groupKey];
+    });
+  }
+  function poolAliasGroupBadges(poolName) {
+    var groups = poolAliasGroups(poolName);
+    if (!groups.length) return "";
+    return (
+      "<div class='pool-alias-groups'>" +
+      groups
+        .map(function (g) {
+          var tip =
+            "上游：" +
+            g.members
+              .map(function (name) {
+                var ups = g.upstreams[name];
+                return name + " → " + (ups && ups.length ? ups.join("、") : "不限");
+              })
+              .join("；");
+          return (
+            "<span class='pool-alias-group' title='" +
+            esc(tip) +
+            "'>" +
+            esc(g.alias) +
+            " · " +
+            esc(g.members.join("、")) +
+            "</span>"
+          );
+        })
+        .join("") +
+      "</div>"
+    );
+  }
   // poolMemberChips：池成员节点调度状态 chips（S5）。每 chip = 相位色点 + 名称，
-  // hover 展示在途/利用率/亲和命中/熔断次数；运行时快照缺失时仅显示名称。
-  function poolMemberChips(poolName) {
+  // hover 展示在途/利用率/亲和命中/熔断次数；showModels 为 true 时（cost 池）
+  // 追加别名优先的模型映射。运行时快照缺失时显示名称与模型映射。
+  function poolMemberChips(poolName, showModels) {
     var key = String(poolName || "").toLowerCase();
     var members = (state.targets || []).filter(function (t) {
       return t.pool && String(t.pool).toLowerCase() === key;
@@ -89,6 +187,7 @@ AdminApp.register("pools", function (app) {
         } else {
           tip += "｜运行态未知";
         }
+        if (showModels) tip += "｜模型 " + poolMemberModelTip(t);
         var inFlightTxt = rt
           ? " <span class='pool-member-load'>" +
             rt.in_flight +
@@ -156,7 +255,11 @@ AdminApp.register("pools", function (app) {
         return String(a.name || "").localeCompare(String(b.name || ""));
       })
       .map(function (p) {
-        var members = poolMemberChips(p.name);
+        // Alias-first model info is a cost-routing concept; load pools keep
+        // their previous chips-only runtime view.
+        var isCost = poolRoutingStrategy(p) === "cost";
+        var members = poolMemberChips(p.name, isCost);
+        var aliasGroups = isCost ? poolAliasGroupBadges(p.name) : "";
         var pauseBadge = p.paused
           ? "<span class='quota-badge over'>已暂停（成员等效暂停）</span>"
           : "<span class='quota-badge ok'>运行中</span>";
@@ -186,7 +289,9 @@ AdminApp.register("pools", function (app) {
           "</td>" +
           "<td class='pool-members'><div class='pool-member-list'>" +
           members +
-          "</div></td>" +
+          "</div>" +
+          aliasGroups +
+          "</td>" +
           "<td class='pool-actions'><div class='btn-group'>" +
           pauseButton +
           "<button class='btn btn-sm readonly-hide' data-edit-pool='" +

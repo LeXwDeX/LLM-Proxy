@@ -334,6 +334,8 @@ type usageEvent struct {
 	FinishReason            string `json:"finish_reason"`
 	UsageAdapter            string `json:"usage_adapter"`
 	UsageDiagnostic         string `json:"usage_diagnostic"`
+	PricingRuleID           string `json:"pricing_rule_id"`
+	PricingRuleVersion      int    `json:"pricing_rule_version"`
 	CostIncomplete          bool   `json:"cost_incomplete"`
 	InputTokens             int64  `json:"input_tokens"`
 	OutputTokens            int64  `json:"output_tokens"`

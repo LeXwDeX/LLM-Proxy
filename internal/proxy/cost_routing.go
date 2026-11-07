@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -18,6 +21,18 @@ import (
 //
 // 价格来自各 target 自己的计价模板（分时段、日期例外均在模板中声明），
 // 代码不感知厂商、时段或节假日；新增峰谷价只需新增配置。
+//
+// 成本比较单位是客户端别名（请求中的 model）：
+//   - 凡是能经自身 model_mappings 解析该请求名的池成员都参与比较（upstream
+//     或 fallback 别名命中；paused 映射除外），无论各自的上游模型名如何；
+//     成员经自己的映射把请求名解析成其上游名，再按
+//     (target, 上游名, 请求时刻) 取价——与计费使用同一取价入口和键。
+//     计费还按事件时间与模板 conditions 选价，因此选路价是请求时刻的估算。
+//   - 以某个上游名直接请求时不做反向别名展开：一个上游名可能对应多个别名，
+//     或在成员间含义不同；扩大候选会改变客户端指定的模型语义。该请求只比较
+//     接受该上游名的成员。
+//   - 计价模板只按上游名声明价格；别名价格不参与选路，否则选路价可能与被计费
+//     按上游名落账的价格分叉。
 const (
 	// costTierTolerance：估算成本相差在该比例内视为同层，避免抖动并保留层内均衡。
 	costTierTolerance = 0.05
@@ -53,8 +68,10 @@ func (r costRank) less(o costRank) bool {
 type costRanker struct {
 	resolver usage.RateResolver
 	pools    map[string]struct{}
-	model    string
-	now      time.Time
+	// alias 是客户端请求的模型名，也是成本比较单位；成员的上游名只用于
+	// 取价与出站，不参与「是否属于同一模型」的判断。
+	alias string
+	now   time.Time
 }
 
 // SetRateResolverSource 接入计价解析器来源（通常是价格缓存的 GetChecked）。
@@ -78,9 +95,10 @@ func costPoolSet(pools []config.DeploymentPool) map[string]struct{} {
 }
 
 // newCostRanker returns nil whenever cost routing must not influence selection.
-func (s *Service) newCostRanker(model string, now time.Time) *costRanker {
+func (s *Service) newCostRanker(alias string, now time.Time) *costRanker {
 	pools := s.costPools.Load()
-	if pools == nil || len(*pools) == 0 || model == "" {
+	alias = strings.TrimSpace(alias)
+	if pools == nil || len(*pools) == 0 || alias == "" {
 		return nil
 	}
 	source := s.rateSource.Load()
@@ -91,7 +109,7 @@ func (s *Service) newCostRanker(model string, now time.Time) *costRanker {
 	if err != nil || resolver == nil {
 		return nil
 	}
-	return &costRanker{resolver: resolver, pools: *pools, model: model, now: now}
+	return &costRanker{resolver: resolver, pools: *pools, alias: alias, now: now}
 }
 
 func (c *costRanker) managed(t *Target) bool {
@@ -102,19 +120,45 @@ func (c *costRanker) managed(t *Target) bool {
 	return ok
 }
 
-func (c *costRanker) rank(t *Target) costRank {
+// comparison resolves the client alias through one member's own mapping and
+// prices the pair (target, resolved upstream, now). The returned upstream keeps
+// the configured spelling; it is the same key billing records for this member.
+func (c *costRanker) comparison(t *Target) (string, costRank) {
 	if !c.managed(t) {
-		return costRank{group: costGroupOutside}
+		return "", costRank{group: costGroupOutside}
 	}
-	upstream, ok := resolveUpstreamModel(t, c.model)
+	upstream, ok := resolveUpstreamModel(t, c.alias)
 	if !ok || upstream == "" {
-		return costRank{group: costGroupUnpriced}
+		return "", costRank{group: costGroupUnpriced}
 	}
 	rates, ok := c.resolver.RateFor(t.Name, upstream, c.now)
 	if !ok {
-		return costRank{group: costGroupUnpriced}
+		return upstream, costRank{group: costGroupUnpriced}
 	}
-	return costRank{group: costGroupPriced, cost: rates.CostFor(costRefInputTokens, costRefOutputTokens, costRefCachedTokens, 0)}
+	return upstream, costRank{group: costGroupPriced, cost: rates.CostFor(costRefInputTokens, costRefOutputTokens, costRefCachedTokens, 0)}
+}
+
+func (c *costRanker) rank(t *Target) costRank {
+	_, rank := c.comparison(t)
+	return rank
+}
+
+// describe renders an alias-first diagnostic for debug logs:
+// target→upstream[$cost], target→upstream[unpriced] or target[outside].
+func (c *costRanker) describe(targets []*Target) string {
+	parts := make([]string, 0, len(targets))
+	for _, t := range targets {
+		upstream, rank := c.comparison(t)
+		switch rank.group {
+		case costGroupPriced:
+			parts = append(parts, fmt.Sprintf("%s→%s[$%.6f]", targetName(t), upstream, rank.cost))
+		case costGroupUnpriced:
+			parts = append(parts, fmt.Sprintf("%s→%s[unpriced]", targetName(t), upstream))
+		default:
+			parts = append(parts, fmt.Sprintf("%s[outside]", targetName(t)))
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 // cheapestTier narrows already-admitted candidates to the cheapest tier. It
@@ -157,7 +201,7 @@ func (s *Service) cheaperTierAvailable(c *costRanker, bound *targetState, allowe
 	if c == nil || bound == nil || !c.managed(bound.Target()) {
 		return false
 	}
-	boundRank := c.rank(bound.Target())
+	boundUpstream, boundRank := c.comparison(bound.Target())
 	for _, state := range s.targetSnapshot() {
 		if state == nil || state == bound || state.Target() == nil {
 			continue
@@ -177,7 +221,17 @@ func (s *Service) cheaperTierAvailable(c *costRanker, bound *targetState, allowe
 		if t.MaxConcurrency > 0 && state.inFlightCount() >= int64(t.MaxConcurrency) {
 			continue
 		}
-		if r := c.rank(t); r.less(boundRank) && !r.within(boundRank) {
+		upstream, r := c.comparison(t)
+		if r.less(boundRank) && !r.within(boundRank) {
+			if s.logger != nil && s.logger.Enabled(context.Background(), slog.LevelDebug) {
+				s.logger.Debug("cost routing rebind candidate",
+					"alias", c.alias,
+					"bound_target", targetName(bound.Target()),
+					"bound_upstream", boundUpstream,
+					"candidate_target", targetName(t),
+					"candidate_upstream", upstream,
+				)
+			}
 			return true
 		}
 	}

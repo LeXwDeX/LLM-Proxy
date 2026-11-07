@@ -2,6 +2,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -399,12 +400,18 @@ func (s *Service) selectTarget(
 		affinityTarget, affOK := sessionBoundTarget, sessionBoundTarget != ""
 		sessionHit := affOK
 		if !affOK {
-			// IP 粘连也优先用 alias，未命中再尝试上游名。
+			// IP 粘连也优先用 alias，未命中再逐个尝试各成员配置的上游名。
+			// 同一别名在不同成员可能映射到不同拼写（大小写或命名不同），
+			// Set side 写入的是实际服务成员的上游拼写，只试第一个会漏。
 			affinityTarget, affOK = s.affinity.Get(affinityKey(clientIP, principal.Name, model), now)
 			if !affOK {
-				upstreamForAffinity := resolveAliasToUpstream(model, allowed, attempted, s.targetSnapshot())
-				if upstreamForAffinity != model {
-					affinityTarget, affOK = s.affinity.Get(affinityKey(clientIP, principal.Name, upstreamForAffinity), now)
+				for _, upstream := range resolveAliasUpstreams(model, allowed, attempted, s.targetSnapshot()) {
+					if upstream == model {
+						continue // alias key already checked above
+					}
+					if affinityTarget, affOK = s.affinity.Get(affinityKey(clientIP, principal.Name, upstream), now); affOK {
+						break
+					}
 				}
 			}
 		}
@@ -499,19 +506,19 @@ func (s *Service) targetSnapshot() []*targetState {
 	return snapshot
 }
 
-// resolveAliasToUpstream 把客户端传入的 model 名（可能是 alias、可能是 upstream）
-// 通过扫描所有目标映射表解析成真正的上游模型名。
+// resolveAliasUpstreams 把客户端传入的 model 名（可能是 alias、可能是 upstream）
+// 通过扫描所有目标映射表解析成各成员真正的上游模型名，按 target 顺序去重返回。
 //
-// 策略：遍历 snapshot 中可访问且未尝试过的 target，只要有一个 target 能解析出 upstream
-// 就返回该 upstream。若没有任何 target 解析成功（例如 target 没配 ModelMappings，或
-// model 本身就是上游名），原样返回 model。
-//
-// 用于 Get side 粘连 key 的生成——和 Set side 使用的 upstreamModel 保持一致，
-// 让使用不同 alias 但指向同一上游的请求命中同一条粘连记录。
-func resolveAliasToUpstream(model string, allowed map[string]struct{}, attempted map[string]struct{}, snapshot []*targetState) string {
+// 用于 Get side 粘连 key 的生成：Set side 使用实际服务成员的 upstreamModel 原始
+// 拼写，同一别名在不同成员可能对应不同上游拼写，必须逐个尝试才能命中。没有
+// target 能解析时返回空；调用方已单独尝试过 alias key。去重按原始拼写，避免把
+// 大小写不同的两个实际 key 合并。
+func resolveAliasUpstreams(model string, allowed map[string]struct{}, attempted map[string]struct{}, snapshot []*targetState) []string {
 	if model == "" {
-		return model
+		return nil
 	}
+	seen := make(map[string]struct{})
+	var upstreams []string
 	for _, state := range snapshot {
 		if state == nil || state.Target() == nil {
 			continue
@@ -532,10 +539,14 @@ func resolveAliasToUpstream(model string, allowed map[string]struct{}, attempted
 			}
 		}
 		if up, ok := resolveUpstreamModel(t, model); ok && up != "" {
-			return up
+			if _, exists := seen[up]; exists {
+				continue
+			}
+			seen[up] = struct{}{}
+			upstreams = append(upstreams, up)
 		}
 	}
-	return model
+	return upstreams
 }
 
 func (s *Service) findAvailableTarget(allowed map[string]struct{}, attempted map[string]struct{}, now time.Time) (*targetState, *targetState) {
@@ -683,7 +694,22 @@ func (s *Service) findAvailableTargetWithModelRanked(ranker *costRanker, allowed
 	}
 
 	// 成本分层（仅 cost 池）：在已准入候选中收窄到最便宜层，不减少可用性。
+	admitted := candidates
 	candidates = cheapestTier(ranker, candidates, func(c targetWithKeys) *targetState { return c.state })
+	// Debug 诊断：以客户端别名为主列出已准入候选及各自上游名与估算价。
+	// 仅在启用 Debug 时计算结果，避免正常请求重复取价。
+	if ranker != nil && s.logger != nil && s.logger.Enabled(context.Background(), slog.LevelDebug) {
+		targets := make([]*Target, 0, len(admitted))
+		for _, c := range admitted {
+			targets = append(targets, c.state.Target())
+		}
+		s.logger.Debug("cost routing candidates",
+			"alias", ranker.alias,
+			"admitted", len(admitted),
+			"tier", len(candidates),
+			"members", ranker.describe(targets),
+		)
+	}
 
 	// S2 容量感知调度：非亲和路径选归一化负载最低的健康节点；
 	// 负载并列时按存活 key 权重轮询打散（全员并列即退化为旧加权轮询，冷启动零回归）。

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,13 @@ func routingPool(t *testing.T, strategy string) string {
 
 // priceTemplate installs a template and returns a function that rewrites it.
 func priceTemplate(t *testing.T, spec map[string]any) func(map[string]any) {
+	_, update := priceTemplateWithID(t, spec)
+	return update
+}
+
+// priceTemplateWithID also returns the stored template ID, which usage events
+// carry as pricing_rule_id.
+func priceTemplateWithID(t *testing.T, spec map[string]any) (string, func(map[string]any)) {
 	t.Helper()
 	code, raw := w.adminDo("POST", "/admin/data/pricing-templates", spec)
 	if code != 201 {
@@ -40,7 +48,7 @@ func priceTemplate(t *testing.T, spec map[string]any) func(map[string]any) {
 	}
 	id := result.Template.ID
 	t.Cleanup(func() { w.adminDo("DELETE", "/admin/data/pricing-templates/"+id, nil) })
-	return func(next map[string]any) {
+	return id, func(next map[string]any) {
 		t.Helper()
 		if code, raw := w.adminDo("PUT", "/admin/data/pricing-templates/"+id, next); code != 200 {
 			t.Fatalf("update price HTTP %d: %s", code, raw)
@@ -76,6 +84,14 @@ func currentPeakPrice(target, model string, peak, idle float64) map[string]any {
 func poolMember(t *testing.T, poolName, upstream, model string) string {
 	return target(t, map[string]any{"endpoint_type": "openai", "endpoint": upstream, "api_key": uniq("sk-fake-cost"),
 		"pool": poolName, "model_mappings": []any{map[string]any{"upstream": model}}})
+}
+
+// poolMemberWithAlias maps one client-facing alias to a member-specific
+// upstream model. Different members can spell the upstream completely
+// differently while sharing the alias.
+func poolMemberWithAlias(t *testing.T, poolName, endpoint, upstream, alias string) string {
+	return target(t, map[string]any{"endpoint_type": "openai", "endpoint": endpoint, "api_key": uniq("sk-fake-cost"),
+		"pool": poolName, "model_mappings": []any{map[string]any{"upstream": upstream, "fallback": alias}}})
 }
 
 func costRoutingCall(t *testing.T, key, model string) {
@@ -169,5 +185,94 @@ func TestPoolLoadRoutingIgnoresPricesE2E(t *testing.T) {
 		if ev.Target != first {
 			t.Fatalf("load pool moved to %s after a price change, want sticky %s", ev.Target, first)
 		}
+	}
+}
+
+// The client alias is the cost comparison unit even when each member forwards
+// it under a completely different upstream spelling. Routing picks the cheaper
+// member, billing records that member's upstream, and the request still costs
+// exactly the serving member's price.
+func TestPoolCostRoutingComparesByClientAliasE2E(t *testing.T) {
+	alias := uniq("e2e-cost-alias")
+	poolName := routingPool(t, "cost")
+	// Mixed case proves the wire model keeps its configured spelling while the
+	// usage identity is normalized.
+	upstreamA := uniq("E2E-Upstream-A")
+	upstreamB := uniq("E2E-Upstream-B")
+	a := poolMemberWithAlias(t, poolName, w.urlA+"/v1", upstreamA, alias)
+	b := poolMemberWithAlias(t, poolName, w.urlB+"/v1", upstreamB, alias)
+	clientName, key := client(t, nil, []string{poolName})
+
+	// A is at its scheduled peak price right now; B is flat half price.
+	// Turning A into the cheaper member would require editing a template, which
+	// also reprices history, so the test keeps prices fixed and exercises the
+	// counter-example in the other direction.
+	idA, _ := priceTemplateWithID(t, currentPeakPrice(a, upstreamA, 10, 1))
+	idB, _ := priceTemplateWithID(t, flatPrice(b, upstreamB, 5, 5))
+	ruleFor := map[string]string{a: idA, b: idB}
+	upstreamFor := map[string]string{a: upstreamA, b: upstreamB}
+
+	// 1. The alias compares both members and picks the cheaper B.
+	costRoutingCall(t, key, alias)
+	events := usageFor(t, clientName, 1)
+	if events[0].Target != b || events[0].Model != strings.ToLower(upstreamB) {
+		t.Fatalf("alias request served by %s/%s, want %s/%s", events[0].Target, events[0].Model, b, strings.ToLower(upstreamB))
+	}
+	if events[0].PricingRuleID != idB {
+		t.Fatalf("pricing rule = %q, want serving member's template %q", events[0].PricingRuleID, idB)
+	}
+	if got := lastRecord(t, w.fakeB, "/v1/chat/completions").Model; got != upstreamB {
+		t.Fatalf("fake B received model %q, want configured spelling %q", got, upstreamB)
+	}
+
+	// 2. A's upstream name is not reverse-expanded to the shared alias: only A
+	// declares it, so A serves even though B is cheaper.
+	costRoutingCall(t, key, upstreamA)
+	events = usageFor(t, clientName, 2)
+	counts := map[string]int{}
+	for _, ev := range events {
+		counts[ev.Target]++
+	}
+	if counts[a] != 1 || counts[b] != 1 {
+		t.Fatalf("serving targets = %v, want one request on each member", counts)
+	}
+	if got := lastRecord(t, w.fakeA, "/v1/chat/completions").Model; got != upstreamA {
+		t.Fatalf("fake A received model %q, want configured spelling %q", got, upstreamA)
+	}
+
+	// 3. The alias again picks B; billing keeps each event at its serving
+	// member's unchanged price (B=5, A=10), records that member's upstream in
+	// lower case and cites that member's pricing template.
+	costRoutingCall(t, key, alias)
+	events = usageFor(t, clientName, 3)
+	counts = map[string]int{}
+	want := 0.0
+	for _, ev := range events {
+		counts[ev.Target]++
+		if ev.CostIncomplete {
+			t.Fatalf("incomplete cost: %+v", ev)
+		}
+		wantUpstream, ok := upstreamFor[ev.Target]
+		if !ok {
+			t.Fatalf("unexpected target %q", ev.Target)
+		}
+		if ev.Model != strings.ToLower(wantUpstream) {
+			t.Fatalf("event model = %q, want lower-cased member upstream %q", ev.Model, strings.ToLower(wantUpstream))
+		}
+		if ev.PricingRuleID != ruleFor[ev.Target] {
+			t.Fatalf("event target %s pricing rule = %q, want %q", ev.Target, ev.PricingRuleID, ruleFor[ev.Target])
+		}
+		switch ev.Target {
+		case a:
+			want += float64(ev.InputTokens+ev.OutputTokens) * 10 / 1e6
+		case b:
+			want += float64(ev.InputTokens+ev.OutputTokens) * 5 / 1e6
+		}
+	}
+	if counts[a] != 1 || counts[b] != 2 {
+		t.Fatalf("serving targets = %v, want two alias requests on %s and one upstream-name request on %s", counts, b, a)
+	}
+	if got := clientCost(t, clientName); math.Abs(got-want) > 1e-12 {
+		t.Fatalf("cost = %g, want %g (each event at its serving member's price)", got, want)
 	}
 }
