@@ -4,12 +4,19 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
+	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
+	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"github.com/LeXwDeX/LLM-Proxy/internal/pricing"
+	"github.com/LeXwDeX/LLM-Proxy/internal/proxy"
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
+	"github.com/go-chi/chi/v5"
 )
 
 type costPreviewResponse struct {
@@ -148,5 +155,63 @@ func TestPoolCostRoutingPreviewHandler(t *testing.T) {
 		if !m.Eligible || m.Priced || m.Tier != nil || m.Reason != "pricing_unavailable" {
 			t.Fatalf("unavailable member = %+v", m)
 		}
+	}
+}
+
+// The preview route is in the read-only group: a readonly session can read it
+// but still cannot write pools.
+func TestPoolCostRoutingPreviewReadOnlySession(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(dir, 1, nil)
+	cfg.Targets[0].Pool = "ds"
+	cfg.Targets[0].ModelMappings = []config.ModelMapping{{Upstream: "upstream-a", Fallback: "alias"}}
+	cfg.Pools = []config.DeploymentPool{{Name: "ds", RoutingStrategy: config.PoolRoutingCost}}
+	path := filepath.Join(dir, "config.json")
+	writeConfigFile(t, path, cfg)
+	stores := setupTestStores(t, dir)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service, err := proxy.NewService(cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+	resolver := pricing.NewResolver([]pricing.PricingTemplate{{
+		ID: "price", Targets: []string{cfg.Targets[0].Name}, Models: []string{"upstream-a"},
+		Mode: pricing.ModeFlat, BaseRates: usage.CostRates{InputPer1MTokens: 1},
+	}}, nil)
+	service.SetRateResolverSource(func() (usage.RateResolver, error) { return resolver, nil })
+	sessions := NewSessionManager(config.AdminSessionConfig{Secret: "fixture-session-secret", CookieName: "session", TTLSeconds: 3600}, logger)
+	h := NewHandler(config.NewManager(path), auth.NewStore(), service, stores.auditStore, stores.userStore, stores.clientStore, stores.targetStore, stores.modelCostStore, stores.usageStore, nil, nil, nil, sessions, logger)
+	router := chi.NewRouter()
+	router.Route("/admin", func(r chi.Router) {
+		r.Use(sessions.Middleware)
+		r.Mount("/", h)
+	})
+	_, cookie, err := sessions.CreateSession(RoleReadonly, RoleReadonly)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/data/pools/ds/cost-routing?model=alias", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("readonly preview status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp costPreviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Active || !resp.PricingAvailable || len(resp.Members) != 1 || resp.Members[0].Target != cfg.Targets[0].Name || !resp.Members[0].Priced {
+		t.Fatalf("readonly preview = %+v", resp)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/admin/data/pools", bytes.NewBufferString(`{"name":"other"}`))
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("readonly pool write status = %d", rec.Code)
 	}
 }
