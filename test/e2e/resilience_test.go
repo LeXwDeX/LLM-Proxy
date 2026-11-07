@@ -104,7 +104,7 @@ func TestKeyPoolAllKeysExhaustedPassesThrough(t *testing.T) {
 //   - ordinary upstream 5xx is passed through (never replayed, the upstream
 //     may have computed) and the target is muted, so later requests avoid it;
 //   - retryable transport errors fail over within the same request;
-//   - plain 4xx is the client's problem: passed through, target not muted.
+//   - a pre-commit 4xx is dequeued to the next candidate (5xx/408 stay terminal).
 func TestPoolFailover(t *testing.T) {
 	cases := []struct {
 		name string
@@ -115,7 +115,7 @@ func TestPoolFailover(t *testing.T) {
 		{"overloaded-529", fakellm.Scenario{Preset: "overloaded"}, "mute"},
 		{"unavailable-503", fakellm.Scenario{Preset: "deepseek_503"}, "mute"},
 		{"transport-abort", fakellm.Scenario{Abort: true}, "retry"},
-		{"bad-request-400", fakellm.Scenario{Preset: "bad_request"}, "passthrough"},
+		{"bad-request-400", fakellm.Scenario{Preset: "bad_request"}, "retry"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

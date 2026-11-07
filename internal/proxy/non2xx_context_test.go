@@ -262,7 +262,9 @@ func TestNon2xxReadPolicyRealHTTP(t *testing.T) {
 						if firstPath == "" {
 							firstPath = r.URL.Path
 						}
-						if r.URL.Path != firstPath {
+						// A complete 400 body is now dequeued to the next candidate; 401/402/429,
+						// 5xx, timeouts and truncated reads keep the original policy.
+						if r.URL.Path != firstPath && !(status == 400 && (mode == "complete" || mode == "bounded")) {
 							t.Error("unexpected target failover")
 						}
 						pathMu.Unlock()
@@ -298,6 +300,11 @@ func TestNon2xxReadPolicyRealHTTP(t *testing.T) {
 					if status == 402 {
 						wantCalls, wantHealthy, wantStatus = 2, 1, 200
 					}
+					if status == 400 && (mode == "complete" || mode == "bounded") {
+						// Dequeued to the next candidate, which rejects it too;
+						// the first real 400 is replayed.
+						wantCalls, wantHealthy, wantStatus = 2, 0, status
+					}
 					if calls.Load() != wantCalls || healthy.Load() != wantHealthy || rr.Code != wantStatus {
 						t.Fatalf("calls=%d healthy=%d status=%d; want %d/%d/%d", calls.Load(), healthy.Load(), rr.Code, wantCalls, wantHealthy, wantStatus)
 					}
@@ -309,8 +316,14 @@ func TestNon2xxReadPolicyRealHTTP(t *testing.T) {
 					} else {
 						assertCompletions(t, stats, requeststats.Failure)
 					}
-					if s.metrics.totalKeyRetries.Load() != int64(wantCalls-1) || s.metrics.totalTargetRetries.Load() != 0 {
-						t.Error("unexpected retry counts")
+					wantKeyRetries, wantTargetRetries := int64(wantCalls-1), int64(0)
+					if status == 400 && (mode == "complete" || mode == "bounded") {
+						// Both candidates returned 400 and were dequeued.
+						wantKeyRetries, wantTargetRetries = 0, 2
+					}
+					if s.metrics.totalKeyRetries.Load() != wantKeyRetries || s.metrics.totalTargetRetries.Load() != wantTargetRetries {
+						t.Errorf("retry counts key=%d target=%d; want %d/%d",
+							s.metrics.totalKeyRetries.Load(), s.metrics.totalTargetRetries.Load(), wantKeyRetries, wantTargetRetries)
 					}
 					for _, state := range s.targetOrder {
 						if !strings.Contains(firstPath, "/"+state.Target().Name+"/") {
@@ -330,7 +343,7 @@ func TestNon2xxReadPolicyRealHTTP(t *testing.T) {
 							t.Errorf("healthy key reason=%q", got)
 						}
 					}
-					if wantCalls == 1 && rr.Body.String() != body {
+					if (wantCalls == 1 || (status == 400 && (mode == "complete" || mode == "bounded"))) && rr.Body.String() != body {
 						t.Errorf("body replay changed: %q", rr.Body.String())
 					}
 					partial := 0

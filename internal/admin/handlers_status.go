@@ -72,7 +72,12 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			Retries                         int64 `json:"retries"`
 			KeyRetries                      int64 `json:"key_retries"`
 			TargetRetries                   int64 `json:"target_retries"`
-			ClientCanceled                  int64 `json:"client_canceled"`
+			// Unified failover: only pre-commit 4xx responses may dequeue.
+			Dequeued            int64 `json:"dequeued_total"`
+			DequeueExhausted    int64 `json:"dequeue_exhausted_total"`
+			CachedErrorReplayed int64 `json:"cached_error_replayed_total"`
+			Dequeue4xx          int64 `json:"dequeue_4xx_total"`
+			ClientCanceled      int64 `json:"client_canceled"`
 		} `json:"requests"`
 		Targets        int                    `json:"targets"`
 		TargetsRuntime []metricsTargetRuntime `json:"targets_runtime"`
@@ -126,6 +131,10 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	response.Requests.Retries = metrics.TotalRetries
 	response.Requests.KeyRetries = metrics.TotalKeyRetries
 	response.Requests.TargetRetries = metrics.TotalTargetRetries
+	response.Requests.Dequeued = metrics.TotalDequeued
+	response.Requests.DequeueExhausted = metrics.TotalDequeueExhausted
+	response.Requests.CachedErrorReplayed = metrics.TotalCachedErrorReplayed
+	response.Requests.Dequeue4xx = metrics.TotalDequeue4xx
 	response.Requests.ClientCanceled = metrics.TotalClientCanceled
 
 	// S5 调度可观测（议题 #18）：每节点运行态含派生调度相位与亲和/熔断计数。
@@ -245,6 +254,10 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 			"retries":                             metrics.TotalRetries,
 			"key_retries":                         metrics.TotalKeyRetries,
 			"target_retries":                      metrics.TotalTargetRetries,
+			"dequeued_total":                      metrics.TotalDequeued,
+			"dequeue_exhausted_total":             metrics.TotalDequeueExhausted,
+			"cached_error_replayed_total":         metrics.TotalCachedErrorReplayed,
+			"dequeue_4xx_total":                   metrics.TotalDequeue4xx,
 			"client_canceled":                     metrics.TotalClientCanceled,
 		},
 		"usage_summary": summary,

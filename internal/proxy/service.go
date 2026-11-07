@@ -164,6 +164,12 @@ type requestMetrics struct {
 	// Requests (HTTP or native WS create) whose duplicate or case-variant
 	// protected members were removed at entry.
 	totalRequestMembersNormalized atomic.Int64
+	// Unified failover: a non-2xx attempt was dequeued in favor of the next
+	// cost-ordered candidate. Only pre-commit 4xx responses qualify.
+	totalDequeued            atomic.Int64
+	totalDequeueExhausted    atomic.Int64
+	totalCachedErrorReplayed atomic.Int64
+	totalDequeue4xx          atomic.Int64
 }
 
 // ServiceMetrics captures aggregate request statistics.
@@ -185,9 +191,15 @@ type ServiceMetrics struct {
 	TotalRetries                  int64 // 总重试 = KeyRetries + TargetRetries（向后兼容）
 	TotalKeyRetries               int64 // key pool 内换 key 重试次数
 	TotalTargetRetries            int64 // target 级 failover 重试次数
-	TotalClientCanceled           int64 // 客户端在响应返回前断开（499），非代理失败
-	ActiveRequests                int64
-	StartTime                     time.Time
+	// Unified failover counters. Only pre-commit 4xx attempts are dequeued;
+	// 5xx/408 remain terminal because the upstream may already have billed.
+	TotalDequeued            int64
+	TotalDequeueExhausted    int64
+	TotalCachedErrorReplayed int64
+	TotalDequeue4xx          int64
+	TotalClientCanceled      int64 // 客户端在响应返回前断开（499），非代理失败
+	ActiveRequests           int64
+	StartTime                time.Time
 	// ResponsesWS covers the upstream Responses WebSocket pool and handshakes.
 	ResponsesWS ResponsesWSMetrics
 }
@@ -718,6 +730,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// lastForwardStatus 追踪最后一次 forwardRequest 的状态码，用于 failover 耗尽后
 	// selectTarget 失败时传播正确的 HTTP 状态码（如全池限流耗尽 → 429 而非 503）。
 	lastForwardStatus := 0
+	// cachedFailoverError keeps the first dequeued 4xx so an exhausted queue can
+	// still deliver the real upstream error instead of a synthesized 503.
+	var cachedFailoverError *cachedUpstreamError
 	// Retain the mapped status only for HTTP 200 ChatCompletionResp errors.
 	lastMinimaxFailure := false
 	// lastQuotaInfo 伴随 429 状态码：如果 lastForwardStatus=429 且 isQuota=true，
@@ -802,6 +817,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					writeUpstreamLimitedResponse(w, lastQuotaInfo.isQuota, lastQuotaInfo.resetAt)
 				} else if lastMinimaxFailure {
 					http.Error(w, http.StatusText(lastForwardStatus), lastForwardStatus)
+				} else if cachedFailoverError != nil && len(attempted) > 0 {
+					// The queue is exhausted; deliver the first real upstream 4xx
+					// instead of a synthesized 503.
+					s.metrics.totalDequeueExhausted.Add(1)
+					s.metrics.totalCachedErrorReplayed.Add(1)
+					writeCachedUpstreamError(w, cachedFailoverError)
 				} else {
 					http.Error(w, selErr.Message, selErr.Status)
 				}
@@ -1447,6 +1468,55 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// A 4xx returned before any client byte was written proves this
+		// candidate rejected the request without processing it. Dequeue it and
+		// let the cost-ordered queue try the next candidate. 5xx/408 are
+		// deliberately excluded: they may already have been computed and billed.
+		if resp != nil && classifyNon2xxAttempt(resp.StatusCode, allowFallback) == failoverDequeue && responseWebsocketRejection(resp) == nil {
+			wsBody := responseWSBody(resp)
+			if wsBody == nil || (!wsBody.generationSent && !wsBody.local) {
+				if err := r.Context().Err(); err != nil {
+					resp.Body.Close()
+					deferCancel(cancel)
+					finishContext(err, target.Name)
+					return
+				}
+				cached, readBody, ok := readUpstreamErrorForCache(resp, target, upstreamModel)
+				if ok {
+					writeUpstreamErrorLogBytes(r, target, resp, len(cached.body), startedAt)
+					// 4xx proves the target is reachable; settle health here and
+					// let the loop release the probe lease before the next pick.
+					state.MarkSuccess(time.Now())
+					if cachedFailoverError == nil {
+						cachedFailoverError = cached
+						// Keep the explicit-trace contract for the response that
+						// is eventually replayed: its body has already been
+						// read, so record it from the cache instead of
+						// writeResponse. Later attempts must not overwrite it.
+						s.recordTrace(r, target, resp, forwardBody, cached.body, startedAt, keyIndex, upstreamModel, usageTokens{})
+					}
+					deferCancel(cancel)
+					resp.Body.Close()
+					resp = nil
+					cancel = nil
+					s.metrics.totalDequeued.Add(1)
+					s.metrics.totalDequeue4xx.Add(1)
+					// A dequeue is a target-level retry; keep retries=key+target.
+					s.metrics.totalTargetRetries.Add(1)
+					s.logger.Info("retrying request with alternate target after upstream 4xx",
+						"request_id", appmiddleware.RequestIDFromContext(r.Context()),
+						"failed_target", target.Name,
+						"status", cached.status,
+						"attempt", attempt,
+					)
+					continue
+				}
+				// Too large or unreadable: restore the body and deliver this
+				// response as the terminal result.
+				restoreUpstreamErrorBody(resp, readBody)
+			}
+		}
+
 		// A response writeResponse observes owns the request's usage
 		// settlement. A passed-through non-2xx response is never observed or
 		// billed, so an earlier sent attempt without official usage keeps its
@@ -1669,6 +1739,10 @@ func (s *Service) MetricsSnapshot() ServiceMetrics {
 		TotalRetries:                         keyRetries + targetRetries,
 		TotalKeyRetries:                      keyRetries,
 		TotalTargetRetries:                   targetRetries,
+		TotalDequeued:                        s.metrics.totalDequeued.Load(),
+		TotalDequeueExhausted:                s.metrics.totalDequeueExhausted.Load(),
+		TotalCachedErrorReplayed:             s.metrics.totalCachedErrorReplayed.Load(),
+		TotalDequeue4xx:                      s.metrics.totalDequeue4xx.Load(),
 		TotalClientCanceled:                  s.metrics.totalClientCanceled.Load(),
 		ActiveRequests:                       s.metrics.activeRequests.Load(),
 		StartTime:                            s.startTime,
