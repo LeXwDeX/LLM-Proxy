@@ -307,7 +307,12 @@ AdminApp.register("pools", function (app) {
           ? esc(schemaLabel("target_phases", m.phase) || m.phase)
           : "—";
         var reason = poolCostReasonLabel(m.reason);
-        var state = phase + (reason ? " · " + reason : "");
+        var load =
+          m.max_concurrency > 0
+            ? " · 在途 " + m.in_flight + "/" + m.max_concurrency
+            : "";
+        var cap = m.affinity_soft_cap_reached ? " · 软上限" : "";
+        var state = phase + load + cap + (reason ? " · " + reason : "");
         var via =
           m.resolved_via === "alias"
             ? "别名"

@@ -811,6 +811,7 @@ async function main() {
     assert.match(previewText, /Qwen-MixedCase-Long-Model-Name-To-Show-Full-Tooltip/);
     assert.match(previewText, /\$9\.450000/);
     assert.match(previewText, /最便宜层/);
+    assert.match(previewText, /在途 0\/4/);
     assert.match(previewText, /估算按选路口径/);
     await page.locator("#poolCostModel").fill("qwen-max");
     await page.locator("#poolCostPreviewRun").click();
