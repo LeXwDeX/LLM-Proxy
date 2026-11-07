@@ -5,7 +5,7 @@
 - **范围**：`internal/proxy` 的目标选择、转发失败分类与响应交付；不含管理端 UI 与计费规则变更。
 - **引用约定**：未写目录的 `*.go` 文件均位于 `internal/proxy/`；其他文件按完整路径标注。
 
-**结论摘要**：新增单一分类器，把“未提交且未处理、且不属于 401/402/403/408/429 的上游 4xx”转为出队；5xx/408、403、已提交响应与本地请求错误仍终止。队列不物化，复用现有成本选路与 `attempted` 集合；4xx 响应按 attempt 缓存，队列耗尽时原样回放第一个真实错误。
+**结论摘要**：新增单一分类器，把“未提交且未处理、且不属于 401/402/403/408/429 的上游 4xx”转为出队；5xx/408、403、已提交响应与本地请求错误均不进入出队面。队列不物化，复用现有成本选路与 `attempted` 集合；4xx 响应按 attempt 缓存，队列耗尽时原样回放第一个真实错误。
 
 ## 1. 问题与目标
 
@@ -21,7 +21,7 @@ LLMS Proxy 在 `cost` 部署池中按估算价格从低到高排序候选（A �
 
 非目标：
 
-- 不改变 keypool 对 401/402/429 的既有收敛规则，不扩大同 key 重试；403 仍按账户/权限拒绝终止，不跨候选重放。
+- 不改变 keypool 对 401/402/429 的既有收敛规则，不扩大同 key 重试；403 不跨候选出队，key 级 403 沿用既有分类，耗尽后终止。
 - 不重放已向客户端提交的响应，不重放可能已推理或计费的 5xx/408/已发送超时。
 - 不引入 alias 级健康、熔断或第二套重试状态机。
 
@@ -82,7 +82,8 @@ LLMS Proxy 在 `cost` 部署池中按估算价格从低到高排序候选（A �
 | 客户端断开/取消 | false | n/a | Client | Terminate | 499；不 mute；按现有 0 token 结算 |
 | 上游 401/402 | false | n/a | Key | SwitchKey，耗尽后 Dequeue | key 冷却；target 不因账户失败刷新粘连 |
 | 上游 429 | false | n/a | Key | 同 key 重试/换 key/安全阀；耗尽后 Dequeue，安全阀命中则 Terminate | key 冷却；`skipMute` 不 mute target |
-| 上游 403（账户/权限拒绝） | false | false | Target | Terminate | 不缓存、不出队；按既有 4xx 结算（账户级失败沿用 keypool 判定），不写用量；跨候选重放会放大客户端授权错误并可能触发账号锁定；厂商 Patch 对 403 的既有 key 级分类不变 |
+| 上游 403（厂商 Patch 识别为 key 级，如额度类） | false | n/a | Key | 走既有 key 循环；耗尽后 Terminate，不出队 | 沿用 keypool/健康既有规则；不跨候选重放 |
+| 上游 403（通用账户/权限拒绝） | false | false | Target | Terminate | 不缓存、不出队；按既有 4xx 结算（账户级失败沿用 keypool 判定），不写用量；跨候选重放会放大客户端授权错误并可能触发账号锁定 |
 | 其他上游 4xx（headers 阶段，403/408 除外） | false | false | Target | Dequeue | 缓存并在丢弃点 MarkSuccess |
 | 5xx/408（headers 阶段） | false | true | Target | Terminate | 原样透传；MarkFailure；mute 一个 target |
 | SSE 4xx（写头前，403/408 除外） | false | false | Target | Dequeue | 同普通可出队 4xx；403/408 Terminate |
@@ -114,7 +115,7 @@ LLMS Proxy 在 `cost` 部署池中按估算价格从低到高排序候选（A �
 
 - 缓存 per-request，绑定产生该响应的 `origin targetState` 与 `upstreamModel`；请求结束即丢弃，不做跨请求复用。
 - body 上限 64 KiB（原始 wire 字节）。超过上限时不缓存，终止出队并交付该响应；不能为了凑缓存截断 body 或改写 `Content-Length`。
-- 不缓存 2xx body，也不缓存 403 与 keypool 已消费的 401/402/429 拒绝；后者由既有 key 状态机与终态交付负责，403 直接终止。
+- 不缓存 2xx body，也不缓存 403 与 keypool 已消费的 401/402/429 拒绝；403 不进入出队面，后者由既有 key 状态机与终态交付负责。
 - 回放必须原样：`Content-Type`、`Content-Encoding`、`Content-Length`、request-id 等头与 body 成对回放；gzip/br 等编码保持原始字节，不解压后重压，不把压缩体当明文。hop-by-hop 头仍按现有 `hopHeaders` 规则过滤（forward.go:1612-1621）。
 - 绝不混用不同 attempt 的 header/body；每次回放只读取同一缓存项。
 - 队列耗尽时回放第一个已缓存的可出队 4xx（按尝试顺序），保留 `X-Proxy-Target` 与 `X-Upstream-Request-Id`（forward.go:848、855-856）以及上游 `request_id`。
@@ -184,7 +185,7 @@ LLMS Proxy 在 `cost` 部署池中按估算价格从低到高排序候选（A �
 - 成本队列：A 返回可出队 4xx（如 400），B 返回 200；断言 A→B 顺序、客户端只收到 B 的响应、用量 `Event.Model` 为 B 的 upstream。
 - 队列耗尽：所有候选返回可出队 4xx 时回放第一个已缓存的可出队 4xx；断言 status、原始 headers、body、`X-Proxy-Target`、`X-Upstream-Request-Id` 与上游 request-id 均来自同一 attempt。
 - 5xx：不重放、不尝试 B、原样透传、只 mute 一个 target、`totalTargetRetries` 不增加。
-- keypool：401/402/429 先同 target 切 key；单 key 401/402 走凭据/账户失败后再升级；403 直接终止，不进入 keypool 或出队；显式 target 不 Dequeue。
+- keypool：401/402/429 先同 target 切 key；单 key 401/402 走凭据/账户失败后再升级；403 不跨候选出队（key 级 403 仍按既有 key 规则处理，耗尽后终止；通用账户/权限 403 直接终止）；显式 target 不 Dequeue。
 - SSE：可出队 4xx 写头前出队，403/408 Terminate；200 Flush 后失败 Terminate，客户端只收到一段流。
 - WS：升级前 400/404/405/426/501 仍同 target HTTP 回退；其他完整拒绝按矩阵；101 后失败 Terminate。
 - Responses：任一 event 转发后失败 Terminate，不重放。
@@ -202,7 +203,7 @@ LLMS Proxy 在 `cost` 部署池中按估算价格从低到高排序候选（A �
 - 不要按状态码宽泛重试；判定必须经过 `classifyNon2xxAttempt`。
 - 不要把 Scope=Request 映射为 Dequeue；本地 quota/admission/accounting/参数错误直接终止。
 - 不要新建第二套状态机或预生成队列；只加一个分类器，复用 `selectTarget` + `attempted`。
-- 4xx 出队不要绕过 keypool：401/402/429 必须先走 key 循环；单 key 目标的 401/402 也按凭据/账户失败处理。403 直接终止，不进入出队面；厂商 Patch 对 403 的既有 key 级分类不变。
+- 4xx 出队不要绕过 keypool：401/402/429 必须先走 key 循环；单 key 目标的 401/402 也按凭据/账户失败处理。403 不进入出队面：通用账户/权限 403 直接终止，厂商 Patch 对 403 的既有 key 级分类不变，耗尽后终止。
 - 一次请求最多 mute 有限 target；5xx 不出队已经避免“一次请求熔断全站”。
 - probe lease 在每条出队/缓存回放路径都要释放，避免 half-open 卡死。
 - alias 不做跨 target 健康身份，否则单 provider 故障会扩散；IP 粘连两代 key 兼容不动。
