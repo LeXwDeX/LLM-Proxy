@@ -53,6 +53,15 @@ type poolCostRoutingResponse struct {
 	proxy.CostRoutingPreview
 }
 
+// poolCostRoutingInactiveResponse deliberately omits the preview fields for a
+// non-cost pool so a zero-valued snapshot cannot be mistaken for real data.
+type poolCostRoutingInactiveResponse struct {
+	Pool            string `json:"pool"`
+	RoutingStrategy string `json:"routing_strategy"`
+	Active          bool   `json:"active"`
+	Paused          bool   `json:"paused"`
+}
+
 // handlePoolCostRoutingPreview returns the alias-first cost ranking for one
 // pool and one client request name. It is read-only: no probes, no affinity,
 // no audit, and no model-group coefficient (the proxy resolver is used).
@@ -86,7 +95,7 @@ func (h *Handler) handlePoolCostRoutingPreview(w http.ResponseWriter, r *http.Re
 	normalized := config.NormalizeDeploymentPool(*pool)
 	strategy := normalized.EffectiveRoutingStrategy()
 	if strategy != config.PoolRoutingCost {
-		writeJSON(w, http.StatusOK, poolCostRoutingResponse{
+		writeJSON(w, http.StatusOK, poolCostRoutingInactiveResponse{
 			Pool:            normalized.Name,
 			RoutingStrategy: strategy,
 			Active:          false,

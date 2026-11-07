@@ -229,13 +229,39 @@ AdminApp.register("pools", function (app) {
       })
       .join(" ");
   }
-  // poolCostModelNames：预览下拉/提示的客户端请求名，复用成本池分组的
-  // 顺序（fallback 别名优先、可直请上游名次之）；无映射成员接受任意名，
-  // 不在列表中，操作者可直接输入。
+  // poolCostModelNames：预览下拉/提示的客户端请求名。与可见分组不同，这里
+  // 同时包含已暂停 target/映射声明的名字，否则操作者无法通过预览看到它们
+  // 为何不参与。fallback 别名优先、可直请上游名次之，各自按名称排序；
+  // 无映射成员接受任意名，不在列表中，操作者可直接输入。
   function poolCostModelNames(poolName) {
-    return poolAliasGroups(poolName).map(function (g) {
-      return g.alias;
+    var key = String(poolName || "").toLowerCase();
+    var aliases = [];
+    var upstreams = [];
+    var seen = Object.create(null);
+    var byName = function (a, b) {
+      return a.toLowerCase().localeCompare(b.toLowerCase());
+    };
+    (state.targets || []).forEach(function (t) {
+      if (!t.pool || String(t.pool).toLowerCase() !== key) return;
+      (Array.isArray(t.model_mappings) ? t.model_mappings : []).forEach(function (m) {
+        if (!m) return;
+        splitAliases(m.fallback).forEach(function (alias) {
+          var nameKey = alias.toLowerCase();
+          if (seen[nameKey]) return;
+          seen[nameKey] = true;
+          aliases.push(alias);
+        });
+        var upstream = String(m.upstream || "").trim();
+        if (upstream) {
+          var upstreamKey = upstream.toLowerCase();
+          if (!seen[upstreamKey]) {
+            seen[upstreamKey] = true;
+            upstreams.push(upstream);
+          }
+        }
+      });
     });
+    return aliases.sort(byName).concat(upstreams.sort(byName));
   }
   function poolCostReasonLabel(reason) {
     var labels = {
@@ -280,10 +306,23 @@ AdminApp.register("pools", function (app) {
     if (!data || !data.active) {
       return "<div class='pool-cost-note'>该池不是「成本优先」策略，不参与成本选路。</div>";
     }
+    var ref = data.reference_tokens || {};
+    var fmtTokens = function (value) {
+      var n = Number(value || 0);
+      return n % 10000 === 0 ? n / 10000 + " 万" : String(n);
+    };
     var meta =
-      "<div class='pool-cost-meta'>生成时间 " +
+      "<div class='pool-cost-meta'>请求名 " +
+      esc(String(data.model || "")) +
+      " · 生成时间 " +
       esc(String(data.generated_at || "")) +
-      " · 参考组合 100 万未缓存输入 + 100 万缓存读 + 20 万输出 · 同层容差 " +
+      " · 参考组合 " +
+      fmtTokens(ref.input) +
+      "未缓存输入 + " +
+      fmtTokens(ref.cached_input) +
+      "缓存读 + " +
+      fmtTokens(ref.output) +
+      "输出 · 同层容差 " +
       Math.round(Number(data.tolerance || 0) * 100) +
       "%</div>";
     var warning = data.pricing_available
@@ -381,6 +420,21 @@ AdminApp.register("pools", function (app) {
         "<div class='pool-cost-error'>预览失败: " + esc(e.message) + "</div>";
     }
   }
+  function focusCostPreviewControl(poolName, opening) {
+    var el = null;
+    if (opening) {
+      el = document.getElementById("poolCostModel");
+    } else {
+      var buttons = document.querySelectorAll("[data-cost-preview-pool]");
+      for (var i = 0; i < buttons.length; i++) {
+        if (buttons[i].dataset && buttons[i].dataset.costPreviewPool === poolName) {
+          el = buttons[i];
+          break;
+        }
+      }
+    }
+    if (el && typeof el.focus === "function") el.focus();
+  }
   async function loadPools() {
     // A roster refresh invalidates any open detail row and in-flight preview.
     expandedCostPool = "";
@@ -413,6 +467,9 @@ AdminApp.register("pools", function (app) {
       "。请点击「刷新」重试。</td></tr>";
   }
   function onSchedulingRefresh() {
+    // Any roster refresh invalidates the open detail row and in-flight preview.
+    expandedCostPool = "";
+    costPreviewSequence++;
     if (targetPoolsAvailable()) renderPools();
     else renderPoolsLoadError("部署池数据不可用");
   }
@@ -454,7 +511,11 @@ AdminApp.register("pools", function (app) {
             esc(p.name) +
             "' aria-expanded='" +
             (expandedCostPool === p.name ? "true" : "false") +
-            "' aria-controls='poolCostDetail'>成本预览</button>"
+            "'" +
+            (expandedCostPool === p.name
+              ? " aria-controls='poolCostDetail'"
+              : "") +
+            ">成本预览</button>"
           : "";
         var detailRow =
           isCost && expandedCostPool === p.name
@@ -515,11 +576,13 @@ AdminApp.register("pools", function (app) {
           expandedCostPool = "";
           costPreviewSequence++;
           renderPools();
+          focusCostPreviewControl(previewName, false);
         } else {
           expandedCostPool = previewName;
           costPreviewSequence++;
           renderPools();
           loadPoolCostPreview(previewName);
+          focusCostPreviewControl(previewName, true);
         }
         return;
       }

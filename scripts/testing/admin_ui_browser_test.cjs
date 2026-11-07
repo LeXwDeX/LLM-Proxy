@@ -807,6 +807,16 @@ async function main() {
     await page.locator('[data-cost-preview-pool="fixture-pool"]').click();
     await page.locator("#poolCostResult .pool-cost-table").waitFor();
     assert.equal(await page.locator("#poolCostModel").inputValue(), "glm-flash");
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.id),
+      "poolCostModel",
+      "opening the preview focuses the request-name input",
+    );
+    const expandedPools = await tableLayout("#targetsPoolsPanel .table-wrap");
+    assert.ok(
+      expandedPools.pageScrollWidth <= expandedPools.pageClientWidth + 1,
+      `expanded pools page overflows: ${expandedPools.pageScrollWidth}/${expandedPools.pageClientWidth}`,
+    );
     const previewText = await page.locator("#poolCostResult").innerText();
     assert.match(previewText, /Qwen-MixedCase-Long-Model-Name-To-Show-Full-Tooltip/);
     assert.match(previewText, /\$9\.450000/);
@@ -824,6 +834,11 @@ async function main() {
     );
     await page.locator('[data-cost-preview-pool="fixture-pool"]').click();
     await page.locator("#poolCostDetail").waitFor({state:"detached"});
+    assert.equal(
+      await page.evaluate(() => document.activeElement?.getAttribute("data-cost-preview-pool")),
+      "fixture-pool",
+      "collapsing the preview returns focus to its button",
+    );
     await page.locator("#newPoolBtn").click();
     await page.locator("#poolModal.open").waitFor();
     await page.locator('#poolModal [data-close="poolModal"]').first().click();

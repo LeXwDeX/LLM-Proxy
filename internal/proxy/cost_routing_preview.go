@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"sort"
 	"strings"
 	"time"
 
@@ -72,7 +73,12 @@ func (s *Service) CostRoutingPreview(poolName, model string, now time.Time) Cost
 	if source := s.rateSource.Load(); source == nil {
 		preview.PricingError = "pricing source not configured"
 	} else if r, err := (*source)(); err != nil {
-		preview.PricingError = err.Error()
+		// Keep the API response free of internal store details; the raw error
+		// stays in the server log for operators.
+		preview.PricingError = "pricing source unavailable"
+		if s.logger != nil {
+			s.logger.Warn("cost routing preview: pricing source unavailable", "error", err)
+		}
 	} else if r == nil {
 		preview.PricingError = "pricing resolver unavailable"
 	} else {
@@ -119,7 +125,39 @@ func (s *Service) CostRoutingPreview(poolName, model string, now time.Time) Cost
 		}
 		m.Tier = &tier
 	}
+	sortPreviewMembers(preview.Members)
 	return preview
+}
+
+// sortPreviewMembers mirrors the routing groups: eligible priced members first
+// (cheapest tier before other priced tiers, then by cost), then eligible
+// unpriced members, then ineligible members; target name breaks ties.
+func sortPreviewMembers(members []CostRoutingPreviewMember) {
+	group := func(m CostRoutingPreviewMember) int {
+		switch {
+		case m.Eligible && m.Priced:
+			return 0
+		case m.Eligible:
+			return 1
+		default:
+			return 2
+		}
+	}
+	sort.SliceStable(members, func(i, j int) bool {
+		a, b := members[i], members[j]
+		if group(a) != group(b) {
+			return group(a) < group(b)
+		}
+		if a.Priced && b.Priced && a.Tier != nil && b.Tier != nil {
+			if *a.Tier != *b.Tier {
+				return *a.Tier < *b.Tier
+			}
+			if a.EstimatedCostUSD != nil && b.EstimatedCostUSD != nil && *a.EstimatedCostUSD != *b.EstimatedCostUSD {
+				return *a.EstimatedCostUSD < *b.EstimatedCostUSD
+			}
+		}
+		return a.Target < b.Target
+	})
 }
 
 func buildPreviewMember(state *targetState, model string, resolver usage.RateResolver, now time.Time) CostRoutingPreviewMember {

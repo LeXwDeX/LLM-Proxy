@@ -54,6 +54,9 @@ func TestCostRoutingPreviewRanksAliasMembers(t *testing.T) {
 	if len(p.Members) != 2 {
 		t.Fatalf("members = %+v, want 2", p.Members)
 	}
+	if p.Members[0].Target != "agg" || p.Members[1].Target != "official" {
+		t.Fatalf("member order = %q,%q, want cheapest tier first", p.Members[0].Target, p.Members[1].Target)
+	}
 
 	official := previewMember(t, p, "official")
 	agg := previewMember(t, p, "agg")
@@ -160,7 +163,7 @@ func TestCostRoutingPreviewPricingUnavailable(t *testing.T) {
 		return nil, errors.New("pricing store down")
 	})
 	p := s.CostRoutingPreview("ds", costTestAlias, peak)
-	if p.PricingAvailable || p.PricingError != "pricing store down" {
+	if p.PricingAvailable || p.PricingError != "pricing source unavailable" {
 		t.Fatalf("pricing header = %+v", p)
 	}
 	if len(p.Members) != 2 {

@@ -126,6 +126,90 @@ test("cost preview expands, defaults to the first request name and renders the A
   assert.match(result, /100 万未缓存输入/);
 });
 
+test("renders the API model and reference tokens instead of hard-coded values", async () => {
+  const { app, field, click } = await setup();
+  app.modules.core.api = async () =>
+    previewResponse({
+      model: "custom-model",
+      reference_tokens: { input: 2000000, cached_input: 0, output: 100000 },
+    });
+  click({ costPreviewPool: "ds" });
+  await flush();
+  const result = field("poolCostResult").innerHTML;
+  assert.match(result, /请求名 custom-model/);
+  assert.match(result, /200 万未缓存输入/);
+  assert.match(result, /0 万缓存读/);
+  assert.match(result, /10 万输出/);
+  assert.doesNotMatch(result, /100 万未缓存输入/);
+});
+
+test("renders unpriced and pricing-unavailable states", async () => {
+  const { app, field, click } = await setup();
+  const base = previewResponse().members[0];
+
+  app.modules.core.api = async () =>
+    previewResponse({
+      members: [
+        {
+          ...base,
+          target: "unpriced",
+          priced: false,
+          estimated_cost_usd: null,
+          tier: null,
+          cheapest: false,
+          reason: "unpriced",
+        },
+      ],
+    });
+  click({ costPreviewPool: "ds" });
+  await flush();
+  let result = field("poolCostResult").innerHTML;
+  assert.match(result, /无价格/);
+  assert.match(result, /—/);
+
+  app.modules.core.api = async () =>
+    previewResponse({
+      pricing_available: false,
+      pricing_error: "pricing down",
+      members: [
+        {
+          ...base,
+          priced: false,
+          estimated_cost_usd: null,
+          tier: null,
+          cheapest: false,
+          reason: "pricing_unavailable",
+        },
+      ],
+    });
+  click({ costPreviewRun: "ds" });
+  await flush();
+  result = field("poolCostResult").innerHTML;
+  assert.match(result, /定价源不可用：pricing down/);
+  assert.match(result, /价格源不可用/);
+});
+
+test("preview result escapes configured names and the model", async () => {
+  const { app, field, click } = await setup();
+  app.modules.core.api = async () =>
+    previewResponse({
+      model: "'><img src=model>",
+      members: [
+        {
+          ...previewResponse().members[0],
+          target: "<img src=target>",
+          upstream: "'><img src=upstream>",
+        },
+      ],
+    });
+  click({ costPreviewPool: "ds" });
+  await flush();
+  const result = field("poolCostResult").innerHTML;
+  assert.doesNotMatch(result, /<img /);
+  assert.match(result, /&lt;img src=target&gt;/);
+  assert.match(result, /&#39;&gt;&lt;img src=upstream&gt;/);
+});
+
 test("switching the request name and refreshing reuse the sequence guard", async () => {
   const { app, field, click } = await setup();
   const calls = [];
@@ -240,8 +324,46 @@ test("a pool refresh collapses an open preview", async () => {
 });
 
 test("readonly users can open the read-only preview", async () => {
-  const { field } = await setup({ role: "readonly" });
+  const { app, field, click } = await setup({ role: "readonly" });
   assert.match(field("poolsTableBody").innerHTML, /data-cost-preview-pool='ds'/);
+  app.modules.core.api = async () => previewResponse();
+  click({ costPreviewPool: "ds" });
+  await flush();
+  assert.match(field("poolCostResult").innerHTML, /Upstream-B/);
+});
+
+test("preview suggestions include paused declarations so their reason is visible", async () => {
+  const { app, field, click } = await setup();
+  app.state.targets = targets.concat([
+    {
+      name: "paused-only",
+      pool: "ds",
+      model_mappings: [
+        { upstream: "Paused-Upstream", fallback: "paused-alias", paused: true },
+      ],
+    },
+  ]);
+  app.modules.pools.renderPools();
+  app.modules.core.api = async () => previewResponse();
+  click({ costPreviewPool: "ds" });
+  await flush();
+  const html = field("poolsTableBody").innerHTML;
+  assert.match(html, /<option value='paused-alias'>/);
+  assert.match(html, /<option value='Paused-Upstream'>/);
+});
+
+test("aria-controls is present only while the detail row exists", async () => {
+  const { app, field, click } = await setup();
+  app.modules.core.api = async () => previewResponse();
+  assert.doesNotMatch(field("poolsTableBody").innerHTML, /aria-controls='poolCostDetail'/);
+  click({ costPreviewPool: "ds" });
+  await flush();
+  assert.match(
+    field("poolsTableBody").innerHTML,
+    /aria-expanded='true'[^>]*aria-controls='poolCostDetail'/,
+  );
+  click({ costPreviewPool: "ds" });
+  assert.doesNotMatch(field("poolsTableBody").innerHTML, /aria-controls='poolCostDetail'/);
 });
 
 test("the preview table keeps theme-colored cheapest and secondary text", () => {

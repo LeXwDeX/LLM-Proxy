@@ -142,10 +142,19 @@ func TestPoolCostRoutingPreviewHandler(t *testing.T) {
 	if rec.Code != http.StatusOK || loadResp.Active || loadResp.RoutingStrategy != "load" {
 		t.Fatalf("load pool preview = %d %+v", rec.Code, loadResp)
 	}
+	var inactive map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &inactive); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"model", "members", "reference_tokens", "tolerance"} {
+		if _, ok := inactive[key]; ok {
+			t.Fatalf("inactive preview carries %q: %s", key, rec.Body.String())
+		}
+	}
 
 	service.SetRateResolverSource(func() (usage.RateResolver, error) { return nil, errors.New("pricing down") })
 	rec, unavailable := getCostPreview(t, h, "/data/pools/ds/cost-routing?model=alias")
-	if rec.Code != http.StatusOK || unavailable.PricingAvailable || unavailable.PricingError != "pricing down" {
+	if rec.Code != http.StatusOK || unavailable.PricingAvailable || unavailable.PricingError != "pricing source unavailable" {
 		t.Fatalf("unavailable preview = %d %+v", rec.Code, unavailable)
 	}
 	if len(unavailable.Members) != 2 {
