@@ -17,6 +17,10 @@ AdminApp.register("pools", function (app) {
   var failSchedulingRefresh = app.bind("targets", "failSchedulingRefresh");
   var validPoolRoster = app.bind("targets", "validPoolRoster");
   var targetPoolsAvailable = app.bind("targets", "targetPoolsAvailable");
+  // Cost-preview state: at most one pool detail row is open. The sequence
+  // guard drops responses that arrive after a refresh or another pool opened.
+  var expandedCostPool = "";
+  var costPreviewSequence = 0;
   /* ===== Pools ===== */
   function poolRoutingStrategy(pool) {
     return (pool && pool.routing_strategy) || state.schema.defaults.pool_routing_strategy;
@@ -225,7 +229,216 @@ AdminApp.register("pools", function (app) {
       })
       .join(" ");
   }
+  // poolCostModelNames：预览下拉/提示的客户端请求名。与可见分组不同，这里
+  // 同时包含已暂停 target/映射声明的名字，否则操作者无法通过预览看到它们
+  // 为何不参与。fallback 别名优先、可直请上游名次之，各自按名称排序；
+  // 无映射成员接受任意名，不在列表中，操作者可直接输入。
+  function poolCostModelNames(poolName) {
+    var key = String(poolName || "").toLowerCase();
+    var aliases = [];
+    var upstreams = [];
+    var seen = Object.create(null);
+    var byName = function (a, b) {
+      return a.toLowerCase().localeCompare(b.toLowerCase());
+    };
+    (state.targets || []).forEach(function (t) {
+      if (!t.pool || String(t.pool).toLowerCase() !== key) return;
+      (Array.isArray(t.model_mappings) ? t.model_mappings : []).forEach(function (m) {
+        if (!m) return;
+        splitAliases(m.fallback).forEach(function (alias) {
+          var nameKey = alias.toLowerCase();
+          if (seen[nameKey]) return;
+          seen[nameKey] = true;
+          aliases.push(alias);
+        });
+        var upstream = String(m.upstream || "").trim();
+        if (upstream) {
+          var upstreamKey = upstream.toLowerCase();
+          if (!seen[upstreamKey]) {
+            seen[upstreamKey] = true;
+            upstreams.push(upstream);
+          }
+        }
+      });
+    });
+    return aliases.sort(byName).concat(upstreams.sort(byName));
+  }
+  function poolCostReasonLabel(reason) {
+    var labels = {
+      target_paused: "目标暂停",
+      mapping_paused: "映射暂停",
+      alias_not_declared: "未声明该名",
+      unpriced: "无价格",
+      pricing_unavailable: "价格源不可用",
+    };
+    return labels[reason] || "";
+  }
+  function poolCostPreviewHtml(poolName) {
+    var names = poolCostModelNames(poolName);
+    var options = names
+      .map(function (name) {
+        return "<option value='" + esc(name) + "'></option>";
+      })
+      .join("");
+    var value = names.length ? names[0] : "";
+    return (
+      "<div class='pool-cost-panel'>" +
+      "<div class='pool-cost-head'>" +
+      "<label for='poolCostModel'>客户端请求名</label>" +
+      "<input class='form-control' id='poolCostModel' list='poolCostModelOptions' value='" +
+      esc(value) +
+      "' placeholder='例如 " +
+      esc(names[0] || "model-alias") +
+      "'>" +
+      "<datalist id='poolCostModelOptions'>" +
+      options +
+      "</datalist>" +
+      "<button class='btn btn-sm' id='poolCostPreviewRun' data-cost-preview-run='" +
+      esc(poolName) +
+      "'>预览</button>" +
+      "<span id='poolCostStatus' class='pool-cost-status'></span>" +
+      "</div>" +
+      "<div id='poolCostResult' class='pool-cost-result'></div>" +
+      "</div>"
+    );
+  }
+  function renderPoolCostPreview(data) {
+    if (!data || !data.active) {
+      return "<div class='pool-cost-note'>该池不是「成本优先」策略，不参与成本选路。</div>";
+    }
+    var ref = data.reference_tokens || {};
+    var fmtTokens = function (value) {
+      var n = Number(value || 0);
+      return n % 10000 === 0 ? n / 10000 + " 万" : String(n);
+    };
+    var meta =
+      "<div class='pool-cost-meta'>请求名 " +
+      esc(String(data.model || "")) +
+      " · 生成时间 " +
+      esc(String(data.generated_at || "")) +
+      " · 参考组合 " +
+      fmtTokens(ref.input) +
+      "未缓存输入 + " +
+      fmtTokens(ref.cached_input) +
+      "缓存读 + " +
+      fmtTokens(ref.output) +
+      "输出 · 同层容差 " +
+      Math.round(Number(data.tolerance || 0) * 100) +
+      "%</div>";
+    var warning = data.pricing_available
+      ? ""
+      : "<div class='pool-cost-error'>定价源不可用" +
+        (data.pricing_error ? "：" + esc(data.pricing_error) : "") +
+        "；以下仅展示成员与可参与性。</div>";
+    var members = Array.isArray(data.members) ? data.members : [];
+    if (!members.length) {
+      return meta + warning + "<div class='pool-cost-note'>该池暂无可展示的成员。</div>";
+    }
+    var rows = members
+      .map(function (m) {
+        var cost =
+          m.estimated_cost_usd == null
+            ? "—"
+            : "$" + Number(m.estimated_cost_usd).toFixed(6);
+        var tier =
+          m.tier == null ? "—" : m.tier === 0 ? "最便宜层" : "较贵层";
+        var phase = m.phase
+          ? esc(schemaLabel("target_phases", m.phase) || m.phase)
+          : "—";
+        var reason = poolCostReasonLabel(m.reason);
+        var load =
+          m.max_concurrency > 0
+            ? " · 在途 " + m.in_flight + "/" + m.max_concurrency
+            : "";
+        var cap = m.affinity_soft_cap_reached ? " · 软上限" : "";
+        var state = phase + load + cap + (reason ? " · " + reason : "");
+        var via =
+          m.resolved_via === "alias"
+            ? "别名"
+            : m.resolved_via === "upstream"
+              ? "上游名"
+              : m.resolved_via === "unrestricted"
+                ? "不限"
+                : "未声明";
+        var upstream = m.upstream
+          ? esc(m.upstream) + " <span class='pool-cost-secondary'>（" + via + "）</span>"
+          : "—";
+        return (
+          "<tr class='" +
+          (m.cheapest ? "pool-cost-cheapest" : "") +
+          "'><td>" +
+          esc(m.target) +
+          "</td><td>" +
+          upstream +
+          "</td><td class='mono'>" +
+          cost +
+          "</td><td>" +
+          tier +
+          "</td><td>" +
+          state +
+          "</td></tr>"
+        );
+      })
+      .join("");
+    return (
+      meta +
+      warning +
+      "<div class='pool-cost-table-wrap'><table class='pool-cost-table'><thead><tr>" +
+      "<th>成员</th><th>上游（次要）</th><th>估算成本（USD）</th><th>层级</th><th>运行态/原因</th>" +
+      "</tr></thead><tbody>" +
+      rows +
+      "</tbody></table></div>" +
+      "<p class='pool-cost-note'>估算按选路口径（固定参考 token 组合），不含条件价、模型组系数与实际 token；实际选择还受可用性、容量、探针与粘连影响；计费以事件回读为准。</p>"
+    );
+  }
+  async function loadPoolCostPreview(poolName) {
+    var input = document.getElementById("poolCostModel");
+    var result = document.getElementById("poolCostResult");
+    var status = document.getElementById("poolCostStatus");
+    if (!input || !result) return;
+    var model = String(input.value || "").trim();
+    if (!model) {
+      if (status) status.textContent = "请输入客户端请求名";
+      return;
+    }
+    var sequence = ++costPreviewSequence;
+    if (status) status.textContent = "加载中…";
+    try {
+      var data = await api(
+        "/admin/data/pools/" +
+          encodeURIComponent(poolName) +
+          "/cost-routing?model=" +
+          encodeURIComponent(model),
+      );
+      if (sequence !== costPreviewSequence || expandedCostPool !== poolName) return;
+      if (status) status.textContent = "";
+      result.innerHTML = renderPoolCostPreview(data);
+    } catch (e) {
+      if (sequence !== costPreviewSequence || expandedCostPool !== poolName) return;
+      if (status) status.textContent = "";
+      result.innerHTML =
+        "<div class='pool-cost-error'>预览失败: " + esc(e.message) + "</div>";
+    }
+  }
+  function focusCostPreviewControl(poolName, opening) {
+    var el = null;
+    if (opening) {
+      el = document.getElementById("poolCostModel");
+    } else {
+      var buttons = document.querySelectorAll("[data-cost-preview-pool]");
+      for (var i = 0; i < buttons.length; i++) {
+        if (buttons[i].dataset && buttons[i].dataset.costPreviewPool === poolName) {
+          el = buttons[i];
+          break;
+        }
+      }
+    }
+    if (el && typeof el.focus === "function") el.focus();
+  }
   async function loadPools() {
+    // A roster refresh invalidates any open detail row and in-flight preview.
+    expandedCostPool = "";
+    costPreviewSequence++;
     var sequence = beginSchedulingRefresh();
     try {
       // 成员 chips 按 targets 汇总；每次刷新都重新拉取，失败时整体报错，
@@ -254,6 +467,9 @@ AdminApp.register("pools", function (app) {
       "。请点击「刷新」重试。</td></tr>";
   }
   function onSchedulingRefresh() {
+    // Any roster refresh invalidates the open detail row and in-flight preview.
+    expandedCostPool = "";
+    costPreviewSequence++;
     if (targetPoolsAvailable()) renderPools();
     else renderPoolsLoadError("部署池数据不可用");
   }
@@ -290,6 +506,23 @@ AdminApp.register("pools", function (app) {
           : "<button class='btn btn-sm readonly-hide' data-pause-pool='" +
             esc(p.name) +
             "'>暂停</button>";
+        var previewButton = isCost
+          ? "<button class='btn btn-sm' data-cost-preview-pool='" +
+            esc(p.name) +
+            "' aria-expanded='" +
+            (expandedCostPool === p.name ? "true" : "false") +
+            "'" +
+            (expandedCostPool === p.name
+              ? " aria-controls='poolCostDetail'"
+              : "") +
+            ">成本预览</button>"
+          : "";
+        var detailRow =
+          isCost && expandedCostPool === p.name
+            ? "<tr class='pool-cost-row' id='poolCostDetail'><td colspan='5'>" +
+              poolCostPreviewHtml(p.name) +
+              "</td></tr>"
+            : "";
         return (
           "<tr><td class='pool-name'>" +
           esc(poolDisplayName(p)) +
@@ -309,17 +542,27 @@ AdminApp.register("pools", function (app) {
           "</td>" +
           "<td class='pool-actions'><div class='btn-group'>" +
           pauseButton +
+          previewButton +
           "<button class='btn btn-sm readonly-hide' data-edit-pool='" +
           esc(p.name) +
           "'>编辑</button>" +
           "<button class='btn btn-danger btn-sm readonly-hide' data-del-pool='" +
           esc(p.name) +
           "'>删除</button>" +
-          "</div></td></tr>"
+          "</div></td></tr>" +
+          detailRow
         );
       })
       .join("");
   }
+  document
+    .getElementById("poolsTableBody")
+    .addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && e.target && e.target.id === "poolCostModel") {
+        e.preventDefault();
+        loadPoolCostPreview(expandedCostPool);
+      }
+    });
   // A repeated click must not send the same write twice while one is pending.
   var rowActionsInFlight = Object.create(null);
   var poolSaveInFlight = false;
@@ -327,6 +570,26 @@ AdminApp.register("pools", function (app) {
     .getElementById("poolsTableBody")
     .addEventListener("click", function (e) {
       var t = e.target;
+      if (t.dataset.costPreviewPool) {
+        var previewName = t.dataset.costPreviewPool;
+        if (expandedCostPool === previewName) {
+          expandedCostPool = "";
+          costPreviewSequence++;
+          renderPools();
+          focusCostPreviewControl(previewName, false);
+        } else {
+          expandedCostPool = previewName;
+          costPreviewSequence++;
+          renderPools();
+          loadPoolCostPreview(previewName);
+          focusCostPreviewControl(previewName, true);
+        }
+        return;
+      }
+      if (t.dataset.costPreviewRun) {
+        loadPoolCostPreview(t.dataset.costPreviewRun);
+        return;
+      }
       if (t.dataset.editPool) {
         var p = state.pools.find(function (x) {
           return x.name === t.dataset.editPool;

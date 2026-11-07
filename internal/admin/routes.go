@@ -40,6 +40,7 @@ func (h *Handler) routes() chi.Router {
 
 		// Deployment pool management (read)
 		r.Get("/pools", h.handleListPools)
+		r.Get("/pools/{name}/cost-routing", h.handlePoolCostRoutingPreview)
 
 		// Model catalog (read)
 		r.Get("/catalog", h.handleListCatalog)

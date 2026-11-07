@@ -523,6 +523,21 @@
     .pool-member-load { color: var(--ink-3); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
     .pool-alias-groups { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
     .pool-alias-group { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; background: var(--accent-soft); color: var(--accent); overflow-wrap: anywhere; }
+    .pool-cost-row > td { background: var(--surface-2); padding: 12px 16px; }
+    .pool-cost-panel { display: flex; flex-direction: column; gap: 8px; }
+    .pool-cost-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .pool-cost-head label { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+    .pool-cost-head .form-control { max-width: 280px; }
+    .pool-cost-status { font-size: 12px; color: var(--ink-3); }
+    .pool-cost-meta { font-size: 11px; color: var(--ink-3); }
+    .pool-cost-table-wrap { overflow-x: auto; }
+    .pool-cost-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .pool-cost-table th, .pool-cost-table td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+    .pool-cost-table th { color: var(--ink-3); font-weight: 600; }
+    .pool-cost-cheapest td { background: var(--ok-soft); }
+    .pool-cost-secondary { color: var(--ink-3); font-size: 11px; }
+    .pool-cost-note, .pool-cost-error { font-size: 11px; color: var(--ink-3); line-height: 1.5; }
+    .pool-cost-error { color: var(--bad); }
 
     /* ===== Toast ===== */
     .toast-container {
