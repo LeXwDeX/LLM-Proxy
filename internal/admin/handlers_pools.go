@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
+	"github.com/LeXwDeX/LLM-Proxy/internal/proxy"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // ===== Pool CRUD =====
@@ -38,6 +40,66 @@ func (h *Handler) handleListPools(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"pools": pools,
 		"count": len(pools),
+	})
+}
+
+// poolCostRoutingResponse adds the pool identity to the proxy's read-only
+// snapshot. Members and pricing fields are embedded from the proxy struct.
+type poolCostRoutingResponse struct {
+	Pool            string `json:"pool"`
+	RoutingStrategy string `json:"routing_strategy"`
+	Active          bool   `json:"active"`
+	Paused          bool   `json:"paused"`
+	proxy.CostRoutingPreview
+}
+
+// handlePoolCostRoutingPreview returns the alias-first cost ranking for one
+// pool and one client request name. It is read-only: no probes, no affinity,
+// no audit, and no model-group coefficient (the proxy resolver is used).
+func (h *Handler) handlePoolCostRoutingPreview(w http.ResponseWriter, r *http.Request) {
+	name, err := poolNameParam(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
+		return
+	}
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	if model == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse("model is required"))
+		return
+	}
+	cfg, err := h.currentConfig()
+	if err != nil {
+		h.writeInternalError(w, "failed to load config", err)
+		return
+	}
+	var pool *config.DeploymentPool
+	for i := range cfg.Pools {
+		if strings.EqualFold(strings.TrimSpace(cfg.Pools[i].Name), name) {
+			pool = &cfg.Pools[i]
+			break
+		}
+	}
+	if pool == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse("pool not found"))
+		return
+	}
+	normalized := config.NormalizeDeploymentPool(*pool)
+	strategy := normalized.EffectiveRoutingStrategy()
+	if strategy != config.PoolRoutingCost {
+		writeJSON(w, http.StatusOK, poolCostRoutingResponse{
+			Pool:            normalized.Name,
+			RoutingStrategy: strategy,
+			Active:          false,
+			Paused:          normalized.Paused,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, poolCostRoutingResponse{
+		Pool:               normalized.Name,
+		RoutingStrategy:    strategy,
+		Active:             true,
+		Paused:             normalized.Paused,
+		CostRoutingPreview: h.proxyService.CostRoutingPreview(normalized.Name, model, time.Now()),
 	})
 }
 

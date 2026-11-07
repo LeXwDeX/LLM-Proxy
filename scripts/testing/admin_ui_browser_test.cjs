@@ -79,7 +79,8 @@ async function main() {
   const mutations = [],
     unknownRequests = [],
     errors = [],
-    requests = [];
+    requests = [],
+    previewModels = [];
   const json = (res, code, data) => {
     res.writeHead(code, { "Content-Type": "application/json" });
     res.end(JSON.stringify(data));
@@ -88,6 +89,7 @@ async function main() {
     const url = new URL(req.url, "http://localhost"),
       endpoint = url.pathname;
     requests.push(endpoint);
+    if (endpoint.endsWith("/cost-routing")) previewModels.push(url.searchParams.get("model"));
     if (endpoint === "/admin" || endpoint === "/admin/ui") {
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end(assembleAdminHTML());
@@ -136,6 +138,52 @@ async function main() {
       "/admin/data/targets": { targets: [target, {...target, name: "z-fixture-target", model_prefix: "Other/"}] },
       "/admin/data/pools": {
         pools: [{ name: "fixture-pool", display_name: "Fixture-POOL", description: "Fixture pool", routing_strategy: "cost" }],
+      },
+      "/admin/data/pools/fixture-pool/cost-routing": {
+        pool: "fixture-pool",
+        routing_strategy: "cost",
+        active: true,
+        paused: false,
+        model: "glm-flash",
+        generated_at: "2026-11-07T16:00:00Z",
+        pricing_available: true,
+        pricing_error: "",
+        tolerance: 0.05,
+        reference_tokens: { input: 1000000, cached_input: 1000000, output: 200000 },
+        members: [
+          {
+            target: "fixture-target",
+            upstream: "Qwen-MixedCase-Long-Model-Name-To-Show-Full-Tooltip",
+            resolved_via: "alias",
+            eligible: true,
+            paused: false,
+            priced: true,
+            estimated_cost_usd: 14.7,
+            tier: 1,
+            cheapest: false,
+            reason: "",
+            phase: "ready",
+            in_flight: 0,
+            max_concurrency: 4,
+            affinity_soft_cap_reached: false,
+          },
+          {
+            target: "z-fixture-target",
+            upstream: "Second-MixedCase-Model",
+            resolved_via: "alias",
+            eligible: true,
+            paused: false,
+            priced: true,
+            estimated_cost_usd: 9.45,
+            tier: 0,
+            cheapest: true,
+            reason: "",
+            phase: "ready",
+            in_flight: 0,
+            max_concurrency: 0,
+            affinity_soft_cap_reached: false,
+          },
+        ],
       },
       "/admin/metrics": {
         uptime_seconds: 60,
@@ -755,6 +803,26 @@ async function main() {
       desktopPools.pageScrollWidth <= desktopPools.pageClientWidth + 1,
       `desktop pools page overflows: ${desktopPools.pageScrollWidth}/${desktopPools.pageClientWidth}`,
     );
+    // Issue #182: expand the read-only cost preview and read the real table.
+    await page.locator('[data-cost-preview-pool="fixture-pool"]').click();
+    await page.locator("#poolCostResult .pool-cost-table").waitFor();
+    assert.equal(await page.locator("#poolCostModel").inputValue(), "glm-flash");
+    const previewText = await page.locator("#poolCostResult").innerText();
+    assert.match(previewText, /Qwen-MixedCase-Long-Model-Name-To-Show-Full-Tooltip/);
+    assert.match(previewText, /\$9\.450000/);
+    assert.match(previewText, /最便宜层/);
+    assert.match(previewText, /估算按选路口径/);
+    await page.locator("#poolCostModel").fill("qwen-max");
+    await page.locator("#poolCostPreviewRun").click();
+    for (let i = 0; i < 100 && !previewModels.includes("qwen-max"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(
+      previewModels.includes("qwen-max"),
+      `preview requests = ${JSON.stringify(previewModels)}`,
+    );
+    await page.locator('[data-cost-preview-pool="fixture-pool"]').click();
+    await page.locator("#poolCostDetail").waitFor({state:"detached"});
     await page.locator("#newPoolBtn").click();
     await page.locator("#poolModal.open").waitFor();
     await page.locator('#poolModal [data-close="poolModal"]').first().click();

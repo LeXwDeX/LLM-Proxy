@@ -26,6 +26,7 @@
 | `custom_inject.go` | 目标级自定义 Header/Body 注入 |
 | `pool.go` | 部署池：池成员调度与 `X-Proxy-Pool` 头来源 |
 | `cost_routing.go` | 部署池 `routing_strategy=cost` 的成本分层：以客户端请求的模型名（别名）为比较单位，成员须经自身 `model_mappings` 解析该名（命中 upstream 或逗号分隔 fallback，paused 映射除外；无映射成员按请求名本身）后，按 `(target, 自身上游名, 选路时刻)` 调 `pricing.Resolver.RateFor`（固定参考 token 组合）估算，成本相差 5% 内为同层；上游名请求不反查别名，不以别名声明价回退；价格不可用或最便宜层达软上限时退回负载均衡。Debug 级 `cost routing candidates` / `cost routing rebind candidate` 输出 alias-first 候选、上游名与价格分组，其中 rebind candidate 为让出判断候选，非最终选择 |
+| `cost_routing_preview.go` | 成本预览快照（只读）：按客户端请求名复用 `cost_routing.go` 的 `rateSource`、`RateFor(target, 成员上游名, now)`、5% 同层容差与固定参考 token 组合，输出 `resolved_via`（alias/upstream/unrestricted/none）、`eligible`/`priced`/`estimated_cost_usd`/`tier`/`reason` 及 `phase`/`in_flight`/`max_concurrency`/`affinity_soft_cap_reached`；不获取探针、不读/改粘连、不改变选路，不套模型组 `cost_coefficient`、不含条件价与实际 token；定价源缺失/报错时 `pricing_available=false` 并在 `pricing_error` 说明原因，成员仍返回，可解析成员标 `pricing_unavailable`。守护用例：`TestCostRoutingPreviewRanksAliasMembers`、`TestCostRoutingPreviewToleranceBoundary`、`TestCostRoutingPreviewEligibilityReasons`、`TestCostRoutingPreviewPricingUnavailable`、`TestCostRoutingPreviewDoesNotTouchRuntimeState` |
 | `model_rewrite.go` / `request_path.go` | 请求体/URL 模型名改写（大小写保留契约）与请求路径识别（`unknown_request_path`、`invalid_responses_path` 等错误码实现处） |
 | `json_members.go` | 唯一的顶层 JSON 成员扫描器（all/last/lastFold 查询与受保护成员规范化），HTTP 与 WS 共用 |
 | `no_official_usage.go` | 未取得官方最终用量时的统一结算（`settleNoOfficialUsage`）：0 token 事件、诊断、Warn 日志与计数，各协议/传输共用 |
