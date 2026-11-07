@@ -397,42 +397,67 @@ func (s *Service) selectTarget(
 	costRebind := false
 	ranker := s.newCostRanker(model, now)
 	if principal != nil && len(attempted) == 0 {
-		affinityTarget, affOK := sessionBoundTarget, sessionBoundTarget != ""
-		sessionHit := affOK
-		if !affOK {
-			// IP 粘连也优先用 alias，未命中再逐个尝试各成员配置的上游名。
-			// 同一别名在不同成员可能映射到不同拼写（大小写或命名不同），
-			// Set side 写入的是实际服务成员的上游拼写，只试第一个会漏。
-			affinityTarget, affOK = s.affinity.Get(affinityKey(clientIP, principal.Name, model), now)
-			if !affOK {
-				for _, upstream := range resolveAliasUpstreams(model, allowed, attempted, s.targetSnapshot()) {
-					if upstream == model {
-						continue // alias key already checked above
-					}
-					if affinityTarget, affOK = s.affinity.Get(affinityKey(clientIP, principal.Name, upstream), now); affOK {
-						break
-					}
+		sessionHit := sessionBoundTarget != ""
+		// 收集全部可用的粘连候选：会话绑定优先；否则 alias key 加各成员
+		// 映射出的上游拼写 key。Set side 写入的是实际服务成员的上游原始
+		// 拼写，同一别名在不同成员可能对应不同拼写，必须逐个尝试。
+		var boundTargets []string
+		seen := make(map[string]struct{})
+		addBound := func(target string) {
+			if target == "" {
+				return
+			}
+			if _, ok := seen[target]; ok {
+				return
+			}
+			seen[target] = struct{}{}
+			boundTargets = append(boundTargets, target)
+		}
+		if sessionHit {
+			addBound(sessionBoundTarget)
+		} else {
+			if target, ok := s.affinity.Get(affinityKey(clientIP, principal.Name, model), now); ok {
+				addBound(target)
+			}
+			for _, upstream := range resolveAliasUpstreams(model, allowed, attempted, s.targetSnapshot()) {
+				if upstream == model {
+					continue // alias key already checked above
+				}
+				if target, ok := s.affinity.Get(affinityKey(clientIP, principal.Name, upstream), now); ok {
+					addBound(target)
 				}
 			}
 		}
-		if affOK {
-			hadAffinity = true
-			if state, exists := s.targetByName(affinityTarget); exists {
-				t := state.Target()
-				nameKey := strings.ToLower(t.Name)
-				allowedOK := allowed == nil
-				if !allowedOK {
-					_, allowedOK = allowed[nameKey]
-				}
-				if t != nil && allowedOK && !t.Paused && modelAllowed(t, model) && t.SupportsPath(path) && s.cheaperTierAvailable(ranker, state, allowed, model, path, now) {
-					costRebind = true
-				} else if t != nil && allowedOK && !t.Paused && modelAllowed(t, model) && t.SupportsPath(path) && (sessionHit || state.belowAffinitySoftCap()) {
-					if decision, lease := state.admitWithProbeState(now); decision == admitOpen {
-						state.affinityHits.Add(1) // S5 可观测：粘连回粘命中计数
-						state.runtimeWindow.record(now, 0, 1, 0)
-						return state, lease, selectionAffinityHit, nil
-					}
-				}
+		hadAffinity = len(boundTargets) > 0
+		// 逐条验证；先命中的旧拼写若指向本轮不可用的目标，继续尝试后续
+		// 绑定，不能让它遮挡仍然可用的粘连记录。
+		for _, affinityTarget := range boundTargets {
+			state, exists := s.targetByName(affinityTarget)
+			if !exists {
+				continue
+			}
+			t := state.Target()
+			if t == nil {
+				continue
+			}
+			allowedOK := allowed == nil
+			if !allowedOK {
+				_, allowedOK = allowed[strings.ToLower(t.Name)]
+			}
+			if !allowedOK || t.Paused || !modelAllowed(t, model) || !t.SupportsPath(path) {
+				continue
+			}
+			if s.cheaperTierAvailable(ranker, state, allowed, model, path, now) {
+				costRebind = true
+				break
+			}
+			if !sessionHit && !state.belowAffinitySoftCap() {
+				continue
+			}
+			if decision, lease := state.admitWithProbeState(now); decision == admitOpen {
+				state.affinityHits.Add(1) // S5 可观测：粘连回粘命中计数
+				state.runtimeWindow.record(now, 0, 1, 0)
+				return state, lease, selectionAffinityHit, nil
 			}
 		}
 	}

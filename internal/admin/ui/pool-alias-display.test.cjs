@@ -63,8 +63,9 @@ test("cost pool member tooltips show aliases before upstream models", async () =
   );
 });
 
-// The grouping itself is visible without hovering: one badge per alias with
-// its member names; upstream names stay secondary in the badge title.
+// The grouping itself is visible without hovering: fallback alias groups come
+// first, and client-addressable upstream names appear as secondary groups.
+// Upstream names stay secondary in each badge's title.
 test("cost pool shows alias groups with upstreams as secondary info", async () => {
   const rows = await render("cost");
   assert.match(rows, /<div class='pool-alias-groups'>/);
@@ -76,11 +77,41 @@ test("cost pool shows alias groups with upstreams as secondary info", async () =
     /title='上游：official → DeepSeek-V4\.1-Flash；agg → deepseek-chat'/,
     "the group title maps each member to its upstream spelling",
   );
+  assert.match(
+    rows,
+    />DeepSeek-V4\.1-Flash · official</,
+    "an upstream name that clients may request is a secondary group",
+  );
+  assert.match(rows, />deepseek-chat · agg</);
   assert.doesNotMatch(
     rows,
     />legacy-alias · /,
     "a paused mapping does not compete and is not grouped",
   );
+});
+
+// A request name can be one member's upstream spelling and another member's
+// fallback. Both compete for that name, so the group must include both.
+test("upstream request names group every competing member", async () => {
+  const harness = createHarness();
+  const app = await harness.run();
+  app.state.pools = [{ name: "ds", routing_strategy: "cost" }];
+  app.state.targets = [
+    {
+      name: "a",
+      pool: "ds",
+      model_mappings: [{ upstream: "deepseek-chat", fallback: "ds-flash" }],
+    },
+    {
+      name: "b",
+      pool: "ds",
+      model_mappings: [{ upstream: "deepseek-chat" }],
+    },
+  ];
+  app.modules.pools.renderPools();
+  const rows = harness.ids.get("poolsTableBody").innerHTML;
+  assert.match(rows, />deepseek-chat · a、b</);
+  assert.match(rows, />ds-flash · a</);
 });
 
 // Alias and upstream are operator-controlled text; both label paths must stay
@@ -103,6 +134,48 @@ test("alias groups and tooltips escape configured names", async () => {
   assert.doesNotMatch(rows, /<img /);
   assert.match(rows, /&lt;img src=x&gt;/);
   assert.match(rows, /&#39;&gt;&lt;img src=y&gt;/);
+});
+
+// Paused targets and paused pools must not look like active cost candidates.
+test("paused targets and paused pools do not look active", async () => {
+  const harness = createHarness();
+  const app = await harness.run();
+  app.state.pools = [{ name: "ds", routing_strategy: "cost" }];
+  app.state.targets = [
+    {
+      name: "active",
+      pool: "ds",
+      model_mappings: [{ upstream: "Active-Upstream", fallback: "active-alias" }],
+    },
+    {
+      name: "paused-target",
+      pool: "ds",
+      paused: true,
+      model_mappings: [{ upstream: "Paused-Upstream", fallback: "paused-alias" }],
+    },
+  ];
+  app.modules.pools.renderPools();
+  let rows = harness.ids.get("poolsTableBody").innerHTML;
+  assert.match(
+    rows,
+    /模型 目标已暂停 paused-alias（上游 Paused-Upstream）/,
+    "a paused target is labelled in its member tooltip",
+  );
+  assert.match(rows, />active-alias · active</);
+  assert.doesNotMatch(
+    rows,
+    />paused-alias · /,
+    "a paused target does not join the active alias groups",
+  );
+
+  app.state.pools[0].paused = true;
+  app.modules.pools.renderPools();
+  rows = harness.ids.get("poolsTableBody").innerHTML;
+  assert.doesNotMatch(
+    rows,
+    /pool-alias-groups/,
+    "a paused pool does not show active alias groups",
+  );
 });
 
 // The visible alias badge must carry explicit theme colors, not inherit an

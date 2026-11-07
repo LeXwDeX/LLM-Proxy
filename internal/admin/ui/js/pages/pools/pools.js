@@ -75,9 +75,11 @@ AdminApp.register("pools", function (app) {
     });
     return labels.length ? labels.join("、") : "不限";
   }
-  // poolAliasGroups 只聚合启用中的 cost 池成员：以客户端别名为组，成员名
-  // 可见，上游名作为次要信息放在 title。已暂停的 target 或映射不参与路由，
-  // 因此不进入分组；没有 model_mappings 的成员无法归入某个别名。
+  // poolAliasGroups 只聚合启用中的 cost 池成员，按客户端可接受的请求名分组：
+// 每个映射的 fallback 别名优先，其 upstream 名也可被客户端直接请求（与
+// /v1/models 的展示一致），因此作为次要分组一并列出；同一请求名的成员合并。
+// 成员的上游名同时放在分组 title 中。已暂停的 target/映射不参与路由，不进入
+// 分组；没有 model_mappings 的成员接受任意请求名，无法归入具体分组。
   function poolAliasGroups(poolName) {
     var key = String(poolName || "").toLowerCase();
     var groups = Object.create(null);
@@ -89,19 +91,23 @@ AdminApp.register("pools", function (app) {
       (Array.isArray(t.model_mappings) ? t.model_mappings : []).forEach(function (m) {
         if (!m || m.paused) return;
         var upstream = String(m.upstream || "").trim();
-        var aliases = splitAliases(m.fallback);
-        if (!aliases.length && upstream) aliases = [upstream];
-        aliases.forEach(function (alias) {
-          var groupKey = alias.toLowerCase();
+        var names = splitAliases(m.fallback).map(function (alias) {
+          return { name: alias, aliasLike: true };
+        });
+        if (upstream) names.push({ name: upstream, aliasLike: false });
+        names.forEach(function (item) {
+          var groupKey = item.name.toLowerCase();
           var group = groups[groupKey];
           if (!group) {
             group = groups[groupKey] = {
-              alias: alias,
+              alias: item.name,
+              aliasLike: false,
               members: [],
               upstreams: Object.create(null),
             };
             order.push(groupKey);
           }
+          if (item.aliasLike) group.aliasLike = true;
           if (group.members.indexOf(name) === -1) group.members.push(name);
           if (upstream) {
             var ups = group.upstreams[name] || (group.upstreams[name] = []);
@@ -110,9 +116,17 @@ AdminApp.register("pools", function (app) {
         });
       });
     });
-    return order.sort().map(function (groupKey) {
-      return groups[groupKey];
-    });
+    // fallback 别名组在前，可直请的上游名组作为次要分组在后。
+    return order
+      .sort(function (a, b) {
+        if (groups[a].aliasLike !== groups[b].aliasLike) {
+          return groups[a].aliasLike ? -1 : 1;
+        }
+        return a.localeCompare(b);
+      })
+      .map(function (groupKey) {
+        return groups[groupKey];
+      });
   }
   function poolAliasGroupBadges(poolName) {
     var groups = poolAliasGroups(poolName);
@@ -187,7 +201,8 @@ AdminApp.register("pools", function (app) {
         } else {
           tip += "｜运行态未知";
         }
-        if (showModels) tip += "｜模型 " + poolMemberModelTip(t);
+        if (showModels)
+          tip += "｜模型 " + (t.paused ? "目标已暂停 " : "") + poolMemberModelTip(t);
         var inFlightTxt = rt
           ? " <span class='pool-member-load'>" +
             rt.in_flight +
@@ -259,7 +274,7 @@ AdminApp.register("pools", function (app) {
         // their previous chips-only runtime view.
         var isCost = poolRoutingStrategy(p) === "cost";
         var members = poolMemberChips(p.name, isCost);
-        var aliasGroups = isCost ? poolAliasGroupBadges(p.name) : "";
+        var aliasGroups = isCost && !p.paused ? poolAliasGroupBadges(p.name) : "";
         var pauseBadge = p.paused
           ? "<span class='quota-badge over'>已暂停（成员等效暂停）</span>"
           : "<span class='quota-badge ok'>运行中</span>";
