@@ -203,3 +203,24 @@ func TestCostRoutingPreviewUnknownPoolIsEmpty(t *testing.T) {
 		t.Fatal("generated_at is zero")
 	}
 }
+
+// The acceptance contract says unpriced members sort after priced ones even
+// when their targets come first in configuration.
+func TestCostRoutingPreviewOrdersPricedBeforeUnpriced(t *testing.T) {
+	peak := costTestAt(2026, 11, 4, 10, 0)
+	unpriced := aliasedTarget("a-unpriced", "ds", "upstream-a")
+	priced := aliasedTarget("b-priced", "ds", "upstream-b")
+	s := newCostService(t, config.PoolRoutingCost, []config.Target{unpriced, priced}, []pricing.PricingTemplate{
+		aliasFlatTemplate("b-priced", "upstream-b", usage.CostRates{InputPer1MTokens: 1}),
+	})
+	p := s.CostRoutingPreview("ds", costTestAlias, peak)
+	if len(p.Members) != 2 {
+		t.Fatalf("members = %+v", p.Members)
+	}
+	if p.Members[0].Target != "b-priced" || !p.Members[0].Priced || p.Members[0].Tier == nil {
+		t.Fatalf("first member = %+v, want priced b-priced", p.Members[0])
+	}
+	if p.Members[1].Target != "a-unpriced" || p.Members[1].Priced || p.Members[1].Tier != nil || p.Members[1].Reason != "unpriced" {
+		t.Fatalf("second member = %+v, want unpriced a-unpriced", p.Members[1])
+	}
+}
