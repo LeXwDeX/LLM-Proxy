@@ -51,7 +51,9 @@ func TestMinimaxNon2xxReadFailureUsesStandardPolicy(t *testing.T) {
 					if firstHost == "" {
 						firstHost = req.URL.Host
 					}
-					if req.URL.Host != firstHost {
+					// A complete 400 body now dequeues to the next candidate; other
+					// non-2xx responses keep the original same-target policy.
+					if req.URL.Host != firstHost && status != 400 {
 						t.Error("unexpected target failover")
 					}
 					if req.Header.Get("Authorization") == "Bearer k1" {
@@ -67,18 +69,21 @@ func TestMinimaxNon2xxReadFailureUsesStandardPolicy(t *testing.T) {
 				rr := httptest.NewRecorder()
 				s.ServeHTTP(rr, statsRequest(t, "/v1/chat/completions"))
 				wantCalls, wantHealthy, wantStatus := 1, 0, status
-				// Main's standard policy ignores this read error: 402 rotates
-				// immediately; 429 first retries the same key, then rotates.
+				// 402 rotates immediately; 429 first retries the same key, then
+				// rotates. A complete 400 body is dequeued to the next candidate,
+				// which also rejects it, so the first real 400 is replayed.
 				if status != 400 {
 					wantCalls, wantHealthy, wantStatus = 2, 1, 200
 					if status == 429 {
 						wantCalls = 3
 					}
+				} else {
+					wantCalls = 2
 				}
 				if calls != wantCalls || healthy != wantHealthy || rr.Code != wantStatus {
 					t.Fatalf("calls=%d healthy=%d HTTP=%d; want %d/%d/%d", calls, healthy, rr.Code, wantCalls, wantHealthy, wantStatus)
 				}
-				if wantCalls == 1 && rr.Body.String() != minimaxReadErrorJSON+"\n" {
+				if status == 400 && rr.Body.String() != minimaxReadErrorJSON+"\n" {
 					t.Fatalf("wire changed: %q", rr.Body.String())
 				}
 				if status == 400 {
