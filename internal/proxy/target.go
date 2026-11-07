@@ -722,8 +722,18 @@ func (s *Service) findAvailableTargetWithModelRanked(ranker *costRanker, allowed
 	admitted := candidates
 	candidates = cheapestTier(ranker, candidates, func(c targetWithKeys) *targetState { return c.state })
 	// Debug 诊断：以客户端别名为主列出已准入候选及各自上游名与估算价。
-	// 仅在启用 Debug 时计算结果，避免正常请求重复取价。
-	if ranker != nil && s.logger != nil && s.logger.Enabled(context.Background(), slog.LevelDebug) {
+	// 仅在启用 Debug 时计算结果，避免正常请求重复取价；全部候选都在
+	// cost 池外时不输出，避免只在别处配置了 cost 池的普通请求被噪声刷屏。
+	managed := false
+	if ranker != nil {
+		for _, c := range admitted {
+			if ranker.managed(c.state.Target()) {
+				managed = true
+				break
+			}
+		}
+	}
+	if managed && s.logger != nil && s.logger.Enabled(context.Background(), slog.LevelDebug) {
 		targets := make([]*Target, 0, len(admitted))
 		for _, c := range admitted {
 			targets = append(targets, c.state.Target())

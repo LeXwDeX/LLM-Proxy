@@ -285,3 +285,22 @@ func TestCostRoutingDoesNotOverrideExplicitTargetOrACL(t *testing.T) {
 		t.Fatalf("ACL request served by %s, want official", state.Target().Name)
 	}
 }
+
+// A request whose only admitted candidates are outside every cost pool must
+// not emit the cost-routing diagnostic, even when other pools use cost.
+func TestCostRoutingDebugLogSkipsOutsideOnlyRequests(t *testing.T) {
+	peak := costTestAt(2026, 11, 4, 10, 0)
+	inside := aliasedTarget("inside", "ds", "inside-upstream")
+	outside := costTarget("outside", "", "")
+	outside.ModelMappings = []config.ModelMapping{{Upstream: "outside-model"}}
+	s := newCostService(t, config.PoolRoutingCost, []config.Target{inside, outside}, []pricing.PricingTemplate{
+		aliasPeakValley("inside", "inside-upstream"),
+	})
+	buf, restore := debugCapture(s)
+	defer restore()
+
+	assertOnly(t, costPicksForModel(t, s, peak, "outside-model", nil, 1), "outside")
+	if strings.Contains(buf.String(), "cost routing candidates") {
+		t.Fatalf("outside-only request emitted cost-routing diagnostics:\n%s", buf.String())
+	}
+}
