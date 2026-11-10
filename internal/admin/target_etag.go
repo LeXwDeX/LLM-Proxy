@@ -223,6 +223,12 @@ func (h *Handler) commitConfigChange(w http.ResponseWriter, cfg *config.Config, 
 		h.writeInternalError(w, "failed to apply config", fmt.Errorf("load clients: %w", err))
 		return "", false
 	}
+	return h.commitConfigChangeWithClients(w, cfg, clients, persistMsg, persist)
+}
+
+// commitConfigChangeWithClients 同 commitConfigChange，但由调用方给出 persist 成功后的
+// 客户端集合（persist 在同一事务内改写客户端时使用，如目标改名改写 allowed_targets）。
+func (h *Handler) commitConfigChangeWithClients(w http.ResponseWriter, cfg *config.Config, clients []config.Client, persistMsg string, persist func() error) (string, bool) {
 	prepared, err := h.proxyService.PrepareConfig(cfg)
 	if err != nil {
 		h.writeInternalError(w, "failed to apply config", fmt.Errorf("prepare proxy config: %w", err))
@@ -237,6 +243,14 @@ func (h *Handler) commitConfigChange(w http.ResponseWriter, cfg *config.Config, 
 	if err := persist(); err != nil {
 		if errors.Is(err, nosql.ErrTargetETagConflict) {
 			writeTargetRevisionConflict(w)
+			return "", false
+		}
+		if errors.Is(err, nosql.ErrTargetRenameConflict) {
+			writeJSON(w, http.StatusConflict, errorResponse(err.Error()))
+			return "", false
+		}
+		if errors.Is(err, nosql.ErrTargetNotFound) {
+			writeJSON(w, http.StatusNotFound, errorResponse(err.Error()))
 			return "", false
 		}
 		h.writeInternalError(w, persistMsg, err)

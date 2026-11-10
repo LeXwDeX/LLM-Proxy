@@ -100,6 +100,7 @@ func (h *Handler) routes() chi.Router {
 		guarded.Post("/targets", h.handleCreateTarget)
 		guarded.Put("/targets/{name}", h.handleUpdateTarget)
 		guarded.Delete("/targets/{name}", h.handleDeleteTarget)
+		guarded.Post("/targets/{name}/rename", h.handleRenameTarget)
 		guarded.Put("/targets/{name}/pause", h.handlePauseTarget)
 		guarded.Put("/targets/{name}/resume", h.handleResumeTarget)
 		guarded.Post("/targets/{name}/test-model", h.handleTestModel)
