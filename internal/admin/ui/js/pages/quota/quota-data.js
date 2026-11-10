@@ -71,13 +71,17 @@ AdminApp.register("quotaData", function (app) {
   }
   // loadModelGroupList fetches the model groups and applies them on its own, so the table (and the
   // views reading state.modelGroups) follow a save even when another request of the page reload
-  // fails. Only the latest request applies; an invalid list keeps the current table and its 已过期
-  // markers.
+  // fails. Only the latest request applies; a malformed list keeps the current table (and its 已过期
+  // markers).
   function loadModelGroupList() {
     var version = ++shared.modelGroupsLoadVersion;
     return api("/admin/data/model-groups").then(function (data) {
       if (version !== shared.modelGroupsLoadVersion) return;
-      if (!validModelGroupList(data)) throw new Error("模型组列表格式无效");
+      if (!validModelGroupList(data)) {
+        // A malformed body never replaces what is shown; after a save it is a load failure.
+        if (Object.keys(shared.modelGroupNeedsRefresh).length) throw new Error("模型组列表格式无效");
+        return;
+      }
       state.modelGroups = data.model_groups || [];
       shared.modelGroupNeedsRefresh = Object.create(null);
       state.modelGroupsLoaded = true;
