@@ -48,6 +48,11 @@
           <small style="color:var(--text-muted)">加入池后：客户端授权一池即授权本节点；池暂停时本节点等效暂停</small>
         </div>
         <div class="form-group">
+          <label for="tgtMaxConcurrency">最大并发</label>
+          <input class="form-control" id="tgtMaxConcurrency" type="number" min="0" step="1" placeholder="0（不限）" autocomplete="off">
+          <small style="color:var(--text-muted)">同时转发到该 Target 的最大在途请求数；留空或 0 表示不限。达到上限后成本池会溢出到下一层候选。</small>
+        </div>
+        <div class="form-group">
           <label for="tgtUsageAdapter">计费类型（必选）</label>
           <select class="form-control" id="tgtUsageAdapter" data-schema-options="usage_adapters" required aria-describedby="tgtUsageAdapterHint tgtUsageAdapterError"></select>
           <small id="tgtUsageAdapterHint">决定用量与缓存解析，以及厂商错误、限流和额度处理；与模型名和网关域名无关。原厂规则按请求协议使用原厂解析。</small>

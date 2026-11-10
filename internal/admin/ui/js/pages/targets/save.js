@@ -53,6 +53,8 @@ AdminApp.register("targetsSave", function (app) {
         .getElementById("tgtKeyResetTime")
         .value.trim();
       var pool = document.getElementById("tgtPool").value;
+      var maxConcurrencyRaw = String(document.getElementById("tgtMaxConcurrency").value || "").trim();
+      var maxConcurrency = maxConcurrencyRaw === "" ? 0 : Number(maxConcurrencyRaw);
 
       if (!name) {
         toast("请填写名称", "error");
@@ -60,6 +62,10 @@ AdminApp.register("targetsSave", function (app) {
       }
       if (!endpoint) {
         toast("请填写 Endpoint URL", "error");
+        return;
+      }
+      if (!Number.isInteger(maxConcurrency) || maxConcurrency < 0) {
+        toast("最大并发必须是非负整数（0 表示不限）", "error");
         return;
       }
       if (!state.editingTarget && document.getElementById("tgtNewKeyInput").value.trim()) {
@@ -120,6 +126,7 @@ AdminApp.register("targetsSave", function (app) {
             custom_body_raw: customBodyRaw,
             key_reset_time: keyResetTime,
             pool: pool,
+            max_concurrency: maxConcurrency,
           },
         };
         if (sendKeys) {
@@ -152,6 +159,7 @@ AdminApp.register("targetsSave", function (app) {
             api_keys: apiKeys,
             key_reset_time: keyResetTime,
             pool: pool,
+            max_concurrency: maxConcurrency,
           },
         };
       }

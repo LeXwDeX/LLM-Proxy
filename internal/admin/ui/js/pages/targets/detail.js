@@ -70,7 +70,7 @@ AdminApp.register("targetsDetail", function (app) {
         schemaLabel("target_phases", rt.phase) +
         " · 在途 " +
         Number(rt.in_flight || 0) +
-        (rt.max_concurrency > 0 ? "/" + rt.max_concurrency : "") +
+        (rt.max_concurrency > 0 ? "/" + rt.max_concurrency + "（上限）" : "") +
         " · 亲和 " +
         Number(rt.affinity_hits || 0) +
         " · 熔断 " +
