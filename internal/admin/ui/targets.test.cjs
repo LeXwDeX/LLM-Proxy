@@ -1303,3 +1303,25 @@ test("unconfirmed: a different custom body __proto__ value is not mistaken for t
   assert.ok(!f.messages.some((m) => m.msg === "已保存"), messageTexts(f).join("|"));
   assert.match(f.harness.ids.get("keyCardList").innerHTML, /该目标已被修改，请重新加载后再保存/);
 });
+
+test("editing a target exposes max_concurrency and saving zero clears the cap", async () => {
+  const f = await setup(target({ max_concurrency: 2500 }));
+  await f.edit();
+  assert.equal(f.harness.ids.get("tgtMaxConcurrency").value, "2500");
+  f.harness.ids.get("tgtMaxConcurrency").value = "0";
+  await f.save();
+  const update = f.puts()[0];
+  assert.ok(update, "target update was sent");
+  assert.equal(putBody(update).max_concurrency, 0);
+});
+
+test("new targets default to no max_concurrency and negative values are rejected", async () => {
+  const f = await setup();
+  await f.app.modules.targets.openTargetModal(null);
+  assert.equal(f.harness.ids.get("tgtMaxConcurrency").value, "");
+  await f.edit();
+  f.harness.ids.get("tgtMaxConcurrency").value = "-1";
+  await f.save();
+  assert.equal(f.puts().length, 0, "a negative max_concurrency must not be saved");
+  assert.ok(f.messages.some((m) => /最大并发/.test(m.msg)), messageTexts(f).join("|"));
+});

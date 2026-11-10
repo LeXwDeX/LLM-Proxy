@@ -371,3 +371,12 @@ test("the preview table keeps theme-colored cheapest and secondary text", () => 
   assert.match(css, /\.pool-cost-cheapest td\s*\{[^}]*background\s*:\s*var\(--ok-soft\)/);
   assert.match(css, /\.pool-cost-secondary\s*\{[^}]*color\s*:\s*var\(--ink-3\)/);
 });
+test("cost preview labels the concurrency denominator as a cap", async () => {
+  const { app, field, click } = await setup();
+  const data = previewResponse();
+  data.members[0].max_concurrency = 2500;
+  app.modules.core.api = async () => data;
+  click({ costPreviewPool: "ds" });
+  await flush();
+  assert.match(field("poolCostResult").innerHTML, /在途 0\/2500（上限）/);
+});

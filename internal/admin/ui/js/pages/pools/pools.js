@@ -194,7 +194,7 @@ AdminApp.register("pools", function (app) {
             (rt.max_concurrency > 0
               ? "/" +
                 rt.max_concurrency +
-                "（" +
+                "（并发上限，" +
                 Math.round((rt.utilization || 0) * 100) +
                 "%）"
               : "") +
@@ -348,7 +348,7 @@ AdminApp.register("pools", function (app) {
         var reason = poolCostReasonLabel(m.reason);
         var load =
           m.max_concurrency > 0
-            ? " · 在途 " + m.in_flight + "/" + m.max_concurrency
+            ? " · 在途 " + m.in_flight + "/" + m.max_concurrency + "（上限）"
             : "";
         var cap = m.affinity_soft_cap_reached ? " · 软上限" : "";
         var state = phase + load + cap + (reason ? " · " + reason : "");

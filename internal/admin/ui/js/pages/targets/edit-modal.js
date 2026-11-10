@@ -126,6 +126,8 @@ AdminApp.register("targetsModal", function (app) {
       ? !!t.allow_bearer_passthrough
       : false;
     document.getElementById("tgtPaused").checked = t ? !!t.paused : false;
+    document.getElementById("tgtMaxConcurrency").value =
+      t && t.max_concurrency > 0 ? String(t.max_concurrency) : "";
     document.getElementById("tgtPreferWS").checked = t ? !!t.prefer_websocket : false;
     document.getElementById("tgtOpenAIPrefix").value =
       t && t.openai_prefix != null ? t.openai_prefix : state.schema.defaults.openai_prefix;
