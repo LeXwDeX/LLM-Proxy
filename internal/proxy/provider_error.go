@@ -15,6 +15,7 @@ type upstreamErrorFields struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
 	Status  string `json:"status"`
+	Param   string `json:"param"`
 }
 
 func decodeUpstreamError(body []byte) upstreamErrorFields {
@@ -32,16 +33,47 @@ func decodeUpstreamError(body []byte) upstreamErrorFields {
 			Type    string          `json:"type"`
 			Message string          `json:"message"`
 			Status  string          `json:"status"`
+			Param   string          `json:"param"`
 		}
 		if json.Unmarshal(envelope.Error, &raw) != nil {
 			return upstreamErrorFields{}
 		}
-		fields := upstreamErrorFields{Type: raw.Type, Message: raw.Message, Status: raw.Status}
+		fields := upstreamErrorFields{Type: raw.Type, Message: raw.Message, Status: raw.Status, Param: raw.Param}
 		// Google's code is numeric; it must not suppress the other fields.
 		_ = json.Unmarshal(raw.Code, &fields.Code)
 		return fields
 	}
 	return upstreamErrorFields{Code: envelope.Code, Message: envelope.Message}
+}
+
+// decodeUpstreamErrorEnvelope reads only a JSON object under the `error` key.
+// Unlike decodeUpstreamError, top-level code/message fallbacks are not a
+// structured envelope and are therefore not parsed. Diagnostics must not
+// guess from an unrelated shape: an unparseable envelope is reported as such.
+func decodeUpstreamErrorEnvelope(body []byte) (upstreamErrorFields, bool) {
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return upstreamErrorFields{}, false
+	}
+	rawError := strings.TrimSpace(string(envelope.Error))
+	if rawError == "" || rawError == "null" {
+		return upstreamErrorFields{}, false
+	}
+	var raw struct {
+		Code    json.RawMessage `json:"code"`
+		Type    string          `json:"type"`
+		Message string          `json:"message"`
+		Status  string          `json:"status"`
+		Param   string          `json:"param"`
+	}
+	if json.Unmarshal(envelope.Error, &raw) != nil {
+		return upstreamErrorFields{}, false
+	}
+	fields := upstreamErrorFields{Type: raw.Type, Message: raw.Message, Status: raw.Status, Param: raw.Param}
+	_ = json.Unmarshal(raw.Code, &fields.Code)
+	return fields, true
 }
 
 // targetKeyExhausted distinguishes credential/billing failures from transient

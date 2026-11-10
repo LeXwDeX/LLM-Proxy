@@ -1483,7 +1483,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				cached, readBody, ok := readUpstreamErrorForCache(resp, target, upstreamModel)
 				if ok {
-					writeUpstreamErrorLogBytes(r, target, resp, len(cached.body), startedAt)
+					writeUpstreamErrorLogBytes(r, target, resp, cached.body, len(cached.body), startedAt)
 					// 4xx proves the target is reachable; settle health here and
 					// let the loop release the probe lease before the next pick.
 					state.MarkSuccess(time.Now())

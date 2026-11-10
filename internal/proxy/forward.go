@@ -1098,11 +1098,12 @@ func (s *Service) writeResponse(
 	if resp.StatusCode >= 400 {
 		// A WS turn can become a terminal error after a 200 start, which is not
 		// captured: count the forwarded bytes (bounded like the capture).
-		respBytes := len(capturedBody())
+		captured := capturedBody()
+		respBytes := len(captured)
 		if capture == nil {
 			respBytes = int(min(copied, int64(responseCaptureLimit)))
 		}
-		writeUpstreamErrorLogBytes(r, target, resp, respBytes, startedAt)
+		writeUpstreamErrorLogBytes(r, target, resp, captured, respBytes, startedAt)
 	}
 
 	// DEBUG 模式：记录完整 trace（请求/响应 META + body）
@@ -1159,11 +1160,45 @@ func (s *Service) observeResponsesKeyFailure(state *targetState, target *Target,
 // writeUpstreamErrorLog 在 writeResponse 写完响应体后落一条 NDJSON 错误日志。
 // Body bytes are counted for diagnostics but never stored in default logs.
 func writeUpstreamErrorLog(r *http.Request, target *Target, resp *http.Response, body []byte, startedAt time.Time) {
-	writeUpstreamErrorLogBytes(r, target, resp, len(body), startedAt)
+	writeUpstreamErrorLogBytes(r, target, resp, body, len(body), startedAt)
 }
 
-// writeUpstreamErrorLogBytes records only the response size, never its bytes.
-func writeUpstreamErrorLogBytes(r *http.Request, target *Target, resp *http.Response, respBytes int, startedAt time.Time) {
+// upstreamErrorDiagnostics decodes only the controlled upstream error
+// envelope (code/type/param/status). It never returns the message. A body
+// that is absent, oversized, encoded with an unsupported/stacked encoding, or
+// not shaped like {"error": {...}} reports ok=false so the caller logs a parse
+// failure instead of guessing.
+func upstreamErrorDiagnostics(resp *http.Response, body []byte) (upstreamErrorFields, bool, string) {
+	contentType := ""
+	if resp != nil && resp.Header != nil {
+		contentType = resp.Header.Get("Content-Type")
+	}
+	if len(body) == 0 || len(body) > maxCachedUpstreamErrorBody {
+		return upstreamErrorFields{}, false, contentType
+	}
+	decoded := body
+	if resp != nil && !responseIsIdentityEncoding(resp.Header) {
+		reader, err := observationReader(bytes.NewReader(body), responseContentEncoding(resp.Header))
+		if err != nil {
+			return upstreamErrorFields{}, false, contentType
+		}
+		data, readErr := io.ReadAll(io.LimitReader(reader, maxCachedUpstreamErrorBody+1))
+		closeErr := reader.Close()
+		if readErr != nil || closeErr != nil || len(data) > maxCachedUpstreamErrorBody {
+			return upstreamErrorFields{}, false, contentType
+		}
+		decoded = data
+	}
+	fields, ok := decodeUpstreamErrorEnvelope(decoded)
+	return fields, ok, contentType
+}
+
+// writeUpstreamErrorLogBytes records the response size and controlled error
+// envelope fields; the response bytes themselves are never stored.
+func writeUpstreamErrorLogBytes(r *http.Request, target *Target, resp *http.Response, body []byte, respBytes int, startedAt time.Time) {
+	if respBytes == 0 && len(body) > 0 {
+		respBytes = len(body)
+	}
 	kind := errorlog.KindUpstream4xx
 	if resp.StatusCode >= 500 {
 		kind = errorlog.KindUpstream5xx
@@ -1193,6 +1228,18 @@ func writeUpstreamErrorLogBytes(r *http.Request, target *Target, resp *http.Resp
 	// The errorlog sink removes userinfo and query from the actual request URL.
 	if resp != nil && resp.Request != nil && resp.Request.URL != nil {
 		entry.UpstreamFullURL = resp.Request.URL.String()
+	}
+	if len(body) > 0 {
+		fields, parsed, contentType := upstreamErrorDiagnostics(resp, body)
+		if parsed {
+			entry.RespErrorCode = fields.Code
+			entry.RespErrorType = fields.Type
+			entry.RespErrorParam = fields.Param
+			entry.RespErrorStatus = fields.Status
+		} else {
+			entry.RespErrorParse = "failed"
+			entry.ContentType = contentType
+		}
 	}
 	errorlog.Write(entry)
 }
