@@ -70,7 +70,9 @@ AdminApp.register("pricingList", function (app) {
             ? "<button type='button' class='btn btn-sm btn-primary readonly-hide' data-copy-pricing='" +
               esc(t.id) +
               "'>复制到现存目标</button>"
-            : "") +
+            : "<button type='button' class='btn btn-sm readonly-hide' data-copy-pricing='" +
+              esc(t.id) +
+              "' title='以现有价格新建一条规则，Target 和模型可重新选择'>复制到其他目标</button>") +
           "<button type='button' class='btn btn-sm btn-danger readonly-hide' data-del-pricing='" +
           esc(t.id) +
           "'>删除</button>" +
