@@ -151,6 +151,17 @@ func restoreUpstreamErrorBody(resp *http.Response, read []byte) {
 	if resp == nil || resp.Body == nil {
 		return
 	}
+	// A native WS turn body carries generation/failure state that
+	// responseWSBody must still recognize after the replay. Wrap its reader in
+	// place so the type and its release handoff survive; a plain resp.Body
+	// replacement would hide both from writeResponse.
+	if wsBody := responseWSBody(resp); wsBody != nil {
+		wsBody.ReadCloser = &replayReadCloser{
+			Reader: io.MultiReader(bytes.NewReader(read), wsBody.ReadCloser),
+			Closer: wsBody.ReadCloser,
+		}
+		return
+	}
 	resp.Body = &replayReadCloser{
 		Reader: io.MultiReader(bytes.NewReader(read), resp.Body),
 		Closer: resp.Body,

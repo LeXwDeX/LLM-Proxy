@@ -149,6 +149,33 @@ func TestReadUpstreamErrorForCacheBoundary(t *testing.T) {
 	})
 }
 
+// A native WS turn body carries generation/failure state. Restoring the read
+// bytes must keep that type and the slot release wrapper recognisable.
+func TestRestoreUpstreamErrorBodyPreservesWebsocketState(t *testing.T) {
+	ws := &responsesWSBody{ReadCloser: io.NopCloser(bytes.NewReader([]byte("rest")))}
+	released := false
+	resp := &http.Response{Body: &releaseOnCloseBody{ReadCloser: ws, release: func() { released = true }}}
+
+	restoreUpstreamErrorBody(resp, []byte("head"))
+
+	if got := responseWSBody(resp); got != ws {
+		t.Fatalf("responseWSBody lost the native body type")
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read restored body: %v", err)
+	}
+	if string(body) != "headrest" {
+		t.Fatalf("restored body = %q, want headrest", body)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close restored body: %v", err)
+	}
+	if !released {
+		t.Fatalf("slot release was lost")
+	}
+}
+
 type failingReader struct {
 	data []byte
 	done bool
