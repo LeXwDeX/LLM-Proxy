@@ -65,11 +65,18 @@ func (s *Service) buildURL(target *Target, original *url.URL) (*url.URL, error) 
 		pathMapper := profile.PathForTarget(target)
 		// 准备 endpoint path
 		forward.Path = pathMapper.PrepareEndpointPath(forward.Path)
-		// 改写客户端路径。当 endpoint 已声明版本段（/v4, /v1 等）且客户端路径
-		// 也带版本前缀（/v1/...）时，剥除客户端的版本前缀，避免版本段叠加
-		// 导致路径污染（如 GLM: /v4/ + /v1/chat/completions → /v4/v1/chat/completions）。
-		clientPath := stripRedundantClientVersion(forward.Path, original.Path)
-		path = pathMapper.RewritePath(clientPath, "")
+		if dual, ok := pathMapper.(*DualProtocolPath); ok {
+			// dual_protocol 必须用原始客户端路径判协议，并在内部按“有效 base”
+			// （prefix 或 endpoint.path）处理版本段；这里不能再预剥版本，否则
+			// /v1/messages 会被剥成 /messages，走到 OpenAI 前缀。
+			path = dual.RewritePath(original.Path, "")
+		} else {
+			// 改写客户端路径。当 endpoint 已声明版本段（/v4, /v1 等）且客户端路径
+			// 也带版本前缀（/v1/...）时，剥除客户端的版本前缀，避免版本段叠加
+			// 导致路径污染（如 GLM: /v4/ + /v1/chat/completions → /v4/v1/chat/completions）。
+			clientPath := stripRedundantClientVersion(forward.Path, original.Path)
+			path = pathMapper.RewritePath(clientPath, "")
+		}
 	} else {
 		// 兼容旧逻辑（不应到达，因为所有 endpoint_type 都已注册）
 		path = mergePaths("", original.Path)

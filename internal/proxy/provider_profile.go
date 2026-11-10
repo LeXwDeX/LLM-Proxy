@@ -113,20 +113,33 @@ func (m *PassthroughPath) PrepareEndpointPath(endpointPath string) string { retu
 
 // DualProtocolPath 双协议路径改写：从 target 读取 prefix 配置，按路径自动分流。
 // OpenAI 风格路径加 OpenAIPrefix，Anthropic 风格路径加 AnthropicPrefix。
+//
+// 前缀与 endpoint 的 path 属于同一语义层：有效 base = endpoint.path + 选中前缀。
+// 有效 base 的最后一段若是版本段（/v1、/v2、/v1beta 等），客户端路径开头的
+// 版本段会被替换（剥除后拼接），与单协议 endpoint 的版本处理规则一致，
+// 避免 prefix=/v2 时拼出 /v2/v1/...。
 type DualProtocolPath struct {
 	OpenAIPrefix      string
 	AnthropicPrefix   string
-	SupportsResponses bool // 兼容旧构造字段；Responses 能力开关由 Target.SupportsPath 校验
+	EndpointPath      string // 运行时从 target.Endpoint.Path 绑定，不进入配置/JSON
+	SupportsResponses bool   // 兼容旧构造字段；Responses 能力开关由 Target.SupportsPath 校验
 }
 
 func (m *DualProtocolPath) RewritePath(clientPath, resourcePathPrefix string) string {
 	path := mergePaths(resourcePathPrefix, clientPath)
+	// 协议判定必须使用原始客户端路径：/v1/messages 一旦按版本剥成 /messages
+	// 就会被误判成 OpenAI 分支。
+	prefix := m.OpenAIPrefix
 	if isAnthropicStylePath(clientPath) {
-		path = m.AnthropicPrefix + ensureLeadingSlash(path)
-	} else {
-		path = m.OpenAIPrefix + ensureLeadingSlash(path)
+		prefix = m.AnthropicPrefix
 	}
-	return path
+	prefix = normalizePrefix(prefix)
+	base := prefix
+	if base == "" {
+		base = normalizePrefix(m.EndpointPath)
+	}
+	path = stripRedundantClientVersion(base, path)
+	return prefix + ensureLeadingSlash(path)
 }
 
 func (m *DualProtocolPath) IsTerminalURL() bool { return false }
@@ -392,7 +405,16 @@ func (a *AzureAuth) ValidateCredential(apiKey string) error {
 	return nil
 }
 func (m *DualProtocolPath) ForTarget(target *Target) PathMapper {
-	return &DualProtocolPath{OpenAIPrefix: target.OpenAIPrefix, AnthropicPrefix: target.AnthropicPrefix, SupportsResponses: target.SupportsResponses}
+	endpointPath := ""
+	if target.Endpoint != nil {
+		endpointPath = target.Endpoint.Path
+	}
+	return &DualProtocolPath{
+		OpenAIPrefix:      target.OpenAIPrefix,
+		AnthropicPrefix:   target.AnthropicPrefix,
+		EndpointPath:      endpointPath,
+		SupportsResponses: target.SupportsResponses,
+	}
 }
 
 // AzurePath adds the deployment API version after generic query cleaning.
