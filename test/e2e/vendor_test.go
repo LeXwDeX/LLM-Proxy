@@ -118,6 +118,14 @@ func vendorCases() []vendorCase {
 		{name: "qwen-anthropic", target: map[string]any{"endpoint_type": "dual_protocol", "usage_adapter": "qwen", "endpoint": "{A}/qwen", "openai_prefix": "/compatible-mode", "anthropic_prefix": "/apps/anthropic", "supports_responses": true},
 			upstream: "qwen3.8-max", path: "/v1/messages", body: qwenCached(messagesBody), upPath: "/qwen/apps/anthropic/v1/messages", auth: "bearer",
 			usage: "[[fake usage.in=100 usage.out=30 usage.cached=40 usage.cw5m=20]]", want: billed{in: 40, out: 30, cached: 40, creation: 20, cw5m: 20}},
+		// 百度千帆形态：OpenAI 前缀自带版本段 /v2，客户端仍发 /v1/...；
+		// Anthropic 前缀无版本段，客户端 /v1 保留。
+		{name: "qianfan-chat", target: map[string]any{"endpoint_type": "dual_protocol", "usage_adapter": "qwen", "endpoint": "{A}/qianfan", "openai_prefix": "/v2", "anthropic_prefix": "/anthropic"},
+			upstream: "qwen3.8-max", path: "/v1/chat/completions", body: qwenCached(chatBody), upPath: "/qianfan/v2/chat/completions", auth: "bearer",
+			usage: "[[fake usage.in=100 usage.out=30 usage.cached=40 usage.reasoning=6]]", want: billed{in: 60, out: 30, cached: 40, reasoning: 6}},
+		{name: "qianfan-anthropic", target: map[string]any{"endpoint_type": "dual_protocol", "usage_adapter": "qwen", "endpoint": "{A}/qianfan", "openai_prefix": "/v2", "anthropic_prefix": "/anthropic"},
+			upstream: "qwen3.8-max", path: "/v1/messages", body: qwenCached(messagesBody), upPath: "/qianfan/anthropic/v1/messages", auth: "bearer",
+			usage: "[[fake usage.in=100 usage.out=30 usage.cached=40 usage.cw5m=20]]", want: billed{in: 40, out: 30, cached: 40, creation: 20, cw5m: 20}},
 		{name: "glm-paas", target: map[string]any{"endpoint_type": "openai", "usage_adapter": "glm", "endpoint": "{A}/glm/api/paas/v4"},
 			upstream: "glm-4.6", path: "/v1/chat/completions", body: chatBody, upPath: "/glm/api/paas/v4/chat/completions", auth: "bearer",
 			usage: "[[fake usage.in=100 usage.out=30 usage.cached=40 usage.reasoning=6]]", want: billed{in: 60, out: 30, cached: 40, reasoning: 6}, noStream: true},

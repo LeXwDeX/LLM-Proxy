@@ -71,12 +71,12 @@
           <div class="form-group">
             <label for="tgtOpenAIPrefix">OpenAI 路径前缀</label>
             <input class="form-control" id="tgtOpenAIPrefix" aria-describedby="tgtOpenAIPrefixHint">
-            <small id="tgtOpenAIPrefixHint">加在 OpenAI 请求路径之前；留空不加前缀。请按上游文档填写，不会按计费类型、域名或模型自动推断。</small>
+            <small id="tgtOpenAIPrefixHint">加在 OpenAI 请求路径之前；留空不加前缀。若前缀最后一段是版本段（/v1、/v2 等），客户端路径开头的版本段会被替换，避免 /v2/v1/... 叠加。请按上游文档填写，不会按计费类型、域名或模型自动推断。</small>
           </div>
           <div class="form-group">
             <label for="tgtAnthropicPrefix">Anthropic 路径前缀</label>
             <input class="form-control" id="tgtAnthropicPrefix" aria-describedby="tgtAnthropicPrefixHint">
-            <small id="tgtAnthropicPrefixHint">加在 Anthropic 请求路径之前；留空不加前缀。切换目标类型会隐藏这些设置，但不会清空已填写的值。</small>
+            <small id="tgtAnthropicPrefixHint">加在 Anthropic 请求路径之前；留空不加前缀。若前缀最后一段是版本段（/v1、/v2 等），客户端路径开头的版本段会被替换。切换目标类型会隐藏这些设置，但不会清空已填写的值。</small>
           </div>
           <div class="form-group">
             <label style="display:flex;align-items:center;gap:8px;">

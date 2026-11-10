@@ -202,7 +202,7 @@ Trace 使用同一解码规则，并保留既有正文长度上限；截断的 t
 
 OpenAI 目标可在管理页开启「Responses 优先使用 WebSocket」，对应 target 字段 `prefer_websocket`，默认关闭。该开关只影响同步 `POST /v1/responses` 的上游传输；Chat Completions 和后台生成不走此适配。HTTP 客户端仍可请求 SSE 或最终 JSON。
 
-双协议目标可在管理页设置 `openai_prefix`、`anthropic_prefix` 和 `supports_responses`。新建规范 `dual_protocol` 目标时，两个前缀默认为空，Responses 默认关闭；请按上游文档填写，不会按计费类型、域名或模型自动推断。编辑时保留已保存的值，清空前缀或取消勾选后保存即可清除设置。切换为其他类型只隐藏这三项，不会清空值；旧 `bailian` / `bailian_api` 配置的兼容归一化保持不变。模型行的「测试」发送最小 HTTP 请求检查上游响应，成功仅表示 HTTP 检测通过，不验证 WebSocket 通道。
+双协议目标可在管理页设置 `openai_prefix`、`anthropic_prefix` 和 `supports_responses`。新建规范 `dual_protocol` 目标时，两个前缀默认为空，Responses 默认关闭；请按上游文档填写，不会按计费类型、域名或模型自动推断。前缀与 endpoint 的 path 采用同一版本规则：有效 base（前缀，前缀为空时为 endpoint path）的最后一段是版本段（`/v1`、`/v2`、`/v1beta` 等）时，客户端路径开头的版本段会被替换，避免 `/v2/v1/...` 叠加；前缀不以版本段结尾时保持原样拼接。编辑时保留已保存的值，清空前缀或取消勾选后保存即可清除设置。切换为其他类型只隐藏这三项，不会清空值；旧 `bailian` / `bailian_api` 配置的兼容归一化保持不变。模型行的「测试」发送最小 HTTP 请求检查上游响应，成功仅表示 HTTP 检测通过，不验证 WebSocket 通道。
 
 支持 OpenAI Chat 请求的目标可显式开启「请求流式用量（仅补缺失值）」，对应目标字段 `request_stream_usage_if_missing`，默认关闭，旧目标不自动开启。仅当实际请求路径为 `chat/completions` 且 `stream` 为布尔 `true` 时，补上缺失的 `stream_options.include_usage=true`。已有 `true` / `false` 或异常类型（含 `null`）均保留；其他嵌套成员不变。Responses、Anthropic、Gemini 原生、图片与非流式请求不受影响。执行顺序是净化或 multipart 转换 → `custom_body` 顶层替换 → 模型改写 → 补缺失值；`custom_body` 显式配置优先，自动策略不修正其中的现有值。切换目标时从客户端原始请求重新装配，不继承上一目标的补值。上游仍不返回用量时记录 `incomplete` / `missing_usage`，不估算 token。管理 API 更新省略此字段会保留原值，显式 `false` 关闭；切换目标类型只隐藏控件，不清空已保存的开关值。
 
