@@ -108,6 +108,16 @@ The admin API `/admin/data/pricing-templates` adds `targets` and `models` arrays
 
 A deployment pool's `name` is still a lowercase internal identifier; the new `display_name` preserves the case entered by the user. The admin page can correct the displayed case, while member targets and client authorization references stay unchanged. Old data did not store the original case, so the display falls back to `name`, and it can be re-entered on the edit page; names that differ only in case cannot be created as two pools.
 
+### Target Rename and Merge
+
+Renaming or merging targets must go through `POST /admin/data/targets/{name}/rename` with body `{"new_name": "...", "merge": false}`; do not edit bbolt offline. Usage events and the usage/quota hourly aggregations are keyed by the target name at write time, and the endpoint never rewrites or deletes them. Instead, one bbolt transaction updates every name-bound object:
+
+- Rename (`merge: false`, the new name must not exist): the target record and its order are renamed; every pricing template bound to the old name also binds the new name, and every model-group binding of the old name gets a copy for the new name. The old name is kept in both, so history keeps its target template and model group while new traffic uses the same ones. Rejected with 409 if the new name already has usage history (for example from a deleted target), if the extended bindings overlap another template's effective period, or if a model-group binding would belong to two groups.
+- Merge (`merge: true`, the new name must exist): the source target is deleted; the destination's configuration and bindings are unchanged, and the source's pricing templates and model-group bindings are kept for its history.
+- In both cases each client's `allowed_targets` replaces the old name with the new name, so a list never becomes empty (which would mean "allow all").
+
+`If-Match` takes the source target ETag. The response lists the synced `pricing_templates`, `model_groups` and `clients`, plus the new `etag`; the audit log records `rename_target` or `merge_target` with the same detail, and quota counters are refreshed. Runtime key-pool and breaker state starts fresh under the new name. Removing the old name from a pricing template or model group, or deleting its aggregation cells, makes history fall back to global or catalog prices or makes accounting fail closed (503), so keep retired names in their bindings.
+
 ### Pool Cost Routing
 
 A deployment pool's `routing_strategy` selects how members are chosen: empty or `load` (the default, omitted from JSON, no migration for old data) keeps load balancing; `cost` routes by estimated cost among the pool's members. The admin pool modal has a strategy select, non-default pools show a badge in the list, the options are published through `/admin/data/schema` as `pool_routing_strategies` (default `defaults.pool_routing_strategy = "load"`), and `POST /admin/data/pools` and `PUT /admin/data/pools/{name}` accept `routing_strategy` and reject unknown values with 400. Strategy changes are hot-published through the normal admin commit pipeline, and pricing template edits take effect through the pricing cache.

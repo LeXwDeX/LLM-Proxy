@@ -5,6 +5,7 @@ package e2e
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 )
@@ -81,8 +82,16 @@ func TestTargetRenameKeepsHistoryPricingAndQuota(t *testing.T) {
 		t.Fatalf("events must keep the write-time target names: %+v", events)
 	}
 	// 2 (history on the old name, target template) + 2 (new name, same template
-	// and group); a global fallback would give 50 per request.
-	if got := used(); math.Abs(got-4) > 1e-9 {
+	// and group); a global fallback would give 50 per request. The rename
+	// schedules a background quota refresh (same eventual-consistency window as
+	// target deletion), so wait for calibration to converge.
+	deadline := time.Now().Add(15 * time.Second)
+	got := used()
+	for math.Abs(got-4) > 1e-9 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		got = used()
+	}
+	if math.Abs(got-4) > 1e-9 {
 		t.Fatalf("post-rename used=%g want 4", got)
 	}
 	// Renaming back onto the retired name is refused: it already has history.
