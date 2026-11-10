@@ -59,7 +59,7 @@ for (const failing of failures) {
     const body = h.ids.get("modelGroupsBody").innerHTML;
     assert.match(body, /grp-new/);
     assert.doesNotMatch(body, /已过期/);
-    assert.deepEqual(app.state.modelGroups.map(g => g.name), ["shared", "grp-new"]);
+    assert.equal(JSON.stringify(app.state.modelGroups.map(g => g.name)), JSON.stringify(["shared", "grp-new"]));
   });
 
   test(`editing a model group shows the new values at once while ${failing} fails`, async () => {
@@ -88,7 +88,7 @@ for (const failing of failures) {
     await tick();
     assert.deepEqual(h.writes, ["DELETE /admin/data/model-groups/shared"]);
     assert.doesNotMatch(h.ids.get("modelGroupsBody").innerHTML, /shared/);
-    assert.deepEqual(app.state.modelGroups, []);
+    assert.equal(app.state.modelGroups.length, 0);
   });
 }
 

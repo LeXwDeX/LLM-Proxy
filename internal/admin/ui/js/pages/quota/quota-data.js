@@ -63,6 +63,32 @@ AdminApp.register("quotaData", function (app) {
       showLoadFailure("projectGroupsBody", 2, e.message);
     }
   }
+  function validModelGroupList(data) {
+    return !!data && Object.prototype.hasOwnProperty.call(data, "model_groups") &&
+      (data.model_groups == null || (Array.isArray(data.model_groups) && data.model_groups.every(function (group) {
+        return group && typeof group.name === "string" && !!group.name;
+      })));
+  }
+  // loadModelGroupList fetches the model groups and applies them on its own, so the table (and the
+  // views reading state.modelGroups) follow a save even when another request of the page reload
+  // fails. Only the latest request applies; an invalid list keeps the current table and its 已过期
+  // markers.
+  function loadModelGroupList() {
+    var version = ++shared.modelGroupsLoadVersion;
+    return api("/admin/data/model-groups").then(function (data) {
+      if (version !== shared.modelGroupsLoadVersion) return;
+      if (!validModelGroupList(data)) throw new Error("模型组列表格式无效");
+      state.modelGroups = data.model_groups || [];
+      shared.modelGroupNeedsRefresh = Object.create(null);
+      state.modelGroupsLoaded = true;
+      refreshUsageModelGroupFilter();
+      try {
+        renderModelGroups();
+      } catch (e) {
+        showLoadFailure("modelGroupsBody", 5, e.message);
+      }
+    });
+  }
   async function loadQuotaManagement() {
     var version = ++shared.quotaLoadVersion;
     ++shared.dictLoadVersion;
@@ -82,24 +108,14 @@ AdminApp.register("quotaData", function (app) {
     try {
       var results = await Promise.all([
         api("/admin/data/quota/summary"),
-        api("/admin/data/model-groups"),
+        loadModelGroupList(),
         api("/admin/data/job-levels"),
         api("/admin/data/project-groups"),
         loadQuotaEditorData(),
       ]);
       if (version !== shared.quotaLoadVersion) return;
-      if (Object.keys(shared.modelGroupNeedsRefresh).length &&
-          (!results[1] || !Object.prototype.hasOwnProperty.call(results[1], "model_groups") ||
-            (results[1].model_groups != null &&
-              (!Array.isArray(results[1].model_groups) || !results[1].model_groups.every(function (group) {
-                return group && typeof group.name === "string" && !!group.name;
-              }))))) throw new Error("模型组列表格式无效");
       ++shared.dictLoadVersion;
       state.quotaSummary = results[0].clients || [];
-      state.modelGroups = results[1].model_groups || [];
-      shared.modelGroupNeedsRefresh = Object.create(null);
-      state.modelGroupsLoaded = true;
-      refreshUsageModelGroupFilter();
       state.jobLevels = Array.isArray(results[2].job_levels)
         ? results[2].job_levels
         : [];

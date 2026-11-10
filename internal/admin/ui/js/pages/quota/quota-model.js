@@ -179,6 +179,7 @@ AdminApp.register("quotaModel", function (app) {
   // Cross-file mutable state is owned here and shared by reference; never reassign the object.
   var shared = {
     quotaLoadVersion: 0,
+    modelGroupsLoadVersion: 0,
     quotaUsageRefresh: null,
     dictLoadVersion: 0,
     modelGroupNeedsRefresh: Object.create(null),
