@@ -22,12 +22,16 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -64,7 +68,53 @@ type Entry struct {
 	ReqBytes        int    `json:"req_bytes,omitempty"`         //
 	RespBytes       int    `json:"resp_bytes,omitempty"`        //
 	RespExcerpt     string `json:"resp_excerpt,omitempty"`      // 有正文时为固定提示，不含正文
+	RespErrorCode   string `json:"resp_error_code,omitempty"`   // 上游 error.code，受控长度
+	RespErrorType   string `json:"resp_error_type,omitempty"`   // 上游 error.type，受控长度
+	RespErrorParam  string `json:"resp_error_param,omitempty"`  // 上游 error.param，受控长度
+	RespErrorStatus string `json:"resp_error_status,omitempty"` // 上游 error.status，受控长度
+	RespErrorParse  string `json:"resp_error_parse,omitempty"`  // 无法解析时为 failed
+	ContentType     string `json:"content_type,omitempty"`      // 仅解析失败时记录媒体类型
 	Error           string `json:"error,omitempty"`             // 受控错误类别
+}
+
+// maxEntryErrorFieldLen bounds each controlled upstream error field. These
+// fields are diagnostics only; an oversized value is truncated, never stored
+// whole. JSON marshalling would escape control characters, but stripping them
+// keeps one log line predictable for grep.
+const maxEntryErrorFieldLen = 256
+
+func sanitizeEntryErrorField(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
+	if len(value) <= maxEntryErrorFieldLen {
+		return value
+	}
+	value = value[:maxEntryErrorFieldLen]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
+func sanitizeEntryContentType(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if mediaType, _, err := mime.ParseMediaType(value); err == nil {
+		value = mediaType
+	} else if i := strings.IndexByte(value, ';'); i >= 0 {
+		value = strings.TrimSpace(value[:i])
+	}
+	return sanitizeEntryErrorField(value)
 }
 
 // ErrorCategory classifies errors without exposing their message or URL.
@@ -182,6 +232,15 @@ func Write(entry Entry) {
 	case "", "error", "context_canceled", "deadline_exceeded", "unexpected_eof", "dns_error", "timeout", "network_error", "panic":
 	default:
 		entry.Error = "error"
+	}
+
+	entry.RespErrorCode = sanitizeEntryErrorField(entry.RespErrorCode)
+	entry.RespErrorType = sanitizeEntryErrorField(entry.RespErrorType)
+	entry.RespErrorParam = sanitizeEntryErrorField(entry.RespErrorParam)
+	entry.RespErrorStatus = sanitizeEntryErrorField(entry.RespErrorStatus)
+	entry.ContentType = sanitizeEntryContentType(entry.ContentType)
+	if entry.RespErrorParse != "" && entry.RespErrorParse != "failed" {
+		entry.RespErrorParse = "failed"
 	}
 
 	line, err := json.Marshal(entry)

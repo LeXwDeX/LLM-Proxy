@@ -1483,37 +1483,56 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				cached, readBody, ok := readUpstreamErrorForCache(resp, target, upstreamModel)
 				if ok {
-					writeUpstreamErrorLogBytes(r, target, resp, len(cached.body), startedAt)
-					// 4xx proves the target is reachable; settle health here and
-					// let the loop release the probe lease before the next pick.
-					state.MarkSuccess(time.Now())
-					if cachedFailoverError == nil {
-						cachedFailoverError = cached
-						// Keep the explicit-trace contract for the response that
-						// is eventually replayed: its body has already been
-						// read, so record it from the cache instead of
-						// writeResponse. Later attempts must not overwrite it.
-						s.recordTrace(r, target, resp, forwardBody, cached.body, startedAt, keyIndex, upstreamModel, usageTokens{})
+					// A deterministic request-shape error is rejected identically
+					// by every candidate; dequeuing only repeats the same 4xx and
+					// replays the first error anyway. Deliver this response as the
+					// terminal result instead. The log line is written by
+					// writeResponse below, so it is not duplicated here.
+					if code, deterministic := deterministicUpstreamClientError(resp, cached.body); deterministic {
+						restoreUpstreamErrorBody(resp, readBody)
+						s.logger.Info("failover skipped for deterministic client error",
+							"request_id", appmiddleware.RequestIDFromContext(r.Context()),
+							"failed_target", target.Name,
+							"status", cached.status,
+							"failover", "skipped",
+							"reason", "deterministic_client_error",
+							"code", code,
+							"attempt", attempt,
+						)
+					} else {
+						writeUpstreamErrorLogBytes(r, target, resp, cached.body, len(cached.body), startedAt)
+						// 4xx proves the target is reachable; settle health here and
+						// let the loop release the probe lease before the next pick.
+						state.MarkSuccess(time.Now())
+						if cachedFailoverError == nil {
+							cachedFailoverError = cached
+							// Keep the explicit-trace contract for the response that
+							// is eventually replayed: its body has already been
+							// read, so record it from the cache instead of
+							// writeResponse. Later attempts must not overwrite it.
+							s.recordTrace(r, target, resp, forwardBody, cached.body, startedAt, keyIndex, upstreamModel, usageTokens{})
+						}
+						deferCancel(cancel)
+						resp.Body.Close()
+						resp = nil
+						cancel = nil
+						s.metrics.totalDequeued.Add(1)
+						s.metrics.totalDequeue4xx.Add(1)
+						// A dequeue is a target-level retry; keep retries=key+target.
+						s.metrics.totalTargetRetries.Add(1)
+						s.logger.Info("retrying request with alternate target after upstream 4xx",
+							"request_id", appmiddleware.RequestIDFromContext(r.Context()),
+							"failed_target", target.Name,
+							"status", cached.status,
+							"attempt", attempt,
+						)
+						continue
 					}
-					deferCancel(cancel)
-					resp.Body.Close()
-					resp = nil
-					cancel = nil
-					s.metrics.totalDequeued.Add(1)
-					s.metrics.totalDequeue4xx.Add(1)
-					// A dequeue is a target-level retry; keep retries=key+target.
-					s.metrics.totalTargetRetries.Add(1)
-					s.logger.Info("retrying request with alternate target after upstream 4xx",
-						"request_id", appmiddleware.RequestIDFromContext(r.Context()),
-						"failed_target", target.Name,
-						"status", cached.status,
-						"attempt", attempt,
-					)
-					continue
+				} else {
+					// Too large or unreadable: restore the body and deliver this
+					// response as the terminal result.
+					restoreUpstreamErrorBody(resp, readBody)
 				}
-				// Too large or unreadable: restore the body and deliver this
-				// response as the terminal result.
-				restoreUpstreamErrorBody(resp, readBody)
 			}
 		}
 

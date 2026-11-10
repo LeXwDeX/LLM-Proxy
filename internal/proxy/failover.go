@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // maxCachedUpstreamErrorBody bounds the bytes retained from an upstream 4xx so
@@ -48,6 +49,29 @@ func classifyNon2xxAttempt(status int, allowFallback bool) failoverAction {
 		return failoverTerminate
 	}
 	return failoverDequeue
+}
+
+// deterministicClientErrorCodes list upstream error codes that describe the
+// request body itself. Every candidate rejects them identically, so crossing
+// targets only repeats the same 4xx. Only codes with sample evidence belong
+// here; target-specific 4xx must stay retryable.
+var deterministicClientErrorCodes = map[string]struct{}{
+	"invalid_function_parameters": {},
+}
+
+// deterministicUpstreamClientError decodes the controlled error envelope and
+// reports a whitelisted deterministic client error code. An unparseable body
+// is not proven deterministic and keeps the existing dequeue behaviour.
+func deterministicUpstreamClientError(resp *http.Response, body []byte) (string, bool) {
+	fields, ok, _ := upstreamErrorDiagnostics(resp, body)
+	if !ok {
+		return "", false
+	}
+	code := strings.ToLower(strings.TrimSpace(fields.Code))
+	if _, deterministic := deterministicClientErrorCodes[code]; !deterministic {
+		return "", false
+	}
+	return code, true
 }
 
 // cachedUpstreamError is the terminal 4xx response of one attempt. It is kept
@@ -125,6 +149,17 @@ type replayReadCloser struct {
 
 func restoreUpstreamErrorBody(resp *http.Response, read []byte) {
 	if resp == nil || resp.Body == nil {
+		return
+	}
+	// A native WS turn body carries generation/failure state that
+	// responseWSBody must still recognize after the replay. Wrap its reader in
+	// place so the type and its release handoff survive; a plain resp.Body
+	// replacement would hide both from writeResponse.
+	if wsBody := responseWSBody(resp); wsBody != nil {
+		wsBody.ReadCloser = &replayReadCloser{
+			Reader: io.MultiReader(bytes.NewReader(read), wsBody.ReadCloser),
+			Closer: wsBody.ReadCloser,
+		}
 		return
 	}
 	resp.Body = &replayReadCloser{

@@ -42,6 +42,31 @@ func TestClassifyNon2xxAttempt(t *testing.T) {
 	}
 }
 
+func TestDeterministicUpstreamClientError(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"whitelisted", `{"error":{"code":"invalid_function_parameters"}}`, "invalid_function_parameters"},
+		{"whitelisted mixed case", `{"error":{"code":" Invalid_Function_Parameters "}}`, "invalid_function_parameters"},
+		{"target-specific code", `{"error":{"code":"bad_a"}}`, ""},
+		{"top-level code only", `{"code":"invalid_function_parameters"}`, ""},
+		{"error is a string", `{"error":"invalid_function_parameters"}`, ""},
+		{"non-json", `invalid_function_parameters`, ""},
+		{"numeric code", `{"error":{"code":400}}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": {"application/json"}}}
+			got, ok := deterministicUpstreamClientError(resp, []byte(tc.body))
+			if ok != (tc.want != "") || got != tc.want {
+				t.Fatalf("deterministicUpstreamClientError(%q) = (%q, %v), want (%q, %v)", tc.body, got, ok, tc.want, tc.want != "")
+			}
+		})
+	}
+}
+
 func TestWriteCachedUpstreamErrorReplaysOrigin(t *testing.T) {
 	body := []byte(`{"code":"InvalidParameter","message":"Request body format invalid"}`)
 	cached := &cachedUpstreamError{
@@ -122,6 +147,33 @@ func TestReadUpstreamErrorForCacheBoundary(t *testing.T) {
 			t.Fatalf("partial bytes not returned: %q", read)
 		}
 	})
+}
+
+// A native WS turn body carries generation/failure state. Restoring the read
+// bytes must keep that type and the slot release wrapper recognisable.
+func TestRestoreUpstreamErrorBodyPreservesWebsocketState(t *testing.T) {
+	ws := &responsesWSBody{ReadCloser: io.NopCloser(bytes.NewReader([]byte("rest")))}
+	released := false
+	resp := &http.Response{Body: &releaseOnCloseBody{ReadCloser: ws, release: func() { released = true }}}
+
+	restoreUpstreamErrorBody(resp, []byte("head"))
+
+	if got := responseWSBody(resp); got != ws {
+		t.Fatalf("responseWSBody lost the native body type")
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read restored body: %v", err)
+	}
+	if string(body) != "headrest" {
+		t.Fatalf("restored body = %q, want headrest", body)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close restored body: %v", err)
+	}
+	if !released {
+		t.Fatalf("slot release was lost")
+	}
 }
 
 type failingReader struct {

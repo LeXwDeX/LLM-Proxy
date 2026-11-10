@@ -356,3 +356,53 @@ func TestImageFailoverPolicy(t *testing.T) {
 		t.Fatalf("no fresh client was routed to the image 5xx target first")
 	})
 }
+
+// #187: a deterministic client error is rejected identically by every
+// candidate. The first 400 is replayed verbatim and B is never called.
+func TestDeterministicClientErrorSkipsFailover(t *testing.T) {
+	beforeDequeued := metricInt(t, "requests/dequeued_total")
+	before4xx := metricInt(t, "requests/dequeue_4xx_total")
+	p := pool(t)
+	alias := uniq("e2e-4xxdet")
+	kA, kB := uniq("sk-4det-a"), uniq("sk-4det-b")
+	tgA := keyedTarget(t, w.urlA, "/openai/v1", alias, []string{kA}, map[string]any{"pool": p})
+	keyedTarget(t, w.urlB, "/openai/v1", alias, []string{kB}, map[string]any{"pool": p})
+	upstreamBody := `{"error":{"code":"invalid_function_parameters","type":"invalid_request_error","param":"tools[0].parameters","message":"from-a"}}`
+	w.fakeA.SetKeyScenario(kA, &fakellm.Scenario{Status: http.StatusBadRequest, Body: upstreamBody})
+	defer w.fakeA.SetKeyScenario(kA, nil)
+
+	for attempt := 0; attempt < 16; attempt++ {
+		_, key := client(t, nil, []string{p})
+		fromA, fromB := w.fakeA.LastSeq(), w.fakeB.LastSeq()
+		resp, body := chat(t, key, alias, "hi")
+		if hits(w.fakeA, kA, fromA) == 0 {
+			continue
+		}
+		if got := hits(w.fakeA, kA, fromA); got != 1 {
+			t.Fatalf("candidate A was called %d times, want 1", got)
+		}
+		if hits(w.fakeB, kB, fromB) != 0 {
+			t.Fatalf("candidate B was called after a deterministic client error")
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("client saw %d %s; want the original 400", resp.StatusCode, body)
+		}
+		if string(body) != upstreamBody {
+			t.Fatalf("client body = %s, want the original upstream error", body)
+		}
+		if got := resp.Header.Get("X-Proxy-Target"); got != tgA {
+			t.Fatalf("X-Proxy-Target = %q, want %q", got, tgA)
+		}
+		if got := resp.Header.Get("X-Upstream-Request-Id"); got == "" {
+			t.Fatalf("X-Upstream-Request-Id missing from the replayed 4xx")
+		}
+		if got := metricInt(t, "requests/dequeued_total"); got != beforeDequeued {
+			t.Fatalf("dequeued_total = %d, want %d (no dequeue)", got, beforeDequeued)
+		}
+		if got := metricInt(t, "requests/dequeue_4xx_total"); got != before4xx {
+			t.Fatalf("dequeue_4xx_total = %d, want %d (no dequeue)", got, before4xx)
+		}
+		return
+	}
+	t.Fatalf("no fresh client was routed to the deterministic-error target first")
+}
