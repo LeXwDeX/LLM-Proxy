@@ -146,10 +146,23 @@ test("a failed quota load leaves no table on 加载中", async () => {
     field(h, id).innerHTML = "<tr class='empty-row'><td>加载中...</td></tr>";
   h.setRouteFailure("/admin/data/quota/summary", true);
   await quota.loadQuotaManagement();
-  for (const id of ["quotaSummaryBody", "modelGroupsBody", "jobLevelsBody", "projectGroupsBody"]) {
+  await tick();
+  for (const id of ["quotaSummaryBody", "jobLevelsBody", "projectGroupsBody"]) {
     assert.doesNotMatch(field(h, id).innerHTML, /加载中/, id);
     assert.match(field(h, id).innerHTML, /加载失败/, id);
   }
+  // Model groups load on their own (Issue #196): their table shows the loaded list.
+  assert.match(field(h, "modelGroupsBody").innerHTML, /shared/);
+  assert.doesNotMatch(field(h, "modelGroupsBody").innerHTML, /加载中|加载失败/);
+});
+
+test("a failed model group load leaves its table on 加载失败, not 加载中", async () => {
+  const {h, quota} = await fixture();
+  field(h, "modelGroupsBody").innerHTML = "<tr class='empty-row'><td>加载中...</td></tr>";
+  h.setRouteFailure("/admin/data/model-groups", true);
+  await quota.loadQuotaManagement();
+  await tick();
+  assert.match(field(h, "modelGroupsBody").innerHTML, /加载失败/);
 });
 
 test("the summary renders before the 30-day usage arrives, then fills in", async () => {
