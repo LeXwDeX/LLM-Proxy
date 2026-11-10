@@ -250,10 +250,25 @@ AdminApp.register("pricingModal", function (app) {
   }
   function pricingTargetChanged() {
     if (state.editingPricingTemplate) return;
+    var targets = pricingSelected("ptTarget");
     var selectedModels = pricingSelected("ptModel");
-    if (!selectedModels.length && state.copyingPricingTemplate) selectedModels = pricingModels(state.copyingPricingTemplate);
+    if (!selectedModels.length && state.copyingPricingTemplate) {
+      // Copy starts with the source models. Drop any model the selected targets
+      // cannot resolve instead of leaving an unchecked-but-selected conflict;
+      // the targets' own models stay available for an explicit choice.
+      selectedModels = pricingModels(state.copyingPricingTemplate).filter(function (model) {
+        return targets.some(function (name) {
+          return (state.targets || []).some(function (target) {
+            return String(target.name).toLowerCase() === String(name).toLowerCase() &&
+              (target.model_mappings || []).some(function (mapping) {
+                return String(mapping.upstream).toLowerCase() === String(model).toLowerCase();
+              });
+          });
+        });
+      });
+    }
     // Keep unsupported selections visible so the full combination is validated, never silently reduced.
-    renderPricingModelSelect(pricingSelected("ptTarget"), selectedModels, true);
+    renderPricingModelSelect(targets, selectedModels, true);
     updatePricingScopeNotice();
   }
   document.getElementById("ptTarget").addEventListener("change", pricingTargetChanged);
