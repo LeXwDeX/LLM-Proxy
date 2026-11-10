@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -155,5 +156,69 @@ func TestUpstreamErrorLogDecodesCompressedEnvelope(t *testing.T) {
 	}
 	if entry.RespErrorParse != "" {
 		t.Fatalf("resp_error_parse = %q, want empty", entry.RespErrorParse)
+	}
+}
+
+// #187: a deterministic client error stops before cross-target failover; the
+// client sees the original response and no dequeue counter moves.
+func TestDeterministicClientErrorSkipsFailover(t *testing.T) {
+	var logs bytes.Buffer
+	s, principal, _ := newTraceCaptureService(t, false, http.StatusBadRequest, "application/json",
+		`{"error":{"code":"invalid_function_parameters","type":"invalid_request_error","param":"tools[0].parameters","message":"from-a"}}`)
+	s.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+
+	w := serveTraceCapture(s, principal)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if got := w.Body.String(); !strings.Contains(got, `"invalid_function_parameters"`) {
+		t.Fatalf("client body = %q, want the original upstream error", got)
+	}
+	if got := s.metrics.totalDequeued.Load(); got != 0 {
+		t.Fatalf("totalDequeued = %d, want 0", got)
+	}
+	if got := s.metrics.totalDequeue4xx.Load(); got != 0 {
+		t.Fatalf("totalDequeue4xx = %d, want 0", got)
+	}
+	if got := s.metrics.totalTargetRetries.Load(); got != 0 {
+		t.Fatalf("totalTargetRetries = %d, want 0", got)
+	}
+
+	logged := logs.String()
+	for _, want := range []string{
+		`"msg":"failover skipped for deterministic client error"`,
+		`"failover":"skipped"`,
+		`"reason":"deterministic_client_error"`,
+		`"code":"invalid_function_parameters"`,
+		`"status":400`,
+	} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("log missing %s: %s", want, logged)
+		}
+	}
+}
+
+// #187 counterexample: a non-whitelisted 4xx still crosses targets.
+func TestNonDeterministicClientErrorStillDequeues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"target-specific code", `{"error":{"code":"bad_a","message":"from-a"}}`},
+		{"unparseable body", `not json`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, principal, _ := newTraceCaptureService(t, false, http.StatusBadRequest, "application/json", tc.body)
+			w := serveTraceCapture(s, principal)
+			if w.Code != http.StatusBadRequest || w.Body.String() != tc.body {
+				t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+			}
+			if got := s.metrics.totalDequeued.Load(); got != 1 {
+				t.Fatalf("totalDequeued = %d, want 1", got)
+			}
+			if got := s.metrics.totalDequeue4xx.Load(); got != 1 {
+				t.Fatalf("totalDequeue4xx = %d, want 1", got)
+			}
+		})
 	}
 }
