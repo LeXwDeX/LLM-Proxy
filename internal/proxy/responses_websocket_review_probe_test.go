@@ -19,7 +19,7 @@ func TestResponsesWebsocketHandshakeRejectionEndsHealthProbe(t *testing.T) {
 	}{
 		{http.StatusInternalServerError, false, true},
 		{http.StatusServiceUnavailable, false, true},
-		{http.StatusForbidden, false, false},
+		{http.StatusUnprocessableEntity, false, false},
 		{http.StatusTooManyRequests, true, true},
 	} {
 		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
@@ -63,7 +63,22 @@ func TestResponsesWebsocketHandshakeRejectionEndsHealthProbe(t *testing.T) {
 				t.Error("completed HTTP rejection left the half-open probe occupied")
 			}
 			stats := state.Stats()
-			if tc.unhealthy {
+			if tc.status == http.StatusTooManyRequests {
+				// A 429 limits the model, not the target: the probe proves the
+				// target answers (half-open ends, nothing cools target-wide) and
+				// the failure is counted against the model's cooldown.
+				if stats.TotalFailure != 2 || stats.ConsecutiveFailure != 0 || state.IsMuted(time.Now()) {
+					t.Errorf("429 probe must recover the target and cool only the model: %+v", stats)
+				}
+				// The test's nanosecond quiet period has already expired the cooldown;
+				// the entry (with its streak) remains until the model succeeds.
+				state.mu.RLock()
+				limits := len(state.modelLimits)
+				state.mu.RUnlock()
+				if limits != 1 {
+					t.Errorf("429 handshake rejection recorded %d model limits, want 1", limits)
+				}
+			} else if tc.unhealthy {
 				if stats.TotalFailure != 2 || stats.ConsecutiveFailure != 2 || stats.LastFailure.Before(time.Now().Add(-time.Minute)) {
 					t.Errorf("ordinary upstream failure was not recorded: %+v", stats)
 				}

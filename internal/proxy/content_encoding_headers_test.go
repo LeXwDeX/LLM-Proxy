@@ -126,15 +126,19 @@ func TestRepeatedEncodingNon2xxDoesNotClassifyRawPrefix(t *testing.T) {
 	req.Header.Set("Accept-Encoding", "gzip")
 	response := httptest.NewRecorder()
 	svc.ServeHTTP(response, req)
-	if calls.Load() != 1 || response.Code != 401 || !bytes.Equal(response.Body.Bytes(), body) {
-		t.Fatalf("ambiguous raw error classified/replayed: calls=%d status=%d", calls.Load(), response.Code)
+	// The undecodable body is never classified: the 401 is handled by status
+	// alone as an unconfirmed proxy-credential rejection (each key cools
+	// briefly as "unauthorized", never as the body's invalid_token), and the
+	// original bytes are replayed with the proxy-key 401 shown as 503.
+	if calls.Load() != 2 || response.Code != http.StatusServiceUnavailable || response.Header().Get(headerUpstreamStatus) != "401" || !bytes.Equal(response.Body.Bytes(), body) {
+		t.Fatalf("ambiguous raw error: calls=%d status=%d", calls.Load(), response.Code)
 	}
 	state, _ := svc.targetByName("test-target")
 	state.keyPool.mu.Lock()
 	defer state.keyPool.mu.Unlock()
 	for _, key := range state.keyPool.entries {
-		if key.exhausted || key.blocked {
-			t.Fatal("ambiguous body changed key availability")
+		if key.exhaustReason != keyReasonUnauthorized {
+			t.Fatalf("ambiguous body was classified: reason=%q", key.exhaustReason)
 		}
 	}
 }

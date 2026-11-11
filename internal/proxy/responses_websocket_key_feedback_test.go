@@ -80,7 +80,16 @@ func TestResponsesWebsocketTerminalKeyFailureUsesHealthyKey(t *testing.T) {
 				state.keyPool.mu.Lock()
 				first, second := state.keyPool.entries[0], state.keyPool.entries[1]
 				state.keyPool.mu.Unlock()
-				if !first.exhausted || first.exhaustReason != tc.reason || !first.cooldownEnd.After(time.Now()) || second.exhausted || state.IsMuted(time.Now()) {
+				if tc.reason == "rate_limited" {
+					// A generic 429 limits only this (key, upstream model): the key stays
+					// active for other models, the other key is untouched.
+					state.keyPool.mu.Lock()
+					limits := len(first.modelLimits)
+					state.keyPool.mu.Unlock()
+					if first.exhausted || limits != 1 || second.exhausted || state.IsMuted(time.Now()) {
+						t.Errorf("incorrect key feedback: exhausted=%v model_limits=%d healthy_exhausted=%v muted=%v", first.exhausted, limits, second.exhausted, state.IsMuted(time.Now()))
+					}
+				} else if !first.exhausted || first.exhaustReason != tc.reason || !first.cooldownEnd.After(time.Now()) || second.exhausted || state.IsMuted(time.Now()) {
 					t.Errorf("incorrect key feedback: exhausted=%v reason=%s healthy_exhausted=%v muted=%v", first.exhausted, first.exhaustReason, second.exhausted, state.IsMuted(time.Now()))
 				}
 				if tc.name == "quota429" && !first.cooldownEnd.Equal(permanentCooldownEnd) {
@@ -112,12 +121,18 @@ func TestResponsesWebsocketHandshakeFinalFailureAccounting(t *testing.T) {
 		name, body       string
 		status, attempts int
 		unhealthy        bool
+		dequeued         int64 // account rejections are dequeued, then replayed as the final error
 	}{
-		{"ordinary403", `{"error":{"message":"denied"}}`, 403, 1, false},
-		{"unknown401", `{"error":{"message":"invalid_api_key"}}`, 401, 1, false},
-		{"malformed401", `{"error":{"code":"invalid_api_key"}} trailing`, 401, 1, false},
-		{"ordinary503", `{"error":{"message":"unavailable"}}`, 503, 1, true},
-		{"accountConvergence", `{"error":{"code":"invalid_api_key","message":"account disabled"}}`, 401, 2, true},
+		// 403 cools each key, converges on the second, then cools the target.
+		{"ordinary403", `{"error":{"message":"denied"}}`, 403, 2, true, 1},
+		{"moderation403", `{"error":{"code":"content_policy_violation"}}`, 403, 1, false, 0},
+		// Unrecognised and malformed 401s are unconfirmed proxy-credential
+		// rejections: each key cools briefly, the loop converges and the
+		// target cools (short first) like the recognised convergence below.
+		{"unknown401", `{"error":{"message":"invalid_api_key"}}`, 401, 2, true, 1},
+		{"malformed401", `{"error":{"code":"invalid_api_key"}} trailing`, 401, 2, true, 1},
+		{"ordinary503", `{"error":{"message":"unavailable"}}`, 503, 1, true, 0},
+		{"accountConvergence", `{"error":{"code":"invalid_api_key","message":"account disabled"}}`, 401, 2, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var attempts atomic.Int32
@@ -134,7 +149,11 @@ func TestResponsesWebsocketHandshakeFinalFailureAccounting(t *testing.T) {
 			state.MarkFailure(time.Now().Add(-time.Hour), time.Nanosecond)
 			conn := dialWebsocketTest(t, server)
 			_ = conn.WriteJSON(map[string]any{"type": "response.create", "model": "codex-fast", "input": "hi"})
-			if event := readWebsocketEvent(t, conn); event["type"] != "error" || event["status"] != float64(tc.status) {
+			wantEventStatus := tc.status
+			if tc.status == http.StatusUnauthorized {
+				wantEventStatus = http.StatusServiceUnavailable // proxy-key 401 shown as 503
+			}
+			if event := readWebsocketEvent(t, conn); event["type"] != "error" || event["status"] != float64(wantEventStatus) {
 				t.Fatalf("final failure=%v", event)
 			}
 			waitWebsocketSlotsReleased(t, service)
@@ -144,7 +163,7 @@ func TestResponsesWebsocketHandshakeFinalFailureAccounting(t *testing.T) {
 				wantFailure++ // includes the old failure used to enter half-open
 				wantSuccess--
 			}
-			if attempts.Load() != int32(tc.attempts) || stats.TotalFailure != wantFailure || stats.TotalSuccess != wantSuccess || state.IsMuted(time.Now()) != tc.unhealthy || state.probeSlotBusy(time.Now()) || service.metrics.totalFailures.Load() != 1 || service.metrics.totalSuccess.Load() != 0 || service.metrics.totalTargetRetries.Load() != 0 {
+			if attempts.Load() != int32(tc.attempts) || stats.TotalFailure != wantFailure || stats.TotalSuccess != wantSuccess || state.IsMuted(time.Now()) != tc.unhealthy || state.probeSlotBusy(time.Now()) || service.metrics.totalFailures.Load() != 1 || service.metrics.totalSuccess.Load() != 0 || service.metrics.totalTargetRetries.Load() != tc.dequeued {
 				t.Fatalf("final rejection did not settle once: attempts=%d stats=%+v successes=%d failures=%d", attempts.Load(), stats, service.metrics.totalSuccess.Load(), service.metrics.totalFailures.Load())
 			}
 			if events := recorder.snapshot(); len(events) != 0 {
@@ -414,7 +433,14 @@ func TestResponsesWebsocketHandshakeRotatesBeforeGeneration(t *testing.T) {
 			state.keyPool.mu.Lock()
 			bad, good := state.keyPool.entries[0], state.keyPool.entries[1]
 			state.keyPool.mu.Unlock()
-			if rejected.Load() != int32(tc.badAttempts) || creates.Load() != 1 || bad.exhaustReason != tc.reason || !bad.exhausted || good.exhausted || good.consecutiveRateLimit != 0 || good.consecutiveFails != 0 {
+			badMarked := bad.exhausted && bad.exhaustReason == tc.reason
+			if tc.reason == "rate_limited" {
+				// A generic 429 limits only the (key, model) pair; the key stays active.
+				state.keyPool.mu.Lock()
+				badMarked = !bad.exhausted && len(bad.modelLimits) == 1
+				state.keyPool.mu.Unlock()
+			}
+			if rejected.Load() != int32(tc.badAttempts) || creates.Load() != 1 || !badMarked || good.exhausted || good.consecutiveRateLimit != 0 || good.consecutiveFails != 0 {
 				t.Fatalf("incorrect rotation/feedback: rejected=%d creates=%d bad=%+v good=%+v", rejected.Load(), creates.Load(), bad, good)
 			}
 			if tc.body != "" && bad.lastError == "" {

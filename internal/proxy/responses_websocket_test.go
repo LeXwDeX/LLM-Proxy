@@ -265,12 +265,18 @@ func TestResponsesWebsocketHandshakeRejectionIsNotRetried(t *testing.T) {
 			if status < 400 {
 				expectedStatus = 502
 			}
+			if status == http.StatusUnauthorized {
+				expectedStatus = http.StatusServiceUnavailable // proxy-key 401 shown as 503
+			}
 			if event["type"] != "error" || event["status"] != float64(expectedStatus) {
 				t.Fatalf("event=%v", event)
 			}
 			wantAttempts := int32(1)
 			if status == http.StatusBadRequest {
 				wantAttempts = 2 // Handshake rejects before a create; HTTP retains its 400.
+			}
+			if status == http.StatusForbidden || status == http.StatusUnauthorized {
+				wantAttempts = 2 // Two keys: the first is cooled, the second sees the same rejection and the account rejection converges.
 			}
 			if attempts.Load() != wantAttempts {
 				t.Fatalf("handshake retried %d times", attempts.Load())
@@ -791,6 +797,7 @@ func TestResponsesWebsocketServerFailureStillMutesTarget(t *testing.T) {
 			}))
 			defer upstream.Close()
 			service, server, recorder := websocketTestProxy(t, upstream.URL)
+			service.inProxyWaitMaxOverride = time.Millisecond // a 30s 500 cooldown is otherwise waited out (own tests)
 			conn := dialWebsocketTest(t, server)
 			conn.WriteJSON(map[string]any{"type": "response.create", "model": "codex-fast", "input": "hi"})
 			if event := readWebsocketEvent(t, conn); event["type"] != failure["type"] {
@@ -801,6 +808,9 @@ func TestResponsesWebsocketServerFailureStillMutesTarget(t *testing.T) {
 			if !state.IsMuted(time.Now()) {
 				t.Fatal("real server fault did not enter existing breaker policy")
 			}
+			// Use up the early-probe slot so the next turn sees the cooldown
+			// (a single transient-cooling target otherwise admits one probe).
+			state.lastEarlyProbe.Store(time.Now().UnixNano())
 			conn.WriteJSON(map[string]any{"type": "response.create", "model": "codex-fast", "input": "hi"})
 			if event := readWebsocketEvent(t, conn); event["status"] != float64(503) {
 				t.Fatalf("muted target accepted next request: %v", event)

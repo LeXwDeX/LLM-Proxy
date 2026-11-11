@@ -558,6 +558,9 @@ func TestIdentityForkCopiesConsistentFailureCounters(t *testing.T) {
 			case <-stop:
 				return
 			default:
+				// Clear the cooldown first: a failure while still cooling only
+				// counts, so alternate to keep totalFailure == breakerTrips.
+				old.MarkSuccess(time.Now())
 				old.MarkFailure(time.Now(), time.Second)
 			}
 		}

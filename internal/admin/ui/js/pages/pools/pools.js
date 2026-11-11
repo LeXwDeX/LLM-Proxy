@@ -25,6 +25,24 @@ AdminApp.register("pools", function (app) {
   function poolRoutingStrategy(pool) {
     return (pool && pool.routing_strategy) || state.schema.defaults.pool_routing_strategy;
   }
+  // 成本优先池中启用且未设并发上限的成员（服务端只读字段，零写入）：软上限不触发，
+  // 流量会集中到最便宜成员。仅提示，不阻断任何操作；成员名可能含任意字符，须转义。
+  function poolCapacityWarning(pool) {
+    var names = pool && Array.isArray(pool.members_without_capacity)
+      ? pool.members_without_capacity.filter(function (n) { return typeof n === "string" && n; })
+      : [];
+    if (!names.length) return "";
+    var text = names.length + " 个成员未设并发上限，成本优先下流量会集中到最便宜成员，建议配置";
+    return (
+      "<div class='pool-capacity-warn' role='note' title='" +
+      esc(text + "：" + names.join("、")) +
+      "'><strong>" +
+      esc(text) +
+      "</strong>：" +
+      esc(names.join("、")) +
+      "</div>"
+    );
+  }
   function poolDisplayName(pool) {
     if (typeof pool === "string") {
       var key = pool.toLowerCase();
@@ -304,7 +322,7 @@ AdminApp.register("pools", function (app) {
   }
   function renderPoolCostPreview(data) {
     if (!data || !data.active) {
-      return "<div class='pool-cost-note'>该池不是「成本优先」策略，不参与成本选路。</div>";
+      return "<div class='pool-cost-note'>该池为性能优先，不参与成本选路。</div>";
     }
     var ref = data.reference_tokens || {};
     var fmtTokens = function (value) {
@@ -486,19 +504,14 @@ AdminApp.register("pools", function (app) {
         return String(a.name || "").localeCompare(String(b.name || ""));
       })
       .map(function (p) {
-        // Alias-first model info is a cost-routing concept; load pools keep
-        // their previous chips-only runtime view.
+        // Alias-first model info is a cost-routing concept; performance-first
+        // (load) pools keep their previous chips-only runtime view.
         var isCost = poolRoutingStrategy(p) === "cost";
         var members = poolMemberChips(p.name, isCost);
         var aliasGroups = isCost && !p.paused ? poolAliasGroupBadges(p.name) : "";
         var pauseBadge = p.paused
           ? "<span class='quota-badge over'>已暂停（成员等效暂停）</span>"
           : "<span class='quota-badge ok'>运行中</span>";
-        if (poolRoutingStrategy(p) !== state.schema.defaults.pool_routing_strategy)
-          pauseBadge +=
-            " <span class='quota-badge strategy'>" +
-            esc(schemaLabel("pool_routing_strategies", poolRoutingStrategy(p))) +
-            "</span>";
         var pauseButton = p.paused
           ? "<button class='btn btn-sm readonly-hide' data-resume-pool='" +
             esc(p.name) +
@@ -524,14 +537,14 @@ AdminApp.register("pools", function (app) {
               "</td></tr>"
             : "";
         return (
-          "<tr><td class='pool-name'>" +
+          "<tr><td class='pool-name'" +
+          (p.description ? " title='" + esc(p.description) + "'" : "") +
+          ">" +
           esc(poolDisplayName(p)) +
           "</td>" +
-          "<td class='pool-description'><div class='pool-description-text'>" +
-          (p.description
-            ? esc(p.description)
-            : "<span style='color:var(--text-muted)'>—</span>") +
-          "</div></td>" +
+          "<td class='pool-strategy'>" +
+          esc(schemaLabel("pool_routing_strategies", poolRoutingStrategy(p))) +
+          "</td>" +
           "<td class='pool-status'>" +
           pauseBadge +
           "</td>" +
@@ -539,6 +552,7 @@ AdminApp.register("pools", function (app) {
           members +
           "</div>" +
           aliasGroups +
+          poolCapacityWarning(p) +
           "</td>" +
           "<td class='pool-actions'><div class='btn-group'>" +
           pauseButton +

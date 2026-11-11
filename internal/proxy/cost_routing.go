@@ -1,9 +1,8 @@
 package proxy
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,7 +16,9 @@ import (
 //   - 暂停、权限、模型、路径、熔断冷却、硬容量与探针在价格之前完成过滤，
 //     价格只在剩余的可用候选中收窄范围，从不让请求因价格失败；
 //   - 价表读取失败、未接入价表或最便宜层全部达到软上限时，退回现行负载均衡；
-//   - 层内仍按现有归一化负载 + 存活 key 加权轮询分摊。
+//   - 层内仍按现有归一化负载 + 存活 key 加权轮询分摊；
+//   - 不打断粘连：IP 亲和与会话绑定的目标只要能承接请求就继续命中，即使存在更便宜的层；
+//     成本分层只决定没有粘连的请求，或粘连目标无法承接时的临时改选，且不迁移原绑定。
 //
 // 价格来自各 target 自己的计价模板（分时段、日期例外均在模板中声明），
 // 代码不感知厂商、时段或节假日；新增峰谷价只需新增配置。
@@ -161,53 +162,68 @@ func (c *costRanker) describe(targets []*Target) string {
 	return strings.Join(parts, ",")
 }
 
-// cheapestTier narrows already-admitted candidates to the cheapest tier. It
-// returns items unchanged when no candidate is managed, or when every member
-// of that tier is at the soft load cap, so load balancing keeps the final say.
+// cheapestTier narrows already-admitted candidates to one price tier. Tiers
+// are walked from cheapest to most expensive (priced pool members by cost,
+// each tier anchored at its cheapest member with costTierTolerance, then
+// unpriced pool members, then candidates outside any cost pool), and the
+// first tier with a member below the soft load cap wins. So with A=B < C=D <
+// E, traffic shares A/B; when A and B are muted, attempted, full or saturated
+// it shares C/D, and only then reaches E. Members inside a tier are load
+// balanced by the caller. It returns items unchanged when no candidate is
+// managed or every tier is saturated, so availability never drops.
 func cheapestTier[T any](c *costRanker, items []T, stateOf func(T) *targetState) []T {
 	if c == nil || len(items) < 2 {
 		return items
 	}
-	ranks := make([]costRank, len(items))
-	best := 0
-	for i, item := range items {
-		ranks[i] = c.rank(stateOf(item).Target())
-		if ranks[i].less(ranks[best]) {
-			best = i
-		}
+	type ranked struct {
+		item T
+		rank costRank
 	}
-	if ranks[best].group == costGroupOutside {
+	all := make([]ranked, len(items))
+	for i, item := range items {
+		all[i] = ranked{item: item, rank: c.rank(stateOf(item).Target())}
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].rank.less(all[j].rank) })
+	if all[0].rank.group == costGroupOutside {
 		return items
 	}
-	tier := make([]T, 0, len(items))
-	headroom := false
-	for i, item := range items {
-		if ranks[best].within(ranks[i]) {
-			tier = append(tier, item)
-			headroom = headroom || stateOf(item).belowAffinitySoftCap()
+	for start := 0; start < len(all); {
+		anchor := all[start].rank
+		end := start
+		headroom := false
+		for end < len(all) && anchor.within(all[end].rank) {
+			headroom = headroom || stateOf(all[end].item).belowAffinitySoftCap()
+			end++
 		}
+		if headroom {
+			tier := make([]T, 0, end-start)
+			for _, r := range all[start:end] {
+				tier = append(tier, r.item)
+			}
+			return tier
+		}
+		start = end
 	}
-	if !headroom {
-		return items
-	}
-	return tier
+	return items
 }
 
-// cheaperTierAvailable reports whether a sticky target should yield: another
-// eligible, healthy target with headroom sits in a strictly cheaper tier. It
-// only reads state (no probe leases); findAvailableTargetWithModel still makes
-// the binding admission decision, so a wrong answer never loses availability.
-func (s *Service) cheaperTierAvailable(c *costRanker, bound *targetState, allowed map[string]struct{}, model, path string, now time.Time) bool {
-	if c == nil || bound == nil || !c.managed(bound.Target()) {
-		return false
+// inPreferredCostTier reports whether target sits in the cheapest price tier
+// among every member eligible for this request (allowed, not paused, accepting
+// the client alias and the request path), ignoring health, cooldowns and load.
+// A target reached only because that tier was down or saturated is not
+// preferred: bindings to it are temporary, so the client returns to the
+// cheap tier once it recovers. With pricing unavailable, or when no eligible
+// member belongs to a cost pool, every target is preferred.
+func (s *Service) inPreferredCostTier(target *Target, allowed map[string]struct{}, model, path string, now time.Time) bool {
+	ranker := s.newCostRanker(model, now)
+	if ranker == nil || target == nil {
+		return true
 	}
-	boundUpstream, boundRank := c.comparison(bound.Target())
+	mine := ranker.rank(target)
+	best := mine
 	for _, state := range s.targetSnapshot() {
-		if state == nil || state == bound || state.Target() == nil {
-			continue
-		}
 		t := state.Target()
-		if t.Paused || !modelAllowed(t, model) || !t.SupportsPath(path) {
+		if t == nil || t.Paused || !modelAllowed(t, model) || !t.SupportsPath(path) {
 			continue
 		}
 		if allowed != nil {
@@ -215,25 +231,16 @@ func (s *Service) cheaperTierAvailable(c *costRanker, bound *targetState, allowe
 				continue
 			}
 		}
-		if state.IsMuted(now) || !state.belowAffinitySoftCap() {
-			continue
-		}
-		if t.MaxConcurrency > 0 && state.inFlightCount() >= int64(t.MaxConcurrency) {
-			continue
-		}
-		upstream, r := c.comparison(t)
-		if r.less(boundRank) && !r.within(boundRank) {
-			if s.logger != nil && s.logger.Enabled(context.Background(), slog.LevelDebug) {
-				s.logger.Debug("cost routing rebind candidate",
-					"alias", c.alias,
-					"bound_target", targetName(bound.Target()),
-					"bound_upstream", boundUpstream,
-					"candidate_target", targetName(t),
-					"candidate_upstream", upstream,
-				)
-			}
-			return true
+		if r := ranker.rank(t); r.less(best) {
+			best = r
 		}
 	}
-	return false
+	// Selection order is priced pool members, then unpriced members, then
+	// targets outside any cost pool; a target behind a better eligible group
+	// was reached by overflow too. When nothing eligible is priced or pooled
+	// there is no cheaper place to return to.
+	if best.group == costGroupOutside {
+		return true
+	}
+	return best.within(mine)
 }

@@ -21,6 +21,7 @@ type adminBreakerFixture struct {
 	service *proxy.Service
 	calls   atomic.Int64
 	fail    atomic.Bool
+	limit   atomic.Bool // answer 429 (a model-level rate limit)
 	lastKey atomic.Value
 	url     string
 }
@@ -32,6 +33,12 @@ func newAdminBreakerFixture(t *testing.T) *adminBreakerFixture {
 		f.calls.Add(1)
 		f.lastKey.Store(r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
+		if f.limit.Load() {
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"fake rate limit","code":"rate_limit"}}`))
+			return
+		}
 		if f.fail.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"error":{"message":"fake unavailable","type":"server_error"}}`))
@@ -111,13 +118,9 @@ func (f *adminBreakerFixture) assertMuted(t *testing.T, previous proxy.TargetSta
 	if !current.Muted || current.Phase != "muted" || !current.MutedUntil.Equal(previous.MutedUntil) || current.ConsecutiveFailures != previous.ConsecutiveFailures {
 		t.Fatalf("unrelated edit changed breaker: before=%+v after=%+v", previous, current)
 	}
-	before := f.calls.Load()
-	if rec := f.request(t); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "all targets muted") {
-		t.Fatalf("expected local muted rejection: HTTP %d %s", rec.Code, rec.Body.String())
-	}
-	if f.calls.Load() != before {
-		t.Fatal("muted target made an upstream request")
-	}
+	// No request is sent here: with no other candidate, a transient cooldown
+	// lets one early probe through (proxy tryEarlyProbe), which would itself
+	// change the breaker under test. The breaker state above is the check.
 }
 
 func (f *adminBreakerFixture) assertReadyAndForward(t *testing.T, previous proxy.TargetStatus) {

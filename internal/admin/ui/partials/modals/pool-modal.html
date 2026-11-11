@@ -16,9 +16,9 @@
           <input class="form-control" id="poolDescription" placeholder="例如: 生产环境部署池">
         </div>
         <div class="form-group">
-          <label for="poolRoutingStrategy">分流策略</label>
+          <label for="poolRoutingStrategy">灾备逻辑</label>
           <select class="form-control" id="poolRoutingStrategy" data-schema-options="pool_routing_strategies"></select>
-          <small style="color:var(--text-muted)">成本优先：在可用成员中按各自计价模板的当前价格分流（峰谷价、节假日都在计价模板里配置）；成员不可用、价格读取失败或便宜成员负载已高时，自动回到负载均衡。在途请求不受影响，下一次请求才切换。</small>
+          <small style="color:var(--text-muted)">成本优先（默认）：按计价模板价格分层，同价（5% 内）成员负载均衡并互为灾备，整层不可用或饱和时才逐层溢出到更贵的一层。性能优先：全部成员按负载与存活 key 加权均衡，不看价格。所有策略都不主动打断客户端粘连，仅在粘连目标无法承接新请求时临时改选。</small>
         </div>
         <div class="form-group">
           <label style="display:flex;align-items:center;gap:8px;">

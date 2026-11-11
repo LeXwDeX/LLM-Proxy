@@ -135,7 +135,7 @@ func TestPoolCostRoutingPreviewHandler(t *testing.T) {
 	if rec, _ := getCostPreview(t, h, "/data/pools/missing/cost-routing?model=alias"); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown pool status = %d", rec.Code)
 	}
-	if rec := postPool(t, h, map[string]any{"name": "load-pool"}); rec.Code != http.StatusCreated {
+	if rec := postPool(t, h, map[string]any{"name": "load-pool", "routing_strategy": "load"}); rec.Code != http.StatusCreated {
 		t.Fatalf("create load pool: %d %s", rec.Code, rec.Body.String())
 	}
 	rec, loadResp := getCostPreview(t, h, "/data/pools/load-pool/cost-routing?model=alias")
@@ -150,6 +150,14 @@ func TestPoolCostRoutingPreviewHandler(t *testing.T) {
 		if _, ok := inactive[key]; ok {
 			t.Fatalf("inactive preview carries %q: %s", key, rec.Body.String())
 		}
+	}
+
+	// 空策略（旧数据/默认）等同 cost：预览生效。
+	if rec := postPool(t, h, map[string]any{"name": "default-pool"}); rec.Code != http.StatusCreated {
+		t.Fatalf("create default pool: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec, defResp := getCostPreview(t, h, "/data/pools/default-pool/cost-routing?model=alias"); rec.Code != http.StatusOK || !defResp.Active || defResp.RoutingStrategy != "cost" {
+		t.Fatalf("default pool preview = %d %+v", rec.Code, defResp)
 	}
 
 	service.SetRateResolverSource(func() (usage.RateResolver, error) { return nil, errors.New("pricing down") })

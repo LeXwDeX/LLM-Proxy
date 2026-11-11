@@ -156,7 +156,15 @@ func TestResponsesWSKeyFailureUsesHealthyKeyOnNextRequest(t *testing.T) {
 				state.keyPool.mu.Lock()
 				first, second := state.keyPool.entries[0], state.keyPool.entries[1]
 				state.keyPool.mu.Unlock()
-				if !first.exhausted || first.exhaustReason != wantReason || !first.cooldownEnd.After(time.Now()) || second.exhausted || state.IsMuted(time.Now()) {
+				if wantReason == "rate_limited" {
+					// A generic 429 limits only this (key, upstream model).
+					state.keyPool.mu.Lock()
+					limits := len(first.modelLimits)
+					state.keyPool.mu.Unlock()
+					if first.exhausted || limits != 1 || second.exhausted || state.IsMuted(time.Now()) {
+						t.Fatalf("incorrect key feedback: exhausted=%v model_limits=%d healthy_exhausted=%v muted=%v", first.exhausted, limits, second.exhausted, state.IsMuted(time.Now()))
+					}
+				} else if !first.exhausted || first.exhaustReason != wantReason || !first.cooldownEnd.After(time.Now()) || second.exhausted || state.IsMuted(time.Now()) {
 					t.Fatalf("incorrect key feedback: exhausted=%v reason=%s healthy_exhausted=%v muted=%v", first.exhausted, first.exhaustReason, second.exhausted, state.IsMuted(time.Now()))
 				}
 				if tc.name == "quota429" && (!first.cooldownEnd.Equal(permanentCooldownEnd) || first.lastError != "upstream error (details withheld)") {

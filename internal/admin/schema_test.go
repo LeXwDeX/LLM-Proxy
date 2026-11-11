@@ -48,7 +48,7 @@ func TestHandlerSchemaContract(t *testing.T) {
 	if string(response["version"]) != "1" {
 		t.Fatalf("unsupported schema version: %s", response["version"])
 	}
-	for _, field := range []string{"endpoint_types", "protocols", "request_schemas", "usage_adapters", "image_operations", "auth_modes", "pricing_modes", "pricing_service_tiers", "pricing_speeds", "roles", "quota_dimensions", "quota_scopes", "quota_sync_modes", "target_phases"} {
+	for _, field := range []string{"endpoint_types", "protocols", "request_schemas", "usage_adapters", "image_operations", "auth_modes", "pricing_modes", "pricing_service_tiers", "pricing_speeds", "roles", "quota_dimensions", "quota_scopes", "quota_sync_modes", "target_phases", "target_mute_reasons"} {
 		var options []map[string]any
 		if err := json.Unmarshal(response[field], &options); err != nil || len(options) == 0 {
 			t.Errorf("schema field %s must contain options: %v", field, err)

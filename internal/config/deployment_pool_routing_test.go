@@ -26,11 +26,11 @@ func TestPoolRoutingStrategyNormalizeAndValidate(t *testing.T) {
 			t.Fatalf("valid(%q) = %v, want %v", got.RoutingStrategy, !tc.valid, tc.valid)
 		}
 	}
-	if (DeploymentPool{}).EffectiveRoutingStrategy() != PoolRoutingLoad {
-		t.Fatal("empty strategy must mean load")
-	}
-	if (DeploymentPool{RoutingStrategy: PoolRoutingCost}).EffectiveRoutingStrategy() != PoolRoutingCost {
-		t.Fatal("cost strategy must be effective")
+	// 空值默认成本优先；显式 load 仍是性能优先，显式 cost 是成本优先。
+	for in, want := range map[string]string{"": PoolRoutingCost, PoolRoutingLoad: PoolRoutingLoad, PoolRoutingCost: PoolRoutingCost} {
+		if got := (DeploymentPool{RoutingStrategy: in}).EffectiveRoutingStrategy(); got != want {
+			t.Fatalf("effective strategy for %q = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -51,8 +51,11 @@ func TestPoolRoutingStrategyLegacyJSONOmitted(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"name":"legacy","paused":true}`), &pool); err != nil {
 		t.Fatal(err)
 	}
-	if pool.EffectiveRoutingStrategy() != PoolRoutingLoad {
+	if pool.EffectiveRoutingStrategy() != PoolRoutingCost {
 		t.Fatalf("legacy pool strategy = %q", pool.EffectiveRoutingStrategy())
+	}
+	if pool.RoutingStrategy != "" {
+		t.Fatalf("legacy value must be read back unchanged, got %q", pool.RoutingStrategy)
 	}
 	data, err := json.Marshal(DeploymentPool{Name: "legacy"})
 	if err != nil {

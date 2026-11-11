@@ -130,9 +130,13 @@ func TestCostRoutingMemberWithoutAliasDoesNotJoinComparison(t *testing.T) {
 	agg, _ := s.targetByName("agg")
 	official.MarkFailure(peak, time.Minute)
 	agg.MarkFailure(peak, time.Minute)
+	// (An early probe of a declaring member is allowed; the undeclaring one
+	// never is.)
 	if state, lease, _, err := s.selectTarget(nil, "", "", "", nil, nil, costTestAlias, costTestPath, peak); err == nil {
 		state.releaseProbe(lease)
-		t.Fatal("alias request unexpectedly used a member that does not declare it")
+		if state.Target().Name == "other" {
+			t.Fatal("alias request unexpectedly used a member that does not declare it")
+		}
 	}
 }
 
@@ -218,15 +222,13 @@ func TestCostRoutingDebugLogsAliasFirstCandidates(t *testing.T) {
 	}
 }
 
-// A sticky target yielding to a cheaper tier logs both sides, alias-first, so
-// operators can explain the rebind without reading pricing templates.
-func TestCostRoutingDebugLogsRebindReason(t *testing.T) {
+// Sticky targets are never moved by cost: even when another member is cheaper
+// for the client alias, a healthy bound target keeps serving it.
+func TestCostRoutingAliasStickyTargetIsNotYielded(t *testing.T) {
 	principal := costPrincipal(t)
 	peak := costTestAt(2026, 11, 4, 10, 0)
 	const ip = "10.0.0.10"
 	s := aliasService(t, config.PoolRoutingCost)
-	buf, restore := debugCapture(s)
-	defer restore()
 	s.affinity.Set(affinityKey(ip, principal.Name, costTestAlias), "official", peak)
 
 	state, lease, kind, err := s.selectTarget(principal, ip, "", "", nil, nil, costTestAlias, costTestPath, peak)
@@ -234,21 +236,8 @@ func TestCostRoutingDebugLogsRebindReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.releaseProbe(lease)
-	if state.Target().Name != "agg" || kind != selectionCostRebind {
-		t.Fatalf("got %s kind=%v, want agg costRebind", state.Target().Name, kind)
-	}
-	out := buf.String()
-	for _, want := range []string{
-		"cost routing rebind",
-		"alias=ds-v4-flash",
-		"bound_target=official",
-		"bound_upstream=DeepSeek-V4.1-Flash",
-		"candidate_target=agg",
-		"candidate_upstream=deepseek-chat",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("rebind log missing %q:\n%s", want, out)
-		}
+	if state.Target().Name != "official" || kind != selectionAffinityHit {
+		t.Fatalf("got %s kind=%v, want sticky official affinity hit", state.Target().Name, kind)
 	}
 }
 

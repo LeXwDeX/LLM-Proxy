@@ -33,10 +33,7 @@ func (h *Handler) handleListPools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pools := cfg.Pools
-	if pools == nil {
-		pools = []config.DeploymentPool{}
-	}
+	pools := buildPoolListEntries(cfg)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"pools": pools,
 		"count": len(pools),

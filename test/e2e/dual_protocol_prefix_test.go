@@ -344,7 +344,8 @@ func TestDualProtocolLoadDistributionE2E(t *testing.T) {
 
 // TestDualProtocolCostRoutingE2E covers the cost ("money load") strategy:
 // traffic follows the cheaper member for both protocol paths, billing keeps
-// the serving member's price, and a price swap moves the next request.
+// the serving member's price, and a price swap never interrupts the sticky
+// client but moves a client with no affinity.
 func TestDualProtocolCostRoutingE2E(t *testing.T) {
 	poolName := routingPool(t, "cost")
 	chatAlias, msgAlias := uniq("e2e-cchat"), uniq("e2e-cmsg")
@@ -389,23 +390,21 @@ func TestDualProtocolCostRoutingE2E(t *testing.T) {
 		t.Fatalf("billed cost before swap = %.12f, want %.12f", got, wantCheap)
 	}
 
-	// Swap prices: the next request must leave the sticky cheap member.
+	// Swap prices: the sticky client stays on its healthy member (no active
+	// interruption); a client with no affinity follows the new cheapest member.
 	setExpensive(flatPrice(expensive, expensiveChat, 1, 1))
 	setCheap(flatPrice(cheap, cheapChat, 10, 10))
 	dualCallOK(t, key, "/v1/chat/completions", chatBody100)
-	events := usageFor(t, clientName, 7)
-	expensiveEvents := 0
-	for _, ev := range events {
-		if ev.Target != expensive {
-			continue
-		}
-		expensiveEvents++
-		if ev.Model != expensiveChat || ev.Path != "/v1/chat/completions" {
-			t.Fatalf("after price swap target=%q model=%q path=%q, want %q %q /v1/chat/completions", ev.Target, ev.Model, ev.Path, expensive, expensiveChat)
+	for _, ev := range usageFor(t, clientName, 7) {
+		if ev.Target != cheap {
+			t.Fatalf("sticky client moved to %q after the price swap, want to stay on %q", ev.Target, cheap)
 		}
 	}
-	if expensiveEvents != 1 {
-		t.Fatalf("expensive member served %d events, want exactly 1: %+v", expensiveEvents, events)
+	freshName, freshKey := client(t, nil, []string{poolName})
+	dualCallOK(t, freshKey, "/v1/chat/completions", chatBody100)
+	fresh := usageFor(t, freshName, 1)[0]
+	if fresh.Target != expensive || fresh.Model != expensiveChat || fresh.Path != "/v1/chat/completions" {
+		t.Fatalf("new client served by target=%q model=%q path=%q, want %q %q /v1/chat/completions", fresh.Target, fresh.Model, fresh.Path, expensive, expensiveChat)
 	}
 }
 

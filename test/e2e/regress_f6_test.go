@@ -41,6 +41,13 @@ func TestRegressF6KimiKeyPolicy(t *testing.T) {
 			if n := hits(w.fakeA, k1, from); n != 2 {
 				t.Fatalf("healthy key hit %d times, want 2", n)
 			}
+			if tc.reason == "rate_limited" {
+				// A generic 429 limits the (key, upstream model) pair; the key stays usable.
+				if st.Exhausted || len(st.ModelLimits) != 1 || st.ModelLimits[0].Model != "Unfamiliar-Upstream" {
+					t.Fatalf("state=%+v want a (key, model) limit for Unfamiliar-Upstream", st)
+				}
+				return
+			}
 			if !st.Exhausted || st.ExhaustReason != tc.reason {
 				t.Fatalf("state=%+v want=%s", st, tc.reason)
 			}

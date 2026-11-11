@@ -439,9 +439,10 @@ func TestSessionAffinityForwardFailoverPreservesBinding(t *testing.T) {
 			if got := sessionEntry(t, svc, key); got != before {
 				t.Errorf("temporary %s failure overwrote session binding: %q -> %q", reason, before.targetName, got.targetName)
 			}
-			// The existing IP write policy is intentionally unchanged.
-			if got, _ := svc.affinity.Get(affinityKey("192.0.2.1", "tester", "test-model"), time.Now()); got != "t2" {
-				t.Fatalf("IP affinity write behavior changed: %q", got)
+			// Failover never moves the IP binding either: a later attempt of a
+			// request whose first pick was sticky is not a fresh pick.
+			if got, _ := svc.affinity.Get(affinityKey("192.0.2.1", "tester", "test-model"), time.Now()); got != "t1" {
+				t.Fatalf("forward failover moved the IP binding to %q, want t1", got)
 			}
 			if heldSlot {
 				a.releaseSlot()

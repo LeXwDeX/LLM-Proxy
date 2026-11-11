@@ -153,6 +153,23 @@ AdminApp.register("targetsKeyList", function (app) {
               "min</span>";
           }
         }
+        // Per-model 429 limits (the key stays usable for its other models): name the
+        // limited models and how long each has left.
+        var modelLimits = item.status && Array.isArray(item.status.model_limits) ? item.status.model_limits : [];
+        var nowMs = Date.now();
+        var limitedModels = modelLimits.filter(function (m) {
+          return m && typeof m.model === "string" && m.model && new Date(m.until).getTime() > nowMs;
+        });
+        if (limitedModels.length) {
+          cooldownInfo +=
+            " <span class='key-model-limit-tag' style='font-size:11px;background:var(--warn-soft);color:var(--warn);padding:1px 6px;border-radius:4px;' title='" +
+            esc(limitedModels.map(function (m) {
+              return m.model + " · 剩 " + Math.max(1, Math.ceil((new Date(m.until).getTime() - nowMs) / 60000)) + " 分";
+            }).join("；")) +
+            "'>模型限流：" +
+            esc(limitedModels.map(function (m) { return m.model; }).join("、")) +
+            "</span>";
+        }
         return (
           "<div style='display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;margin-bottom:4px;background:var(--surface-2);'>" +
           "<span style='font-family:var(--font-mono);font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='" +

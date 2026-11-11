@@ -20,6 +20,27 @@ AdminApp.register("targetsModal", function (app) {
   var renderKeyList = app.bind("targetsKeyList", "renderKeyList");
   var renderTgtModelSuggestions = app.bind("targetsMappings", "renderTgtModelSuggestions");
   var updateModelPrefixPreview = app.bind("targetsMappings", "updateModelPrefixPreview");
+  // 并发上限为空/0 的启用成员在成本优先池中会使软上限失效，流量集中到最便宜成员：
+  // 仅在并发上限旁提示，不阻断保存。是否依赖并发上限由 /admin/data/pools 的
+  // member_capacity_advised 给出，前端不判断策略枚举。
+  function updateMaxConcurrencyHint() {
+    var hint = document.getElementById("tgtMaxConcurrencyHint");
+    if (!hint) return;
+    var poolName = String(document.getElementById("tgtPool").value || "");
+    var pool = poolName
+      ? (ts.targetPoolsSnapshot || state.pools || []).find(function (p) {
+          return String(p.name || "") === poolName;
+        })
+      : null;
+    var limit = Number(String(document.getElementById("tgtMaxConcurrency").value || "").trim());
+    var unlimited = !(limit > 0);
+    var paused = document.getElementById("tgtPaused").checked;
+    var show = !!(pool && pool.member_capacity_advised) && unlimited && !paused;
+    hint.hidden = !show;
+    hint.textContent = show
+      ? "该目标所在部署池为成本优先，未设并发上限，成本优先下流量会集中到最便宜成员，建议配置。"
+      : "";
+  }
   function updateTargetFormVisibility() {
     var epType = document.getElementById("tgtType").value;
     var meta = epMeta(epType) || {};
@@ -195,6 +216,7 @@ AdminApp.register("targetsModal", function (app) {
     document.getElementById("tgtKeyResetTime").value =
       t && t.key_reset_time ? t.key_reset_time : "";
     renderTargetPoolOptions(t && t.pool ? t.pool : "");
+    updateMaxConcurrencyHint();
     // Once, after the pool options: the key notice depends on that snapshot.
     renderKeyList();
     updateTargetFormVisibility();
@@ -250,6 +272,9 @@ AdminApp.register("targetsModal", function (app) {
   document
     .getElementById("tgtType")
     .addEventListener("change", updateTargetFormVisibility);
+  document.getElementById("tgtPool").addEventListener("change", updateMaxConcurrencyHint);
+  document.getElementById("tgtMaxConcurrency").addEventListener("input", updateMaxConcurrencyHint);
+  document.getElementById("tgtPaused").addEventListener("change", updateMaxConcurrencyHint);
   function setUsageAdapterError(message) {
     var error = document.getElementById("tgtUsageAdapterError");
     error.textContent = message;

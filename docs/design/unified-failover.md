@@ -107,7 +107,7 @@ LLMS Proxy 在 `cost` 部署池中按估算价格从低到高排序候选（A �
 
 显式 `X-Proxy-Target`（或 query `target`）时 `allowFallback=false`（service.go:621）：Dequeue 降级为 Terminate，只允许同 target 切 key；不因 4xx 跳到其他 target。
 
-健康状态仍按 target/key 维护，不新增 alias 级健康或熔断。alias 只用于候选过滤、队列顺序与诊断。理由是单 provider 故障若扩散为 alias 级不可用，会把其他仍可服务的 provider 一起排除；IP 粘连的 Set/Get 两代 key 兼容也不动（target.go:391-430、534-575）。`cost` 池的 `selectionCostRebind` 仍可在成功后将 IP 亲和与会话绑定迁到新目标（service.go:1464-1470）。
+健康状态仍按 target/key 维护，不新增 alias 级健康或熔断。alias 只用于候选过滤、队列顺序与诊断。理由是单 provider 故障若扩散为 alias 级不可用，会把其他仍可服务的 provider 一起排除；IP 粘连的 Set/Get 两代 key 兼容也不动（target.go:391-430、534-575）。所有策略都不主动打断粘连（已删除 `cost` 池的 `selectionCostRebind` 让出路径）：粘连目标无法承接时临时改选，但不迁移原绑定。
 
 ## 6. 响应缓存与回放
 
@@ -227,3 +227,42 @@ LLMS Proxy 在 `cost` 部署池中按估算价格从低到高排序候选（A �
 - `count_tokens` 的 5xx 是否应例外，需评审确认。
 - 新增计数器与 admin JSON 字段的最终命名需与现有指标契约对齐；`internal/admin/AGENTS.md` 是否已逐字段描述这些字段需在 P1 确认，如无则补充。
 - keypool 全 key 耗尽后的最后一次 401/402/429 是否应作为真实响应交付，留待 P1 复核。
+## 15. 模型级 429 冷却、代理内有界等待与粘连终态仲裁
+
+- **触发事故**：同一客户端同时用 qwen-max 与 DeepSeek 别名，两者落到同一百炼目标（上游 `qwen4-max-preview` 与 `deepseek-v4.1-flash`），DeepSeek 在百炼不可用时另有官方渠道。百炼对 `qwen4-max-preview` 按模型订阅限流返回 429，按目标熔断整个百炼 60 秒，DeepSeek 会话被挤到官方渠道；官方因思考模式缺历史思考块返回 400，Claude Code 对 400 直接停止。
+- **原则**：客户端尽量少感知错误，平台替客户端能做的都做；红线不变（已发送请求不重放、5xx/408/发送后超时不重试、客户端取消立即停止、不为确定性客户端错误无限重试）。
+
+### 15.1 B：429 冷却按（target, 上游模型）
+
+- `targetHealthState.modelLimits`（键为目标实际转发的上游模型原始拼写；目标无 `model_mappings` 时键为小写请求名，上限 32 项，溢出退回目标级冷却）保存 `until/streak/status/reason`。`markTargetFailure` 新增 `upstreamModel` 参数：类别为 429 且模型非空时走模型级（`Retry-After` 精确不翻倍，否则按该模型连续次数以 429 类基数翻倍、封顶 8 倍；冷却期内迟到失败只计数），其余类别（账户拒绝、网络、5xx、408、504）仍为目标级。多 key 目标的 429 见 §15.4（按（key，模型）记录，全部 key 对该模型被限流时进入模型级冷却）。
+- 模型级 429（计数的真实应答）把目标按“已被一次 4xx 证明可达”处理：目标未处于冷却时重置其连续失败（半开探针抽到 429 即恢复目标），运行中的目标级冷却仍由自己的探针结束。
+- 选路在判断目标可用前，用目标对本请求别名解析出的上游模型（`resolveUpstreamModel`）检查模型级冷却：粘连命中、`findAvailableRankedDetail`、显式目标都先于准入（不占探针租约）；被冷却的目标对本请求视为冷却中、计入 `blockage.earliestRecovery`，对其他模型照常可用，不作为提前探测候选。成本分层的准入过滤在分层之前，整层不可用才溢出。
+- 清除：同一模型的真实成功（`writeResponse` 成功分支）或持有模型探针的请求得到任何非 429 的上游应答，清该模型条目；其他模型的成功、请求类 4xx、`markReachable` 都不清。`ClearMute` 清空全部；身份分叉的新健康对象从空开始。
+- 可观测：`TargetStatus.ModelCooldowns` 与 `/admin/metrics` 的 `targets_runtime[].model_cooldowns[]`（`model/until/status/reason`）；`phase` 在仅有模型冷却时保持 `ready`；成本预览按别名解析出的上游模型把成员相位标为 `muted` 并带 `model_cooldown_until`；管理端目标列表/详情显示“部分模型限流”。
+
+### 15.2 C：代理内有界等待
+
+- 选路失败且尚未写出任何字节时，满足全部条件才等待一次：(1) 不是显式目标、不是 MiniMax 终态；(2) 请求被粘连目标持有且该目标可等（冷却或探针在途，本请求未向它发送过），或阻塞全部短暂（`selectionError.Transient`：模型级 429 冷却、非账户拒绝的目标级冷却，且最早恢复时间已知）、无缓存的 4xx、本请求未收到 429；(3) 最早恢复时间距今 ≤ `inProxyWaitMax`（30 秒）；(4) 全局等待名额未满（64，原子计数）。**满载不等待**（没有恢复时间）。等待 = 恢复时间 + 0-500 ms 抖动，只受父上下文约束（不计入 `request_timeout`；取消按 499、父 deadline 到期按 504）；选路失败分支位于 `releaseSelected` 之后，等待期间不持有目标并发槽、key、探针租约（目标级与模型级）、准入令牌。
+- 唤醒后 `attempt--` 并重新选路。粘连持有的请求先单独对未尝试过的粘连目标准入（`selectionTrace.retrySticky`），恢复了就回到它。**每请求每目标至多发送一次**：已在 `attempted` 中的粘连目标（发送前失败、已作答）既不等待也不重发，直接 503 + Retry-After；每请求至多等待一次。
+- **半开门**：目标级冷却与模型级冷却结束后都只放一个探针请求（模型级为 `modelProbe` 租约，随请求持有，成功清条目、429 再冷却、其他结果释放），其余请求视为“探针在途”。多个等待者同时醒来时，一个充当探针，其余在一次最长 3 秒（`inProxyProbeWaitMax`，每 200 ms 重选一次）的短轮询里等探针结算：要么全部成功，要么 3 秒内得到 503 + Retry-After。
+- 延迟上界：原先立即 503 的请求现在可能延迟最多约 30.5 秒（30 秒等待 + 0-500 ms 抖动），遇探针在途时另加至多 3 秒轮询（凡探针在途，没等过的请求也轮询，并把它算作唯一的一次等待），合计约 33.5 秒。生产入口 nginx 的 `proxy_read_timeout` 为默认 60 秒（只读确认），仍有余量；`inProxyWaitMax` 因此保持 30 秒，不要调大到接近该值。
+- 指标：`in_proxy_wait_total`、`in_proxy_wait_success_total`（等待后最终成功）、`in_proxy_wait_rejected_total`（无名额）、`in_proxy_waiting`（当前等待者）；探针轮询不单独计数。
+
+### 15.3 A：等不到时的终态仲裁
+
+- 粘连持有 `stickyVerdictPending`（只读，不抢探针、不改状态）：本请求首轮选路命中粘连（会话或 IP，`selectionTrace.bound`）；粘连目标仍是合法候选（存在、未暂停、ACL、模型、路径）；本请求内没有任何绑定目标返回过 4xx（`stickyAnswered`，429 亦然；有则以作答者的应答为结论）；不处于账户拒绝冷却；它暂时不可用——被本请求模型的 429 冷却、目标级冷却、半开探针阻塞，或满载/IP 软上限——或已在本请求发送前失败。已知恢复时间超出绑定的上限则不持有（会话绑定 10 分钟 `retryAfterMax`，IP 亲和 120 秒 `ipStickyHoldMax`），回放替代目标的 4xx。
+- 持有成立时终态一律 `503` + `Retry-After`（向上取整、≥1；取粘连目标恢复时间与其余候选最早恢复时间中较早者；满载与探针在途为 1）+ 代理生成的 `upstream_temporarily_unavailable` 错误体（`writeStickyRetry`），优先于 429、`upstream_rejected` 与裸 503 分支（显式目标、MiniMax 终态除外）。有缓存的替代 4xx 时带 `X-Upstream-Status` 与 `error.substitute_error_code`（替代目标的 `error.code`，缺省取 `type`，至多 64 字符，仅供排障；不点名目标、不回放正文），没有缓存错误时两者省略。计 `sticky_retry_hinted_total`，有缓存错误时另计 `dequeue_exhausted_total`，不计 `cached_error_replayed_total`；绑定不动，目标恢复后客户端自动回到它。原生 WS 轮次得到同形错误事件并带 `retry_after`。
+- 粘连目标自己的 4xx（含 429）出队时整体替换 `cachedFailoverError`（状态、头、体、目标、request-id 成组，并重新记 trace）。
+- 普通“全部冷却/满载/恢复中”的 503 补 `Retry-After`（最早恢复时间，≥1 秒）。
+- 保持原样：粘连目标自己的 4xx、无粘连请求的首个真实 4xx（不改 503，避免坏请求无限重试）、确定性错误白名单、审核类 403、客户端凭据 401/403、显式 `X-Proxy-Target`、5xx/408、发送后超时、已提交响应、本地 quota/参数/415/499、粘连目标处于账户拒绝冷却时按原逻辑回放（它已长期不可用）。
+
+### 15.4 多 key 目标：按（key，上游模型）的 429
+
+- keypool 原先的 `rate_limited` 不分模型，同一 key 上一个模型的 429 会让它的其他模型也被换 key 或耗尽。现在通用 429 只记 `keyRuntime.modelLimits`（5s 起翻倍、封顶 60s，每 key 至多 32 项，溢出回退 key 级），key 保持可用，选 key（`selectKeyForClientModel` 等）按本请求上游模型跳过被限流的 key；同 key 有限重试不扩大：每个 key 在一次请求内至多同 key 重试一次（请求内本地计数 `sameKeyRetries`，不依赖会被其他模型成功清零的按 key 共享计数），全局四次上限不变。账户类（401/402/403、额度耗尽）与 GLM 选择目标的 429 仍是 key 级。
+- 所有未被封的 key 对该模型都被限流时，`forwardRequest` 先走原有唤醒路径（尚有可唤醒的 exhausted key 时），仍无 key 可用才返回带 `modelLimitedUntil` 的 `skipMute` 错误（不当作耗尽），`service.go` 对该（目标，模型）`setModelCooldown` 到最早 key 恢复（不计失败；上游没有应答，不恢复半开中的目标、不清失败/超时计数），之后与单 key 目标走同一条模型级冷却 / hold / 等待路径。模型限流导致的溢出选 key 只服务本次请求，不创建或移动客户端的 key 亲和绑定。该次 429 已作答，目标在 `attempted` 中不重发，也不再用 `lastForwardStatus=429` 抑制粘连 hold 与等待。`KeyStatus.ModelLimits` 供管理端展示。
+
+### 15.5 取舍与已知限制
+
+- 多个等待者同时醒来时一个充当探针（目标级或模型级），其余在 ≤3 秒的短轮询里等它结算，探针更慢则这些请求 503 + `Retry-After`。
+- 粘连等待不检查其余候选的账户拒绝冷却：等待的目的是粘连目标本身的恢复。
+- 本设计基于代码核对与 fakellm 的确定性场景，未经真实上游 API 验证。

@@ -60,6 +60,12 @@ func TestResponsesWebsocketUnsupportedHandshakeFallsBackWithoutLosingHTTPError(t
 	}))
 	defer upstream.Close()
 	service, server, _ := websocketTestProxy(t, upstream.URL)
+	// A multi-key target answers a non-moderation 403 by cooling the key and
+	// trying the next one (the HTTP rule), which would issue a second POST with
+	// the other key. This test pins the single-key replay: one handshake, one
+	// POST, and the real 403 delivered.
+	state, _ := service.targetByName("test-target")
+	state.keyPool = nil
 	conn := dialWebsocketTest(t, server)
 	conn.WriteJSON(map[string]any{"type": "response.create", "model": "codex-fast", "input": "hi"})
 	event := readWebsocketEvent(t, conn)

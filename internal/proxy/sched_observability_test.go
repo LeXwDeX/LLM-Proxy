@@ -55,18 +55,18 @@ func TestAffinityHitAndBreakerTripCounters(t *testing.T) {
 
 	// 熔断计数：阈值以下不计，达阈值恰好 +1。
 	st := newBreakerStateForCounters(a, t, 3)
-	st.MarkFailure(time.Now(), time.Second)
-	st.MarkFailure(time.Now(), time.Second)
+	st.MarkFailure(time.Now(), time.Millisecond)
+	st.MarkFailure(time.Now(), time.Millisecond)
 	if got := st.breakerTrips.Load(); got != 0 {
 		t.Fatalf("trips below threshold = %d, want 0", got)
 	}
-	st.MarkFailure(time.Now(), time.Second)
+	st.MarkFailure(time.Now(), time.Millisecond)
 	if got := st.breakerTrips.Load(); got != 1 {
 		t.Fatalf("trips at threshold = %d, want 1", got)
 	}
 	// half-open 探测失败延长冷却同样是一次熔断事件。
-	time.Sleep(10 * time.Millisecond) // 保证 mutedUntil 过期进入 half-open
-	st.MarkFailure(time.Now(), time.Second)
+	time.Sleep(10 * time.Millisecond) // 保证 mutedUntil（1ms）过期进入 half-open
+	st.MarkFailure(time.Now(), time.Millisecond)
 	if got := st.breakerTrips.Load(); got != 2 {
 		t.Fatalf("trips after probe failure extension = %d, want 2", got)
 	}

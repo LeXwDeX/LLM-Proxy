@@ -5,44 +5,30 @@ const path = require("node:path");
 const test = require("node:test");
 const { createHarness } = require("../../../scripts/testing/admin_ui_test.cjs");
 
-function costPoolRows() {
+test("pool list shows the strategy label in the failover-logic column and no status badge", async () => {
   const harness = createHarness();
-  return harness.run().then((app) => {
-    app.state.pools = [
-      { name: "ds", display_name: "DeepSeek 部署池", routing_strategy: "cost" },
-      { name: "legacy" },
-    ];
-    app.state.targets = [];
-    app.modules.pools.renderPools();
-    return harness.ids.get("poolsTableBody").innerHTML;
-  });
-}
-
-test("cost pool strategy badge carries an explicit visible style class", async () => {
-  const rows = await costPoolRows();
-  assert.match(
-    rows,
-    /<span class='quota-badge strategy'>Schema成本优先<\/span>/,
-    "the strategy badge must not use a bare quota-badge span",
-  );
+  const app = await harness.run();
+  app.state.pools = [
+    { name: "ds", display_name: "DeepSeek 部署池", description: "生产池", routing_strategy: "cost" },
+    { name: "perf", routing_strategy: "load" },
+    { name: "legacy" },
+  ];
+  app.state.targets = [];
+  app.modules.pools.renderPools();
+  const rows = harness.ids.get("poolsTableBody").innerHTML;
+  const labels = rows.match(/<td class='pool-strategy'>([^<]*)<\/td>/g);
+  // rows are sorted by pool name: ds, legacy, perf
+  assert.deepEqual(labels, [
+    "<td class='pool-strategy'>Schema成本优先</td>",
+    "<td class='pool-strategy'>Schema成本优先</td>",
+    "<td class='pool-strategy'>Schema性能优先</td>",
+  ]);
+  assert.doesNotMatch(rows, /quota-badge strategy/, "the status column no longer carries a strategy badge");
+  assert.match(rows, /<td class='pool-name' title='生产池'>/, "description moves to the name tooltip");
+  assert.doesNotMatch(rows, /pool-description/);
 });
 
-test("strategy badge style defines foreground and background for both themes", () => {
-  const css = fs.readFileSync(path.join(__dirname, "css/admin.css"), "utf8");
-  const rule = css.match(/\.quota-badge\.strategy\s*\{([^}]*)\}/);
-  assert.ok(rule, ".quota-badge.strategy rule is missing");
-  assert.match(rule[1], /color\s*:\s*var\(--accent\)/);
-  assert.match(rule[1], /background\s*:\s*var\(--accent-soft\)/);
-  const light = css.match(/\.app\s*\{([^}]*)\}/);
-  const dark = css.match(/\.app\.dark\s*\{([^}]*)\}/);
-  assert.ok(light && dark, "theme token blocks are missing");
-  for (const block of [light[1], dark[1]]) {
-    assert.match(block, /--accent\s*:/);
-    assert.match(block, /--accent-soft\s*:/);
-  }
-});
-
-test("pool routing strategy round-trips through the modal and shows on cost pools", async () => {
+test("pool routing strategy round-trips through the modal and defaults to cost", async () => {
   const harness = createHarness();
   const app = await harness.run();
   const field = (id) => harness.ids.get(id);
@@ -54,8 +40,6 @@ test("pool routing strategy round-trips through the modal and shows on cost pool
   app.state.targets = [];
   pools.renderPools();
   const rows = field("poolsTableBody").innerHTML;
-  assert.match(rows, /Schema成本优先/);
-  assert.equal((rows.match(/Schema成本优先/g) || []).length, 1, "load pools carry no strategy badge");
 
   const calls = [];
   app.modules.core.api = async (url, options) => {
@@ -69,14 +53,14 @@ test("pool routing strategy round-trips through the modal and shows on cost pool
   assert.equal(calls[0].options.body.routing_strategy, "cost");
 
   pools.openPoolModal(app.state.pools[1]);
-  assert.equal(field("poolRoutingStrategy").value, "load", "legacy pools default to load");
+  assert.equal(field("poolRoutingStrategy").value, "cost", "legacy pools default to cost");
 
   pools.openPoolModal(null);
-  assert.equal(field("poolRoutingStrategy").value, "load");
+  assert.equal(field("poolRoutingStrategy").value, "cost", "new pools default to cost");
   field("poolName").value = "new-pool";
-  field("poolRoutingStrategy").value = "cost";
+  field("poolRoutingStrategy").value = "load";
   await field("savePoolBtn").listeners.click[0]();
   const create = calls.find((c) => c.options && c.options.method === "POST");
   assert.equal(create.url, "/admin/data/pools");
-  assert.equal(create.options.body.routing_strategy, "cost");
+  assert.equal(create.options.body.routing_strategy, "load");
 });

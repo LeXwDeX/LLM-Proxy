@@ -145,7 +145,9 @@ func TestMinimaxNon2xxMatchesStandard(t *testing.T) {
 		status, badCalls, goodCalls, result int
 	}{
 		{"/v1/chat/completions", "openai", `{"base_resp":{"status_code":1008}}`, 429, 2, 1, 200},
-		{"/v1/chat/completions", "openai", `{"base_resp":{"status_code":1004}}`, 401, 1, 0, 401},
+		// An unrecognised 401 still rejects the proxy key: it cools briefly
+		// and the next key serves (MiniMax and standard alike).
+		{"/v1/chat/completions", "openai", `{"base_resp":{"status_code":1004}}`, 401, 1, 1, 200},
 		{"/v1/messages", "claude", `{"type":"error","request_id":"req_fake","error":{"type":"rate_limit_error","message":"Rate limit reached"}}`, 429, 2, 1, 200},
 		{"/v1/messages", "claude", `{"type":"error","request_id":"req_fake","error":{"type":"overloaded_error","message":"Overloaded"}}`, 529, 1, 0, 529},
 	} {
@@ -175,10 +177,12 @@ func TestMinimaxNon2xxMatchesStandard(t *testing.T) {
 					t.Fatal("response changed")
 				}
 				state := s.targetOrder[0]
-				if state.keyPool.entries[0].exhausted != (tc.status == 429) {
+				// A 429 limits the (key, model) pair and keeps the key active; a 401
+				// cools it as an unconfirmed rejection.
+				if state.keyPool.entries[0].exhausted != (tc.status == 401) {
 					t.Fatal("wrong key state")
 				}
-				if tc.status == 429 && state.keyPool.exhaustReasonAt(0) != "rate_limited" {
+				if tc.status == 429 && len(state.keyPool.entries[0].modelLimits) != 1 {
 					t.Fatal("base_resp changed generic cooldown")
 				}
 				for _, n := range state.keyPool.inFlight {

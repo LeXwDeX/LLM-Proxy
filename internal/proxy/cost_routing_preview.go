@@ -49,6 +49,11 @@ type CostRoutingPreviewMember struct {
 	InFlight               int64    `json:"in_flight"`
 	MaxConcurrency         int      `json:"max_concurrency"`
 	AffinitySoftCapReached bool     `json:"affinity_soft_cap_reached"`
+	// ModelCooldownUntil is set while this member's upstream model for the
+	// previewed alias is cooling after a 429. Phase then reads muted for this
+	// alias (the member cannot be admitted for it) although the target keeps
+	// serving its other models.
+	ModelCooldownUntil *time.Time `json:"model_cooldown_until,omitempty"`
 }
 
 // CostRoutingPreview builds a diagnostic snapshot for one pool and one client
@@ -186,6 +191,13 @@ func buildPreviewMember(state *targetState, model string, resolver usage.RateRes
 		return member
 	}
 	member.ResolvedVia = previewResolvedVia(t, model, upstream)
+	if ml, limited := state.modelLimitFor(upstream, now); limited {
+		until := ml.until
+		member.ModelCooldownUntil = &until
+		if member.Phase == phaseReady {
+			member.Phase = phaseMuted
+		}
+	}
 	if t.Paused {
 		member.Eligible = false
 		member.Reason = "target_paused"

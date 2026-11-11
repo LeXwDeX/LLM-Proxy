@@ -29,6 +29,7 @@ type AdminSchema struct {
 	QuotaScopes              []config.EnumOption         `json:"quota_scopes"`
 	QuotaSyncModes           []config.EnumOption         `json:"quota_sync_modes"`
 	TargetPhases             []config.EnumOption         `json:"target_phases"`
+	TargetMuteReasons        []config.EnumOption         `json:"target_mute_reasons"`
 	PoolRoutingStrategies    []config.EnumOption         `json:"pool_routing_strategies"`
 	Defaults                 SchemaDefaults              `json:"defaults"`
 	StreamUsageRequestSchema config.RequestSchema        `json:"stream_usage_request_schema"`
@@ -74,6 +75,7 @@ func (h *Handler) handleSchema(w http.ResponseWriter, r *http.Request) {
 			{Value: "job_level", Label: "到整个职级"},
 		},
 		TargetPhases:          proxy.AllTargetPhaseOptions(),
+		TargetMuteReasons:     proxy.AllTargetMuteReasonOptions(),
 		PoolRoutingStrategies: config.AllPoolRoutingStrategyOptions(),
 		Defaults: SchemaDefaults{
 			EndpointType:                config.NormalizeEndpointType(""),
@@ -87,7 +89,7 @@ func (h *Handler) handleSchema(w http.ResponseWriter, r *http.Request) {
 			AnthropicPrefix:             config.DefaultDualProtocolAnthropicPrefix,
 			SupportsResponses:           config.DefaultDualProtocolSupportsResponses,
 			RequestStreamUsageIfMissing: config.DefaultRequestStreamUsageIfMissing,
-			PoolRoutingStrategy:         config.PoolRoutingLoad,
+			PoolRoutingStrategy:         config.PoolRoutingCost,
 		},
 	})
 }

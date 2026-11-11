@@ -51,6 +51,7 @@
           <label for="tgtMaxConcurrency">最大并发</label>
           <input class="form-control" id="tgtMaxConcurrency" type="number" min="0" step="1" placeholder="0（不限）" autocomplete="off">
           <small style="color:var(--text-muted)">同时转发到该 Target 的最大在途请求数；留空或 0 表示不限。达到上限后成本池会溢出到下一层候选。</small>
+          <small id="tgtMaxConcurrencyHint" class="pool-capacity-hint" role="note" hidden></small>
         </div>
         <div class="form-group">
           <label for="tgtUsageAdapter">计费类型（必选）</label>

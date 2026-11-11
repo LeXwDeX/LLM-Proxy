@@ -90,7 +90,11 @@ func TestRequestStatsHTTPCompletionAndWire(t *testing.T) {
 			s.SetRequestStatsRecorder(rec)
 			w := httptest.NewRecorder()
 			s.ServeHTTP(w, statsRequest(t, tc.path))
-			if w.Code != tc.status || w.Body.String() != tc.body {
+			wantCode := tc.status
+			if tc.status == http.StatusUnauthorized {
+				wantCode = http.StatusServiceUnavailable // proxy-key 401 shown as 503, body unchanged
+			}
+			if w.Code != wantCode || w.Body.String() != tc.body {
 				t.Fatalf("wire changed: %d %s", w.Code, w.Body.String())
 			}
 			assertCompletions(t, rec, tc.want)

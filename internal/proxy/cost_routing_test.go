@@ -226,11 +226,17 @@ func TestCostRoutingUnpricedAndOutsidePoolRankLast(t *testing.T) {
 	assertOnly(t, costPicks(t, s, peak, map[string]struct{}{"priced": {}, "unpriced": {}}, 4), "outside")
 }
 
+// 空策略（含旧数据）默认成本优先；仅显式 load 才保持性能优先的负载均衡。
+func TestCostRoutingEmptyStrategyDefaultsToCost(t *testing.T) {
+	peak := costTestAt(2026, 11, 4, 10, 0)
+	assertOnly(t, costPicks(t, peakValleyService(t, ""), peak, nil, 8), "agg")
+	assertShared(t, costPicks(t, peakValleyService(t, config.PoolRoutingLoad), peak, nil, 8), "official", "agg")
+}
+
 func TestCostRoutingDisabledKeepsLoadBalancing(t *testing.T) {
 	peak := costTestAt(2026, 11, 4, 10, 0)
 
 	t.Run("load strategy", func(t *testing.T) {
-		assertShared(t, costPicks(t, peakValleyService(t, ""), peak, nil, 8), "official", "agg")
 		assertShared(t, costPicks(t, peakValleyService(t, config.PoolRoutingLoad), peak, nil, 8), "official", "agg")
 	})
 
@@ -276,34 +282,79 @@ func costPrincipal(t *testing.T) *auth.Principal {
 	return principal
 }
 
-func TestCostRoutingAffinityFollowsCheapestTier(t *testing.T) {
+// 所有策略都不主动打断粘连：粘连目标只要能承接请求就继续命中，即使存在更便宜的层；
+// 仅在粘连目标无法承接时临时改选，且不迁移绑定。
+func TestCostRoutingAffinityDoesNotYieldToCheaperTier(t *testing.T) {
 	principal := costPrincipal(t)
 	peak := costTestAt(2026, 11, 4, 10, 0)
 	idle := costTestAt(2026, 11, 4, 20, 0)
 	const ip = "10.0.0.8"
 
-	t.Run("ip affinity yields to a cheaper tier", func(t *testing.T) {
+	t.Run("ip affinity keeps a healthy pricier target", func(t *testing.T) {
 		s := peakValleyService(t, config.PoolRoutingCost)
 		s.affinity.Set(affinityKey(ip, principal.Name, costTestModel), "official", peak)
-		state, lease, kind, err := s.selectTarget(principal, ip, "", "", nil, nil, costTestModel, costTestPath, peak)
-		if err != nil {
-			t.Fatal(err)
-		}
-		state.releaseProbe(lease)
-		if state.Target().Name != "agg" || kind != selectionCostRebind {
-			t.Fatalf("got %s kind=%v, want agg costRebind", state.Target().Name, kind)
+		for i := 0; i < 4; i++ {
+			state, lease, kind, err := s.selectTarget(principal, ip, "", "", nil, nil, costTestModel, costTestPath, peak)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.releaseProbe(lease)
+			if state.Target().Name != "official" || kind != selectionAffinityHit {
+				t.Fatalf("got %s kind=%v, want sticky official affinity hit", state.Target().Name, kind)
+			}
 		}
 	})
 
-	t.Run("session binding yields to a cheaper tier", func(t *testing.T) {
+	t.Run("session binding keeps a healthy pricier target", func(t *testing.T) {
 		s := peakValleyService(t, config.PoolRoutingCost)
 		state, lease, kind, err := s.selectTarget(principal, ip, "official", "", nil, nil, costTestModel, costTestPath, peak)
 		if err != nil {
 			t.Fatal(err)
 		}
 		state.releaseProbe(lease)
-		if state.Target().Name != "agg" || kind != selectionCostRebind {
-			t.Fatalf("got %s kind=%v, want agg costRebind", state.Target().Name, kind)
+		if state.Target().Name != "official" || kind != selectionAffinityHit {
+			t.Fatalf("got %s kind=%v, want sticky official affinity hit", state.Target().Name, kind)
+		}
+	})
+
+	t.Run("empty strategy pool also keeps the binding", func(t *testing.T) {
+		s := peakValleyService(t, "")
+		s.affinity.Set(affinityKey(ip, principal.Name, costTestModel), "official", peak)
+		state, lease, kind, err := s.selectTarget(principal, ip, "", "", nil, nil, costTestModel, costTestPath, peak)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.releaseProbe(lease)
+		if state.Target().Name != "official" || kind != selectionAffinityHit {
+			t.Fatalf("got %s kind=%v, want sticky official affinity hit", state.Target().Name, kind)
+		}
+	})
+
+	t.Run("unavailable sticky target fails over by cost without moving the binding", func(t *testing.T) {
+		s := peakValleyService(t, config.PoolRoutingCost)
+		s.affinity.Set(affinityKey(ip, principal.Name, costTestModel), "official", peak)
+		official, _ := s.targetByName("official")
+		official.MarkFailure(peak, time.Minute)
+		state, lease, kind, err := s.selectTarget(principal, ip, "", "", nil, nil, costTestModel, costTestPath, peak)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.releaseProbe(lease)
+		if state.Target().Name != "agg" || kind != selectionFailover {
+			t.Fatalf("got %s kind=%v, want cheapest agg failover", state.Target().Name, kind)
+		}
+		if bound, _ := s.affinity.Get(affinityKey(ip, principal.Name, costTestModel), peak); bound != "official" {
+			t.Fatalf("failover moved the ip binding to %q", bound)
+		}
+		// The cooldown ends: the next request returns to the sticky target.
+		back := peak.Add(2 * time.Minute)
+		state, lease, kind, err = s.selectTarget(principal, ip, "", "", nil, nil, costTestModel, costTestPath, back)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.releaseProbe(lease)
+		if state.Target().Name != "official" || kind != selectionAffinityHit {
+			t.Fatalf("after cooldown got %s kind=%v, want sticky official", state.Target().Name, kind)
 		}
 	})
 
@@ -337,17 +388,23 @@ func TestCostRoutingAffinityFollowsCheapestTier(t *testing.T) {
 	})
 }
 
-// The switch happens on the next request: the session binding moves to the
-// cheaper tier once that request succeeds, and a load pool keeps the binding.
-func TestCostRoutingNextRequestRebindsSession(t *testing.T) {
+// A cost pool never moves a session binding on its own: while the bound target
+// can serve, requests stay on it even though another member is cheaper; when it
+// is cooling the request goes to the cheapest member and the binding is kept.
+func TestCostRoutingNextRequestKeepsSessionBinding(t *testing.T) {
 	for _, tc := range []struct {
+		name     string
 		strategy string
+		cooling  bool // the bound target is cooling, so the request must go elsewhere
 		want     string
 	}{
-		{config.PoolRoutingCost, "agg"},
-		{config.PoolRoutingLoad, "official"},
+		{"cost keeps the binding", config.PoolRoutingCost, false, "official"},
+		{"empty keeps the binding", "", false, "official"},
+		{"load keeps the binding", config.PoolRoutingLoad, false, "official"},
+		{"cost failover leaves the binding", config.PoolRoutingCost, true, "agg"},
+		{"load failover leaves the binding", config.PoolRoutingLoad, true, "agg"},
 	} {
-		t.Run(tc.strategy, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			hits := map[string]int{}
 			upstream := func(name string) *httptest.Server {
 				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -368,6 +425,10 @@ func TestCostRoutingNextRequestRebindsSession(t *testing.T) {
 			principal := costPrincipal(t)
 			sessionKey := sessionAffinityKey(principal.Name, "sess-1", costTestModel)
 			s.affinity.SetWithTTL(sessionKey, "official", time.Now(), sessionAffinityTTL)
+			if tc.cooling {
+				bound, _ := s.targetByName("official")
+				bound.MarkFailure(time.Now(), time.Hour)
+			}
 
 			req := httptest.NewRequest(http.MethodPost, costTestPath, bytes.NewBufferString(`{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"hi"}]}`))
 			req.Header.Set("Content-Type", "application/json")
@@ -381,8 +442,8 @@ func TestCostRoutingNextRequestRebindsSession(t *testing.T) {
 			if hits[tc.want] != 1 || len(hits) != 1 {
 				t.Fatalf("upstream hits = %v, want one request on %s", hits, tc.want)
 			}
-			if bound, _ := s.affinity.Get(sessionKey, time.Now()); bound != tc.want {
-				t.Fatalf("session bound to %q, want %q", bound, tc.want)
+			if bound, _ := s.affinity.Get(sessionKey, time.Now()); bound != "official" {
+				t.Fatalf("session bound to %q, want the original official binding", bound)
 			}
 		})
 	}

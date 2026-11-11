@@ -410,6 +410,10 @@ type keyState struct {
 	ExhaustReason string    `json:"exhaust_reason"`
 	CooldownEnd   time.Time `json:"cooldown_end"`
 	Status        string    `json:"status"`
+	// ModelLimits are the per-model 429 limits of an otherwise usable key.
+	ModelLimits []struct {
+		Model string `json:"model"`
+	} `json:"model_limits"`
 }
 
 func keyStatus(t *testing.T, targetName string, index int) keyState {

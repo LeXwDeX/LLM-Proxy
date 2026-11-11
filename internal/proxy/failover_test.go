@@ -13,30 +13,36 @@ func TestClassifyNon2xxAttempt(t *testing.T) {
 		name          string
 		status        int
 		allowFallback bool
+		keyPooled     bool
 		want          failoverAction
 	}{
-		{"400 dequeue", http.StatusBadRequest, true, failoverDequeue},
-		{"403 account rejection", http.StatusForbidden, true, failoverTerminate},
-		{"404 dequeue", http.StatusNotFound, true, failoverDequeue},
-		{"409 dequeue", http.StatusConflict, true, failoverDequeue},
-		{"413 dequeue", http.StatusRequestEntityTooLarge, true, failoverDequeue},
-		{"415 dequeue", http.StatusUnsupportedMediaType, true, failoverDequeue},
-		{"422 dequeue", http.StatusUnprocessableEntity, true, failoverDequeue},
-		{"401 key scope", http.StatusUnauthorized, true, failoverTerminate},
-		{"402 key scope", http.StatusPaymentRequired, true, failoverTerminate},
-		{"429 key scope", http.StatusTooManyRequests, true, failoverTerminate},
-		{"408 may have processed", http.StatusRequestTimeout, true, failoverTerminate},
-		{"500 may have processed", http.StatusInternalServerError, true, failoverTerminate},
-		{"502 may have processed", http.StatusBadGateway, true, failoverTerminate},
-		{"503 may have processed", http.StatusServiceUnavailable, true, failoverTerminate},
-		{"529 may have processed", 529, true, failoverTerminate},
-		{"200 success", http.StatusOK, true, failoverTerminate},
-		{"400 explicit target", http.StatusBadRequest, false, failoverTerminate},
+		{"400 dequeue", http.StatusBadRequest, true, false, failoverDequeue},
+		{"403 account rejection dequeues", http.StatusForbidden, true, false, failoverDequeue},
+		{"403 multi-key dequeues after key loop", http.StatusForbidden, true, true, failoverDequeue},
+		{"403 explicit target", http.StatusForbidden, false, false, failoverTerminate},
+		{"404 dequeue", http.StatusNotFound, true, false, failoverDequeue},
+		{"409 dequeue", http.StatusConflict, true, false, failoverDequeue},
+		{"413 dequeue", http.StatusRequestEntityTooLarge, true, false, failoverDequeue},
+		{"415 dequeue", http.StatusUnsupportedMediaType, true, false, failoverDequeue},
+		{"422 dequeue", http.StatusUnprocessableEntity, true, false, failoverDequeue},
+		{"401 only if account rejection", http.StatusUnauthorized, true, false, failoverDequeueIfAccountRejection},
+		{"402 only if account rejection", http.StatusPaymentRequired, true, true, failoverDequeueIfAccountRejection},
+		{"401 explicit target", http.StatusUnauthorized, false, false, failoverTerminate},
+		{"429 single key dequeues", http.StatusTooManyRequests, true, false, failoverDequeue},
+		{"429 key pool scope", http.StatusTooManyRequests, true, true, failoverTerminate},
+		{"429 explicit target", http.StatusTooManyRequests, false, false, failoverTerminate},
+		{"408 may have processed", http.StatusRequestTimeout, true, false, failoverTerminate},
+		{"500 may have processed", http.StatusInternalServerError, true, false, failoverTerminate},
+		{"502 may have processed", http.StatusBadGateway, true, false, failoverTerminate},
+		{"503 may have processed", http.StatusServiceUnavailable, true, false, failoverTerminate},
+		{"529 may have processed", 529, true, false, failoverTerminate},
+		{"200 success", http.StatusOK, true, false, failoverTerminate},
+		{"400 explicit target", http.StatusBadRequest, false, false, failoverTerminate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := classifyNon2xxAttempt(tc.status, tc.allowFallback); got != tc.want {
-				t.Fatalf("classifyNon2xxAttempt(%d, %v) = %v, want %v", tc.status, tc.allowFallback, got, tc.want)
+			if got := classifyNon2xxAttempt(tc.status, tc.allowFallback, tc.keyPooled); got != tc.want {
+				t.Fatalf("classifyNon2xxAttempt(%d, %v, %v) = %v, want %v", tc.status, tc.allowFallback, tc.keyPooled, got, tc.want)
 			}
 		})
 	}
