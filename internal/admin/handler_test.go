@@ -259,9 +259,10 @@ func TestHandlerMetrics(t *testing.T) {
 	}
 
 	var resp struct {
-		UptimeSeconds float64          `json:"uptime_seconds"`
-		Targets       int              `json:"targets"`
-		Requests      map[string]int64 `json:"requests"`
+		UptimeSeconds float64 `json:"uptime_seconds"`
+		Targets       int     `json:"targets"`
+		// requests mixes scalar counters with the per-status mute breakdown object.
+		Requests map[string]json.RawMessage `json:"requests"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -272,8 +273,14 @@ func TestHandlerMetrics(t *testing.T) {
 	if resp.Targets != 1 {
 		t.Fatalf("expected targets 1, got %d", resp.Targets)
 	}
-	if count, ok := resp.Requests["usage_record_failures"]; !ok || count != 0 {
-		t.Fatalf("usage_record_failures metric = %d (present=%v), want present and 0", count, ok)
+	if raw, ok := resp.Requests["usage_record_failures"]; !ok || string(raw) != "0" {
+		t.Fatalf("usage_record_failures metric = %s (present=%v), want present and 0", raw, ok)
+	}
+	if raw, ok := resp.Requests["upstream_rejection_muted_total"]; !ok || string(raw) != "0" {
+		t.Fatalf("upstream_rejection_muted_total = %s (present=%v), want present and 0", raw, ok)
+	}
+	if _, ok := resp.Requests["upstream_rejection_muted_by_status"]; !ok {
+		t.Fatalf("upstream_rejection_muted_by_status missing")
 	}
 }
 
@@ -3588,7 +3595,7 @@ func TestHandlerMetricsAndHealthzExposeCapacity(t *testing.T) {
 		}
 	}
 	var recentRaw struct {
-		Requests map[string]int64 `json:"requests"`
+		Requests map[string]json.RawMessage `json:"requests"`
 	}
 	if err := json.Unmarshal(recentRec.Body.Bytes(), &recentRaw); err != nil {
 		t.Fatal(err)

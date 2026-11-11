@@ -182,8 +182,17 @@ func runOfficialContract(t *testing.T, tc officialContract) {
 	if err := <-checks; err != nil {
 		t.Fatal(err)
 	}
-	if rr.Code != tc.Status || !bytes.Equal(rr.Body.Bytes(), wire) {
-		t.Fatalf("response altered: status=%d want=%d body=%q", rr.Code, tc.Status, rr.Body.String())
+	wantStatus := tc.Status
+	if tc.Status == http.StatusUnauthorized {
+		// A 401 on the proxy's own key reaches the client as 503 with the
+		// upstream status in X-Upstream-Status; the body is unchanged.
+		wantStatus = http.StatusServiceUnavailable
+		if got := rr.Header().Get(headerUpstreamStatus); got != "401" {
+			t.Fatalf("%s = %q, want 401", headerUpstreamStatus, got)
+		}
+	}
+	if rr.Code != wantStatus || !bytes.Equal(rr.Body.Bytes(), wire) {
+		t.Fatalf("response altered: status=%d want=%d body=%q", rr.Code, wantStatus, rr.Body.String())
 	}
 	if tc.ResponseEncoding != "" && rr.Header().Get("Content-Encoding") != tc.ResponseEncoding {
 		t.Error("response encoding changed")

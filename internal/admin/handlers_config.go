@@ -84,6 +84,7 @@ func (h *Handler) handleReloadConfig(w http.ResponseWriter, r *http.Request) {
 	if h.costCache != nil {
 		h.costCache.Invalidate()
 	}
+	h.warnCostPoolCapacity(cfg)
 	h.noteQuotaConfigChange()
 	// 计价缓存预热由 configTxn.Unlock 在释放 configMu 之后完成。
 	// m11：同步 admin_session 配置（secret/ttl），否则 reload 返回 ok 但 sessionManager

@@ -149,6 +149,10 @@ func newSchedFixture(t *testing.T, mut func(*config.Config)) *schedFixture {
 	if err != nil {
 		t.Fatalf("proxy service: %v", err)
 	}
+	// These scenarios assert the immediate "all targets muted" 503 during a
+	// cooldown. The bounded in-proxy wait (which would wait out the 0.5-1s
+	// cooldowns here) is covered by the proxy unit tests and the e2e suite.
+	f.svc.SetInProxyWaitLimits(-1, 0)
 	f.store = auth.NewStore()
 	if err := f.store.LoadFromConfig(clients); err != nil {
 		t.Fatalf("load clients: %v", err)
@@ -432,13 +436,22 @@ func TestIntegrationFaultTripHalfOpenProbeRecoveryChain(t *testing.T) {
 		return r.Phase == "muted" && r.BreakerTrips == 1
 	}, "after first failure")
 
-	// ② 冷却期内的后续自动选择 → 503 all targets muted until X（绝不吸入流量）。
+	// ② 冷却期内、没有其他可用候选：首个请求成为单飞提前探测（上游仍 500，失败发生在
+	//    冷却期内只计数，不延长、不叠加熔断次数）；同一探测间隔内的后续请求 → 503
+	//    all targets muted until X（绝不吸入流量）。
 	code, body := doRequest(t, f.svc, f.store, "10.7.0.2", "")
+	if code != http.StatusInternalServerError || flaky.hits.Load() != 2 {
+		t.Fatalf("early probe during cooldown: got %d %s, flaky hits=%d", code, body, flaky.hits.Load())
+	}
+	waitForRuntime(t, f.adminH, "flaky-node", func(r runtimeNode) bool {
+		return r.Phase == "muted" && r.BreakerTrips == 1
+	}, "after failed early probe")
+	code, body = doRequest(t, f.svc, f.store, "10.7.0.2", "")
 	if code != http.StatusServiceUnavailable || !strings.Contains(body, "all targets muted until") {
 		t.Fatalf("during cooldown expected 503 muted message, got %d %s", code, body)
 	}
-	if flaky.hits.Load() != 1 {
-		t.Fatalf("cooldown window must not schedule traffic, flaky hits=%d", flaky.hits.Load())
+	if flaky.hits.Load() != 2 {
+		t.Fatalf("cooldown window must not schedule more traffic, flaky hits=%d", flaky.hits.Load())
 	}
 	// paused 对照节点显式点名同样被拒（下线优先于一切状态）。
 	code, body = doRequest(t, f.svc, f.store, "10.7.0.2", "healthy-paused")

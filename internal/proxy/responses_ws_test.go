@@ -148,6 +148,9 @@ func TestResponsesWSFallbackAndEligibility(t *testing.T) {
 			if tc.handshakeStatus == 401 || tc.handshakeStatus == 403 || tc.handshakeStatus == 429 {
 				wantPOST, wantStatus = 0, tc.handshakeStatus
 			}
+			if tc.handshakeStatus == 401 {
+				wantStatus = http.StatusServiceUnavailable // proxy-key 401 shown as 503
+			}
 			if gets.Load() != int32(tc.wantGET) || posts.Load() != wantPOST || w.Code != wantStatus {
 				t.Fatalf("GET=%d POST=%d response=%d %s", gets.Load(), posts.Load(), w.Code, w.Body.String())
 			}

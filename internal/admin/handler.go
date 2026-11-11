@@ -39,6 +39,8 @@ type Handler struct {
 	pricingTemplateStore *nosql.PricingTemplateStore
 	sessionManager       *SessionManager
 	logger               *slog.Logger
+	capacityWarnedMu     sync.Mutex        // 保护 capacityWarned
+	capacityWarned       map[string]string // 成本优先池未设并发上限成员的上次告警内容（去重）
 
 	// reportCache 是展示用的短 TTL 报表缓存（仅总览与用量聚合），见 report_cache.go。
 	reportCache *reportCache

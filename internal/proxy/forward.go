@@ -54,6 +54,10 @@ type forwardAttemptError struct {
 	// skipMute=true 时，service.go 的 failover 分支不调用 handleForwardError（不 mute 目标）。
 	// 仅 all-keys-exhausted 用：keypool 冷却自管恢复，mute 会误伤显式目标（评审回归修复）。
 	skipMute bool
+	// modelLimitedUntil is set with skipMute when no key can serve the request's
+	// upstream model only because every active key is rate limited for it (the
+	// earliest key recovery): the target then cools for that model.
+	modelLimitedUntil time.Time
 	// noUsage: this attempt may have reached the upstream without a response
 	// body. The request loop records it only if it is the final outcome.
 	noUsage *pendingNoUsage
@@ -130,7 +134,7 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 		}
 		// 亲和键：IP + 客户端 access_key，区分同 token 不同机器/用户
 		affinityID := clientIP(r) + "|" + clientKey
-		selected, idx := state.keyPool.selectKeyForClient(affinityID)
+		selected, idx := state.keyPool.selectKeyForClientModel(affinityID, upstreamModel)
 		if selected == "" {
 			if err := r.Context().Err(); err != nil {
 				return nil, nil, -1, &forwardAttemptError{status: classifyTransportError(err), err: err}
@@ -146,7 +150,7 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 				state.keyPool.wakeUpComplete()
 				if recoveredIdx >= 0 {
 					// 唤醒成功，重新选择 key
-					selected, idx = state.keyPool.selectKeyForClient(affinityID)
+					selected, idx = state.keyPool.selectKeyForClientModel(affinityID, upstreamModel)
 					if selected != "" {
 						s.logger.Info("[keypool] wake-up successful, key recovered",
 							"request_id", appmiddleware.RequestIDFromContext(r.Context()),
@@ -157,6 +161,18 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 						keyIndex = idx
 						goto keySelected
 					}
+				}
+			}
+			// Active keys that are all rate limited for this model (and nothing left to
+			// wake): the model is limited on this target, not the keys exhausted.
+			if until, limited := state.keyPool.allKeysModelLimited(upstreamModel, time.Now()); limited {
+				return nil, nil, -1, &forwardAttemptError{
+					status:            http.StatusTooManyRequests,
+					retryable:         true,
+					skipMute:          true,
+					modelLimitedUntil: until,
+					err:               fmt.Errorf("proxy: every API key is rate limited for model on target %q", target.Name),
+					startedAt:         startedAt,
 				}
 			}
 			return nil, nil, -1, &forwardAttemptError{
@@ -384,15 +400,15 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 	// transport errors retain the defensive, non-replayable error path below.
 	var nativeHandshakeErr *responsesWebsocketHandshakeError
 	if errors.As(err, &nativeHandshakeErr) && nativeHandshakeErr.complete {
-		keyFailure := s.observeResponsesKeyFailure(state, target, extractModel(r, body), ResolveProtocol(r.URL.Path), keyIndex, nativeHandshakeErr.status, nativeHandshakeErr.body, false)
+		keyFailure := s.observeResponsesKeyFailure(state, target, upstreamModel, ResolveProtocol(r.URL.Path), keyIndex, nativeHandshakeErr.status, nativeHandshakeErr.body, false, s.attemptUsesClientCredential(target, r))
 		rejection := &responsesWebsocketRejectionBody{
 			Reader: bytes.NewReader(nativeHandshakeErr.body), envelope: nativeHandshakeErr.body,
 			unhealthy: !keyFailure && isUpstreamFailureStatus(nativeHandshakeErr.status),
 			settleHealth: func(unhealthy bool) {
 				if unhealthy {
-					state.MarkFailure(time.Now(), s.quietPeriod)
+					s.markTargetFailure(state, time.Now(), nativeHandshakeErr.status, nativeHandshakeErr.header, false, upstreamModel)
 				} else {
-					state.MarkSuccess(time.Now())
+					state.markReachable(time.Now(), lease != nil)
 				}
 				state.releaseProbe(lease)
 			},
@@ -537,11 +553,12 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 			if !isUpstreamFailureStatus(transportStatus) {
 				// Deterministic request/key rejections confirm reachability.
 				// Every completed handshake must also end a half-open probe.
-				state.MarkSuccess(time.Now())
+				state.markReachable(time.Now(), lease != nil)
 			} else {
 				// Health feedback is independent of replay permission: an upstream
-				// failure ends the probe with normal cooldown but never replays WS.
-				state.MarkFailure(time.Now(), s.quietPeriod)
+				// failure ends the probe with its classified cooldown but never
+				// replays WS.
+				s.markTargetFailure(state, time.Now(), transportStatus, nativeHandshakeErr.header, false, upstreamModel)
 			}
 			state.releaseProbe(lease)
 			if session, ok := r.Context().Value(responsesWebsocketContextKey{}).(*responsesWebsocketSession); ok {
@@ -580,6 +597,19 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 				"possibly_sent", true,
 				"replayed", false,
 				"upstream_close_code", responsesWSUpstreamCloseCode(err),
+			)
+		}
+		// A timeout after the request may have been sent is never retried or
+		// replayed. A single one does not judge the target either; only
+		// sentTimeoutBreakerThreshold in a row (no success between) cool it,
+		// so a black-holing upstream stops receiving sticky traffic. A parent
+		// cancel or deadline is the client's, not the target's, and never counts.
+		if internalStatus == http.StatusGatewayTimeout && (wsSent || sendState.mayHaveSent.Load()) && r.Context().Err() == nil && state.noteSentTimeout(time.Now()) {
+			s.markTargetFailure(state, time.Now(), http.StatusGatewayTimeout, nil, false, "")
+			s.logger.Warn("target cooled after consecutive sent timeouts",
+				"request_id", reqID,
+				"target", targetName(target),
+				"consecutive_timeouts", sentTimeoutBreakerThreshold,
 			)
 		}
 		return nil, nil, keyIndex, &forwardAttemptError{
@@ -641,6 +671,10 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 			exhaustionBody = nil
 		}
 		if strings.EqualFold(encoding, "gzip") {
+			// A gzip prefix that does not decode (e.g. a body longer than the
+			// 4 KiB pre-read) supplies no classification; never classify the
+			// compressed bytes themselves.
+			exhaustionBody = nil
 			if gr, err := gzip.NewReader(bytes.NewReader(checkBody)); err == nil {
 				if decompressed, err := io.ReadAll(io.LimitReader(gr, 8192)); err == nil {
 					exhaustionBody = decompressed
@@ -648,12 +682,32 @@ func (s *Service) forwardRequest(r *http.Request, state *targetState, body []byt
 				gr.Close()
 			}
 		}
+		// A 403 is only judged on a complete body: a truncated prefix cannot
+		// rule out content moderation. The cross-target dequeue reads up to
+		// 64 KiB and decides there.
+		rejectionBody := exhaustionBody
+		if readErr != nil || len(checkBody) >= 4096 {
+			rejectionBody = nil
+		}
+		clientCredential := s.attemptUsesClientCredential(target, r)
 		if wsBody := responseWSBody(resp); wsBody != nil {
 			wsBody.setOutcome(true, resp.StatusCode, exhaustionBody)
 		}
 
-		if exhausted, code := targetKeyExhausted(target, ResolveProtocol(r.URL.Path), resp.StatusCode, exhaustionBody); exhausted {
+		if exhausted, code := targetKeyExhausted(target, ResolveProtocol(r.URL.Path), resp.StatusCode, exhaustionBody); exhausted && !clientCredential {
+			// The client's own forwarded credential never cools a proxy key.
 			state.keyPool.markExhaustedWithError(keyIndex, code, string(exhaustionBody))
+		} else if !exhausted {
+			// A non-moderation 403 or an unrecognised 401 rejects this key's
+			// credential: cool the key (confirmed for the fixed hour,
+			// unconfirmed briefly) and let the key loop try the other keys
+			// first. The target itself is muted only when the loop converges or
+			// runs out of keys and the rejection reaches the cross-target dequeue.
+			body := exhaustionBody
+			if resp.StatusCode == http.StatusForbidden {
+				body = rejectionBody
+			}
+			s.markKeyAccountRejection(state, target, ResolveProtocol(r.URL.Path), keyIndex, resp.StatusCode, body, clientCredential)
 		}
 	}
 
@@ -784,6 +838,13 @@ func (b *responsesWebsocketRejectionBody) settle(unhealthy bool) {
 	b.once.Do(func() { b.settleHealth(unhealthy) })
 }
 
+// settleWith replaces the default health settlement with the caller's own
+// (the cross-target dequeue's fixed cooldown). It shares the once guard with
+// settle, so the attempt still settles exactly once however it ends.
+func (b *responsesWebsocketRejectionBody) settleWith(settle func()) {
+	b.once.Do(settle)
+}
+
 func (b *responsesWebsocketRejectionBody) Close() error {
 	b.settle(b.unhealthy)
 	return nil
@@ -824,7 +885,7 @@ func (s *Service) writeResponse(
 	keyIndex int,
 	accountLevelFailure bool, // MED-3: 收敛透传的账户级 4xx 应按失败计（mute + 不计 success）
 	lease *probeLease,
-) requeststats.Outcome {
+) (completion requeststats.Outcome, delivered bool) {
 	defer deferCancel(cancel)
 	defer resp.Body.Close()
 
@@ -866,11 +927,13 @@ func (s *Service) writeResponse(
 			if nativeRejection != nil {
 				nativeRejection.settle(unhealthy)
 			} else if unhealthy {
-				state.MarkFailure(time.Now(), s.quietPeriod)
+				// Classified cooldown by the upstream status; a 2xx that failed
+				// while copying is a transport problem (network class).
+				s.markTargetFailure(state, time.Now(), resp.StatusCode, resp.Header, accountLevelFailure, upstreamModel)
 			} else {
 				// Request errors and normal truncation confirm reachability,
 				// just as HTTP 4xx does, and release any half-open probe lease.
-				state.MarkSuccess(time.Now())
+				state.markReachable(time.Now(), lease != nil)
 			}
 			stats := state.Stats()
 			s.metrics.totalFailures.Add(1)
@@ -883,10 +946,19 @@ func (s *Service) writeResponse(
 				"muted_until", stats.MutedUntil,
 			)
 		} else {
-			state.MarkSuccess(time.Now())
+			if resp.StatusCode >= 400 {
+				// A passed-through request 4xx proves reachability only; it must
+				// not clear a concurrent account-rejection cooldown.
+				state.markReachable(time.Now(), lease != nil)
+			} else {
+				state.MarkSuccess(time.Now())
+				// A real success ends only its own model's 429 cooldown: another
+				// model's success says nothing about this model's rate limit.
+				state.clearModelLimit(upstreamModel)
+			}
 			// 真实成功：重置该 key 的连续 429 限流指数退避计数（限流周期已过）
 			if state.keyPool != nil && keyIndex >= 0 {
-				state.keyPool.markKeySuccess(keyIndex)
+				state.keyPool.markKeySuccessModel(keyIndex, upstreamModel)
 				// WP-3：重置连续失败计数（consecutiveFails，RETRY≥2 降级依据）
 				state.keyPool.resetFails(keyIndex)
 			}
@@ -993,7 +1065,7 @@ func (s *Service) writeResponse(
 			if state.keyPool != nil && keyIndex >= 0 && state.keyPool.exhaustReasonAt(keyIndex) != "" {
 				unhealthy = accountLevelFailure
 			}
-		} else if s.observeResponsesKeyFailure(state, target, upstreamModel, ResolveProtocol(r.URL.Path), keyIndex, status, errorBody, true) {
+		} else if s.observeResponsesKeyFailure(state, target, upstreamModel, ResolveProtocol(r.URL.Path), keyIndex, status, errorBody, true, s.attemptUsesClientCredential(target, r)) {
 			unhealthy = (copyErr != nil && !wsBody.noMute.Load()) || accountLevelFailure
 		}
 		// Streaming headers may already be committed, but accounting and traces
@@ -1029,7 +1101,7 @@ func (s *Service) writeResponse(
 			unhealthy := upstreamCopyFailed || isUpstreamFailureStatus(status)
 			// Observe key-specific failures once, after sending. Never replay a
 			// WS create: only the next client turn may choose another key.
-			if s.observeResponsesKeyFailure(state, target, upstreamModel, ResolveProtocol(r.URL.Path), keyIndex, status, websocketSession.turnErrorBody, true) {
+			if s.observeResponsesKeyFailure(state, target, upstreamModel, ResolveProtocol(r.URL.Path), keyIndex, status, websocketSession.turnErrorBody, true, s.attemptUsesClientCredential(target, r)) {
 				unhealthy = upstreamCopyFailed
 			}
 			recordOutcome(websocketSession.turnFailed || copyErr != nil, unhealthy)
@@ -1126,7 +1198,39 @@ func (s *Service) writeResponse(
 			lifecycleFailed = lifecycleFailed || !nativeWriter.terminal
 		}
 	}
-	return responseCompletion(r, resp.StatusCode, copyErr, clientWriteFailed, lifecycleFailed)
+	outcome := responseCompletion(r, resp.StatusCode, copyErr, clientWriteFailed, lifecycleFailed)
+	delivered = outcome == requeststats.Success
+	if !delivered && wsBody == nil && !websocketResponse {
+		var terminal bool
+		if usageReader != nil {
+			terminal = usageReader.streaming && usageReader.terminal && usageReader.err == nil
+		}
+		delivered = responseDeliveredInFull(resp.StatusCode, resp.ContentLength, copied, copyErr, clientWriteFailed, lifecycleFailed, terminal)
+	}
+	return outcome, delivered
+}
+
+// responseDeliveredInFull reports whether a plain HTTP response reached the
+// client complete: an upstream 2xx whose lifecycle did not fail and whose body
+// was written downstream without a write error. A client that disconnects after
+// that (the edge proxy closes the connection after every response, without
+// upstream keep-alive) cancels the request context while the handler still does
+// its post-copy work; that cancel is not a failure of the delivery. A cancel
+// that surfaces in the copy itself counts only with proof the body was complete:
+// the declared length was copied, or the stream's terminal event was seen. Used
+// for bindings and the wait's success count; request statistics keep
+// responseCompletion's reading.
+func responseDeliveredInFull(status int, contentLength, copied int64, copyErr error, clientWriteFailed, lifecycleFailed, streamTerminal bool) bool {
+	if status < 200 || status >= 300 || clientWriteFailed || lifecycleFailed {
+		return false
+	}
+	if copyErr == nil {
+		return true
+	}
+	if !errors.Is(copyErr, context.Canceled) {
+		return false
+	}
+	return (contentLength >= 0 && copied == contentLength) || streamTerminal
 }
 
 // Observe a Responses key failure without replaying the current generation.
@@ -1135,20 +1239,30 @@ func (s *Service) writeResponse(
 // enters the key loop, which signals AIMD only once every key is exhausted,
 // so it passes false; a rejection after generation was sent is never retried
 // and signals here.
-func (s *Service) observeResponsesKeyFailure(state *targetState, target *Target, model string, protocol config.ProtocolType, keyIndex, status int, body []byte, signalAIMD bool) bool {
-	if state.keyPool == nil || keyIndex < 0 {
+func (s *Service) observeResponsesKeyFailure(state *targetState, target *Target, model string, protocol config.ProtocolType, keyIndex, status int, body []byte, signalAIMD, clientCredential bool) bool {
+	if state.keyPool == nil || keyIndex < 0 || clientCredential {
+		// The client's own forwarded credential never cools a proxy key.
 		return false
 	}
 	if exhausted, code := targetKeyExhausted(target, protocol, status, body); exhausted {
 		state.keyPool.markExhaustedWithError(keyIndex, code, string(body))
 		return true
 	}
+	// Same rule as the HTTP key loop: a non-moderation 403 or an unrecognised
+	// 401 cools this key (confirmed for the fixed hour, unconfirmed briefly).
+	// An empty complete body is still a rejection. After a sent generation
+	// this only steers the next turn; the current one is never replayed.
+	if s.markKeyAccountRejection(state, target, protocol, keyIndex, status, body, false) {
+		return true
+	}
 	if status != http.StatusTooManyRequests {
 		return false
 	}
+	// A generic 429 limits only this (key, upstream model); GLM business codes
+	// keep their key-level classification.
 	if usesGLMErrorPatch(target) {
-		state.keyPool.markRateLimitedWithBody(keyIndex, body)
-	} else {
+		state.keyPool.markRateLimitedFor(keyIndex, model, body, true)
+	} else if !state.keyPool.markRateLimitedFor(keyIndex, model, body, false) {
 		state.keyPool.markExhaustedWithError(keyIndex, "rate_limited", string(body))
 	}
 	if am := s.admissionManager.Load(); signalAIMD && am != nil {
@@ -1579,7 +1693,9 @@ func (s *Service) handleForwardError(r *http.Request, state *targetState, err er
 	if status == 0 {
 		status = http.StatusServiceUnavailable // 默认服务不可用（5xx），非网关错误
 	}
-	state.MarkFailure(time.Now(), s.quietPeriod)
+	// Forwarding errors without an upstream response are transport failures:
+	// they use the network cooldown class, not the synthesized status.
+	s.markTargetFailure(state, time.Now(), 0, nil, false, "")
 	stats := state.Stats()
 
 	s.logger.Warn("forward request failed",
@@ -1878,7 +1994,8 @@ func replaceModelInURLPath(path, upstream, model string) string {
 //   - 429：上游过载/限流（OpenAI/Azure 在模型容量瓶颈时常返回此码，含 "Engine is overloaded"）；
 //   - 408：上游请求超时（典型见于网宿/Azure 长耗时图像生成接口）。
 //
-// 4xx 其他状态（400/401/403/404 等）属于客户端请求问题，不切换 target。
+// 其他 4xx 不在此处记失败：账户级 401/402/403 的固定冷却与出队由 service.go 的
+// 出队代码块（upstreamRejectionMutesTarget）处理，普通 4xx 视为可达。
 func isUpstreamFailureStatus(statusCode int) bool {
 	if statusCode >= 500 {
 		return true

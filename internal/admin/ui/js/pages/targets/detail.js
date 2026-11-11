@@ -20,6 +20,8 @@ AdminApp.register("targetsDetail", function (app) {
   var targetKeyStatusComplete = app.bind("targetsHealth", "targetKeyStatusComplete");
   var targetPhaseKnown = app.bind("targetsHealth", "targetPhaseKnown");
   var targetRuntimeFor = app.bind("targetsHealth", "targetRuntimeFor");
+  var targetMuteSummary = app.bind("targetsHealth", "targetMuteSummary");
+  var targetModelCooldownSummary = app.bind("targetsHealth", "targetModelCooldownSummary");
   function detailRow(label, value) {
     return (
       "<div class='target-detail-row'><dt>" +
@@ -66,8 +68,9 @@ AdminApp.register("targetsDetail", function (app) {
     } else if (!targetPhaseKnown(rt.phase)) {
       runtimeText = "运行态不可用（调度相位缺失或无法识别）";
     } else {
+      var mute = targetMuteSummary(rt, Date.now());
       runtimeText =
-        schemaLabel("target_phases", rt.phase) +
+        (mute ? mute.text + "（" + mute.title + "）" : schemaLabel("target_phases", rt.phase)) +
         " · 在途 " +
         Number(rt.in_flight || 0) +
         (rt.max_concurrency > 0 ? "/" + rt.max_concurrency + "（上限）" : "") +
@@ -77,6 +80,10 @@ AdminApp.register("targetsDetail", function (app) {
         Number(rt.breaker_trips || 0);
       if (rt.window_15m) {
         runtimeText += " · 15 分钟峰值 " + Number(rt.window_15m.in_flight_peak || 0);
+      }
+      var modelCooling = targetModelCooldownSummary(rt, Date.now());
+      if (modelCooling) {
+        runtimeText += " · " + modelCooling.text + "（" + modelCooling.title.split("\n").join("；") + "）";
       }
     }
     return (

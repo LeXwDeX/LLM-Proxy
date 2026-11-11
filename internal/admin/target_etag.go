@@ -275,6 +275,7 @@ func (h *Handler) commitConfigChangeWithClients(w http.ResponseWriter, cfg *conf
 	if h.costCache != nil {
 		h.costCache.Invalidate()
 	}
+	h.warnCostPoolCapacity(cfg)
 	return warning, true
 }
 

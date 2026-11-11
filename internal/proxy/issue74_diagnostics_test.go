@@ -160,7 +160,11 @@ func TestIssue74HTTPErrorLogKeepsResponseAndQueryUntouched(t *testing.T) {
 			req = req.WithContext(auth.WithPrincipal(req.Context(), principal))
 			rec := httptest.NewRecorder()
 			s.ServeHTTP(rec, req)
-			if rec.Code != status || rec.Body.String() != wire || gotQuery != "arbitrary=fixture-query" {
+			wantStatus := status
+			if status == http.StatusUnauthorized {
+				wantStatus = http.StatusServiceUnavailable // proxy-key 401 is shown as 503 (X-Upstream-Status: 401)
+			}
+			if rec.Code != wantStatus || rec.Body.String() != wire || gotQuery != "arbitrary=fixture-query" {
 				t.Fatalf("forwarding changed status=%d body=%s query=%s", rec.Code, rec.Body.String(), gotQuery)
 			}
 			data, err := os.ReadFile(path)

@@ -510,11 +510,10 @@
     /* ===== Pools Management (targets page tab) ===== */
     .pools-table { min-width: 960px; }
     .pools-table .pool-name,
+    .pools-table .pool-strategy,
     .pools-table .pool-status,
     .pools-table .pool-actions { width: 1%; white-space: nowrap; }
     .pools-table .pool-actions .btn-group { flex-wrap: nowrap; }
-    .pools-table .pool-description { width: 1%; }
-    .pool-description-text { width: max-content; max-width: clamp(160px, 20vw, 320px); overflow-wrap: anywhere; }
     .pool-members { min-width: 200px; }
     .pool-member-list { display: flex; flex-wrap: wrap; gap: 4px; }
     .pool-member-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 12px; }
@@ -523,6 +522,9 @@
     .pool-member-load { color: var(--ink-3); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
     .pool-alias-groups { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
     .pool-alias-group { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; background: var(--accent-soft); color: var(--accent); overflow-wrap: anywhere; }
+    .pool-capacity-warn { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--warn-soft); color: var(--warn); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .pool-capacity-hint { display: block; margin-top: 4px; color: var(--warn); font-size: 12px; line-height: 1.5; }
+    .pool-capacity-hint[hidden] { display: none; }
     .pool-cost-row > td { background: var(--surface-2); padding: 12px 16px; }
     .pool-cost-panel { display: flex; flex-direction: column; gap: 8px; }
     .pool-cost-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -860,7 +862,6 @@
     .quota-badge.over { background:var(--bad-soft); color:var(--bad); }
     .quota-badge.none { background:var(--muted-soft); color:var(--ink-3); }
     .quota-badge.del { background:var(--muted-soft); color:var(--ink-3); }
-    .quota-badge.strategy { background:var(--accent-soft); color:var(--accent); }
     /* Endpoint badges carry Schema metadata colors in light mode; dark mode uses theme tokens. */
     .ep-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:var(--ep-bg, var(--muted-soft)); color:var(--ep-fg, var(--ink-3)); }
     .app.dark .ep-badge { background:var(--accent-soft); color:var(--accent); }

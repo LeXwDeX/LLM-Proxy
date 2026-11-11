@@ -75,6 +75,9 @@ func TestResponsesWebsocketGzipFallbackEventsAndUsage(t *testing.T) {
 			}))
 			defer upstream.Close()
 			service, server, recorder := websocketTestProxy(t, upstream.URL)
+			// Single key: a multi-key 403 would cool the key and use the next one.
+			state, _ := service.targetByName("test-target")
+			state.keyPool = nil
 			conn := nativeReviewDialGzip(t, server)
 			if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "codex-fast", "input": "hi"}); err != nil {
 				t.Fatal(err)

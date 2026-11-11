@@ -454,7 +454,7 @@ func TestKeyPoolReloadDuringForward(t *testing.T) {
 				}
 				if response != nil {
 					if tc.name == "success" {
-						s.writeResponse(httptest.NewRecorder(), request, old, response, cancel, 1, "m", body, time.Now(), 0, false, nil)
+						_, _ = s.writeResponse(httptest.NewRecorder(), request, old, response, cancel, 1, "m", body, time.Now(), 0, false, nil)
 					}
 					_ = response.Body.Close()
 					_ = response.Body.Close()

@@ -26,10 +26,15 @@ func TestBreakerResetsOnTargetIdentityChange(t *testing.T) {
 			}
 			tg := keyedTarget(t, w.urlA, "/openai/v1", alias, []string{oldKey}, extra)
 			_, key := client(t, []string{tg}, nil)
-			w.fakeA.SetKeyScenario(oldKey, &fakellm.Scenario{Status: http.StatusServiceUnavailable})
+			// A target-level trip whose cooldown is not early-probed, so the local
+			// rejection below is deterministic (a transient 5xx cooldown with no
+			// other candidate admits one early probe per interval). A 429 only
+			// cools its model now, so the trip is a structured 403 account
+			// rejection (fixed target-level cooldown).
+			w.fakeA.SetKeyScenario(oldKey, &fakellm.Scenario{Status: http.StatusForbidden, ErrType: "permission_error", ErrCode: "forbidden"})
 			t.Cleanup(func() { w.fakeA.SetKeyScenario(oldKey, nil) })
 			from := w.fakeA.LastSeq()
-			if resp, body := chat(t, key, alias, "trip breaker"); resp.StatusCode != http.StatusServiceUnavailable {
+			if resp, body := chat(t, key, alias, "trip breaker"); resp.StatusCode != http.StatusForbidden {
 				t.Fatalf("first upstream failure: HTTP %d %s", resp.StatusCode, body)
 			}
 			if n := hits(w.fakeA, oldKey, from); n != 1 {
@@ -43,7 +48,7 @@ func TestBreakerResetsOnTargetIdentityChange(t *testing.T) {
 			assertMuted := func() {
 				t.Helper()
 				cursor := w.fakeA.LastSeq()
-				if resp, body := chat(t, key, alias, "still muted"); resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "all targets muted") {
+				if resp, body := chat(t, key, alias, "still muted"); resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "upstream_rejected") {
 					t.Fatalf("expected local muted rejection: HTTP %d %s", resp.StatusCode, body)
 				}
 				if n := hits(w.fakeA, oldKey, cursor) + hits(w.fakeA, newKey, cursor); n != 0 {

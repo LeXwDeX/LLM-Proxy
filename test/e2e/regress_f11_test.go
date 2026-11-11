@@ -171,7 +171,8 @@ func TestRegressF11Non2xxUsesOriginalProtocol(t *testing.T) {
 		status, badCalls, goodCalls                int
 	}{
 		{"chat429", "/v1/chat/completions", "/minimax/v1", "openai", "", `{"base_resp":{"status_code":1008}}`, 429, 2, 1},
-		{"chat401", "/v1/chat/completions", "/minimax/v1", "openai", "", `{"base_resp":{"status_code":1004}}`, 401, 1, 0},
+		// An unrecognised 401 cools the key briefly and the next key serves.
+		{"chat401", "/v1/chat/completions", "/minimax/v1", "openai", "", `{"base_resp":{"status_code":1004}}`, 401, 1, 1},
 		{"messages429", "/v1/messages", "/minimax/anthropic", "claude", "rate_limit", "", 429, 2, 1},
 		{"messages529", "/v1/messages", "/minimax/anthropic", "claude", "overloaded", "", 529, 1, 0},
 	} {
@@ -192,7 +193,15 @@ func TestRegressF11Non2xxUsesOriginalProtocol(t *testing.T) {
 					t.Fatalf("HTTP %d, hits=%d/%d: %s", resp.StatusCode, hits(w.fakeA, k0, from), hits(w.fakeA, k1, from), body)
 				}
 				st := keyStatus(t, tg, 0)
-				if st.Exhausted != (tc.status == 429) || (st.Exhausted && st.ExhaustReason != "rate_limited") {
+				if tc.status == 429 {
+					// A generic 429 limits the (key, upstream model) pair; the key stays usable.
+					if st.Exhausted || len(st.ModelLimits) != 1 {
+						t.Fatalf("wrong key state: %+v", st)
+					}
+					return
+				}
+				wantReason := map[int]string{401: "unauthorized"}[tc.status]
+				if st.Exhausted != (wantReason != "") || (st.Exhausted && st.ExhaustReason != wantReason) {
 					t.Fatalf("wrong key state: %+v", st)
 				}
 			})

@@ -203,7 +203,17 @@ type ServerConfig struct {
 	// QuietPeriodSeconds 失败静默基线冷却秒数（S4 熔断 cooldown 基线，议题 #18 起可配）。
 	// 0/负值使用内置默认 60s。half-open 探测失败的指数延长以此值为基数。
 	QuietPeriodSeconds int `json:"quiet_period_seconds,omitempty"`
+	// FailureCooldownSeconds 按错误类别覆盖目标熔断冷却秒数（缺省用内置默认表）。
+	// key 取 FailureCooldownClasses：401/402/403（已确认的账户拒绝，固定时长不翻倍）、
+	// 401_unverified/403_unverified（未确认拒绝的首次短冷却，默认 300s；1 小时内再次出现
+	// 即按 401/403 时长）、
+	// 408、429、500、502、503、504、529、5xx（其他 5xx）、network（网络错误）。
+	// 值须 > 0；429/503/529 有 Retry-After 时优先使用它（限制在 1s–10min）。
+	FailureCooldownSeconds map[string]int `json:"failure_cooldown_seconds,omitempty"`
 }
+
+// FailureCooldownClasses lists the accepted failure_cooldown_seconds keys.
+var FailureCooldownClasses = []string{"401", "402", "403", "401_unverified", "403_unverified", "408", "429", "500", "502", "503", "504", "529", "5xx", "network"}
 
 // ModelMapping maps an upstream model name to zero or more downstream aliases.
 //
@@ -748,6 +758,18 @@ func (c *Config) Validate() error {
 
 	if strings.TrimSpace(c.DataStore.DBPath) == "" {
 		problems = append(problems, "data_store.db_path must not be empty")
+	}
+
+	for class, seconds := range c.Server.FailureCooldownSeconds {
+		known := false
+		for _, k := range FailureCooldownClasses {
+			known = known || k == class
+		}
+		if !known {
+			problems = append(problems, fmt.Sprintf("server.failure_cooldown_seconds key %q is not supported (want one of %s)", class, strings.Join(FailureCooldownClasses, ", ")))
+		} else if seconds <= 0 {
+			problems = append(problems, fmt.Sprintf("server.failure_cooldown_seconds[%q] must be > 0", class))
+		}
 	}
 
 	// 部署池校验：name 非空 + 小写去重（成员引用存在性由运行时 store 校验）。

@@ -77,7 +77,17 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			DequeueExhausted    int64 `json:"dequeue_exhausted_total"`
 			CachedErrorReplayed int64 `json:"cached_error_replayed_total"`
 			Dequeue4xx          int64 `json:"dequeue_4xx_total"`
-			ClientCanceled      int64 `json:"client_canceled"`
+			// 代理内有界等待与粘连重试提示（见 internal/proxy/inproxy_wait.go）。
+			InProxyWait         int64 `json:"in_proxy_wait_total"`
+			InProxyWaitSuccess  int64 `json:"in_proxy_wait_success_total"`
+			InProxyWaitRejected int64 `json:"in_proxy_wait_rejected_total"`
+			InProxyWaiting      int64 `json:"in_proxy_waiting"`
+			StickyRetryHinted   int64 `json:"sticky_retry_hinted_total"`
+			// Fixed target cooldowns after an account-level upstream
+			// rejection; total plus a per-status breakdown ("401"/"402"/"403").
+			UpstreamRejectionMuted         int64            `json:"upstream_rejection_muted_total"`
+			UpstreamRejectionMutedByStatus map[string]int64 `json:"upstream_rejection_muted_by_status"`
+			ClientCanceled                 int64            `json:"client_canceled"`
 		} `json:"requests"`
 		Targets        int                    `json:"targets"`
 		TargetsRuntime []metricsTargetRuntime `json:"targets_runtime"`
@@ -135,6 +145,15 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	response.Requests.DequeueExhausted = metrics.TotalDequeueExhausted
 	response.Requests.CachedErrorReplayed = metrics.TotalCachedErrorReplayed
 	response.Requests.Dequeue4xx = metrics.TotalDequeue4xx
+	response.Requests.InProxyWait = metrics.TotalInProxyWait
+	response.Requests.InProxyWaitSuccess = metrics.TotalInProxyWaitSuccess
+	response.Requests.InProxyWaitRejected = metrics.TotalInProxyWaitRejected
+	response.Requests.InProxyWaiting = metrics.InProxyWaiting
+	response.Requests.StickyRetryHinted = metrics.TotalStickyRetryHinted
+	response.Requests.UpstreamRejectionMutedByStatus = metrics.UpstreamRejectionMuted
+	for _, n := range metrics.UpstreamRejectionMuted {
+		response.Requests.UpstreamRejectionMuted += n
+	}
 	response.Requests.ClientCanceled = metrics.TotalClientCanceled
 
 	// S5 调度可观测（议题 #18）：每节点运行态含派生调度相位与亲和/熔断计数。
@@ -150,10 +169,21 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			BreakerTrips:   ts.BreakerTrips,
 			Window15m:      ts.Window15m,
 			MutedUntil:     ts.MutedUntil,
+			MuteReason:     ts.MuteReason,
+			MuteCode:       ts.MuteCode,
+			MuteStatus:     ts.MuteStatus,
+			ModelCooldowns: modelCooldownsOrEmpty(ts.ModelCooldowns),
 		})
 	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+func modelCooldownsOrEmpty(list []proxy.ModelCooldown) []proxy.ModelCooldown {
+	if list == nil {
+		return []proxy.ModelCooldown{}
+	}
+	return list
 }
 
 // metricsTargetRuntime 是 /admin/metrics 中单节点的容量与调度运行态快照。
@@ -168,6 +198,13 @@ type metricsTargetRuntime struct {
 	AffinityHits   int64               `json:"affinity_hits"`
 	BreakerTrips   int64               `json:"breaker_trips"`
 	MutedUntil     time.Time           `json:"muted_until,omitempty"`
+	// MuteReason 为空表示普通熔断；取值见 schema target_mute_reasons。
+	MuteReason string `json:"mute_reason,omitempty"`
+	MuteCode   string `json:"mute_code,omitempty"`   // 上游错误 code/type，不含 message
+	MuteStatus int    `json:"mute_status,omitempty"` // 触发冷却的上游状态码
+	// ModelCooldowns 只读：该目标上各上游模型的 429 冷却。它们不改变 phase
+	// （目标其他模型照常调度），始终输出数组（无冷却时为 []）。
+	ModelCooldowns []proxy.ModelCooldown `json:"model_cooldowns"`
 }
 
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {
@@ -258,6 +295,10 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 			"dequeue_exhausted_total":             metrics.TotalDequeueExhausted,
 			"cached_error_replayed_total":         metrics.TotalCachedErrorReplayed,
 			"dequeue_4xx_total":                   metrics.TotalDequeue4xx,
+			"in_proxy_wait_total":                 metrics.TotalInProxyWait,
+			"in_proxy_wait_success_total":         metrics.TotalInProxyWaitSuccess,
+			"in_proxy_wait_rejected_total":        metrics.TotalInProxyWaitRejected,
+			"sticky_retry_hinted_total":           metrics.TotalStickyRetryHinted,
 			"client_canceled":                     metrics.TotalClientCanceled,
 		},
 		"usage_summary": summary,

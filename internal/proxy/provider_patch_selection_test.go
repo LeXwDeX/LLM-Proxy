@@ -141,14 +141,17 @@ func TestSelectedGLMErrorPolicyOnGeminiProtocol(t *testing.T) {
 			defer svc.Close()
 			state := svc.targetsByName["test"]
 			body := []byte(`{"error":{"code":"1308","message":"quota exhausted"}}`)
-			if !svc.observeResponsesKeyFailure(state, state.Target(), "unlisted-model", config.ProtocolGemini, 0, 429, body, true) {
+			if !svc.observeResponsesKeyFailure(state, state.Target(), "unlisted-model", config.ProtocolGemini, 0, 429, body, true, false) {
 				t.Fatal("429 did not update key state")
 			}
-			want := "rate_limited"
-			if adapter == " GLM " {
-				want = glmReasonForCode("1308")
+			if adapter != " GLM " {
+				// A generic 429 limits only the (key, model) pair; the key stays active.
+				if got := state.keyPool.exhaustReasonAt(0); got != "" || !state.keyPool.keyModelLimited(0, "unlisted-model") {
+					t.Fatalf("Gemini error policy reason=%q model_limited=%v, want a (key, model) limit", got, state.keyPool.keyModelLimited(0, "unlisted-model"))
+				}
+				return
 			}
-			if got := state.keyPool.exhaustReasonAt(0); got != want {
+			if got, want := state.keyPool.exhaustReasonAt(0), glmReasonForCode("1308"); got != want {
 				t.Fatalf("Gemini error policy reason=%q want=%q", got, want)
 			}
 		})

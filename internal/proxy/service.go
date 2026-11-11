@@ -50,6 +50,8 @@ type Service struct {
 	responsesWS            *responsesWSPool
 	requestTimeout         atomic.Int64
 	quietPeriod            time.Duration
+	// failureCooldownOverrides holds server.failure_cooldown_seconds by class.
+	failureCooldownOverrides map[string]int
 
 	usageMu                    sync.RWMutex
 	usageRecorder              usage.Recorder
@@ -65,7 +67,7 @@ type Service struct {
 
 	affinity *affinityMap
 
-	// costPools 是 routing_strategy=cost 的池名集合；rateSource 提供计价解析器。
+	// costPools 是生效策略为成本优先（routing_strategy 为 cost 或空值）的池名集合；rateSource 提供计价解析器。
 	// 二者任一缺失时选路退回现行负载均衡（见 cost_routing.go）。
 	costPools  atomic.Pointer[map[string]struct{}]
 	rateSource atomic.Pointer[func() (usage.RateResolver, error)]
@@ -87,6 +89,13 @@ type Service struct {
 	startTime time.Time
 	activity  *activityTracker
 	rrCounter atomic.Uint64
+	// inProxyWaiting counts requests currently waiting in the proxy for a
+	// blocked target to recover (global cap inProxyWaitSlots).
+	inProxyWaiting atomic.Int64
+	// inProxyWaitMaxOverride / inProxyWaitJitterOverride shorten the bounded
+	// wait in tests; zero keeps the built-in values (a negative jitter means none).
+	inProxyWaitMaxOverride    time.Duration
+	inProxyWaitJitterOverride time.Duration
 
 	websocketMu       sync.Mutex
 	websocketSessions map[*responsesWebsocketLifecycle]struct{}
@@ -170,6 +179,15 @@ type requestMetrics struct {
 	totalDequeueExhausted    atomic.Int64
 	totalCachedErrorReplayed atomic.Int64
 	totalDequeue4xx          atomic.Int64
+	// In-proxy bounded wait (inproxy_wait.go) and the sticky retry hint.
+	totalInProxyWait         atomic.Int64
+	totalInProxyWaitSuccess  atomic.Int64
+	totalInProxyWaitRejected atomic.Int64
+	totalStickyRetryHinted   atomic.Int64
+	// Fixed cooldowns entered after an account-level upstream rejection.
+	totalRejectionMuted401 atomic.Int64
+	totalRejectionMuted402 atomic.Int64
+	totalRejectionMuted403 atomic.Int64
 }
 
 // ServiceMetrics captures aggregate request statistics.
@@ -197,9 +215,22 @@ type ServiceMetrics struct {
 	TotalDequeueExhausted    int64
 	TotalCachedErrorReplayed int64
 	TotalDequeue4xx          int64
-	TotalClientCanceled      int64 // 客户端在响应返回前断开（499），非代理失败
-	ActiveRequests           int64
-	StartTime                time.Time
+	// TotalInProxyWait counts requests that waited in the proxy for a blocked
+	// target to recover; Success those that then completed successfully;
+	// Rejected those denied a wait slot (global cap). TotalStickyRetryHinted
+	// counts sticky requests answered 503 + Retry-After instead of replaying a
+	// substitute target's 4xx. InProxyWaiting is the current number of waiters.
+	TotalInProxyWait         int64
+	TotalInProxyWaitSuccess  int64
+	TotalInProxyWaitRejected int64
+	TotalStickyRetryHinted   int64
+	InProxyWaiting           int64
+	// UpstreamRejectionMuted counts fixed cooldowns entered after an
+	// account-level upstream rejection, keyed by status ("401"/"402"/"403").
+	UpstreamRejectionMuted map[string]int64
+	TotalClientCanceled    int64 // 客户端在响应返回前断开（499），非代理失败
+	ActiveRequests         int64
+	StartTime              time.Time
 	// ResponsesWS covers the upstream Responses WebSocket pool and handshakes.
 	ResponsesWS ResponsesWSMetrics
 }
@@ -212,6 +243,9 @@ type TargetStatus struct {
 	Paused               bool
 	Muted                bool
 	MutedUntil           time.Time
+	MuteReason           string // 空=普通熔断；upstream_403=上游 403 固定冷却
+	MuteCode             string // 上游错误 envelope 的 code/type，不含 message
+	MuteStatus           int    // 触发固定冷却的上游状态码（401/402/403），普通熔断为 0
 	LastSuccess          time.Time
 	LastFailure          time.Time
 	ConsecutiveFailures  int
@@ -236,6 +270,9 @@ type TargetStatus struct {
 	AffinityHits int64
 	BreakerTrips int64
 	Window15m    RuntimeWindow
+	// ModelCooldowns lists the active per-upstream-model 429 cooldowns. They
+	// do not change Phase or Muted: the target keeps serving its other models.
+	ModelCooldowns []ModelCooldown
 }
 
 // Wire transport connection settings.
@@ -299,6 +336,12 @@ func NewService(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 	// 供运维调优与端到端集成验收压缩熔断恢复窗口。
 	if v := cfg.Server.QuietPeriodSeconds; v > 0 {
 		service.quietPeriod = time.Duration(v) * time.Second
+	}
+	if len(cfg.Server.FailureCooldownSeconds) > 0 {
+		service.failureCooldownOverrides = make(map[string]int, len(cfg.Server.FailureCooldownSeconds))
+		for class, seconds := range cfg.Server.FailureCooldownSeconds {
+			service.failureCooldownOverrides[class] = seconds
+		}
 	}
 	registry, err := NewDefaultProviderRegistry()
 	if err != nil {
@@ -789,13 +832,36 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var selectedState *targetState
 	var selectedLease *probeLease
+	var selectedModelProbe *modelProbe
 	releaseSelected := func() {
 		if selectedState != nil {
 			selectedState.releaseProbe(selectedLease)
+			// A model half-open lease not settled by a success or a new 429
+			// (a 4xx, 5xx, cancel or an unused selection) is given back.
+			selectedState.releaseModelProbe(selectedModelProbe)
 		}
-		selectedState, selectedLease = nil, nil
+		selectedState, selectedLease, selectedModelProbe = nil, nil, nil
 	}
 	defer releaseSelected()
+	// affinityBound records whether the first selection found an existing IP
+	// or session binding. A later attempt in the same request is a failover
+	// even when selectTarget reports it as a fresh pick (it skips affinity
+	// once a target was attempted), so it must never move that binding.
+	affinityBound := false
+	// stickyBound lists the sticky targets of the first selection round, even
+	// when that round failed (the sticky verdict needs them to tell a bound
+	// request); stickySession tells a session binding from an IP one.
+	// stickyAnswered holds sticky targets that answered this request with a 4xx
+	// (429 included): that answer is their verdict, and they are not sent the
+	// request again (attempted keeps every target to at most one send).
+	var stickyBound []string
+	stickySession := false
+	stickyAnswered := make(map[string]struct{})
+	// waited: the request already used its one in-proxy wait. stickyNext asks
+	// the next selection to try the unattempted sticky target first.
+	// probePollUntil bounds the short polling for an in-flight probe after a wait.
+	waited, stickyNext := false, false
+	var probePollUntil time.Time
 
 	for {
 		// A target change ends the previous selection; same-target key retries
@@ -806,13 +872,91 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		attempt++
-		state, lease, selKind, err := s.selectTarget(principal, clientIP(r), sessionBoundTarget, requestedLower, allowed, attempted, model, origURLPath, time.Now())
+		trace := selectionTrace{retrySticky: stickyNext}
+		stickyNext = false
+		state, lease, selKind, err := s.selectTargetTraced(principal, clientIP(r), sessionBoundTarget, requestedLower, allowed, attempted, model, origURLPath, time.Now(), &trace)
+		if len(attempted) == 0 {
+			stickyBound, stickySession = trace.bound, trace.sessionHit
+		}
 		if err != nil {
 			var selErr *selectionError
 			if errors.As(err, &selErr) {
+				now := time.Now()
+				// A sticky request whose bound target is only unavailable for now
+				// (cooling, probing, full) is owed that target's verdict, not a
+				// substitute's 4xx: it waits for the target (bounded, once) or is
+				// told to retry. A MiniMax in-band failure and an explicit
+				// target keep their own outcomes.
+				var verdict stickyVerdict
+				pending := false
+				if requestedLower == "" && !lastMinimaxFailure && selErr.Status == http.StatusServiceUnavailable && len(stickyBound) > 0 {
+					verdict, pending = s.stickyVerdictPending(stickyBound, stickySession, allowed, attempted, stickyAnswered, model, origURLPath, now)
+				}
+				if requestedLower == "" && !lastMinimaxFailure {
+					plainOK := !pending && lastForwardStatus != http.StatusTooManyRequests
+					if !waited {
+						if until, ok := s.inProxyWaitPlan(selErr, verdict, pending, cachedFailoverError != nil, plainOK, now); ok {
+							admitted, waitErr := s.inProxyWait(r.Context(), until, true, true)
+							if admitted {
+								waited = true
+								if waitErr != nil {
+									// Nothing was sent upstream: settle as the usual
+									// client cancel (499) or parent deadline (504).
+									finishContext(waitErr, "")
+									return
+								}
+								s.logger.Info("in-proxy wait finished, selecting again",
+									"request_id", appmiddleware.RequestIDFromContext(r.Context()),
+									"sticky", pending,
+								)
+								stickyNext = pending
+								attempt-- // the wait is not an attempt
+								continue
+							}
+						}
+					}
+					if selErr.ProbeInFlight && (pending || (plainOK && cachedFailoverError == nil)) {
+						// A half-open probe (target or model level) is in flight: poll a
+						// little for it to settle, whether or not the request waited
+						// before. A request that never waited counts this as its one wait.
+						if probePollUntil.IsZero() {
+							probePollUntil = now.Add(inProxyProbeWaitMax)
+						}
+						if now.Before(probePollUntil) {
+							if admitted, waitErr := s.inProxyWait(r.Context(), now.Add(inProxyProbePollStep), !waited, false); admitted {
+								waited = true
+								if waitErr != nil {
+									finishContext(waitErr, "")
+									return
+								}
+								stickyNext = pending
+								attempt--
+								continue
+							}
+						}
+					}
+				}
 				// 标准 HTTP 状态码：如果上一轮 forward 是 429（限流/限额），传播 429 让客户端退避；
 				// 否则用 selectTarget 的原始状态码（503 服务不可用 / 400 参数错误等）。
-				if lastForwardStatus == http.StatusTooManyRequests {
+				if pending {
+					// Terminal verdict of a sticky request: retry later. The
+					// substitute's own 4xx (and any proxy-generated rejection
+					// body) is never shown; its status and error code only
+					// help diagnosis.
+					substStatus, substCode := 0, ""
+					if cachedFailoverError != nil && len(attempted) > 0 {
+						substStatus = cachedFailoverError.status
+						substCode = upstreamRejectionCode(&http.Response{Header: cachedFailoverError.header}, cachedFailoverError.body)
+						s.metrics.totalDequeueExhausted.Add(1)
+					}
+					s.metrics.totalStickyRetryHinted.Add(1)
+					// Retry when the sooner of the sticky target and the other candidates recovers.
+					retryAt := verdict.retryAt
+					if !selErr.RetryAt.IsZero() && selErr.RetryAt.After(now) && selErr.RetryAt.Before(retryAt) {
+						retryAt = selErr.RetryAt
+					}
+					writeStickyRetry(w, substStatus, substCode, retryAt, now)
+				} else if lastForwardStatus == http.StatusTooManyRequests {
 					// 使用上一轮 forward 记录的 quota 信息（selectTarget 失败时已脱离 keypool 上下文）
 					writeUpstreamLimitedResponse(w, lastQuotaInfo.isQuota, lastQuotaInfo.resetAt)
 				} else if lastMinimaxFailure {
@@ -822,9 +966,18 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					// instead of a synthesized 503.
 					s.metrics.totalDequeueExhausted.Add(1)
 					s.metrics.totalCachedErrorReplayed.Add(1)
+					if session, ok := r.Context().Value(responsesWebsocketContextKey{}).(*responsesWebsocketSession); ok && cachedFailoverError.nativeHandshake {
+						// Keep the upstream error object as the native error event.
+						session.turnHandshake = true
+					}
 					writeCachedUpstreamError(w, cachedFailoverError)
+				} else if selErr.MuteStatus != 0 {
+					// Every candidate is cooling after an account rejection:
+					// surface the real upstream status and reason instead of a
+					// bare 503, so operators see why (e.g. 402 billing).
+					writeUpstreamRejectionCooldown(w, selErr, time.Now())
 				} else {
-					http.Error(w, selErr.Message, selErr.Status)
+					writeServiceUnavailable(w, selErr, now)
 				}
 				s.metrics.totalFailures.Add(1)
 				requestOutcomeRecorded = true
@@ -839,7 +992,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			requestOutcomeRecorded = true
 			return
 		}
-		selectedState, selectedLease = state, lease
+		selectedState, selectedLease, selectedModelProbe = state, lease, trace.modelProbe
+		if attempt == 1 && (selKind == selectionAffinityHit || selKind == selectionFailover) {
+			affinityBound = true
+		}
 
 		target := state.Target()
 		if target == nil {
@@ -983,6 +1139,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 不同 reason 可能来自多账户混合池的不同账户，不应收敛（会误 abandon 健康 key + 误 mute）。
 		convergeCode := ""
 		convergeStreak := 0
+		// sameKeyRetries counts, within this attempt, the same-key retries each key
+		// already got. The shared per-key failure counter is reset by any model's
+		// success on the key, so it alone cannot bound this request's retries.
+		sameKeyRetries := make(map[int]int)
 		accountLevelFailure := false // MED-3: 命中收敛后透传时按失败计（mute + 不计 success）
 		// Only the parent stops the rejection retry policy. A per-attempt
 		// deadline after response headers does not replace the HTTP rejection.
@@ -1086,7 +1246,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 					// WP-3：RETRY<2 解除 exhausted 状态 + sleep 1s 重试同一个 key —— 仅对瞬时类生效。
 					// 额度类（1308/1310/unknown）1 秒后不可能恢复，不做无意义的同 key 重试，直接走换 key 路径。
-					if isTransient && keyFails < 2 {
+					if isTransient && keyFails < 2 && sameKeyRetries[keyIndex] < 1 {
 						s.logger.Info("[keypool] GLM transient key failed but RETRY<2, sleep and retry same key",
 							"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 							"target", target.Name,
@@ -1096,6 +1256,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							"reason", reason,
 						)
 						// 解除 exhausted 状态让 selectKeyForClient 能重新选中该 key（WP-3 坚持机制）
+						sameKeyRetries[keyIndex]++
 						waitForKeyRetry(r.Context())
 						if parentEnded() {
 							break
@@ -1109,7 +1270,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						break
 					}
 					reqTotalFails++
-					nextKey, nextIdx := state.keyPool.selectNextActiveKey(keyIndex)
+					nextKey, nextIdx := state.keyPool.selectNextActiveKeyModel(keyIndex, upstreamModel)
 					if nextKey == "" {
 						// 所有 key 都限流/耗尽：不再重新转发透传——那会拿到 200 限流 SSE 走
 						// writeResponse 成功路径，既不 mute 也不 failover，请求卡死在本 target。
@@ -1167,15 +1328,17 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				lastForwardStatus = http.StatusTooManyRequests // 标记限流，failover 耗尽时传播 429
 				// Native rejections were classified once using their full bounded
 				// envelope. A 4 KiB reread must not downgrade quota/vendor reasons.
+				rateLimitScoped := false
 				if responseWebsocketRejection(resp) == nil {
 					body429, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 					// Only identity bytes can refine an HTTP 429 into vendor
 					// quota/account feedback. Other encodings retain generic retry.
-					if usesGLMErrorPatch(target) && responseIsIdentityEncoding(resp.Header) {
-						state.keyPool.markRateLimitedWithBody(keyIndex, body429)
-					} else {
-						state.keyPool.markRateLimited(keyIndex)
+					// A generic 429 limits only this (key, upstream model).
+					bodyOrNil := body429
+					if !(usesGLMErrorPatch(target) && responseIsIdentityEncoding(resp.Header)) {
+						bodyOrNil = nil
 					}
+					rateLimitScoped = state.keyPool.markRateLimitedFor(keyIndex, upstreamModel, bodyOrNil, usesGLMErrorPatch(target))
 				}
 				resp.Body.Close()
 				resp = nil
@@ -1220,6 +1383,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// 注：极端并发下 reason 可能为 ""（key 恰被其他请求冷却恢复洗白），此时走 RETRY<2 同 key，
 				// 与原行为一致，安全默认。
 				reason := state.keyPool.exhaustReasonAt(keyIndex)
+				// A native handshake rejection was marked inside forwardRequest.
+				if !rateLimitScoped && reason == "" && state.keyPool.keyModelLimited(keyIndex, upstreamModel) {
+					rateLimitScoped = true
+				}
+				if rateLimitScoped && reason == "" {
+					reason = "rate_limited" // the key itself stays active; only this model is limited
+				}
 				skipSameKey := !sameKeyRetryable429Reason(reason)
 
 				retryClientName := ""
@@ -1229,7 +1399,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 				// WP-3：RETRY<2 解除 exhausted 状态 + sleep 1s 重试同一个 key
 				// 例外：额度/账户类 1 秒后不可能恢复，直接换 key（与 GLM SSE 分支对齐）。
-				if !skipSameKey && keyFails < 2 {
+				if !skipSameKey && keyFails < 2 && sameKeyRetries[keyIndex] < 1 {
 					s.logger.Info("[keypool] Key failed (HTTP 429) but RETRY<2, sleep and retry same key",
 						"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 						"target", target.Name,
@@ -1239,11 +1409,16 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						"reason", reason,
 					)
 					// 解除 exhausted 状态让 selectKeyForClient 能重新选中该 key（WP-3 坚持机制）
+					sameKeyRetries[keyIndex]++
 					waitForKeyRetry(r.Context())
 					if parentEnded() {
 						break
 					}
-					state.keyPool.unmarkExhaustedForRetry(keyIndex)
+					if rateLimitScoped {
+						state.keyPool.clearKeyModelLimit(keyIndex, upstreamModel, true)
+					} else {
+						state.keyPool.unmarkExhaustedForRetry(keyIndex)
+					}
 					s.metrics.totalKeyRetries.Add(1)
 					continue
 				}
@@ -1252,7 +1427,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 				reqTotalFails++
-				nextKey, nextIdx := state.keyPool.selectNextActiveKey(keyIndex)
+				nextKey, nextIdx := state.keyPool.selectNextActiveKeyModel(keyIndex, upstreamModel)
 				if nextKey == "" {
 					// 所有 key 都被限流或耗尽：透传 429 给客户端。
 					// 重新发起请求以获取新的 resp（因为已经 Close 了）
@@ -1296,6 +1471,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if state.keyPool == nil || keyIndex < 0 {
 				break
 			}
+			// A 403 whose body is larger than the pre-read was left unclassified by
+			// forwardRequest (a prefix cannot rule out moderation). Judge it on the
+			// complete body now, so the rejected key is cooled and the loop tries
+			// the next key before the response is settled.
+			s.classifyDeferredKeyRejection(state, target, r, resp, keyIndex)
 			// HIGH-1: 只有当当前 key 真正被标记耗尽（reason != ""）才换 key；通用 5xx / 4xx
 			// （非 key 问题）换 key 无意义，直接透传，避免多 key 目标的无界 key 轮换风暴。
 			reason := state.keyPool.exhaustReasonAt(keyIndex)
@@ -1316,6 +1496,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				if convergeStreak >= 2 {
 					accountLevelFailure = true
+					// Cool the target now with the duration the key reason
+					// earns (unconfirmed rejections start short), unless a
+					// key that can still serve remains. Later settlements of
+					// this request are the same incident and only count.
+					if !targetHasServingKeys(state) {
+						s.applyAccountRejection(state, time.Now(), resp.StatusCode, "", keyReasonConfirmed(reason))
+					}
 					s.logger.Warn("[keypool] convergence: multiple keys returned same account-level failure, passing through upstream response",
 						"request_id", appmiddleware.RequestIDFromContext(r.Context()),
 						"target", target.Name,
@@ -1329,7 +1516,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if parentEnded() {
 				break
 			}
-			nextKey, nextIdx := state.keyPool.selectKey()
+			nextKey, nextIdx := state.keyPool.selectKeyModel(upstreamModel)
 			if nextKey == "" || nextIdx == keyIndex {
 				break
 			}
@@ -1382,6 +1569,20 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				pendingNoUsage = fe.noUsage
 			}
 			lastForwardStatus = status // 追踪状态码，failover 耗尽后 selectTarget 失败时传播
+			if ok && !fe.modelLimitedUntil.IsZero() {
+				// Every key is rate limited for this model: the target cools for
+				// that model alone, until the earliest key recovers.
+				if d := time.Until(fe.modelLimitedUntil); d > 0 {
+					state.setModelCooldown(time.Now(), upstreamModel, d, http.StatusTooManyRequests, failureMuteReason(failureClass(http.StatusTooManyRequests)))
+				}
+			}
+			if status == http.StatusTooManyRequests {
+				for _, name := range stickyBound {
+					if strings.EqualFold(name, target.Name) {
+						stickyAnswered[targetKey] = struct{}{}
+					}
+				}
+			}
 			lastMinimaxFailure = errors.Is(fErr, errMinimaxInBandError)
 			// 429 时记录 quota 信息，供 selectTarget 失败路径使用（那时已脱离 keypool 上下文）
 			if status == http.StatusTooManyRequests && state.keyPool != nil {
@@ -1472,7 +1673,23 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// candidate rejected the request without processing it. Dequeue it and
 		// let the cost-ordered queue try the next candidate. 5xx/408 are
 		// deliberately excluded: they may already have been computed and billed.
-		if resp != nil && classifyNon2xxAttempt(resp.StatusCode, allowFallback) == failoverDequeue && responseWebsocketRejection(resp) == nil {
+		// The model's half-open probe got an upstream answer other than a 429
+		// (a 4xx, 5xx...): the model is reachable and no longer rate limited, as a
+		// reachable answer ends a target-level probe. A 429 re-cools it elsewhere.
+		if resp != nil && selectedModelProbe != nil && resp.StatusCode != http.StatusTooManyRequests {
+			if wsBody := responseWSBody(resp); wsBody == nil || !wsBody.local {
+				state.clearModelLimit(upstreamModel)
+			}
+		}
+		failoverAct := failoverTerminate
+		if resp != nil {
+			failoverAct = classifyNon2xxAttempt(resp.StatusCode, allowFallback, state.keyPool != nil)
+		}
+		// A completed native handshake rejection proves no response.create was
+		// sent, so it takes the same dequeue as an HTTP 4xx. Its saved body is
+		// bounded (<= 64 KiB) and complete; partial captures never reach here
+		// as a rejection response.
+		if failoverAct != failoverTerminate {
 			wsBody := responseWSBody(resp)
 			if wsBody == nil || (!wsBody.generationSent && !wsBody.local) {
 				if err := r.Context().Err(); err != nil {
@@ -1488,7 +1705,46 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					// replays the first error anyway. Deliver this response as the
 					// terminal result instead. The log line is written by
 					// writeResponse below, so it is not duplicated here.
-					if code, deterministic := deterministicUpstreamClientError(resp, cached.body); deterministic {
+					decodedErr, decodedOK := decodedUpstreamErrorBody(resp, cached.body)
+					rejectionConfirmed := true
+					if failoverAct == failoverDequeueIfAccountRejection || cached.status == http.StatusForbidden {
+						_, rejectionConfirmed = accountRejectionDetail(target, ResolveProtocol(r.URL.Path), cached.status, decodedErr, decodedOK)
+					}
+					skipReason := ""
+					switch {
+					case upstreamRejectionMutesTarget(cached.status) && s.attemptUsesClientCredential(target, r):
+						// Bearer passthrough: the upstream judged the client's own
+						// token. Pass it through; never cool keys or the target.
+						skipReason = "client_credential"
+					case cached.status == http.StatusForbidden && decodedOK && upstreamContentModeration(target, decodedErr):
+						// Content moderation rejects the request, not the account:
+						// every candidate would see the same content.
+						skipReason = "content_moderation"
+					case failoverAct == failoverDequeueIfAccountRejection && !func() bool {
+						rejected, _ := accountRejectionDetail(target, ResolveProtocol(r.URL.Path), cached.status, decodedErr, decodedOK)
+						return rejected
+					}():
+						// A non-account 402 (e.g. OpenRouter in-flight/weight) keeps
+						// the old terminal behaviour. Every proxy-credential 401 is a
+						// rejection (unconfirmed ones cool briefly first).
+						skipReason = "not_account_rejection"
+					}
+					if skipReason != "" {
+						if skipReason == "content_moderation" || skipReason == "client_credential" {
+							// Not the account: a key-loop convergence on this
+							// response must not cool the target afterwards.
+							accountLevelFailure = false
+						}
+						restoreUpstreamErrorBody(resp, readBody)
+						s.logger.Info("failover skipped for upstream rejection",
+							"request_id", appmiddleware.RequestIDFromContext(r.Context()),
+							"failed_target", target.Name,
+							"status", cached.status,
+							"failover", "skipped",
+							"reason", skipReason,
+							"attempt", attempt,
+						)
+					} else if code, deterministic := deterministicUpstreamClientError(resp, cached.body); deterministic {
 						restoreUpstreamErrorBody(resp, readBody)
 						s.logger.Info("failover skipped for deterministic client error",
 							"request_id", appmiddleware.RequestIDFromContext(r.Context()),
@@ -1503,8 +1759,64 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						writeUpstreamErrorLogBytes(r, target, resp, cached.body, len(cached.body), startedAt)
 						// 4xx proves the target is reachable; settle health here and
 						// let the loop release the probe lease before the next pick.
-						state.MarkSuccess(time.Now())
-						if cachedFailoverError == nil {
+						// An account rejection (401/402/403) cools the target
+						// (confirmed: the class cooldown; unconfirmed: short first)
+						// unless a key can still serve; a single-key 429 takes the
+						// 429 class; any other 4xx only proves reachability.
+						settleDequeued := func() {
+							switch {
+							case upstreamRejectionMutesTarget(cached.status) && accountLevelFailure:
+								// The key-loop convergence already settled this
+								// attempt's target health; do not count it twice.
+							case upstreamRejectionMutesTarget(cached.status) && targetHasServingKeys(state):
+								// Other keys of this target can still serve: the key
+								// pool already cooled the rejected ones, so only this
+								// request moves on and the target stays in rotation.
+								state.markReachable(time.Now(), lease != nil)
+								s.logger.Info("account rejection dequeued without muting target; healthy keys remain",
+									"request_id", appmiddleware.RequestIDFromContext(r.Context()),
+									"target", target.Name,
+									"status", cached.status,
+								)
+							case upstreamRejectionMutesTarget(cached.status):
+								muteCode := upstreamRejectionCode(resp, cached.body)
+								cooldown, _ := s.applyAccountRejection(state, time.Now(), cached.status, muteCode, rejectionConfirmed)
+								s.logger.Warn("target muted after upstream account rejection",
+									"request_id", appmiddleware.RequestIDFromContext(r.Context()),
+									"target", target.Name,
+									"status", cached.status,
+									"code", muteCode,
+									"cooldown", cooldown.String(),
+									"confirmed", rejectionConfirmed,
+								)
+							case cached.status == http.StatusTooManyRequests:
+								s.markTargetFailure(state, time.Now(), cached.status, cached.header, false, upstreamModel)
+							default:
+								state.markReachable(time.Now(), lease != nil)
+							}
+						}
+						// A native handshake rejection owns a once-only health
+						// settlement that its Close would otherwise run with the
+						// ordinary result, overwriting the fixed cooldown.
+						if nativeRejection := responseWebsocketRejection(resp); nativeRejection != nil {
+							cached.nativeHandshake = true
+							nativeRejection.settleWith(settleDequeued)
+						} else {
+							settleDequeued()
+						}
+						// A sticky target's own 4xx (429 included) is its verdict on this
+						// request: it replaces a substitute's cached answer as a
+						// whole (status, headers, body, target, request id), and
+						// the request is no longer held by it (stickyVerdictPending).
+						stickyOwn := false
+						for _, name := range stickyBound {
+							if strings.EqualFold(name, target.Name) {
+								stickyOwn = true
+								stickyAnswered[targetKey] = struct{}{}
+								break
+							}
+						}
+						if cachedFailoverError == nil || stickyOwn {
 							cachedFailoverError = cached
 							// Keep the explicit-trace contract for the response that
 							// is eventually replayed: its body has already been
@@ -1543,26 +1855,67 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if responseObservesUsage(resp) {
 			pendingNoUsage = nil
 		}
-		completion = s.writeResponse(w, r, state, resp, cancel, attempt, upstreamModel, forwardBody, startedAt, keyIndex, accountLevelFailure, lease)
+		var delivered bool
+		completion, delivered = s.writeResponse(w, r, state, resp, cancel, attempt, upstreamModel, forwardBody, startedAt, keyIndex, accountLevelFailure, lease)
+		if waited && delivered {
+			s.metrics.totalInProxyWaitSuccess.Add(1)
+		}
 		// 更新 IP 粘连：仅在粘连命中（刷新 TTL）或首次轮询（建立粘连）时更新。
 		// Failover（原粘连目标暂不可用）和显式指定目标时不更新，避免劫持粘连。
 		// 粘连 key 使用 upstreamModel（真实上游模型名，保留原始大小写），让不同 alias
 		// 指向同一上游的请求归到同一条粘连记录，也与 selectTarget 中 Get side 的上游
 		// 查找 key 保持一致。
 		// MED-3: 收敛透传的账户级失败不应刷新/建立粘连到该坏目标。
-		if !accountLevelFailure && principal != nil && target != nil {
+		// Bindings are written only for a response delivered in full: a failed
+		// answer (5xx, 429, unrecognised 401, moderation 403, broken stream)
+		// must not pin the client to that target. A client that disconnects after
+		// the whole response was written still counts (the request statistics
+		// may call that a cancel; the delivery was complete). A half-open probe request
+		// does not create a new binding either (it may refresh its own one).
+		if !accountLevelFailure && delivered && principal != nil && target != nil {
 			now := time.Now()
 			targetName := strings.ToLower(target.Name)
-			if selKind == selectionAffinityHit || selKind == selectionRoundRobin || selKind == selectionCostRebind {
-				s.affinity.Set(affinityKey(clientIP(r), principal.Name, upstreamModel), targetName, now)
-			}
+			probe := lease != nil
+			// A hit refreshes the binding the request was routed by; a new
+			// binding is only written for a fresh pick, a new session or a
+			// permanently invalid session target.
+			ipHit := selKind == selectionAffinityHit
+			ipNew := selKind == selectionRoundRobin && !affinityBound && !probe
 			// Session writes are independent of the final selection kind: refresh
 			// the original target, or rebind only if it is permanently invalid.
 			// A temporary forwarding failover must not even refresh its TTL.
-			// Exception: a cost pool moved this request to a cheaper tier, so the
-			// binding follows it from the next request on (cost_routing.go).
-			if sessionKey != "" && (sessionBoundTarget == "" || selKind == selectionCostRebind || strings.EqualFold(sessionBoundTarget, targetName) || s.sessionTargetInvalid(sessionBoundTarget, allowed, model)) {
-				s.affinity.SetWithTTL(sessionKey, targetName, now, sessionAffinityTTL)
+			sessHit := sessionKey != "" && strings.EqualFold(sessionBoundTarget, targetName)
+			sessNew := sessionKey != "" && !sessHit && ((sessionBoundTarget == "" && !probe) || s.sessionTargetInvalid(sessionBoundTarget, allowed, model))
+			ipKey := affinityKey(clientIP(r), principal.Name, upstreamModel)
+			// A hit refreshes only a live sliding binding; a temporary one keeps
+			// its absolute expiry. If the binding expired while this request
+			// was in flight, it is recreated only on a preferred tier, so a
+			// temporary binding is never renewed by in-flight traffic.
+			needIP := ipNew || (ipHit && !s.affinity.Touch(ipKey, targetName, now, 0))
+			needSess := sessNew || (sessHit && !s.affinity.Touch(sessionKey, targetName, now, sessionAffinityTTL))
+			if needIP || needSess {
+				// A binding to a more expensive tier than this request could
+				// use (reached because the cheap tier was down or saturated)
+				// is temporary: it never slides, so the client returns to the
+				// cheap tier after it recovers. Established sliding bindings
+				// are refreshed, never demoted.
+				preferred := s.inPreferredCostTier(target, allowed, model, origURLPath, now)
+				if needIP {
+					switch {
+					case preferred:
+						s.affinity.Set(ipKey, targetName, now)
+					case ipNew:
+						s.affinity.SetTemporary(ipKey, targetName, now, 0, affinityTTL)
+					}
+				}
+				if needSess {
+					switch {
+					case preferred:
+						s.affinity.SetWithTTL(sessionKey, targetName, now, sessionAffinityTTL)
+					case sessNew:
+						s.affinity.SetTemporary(sessionKey, targetName, now, sessionAffinityTTL, temporarySessionAffinityTTL)
+					}
+				}
 			}
 		}
 		requestOutcomeRecorded = true
@@ -1762,10 +2115,20 @@ func (s *Service) MetricsSnapshot() ServiceMetrics {
 		TotalDequeueExhausted:                s.metrics.totalDequeueExhausted.Load(),
 		TotalCachedErrorReplayed:             s.metrics.totalCachedErrorReplayed.Load(),
 		TotalDequeue4xx:                      s.metrics.totalDequeue4xx.Load(),
-		TotalClientCanceled:                  s.metrics.totalClientCanceled.Load(),
-		ActiveRequests:                       s.metrics.activeRequests.Load(),
-		StartTime:                            s.startTime,
-		ResponsesWS:                          s.responsesWS.metricsSnapshot(),
+		TotalInProxyWait:                     s.metrics.totalInProxyWait.Load(),
+		TotalInProxyWaitSuccess:              s.metrics.totalInProxyWaitSuccess.Load(),
+		TotalInProxyWaitRejected:             s.metrics.totalInProxyWaitRejected.Load(),
+		TotalStickyRetryHinted:               s.metrics.totalStickyRetryHinted.Load(),
+		InProxyWaiting:                       s.inProxyWaiting.Load(),
+		UpstreamRejectionMuted: map[string]int64{
+			"401": s.metrics.totalRejectionMuted401.Load(),
+			"402": s.metrics.totalRejectionMuted402.Load(),
+			"403": s.metrics.totalRejectionMuted403.Load(),
+		},
+		TotalClientCanceled: s.metrics.totalClientCanceled.Load(),
+		ActiveRequests:      s.metrics.activeRequests.Load(),
+		StartTime:           s.startTime,
+		ResponsesWS:         s.responsesWS.metricsSnapshot(),
 	}
 }
 
@@ -1833,6 +2196,9 @@ func (s *Service) TargetStatuses(now time.Time) []TargetStatus {
 			Paused:                    target.Paused,
 			Muted:                     state.IsMuted(now),
 			MutedUntil:                stats.MutedUntil,
+			MuteReason:                stats.MuteReason,
+			MuteCode:                  stats.MuteCode,
+			MuteStatus:                stats.MuteStatus,
 			LastSuccess:               stats.LastSuccess,
 			LastFailure:               stats.LastFailure,
 			ConsecutiveFailures:       stats.ConsecutiveFailure,
@@ -1851,6 +2217,7 @@ func (s *Service) TargetStatuses(now time.Time) []TargetStatus {
 			AffinityHits:              state.affinityHitCount(),
 			BreakerTrips:              state.breakerTripCount(),
 			Window15m:                 state.runtimeWindow.snapshot(now),
+			ModelCooldowns:            state.modelCooldowns(now),
 		})
 		if s := &statuses[len(statuses)-1]; target.MaxConcurrency > 0 {
 			s.Utilization = float64(s.InFlight) / float64(target.MaxConcurrency)
@@ -2209,4 +2576,17 @@ func (s *Service) bindAdmissionPool(name string, pool *keyPool) {
 			manager.UpdateActiveKeys(name, current.activeKeyCountLocked(), len(current.entries))
 		}
 	})
+}
+
+// countRejectionMute records a fixed cooldown entered after an account-level
+// upstream rejection.
+func (s *Service) countRejectionMute(status int) {
+	switch status {
+	case http.StatusUnauthorized:
+		s.metrics.totalRejectionMuted401.Add(1)
+	case http.StatusPaymentRequired:
+		s.metrics.totalRejectionMuted402.Add(1)
+	case http.StatusForbidden:
+		s.metrics.totalRejectionMuted403.Add(1)
+	}
 }

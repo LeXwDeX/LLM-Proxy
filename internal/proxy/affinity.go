@@ -13,16 +13,27 @@ import (
 const (
 	affinityTTL        = 5 * time.Minute
 	sessionAffinityTTL = 24 * time.Hour
-	maxAffinityEntries = 50000 // 容量上限，防止 map 无限增长
+	// temporarySessionAffinityTTL bounds a session binding created on a
+	// non-preferred (more expensive) cost tier. It never slides, so the
+	// session re-selects, and returns to the cheap tier once it recovers.
+	temporarySessionAffinityTTL = 10 * time.Minute
+	maxAffinityEntries          = 50000 // 容量上限，防止 map 无限增长
 )
 
 type affinityEntry struct {
 	targetName string
 	lastUsed   time.Time
 	ttl        time.Duration // 零值沿用 IP 粘连的默认 TTL
+	// expiresAt 非零表示临时绑定：绝对到期，不随使用滑动。
+	expiresAt time.Time
 }
 
+func (e affinityEntry) temporary() bool { return !e.expiresAt.IsZero() }
+
 func (e affinityEntry) expired(now time.Time) bool {
+	if e.temporary() {
+		return now.After(e.expiresAt)
+	}
 	ttl := e.ttl
 	if ttl == 0 {
 		ttl = affinityTTL
@@ -115,6 +126,56 @@ func (a *affinityMap) SetWithTTL(key, targetName string, now time.Time, ttl time
 	}
 	a.entries[key] = affinityEntry{targetName: targetName, lastUsed: now, ttl: ttl}
 	a.mu.Unlock()
+}
+
+// SetTemporary writes a binding that expires at an absolute time and never
+// slides. It does not demote an existing sliding binding to the same target
+// (that binding is the client's established stickiness and is refreshed
+// instead), and it does not extend a live temporary binding to the same
+// target, so a temporary binding always ends and the next request re-selects.
+func (a *affinityMap) SetTemporary(key, targetName string, now time.Time, slidingTTL, ttl time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	existing, exists := a.entries[key]
+	if exists && !existing.expired(now) && existing.targetName == targetName {
+		if !existing.temporary() {
+			existing.lastUsed = now
+			existing.ttl = slidingTTL
+			a.entries[key] = existing
+		}
+		return
+	}
+	if !exists && len(a.entries) >= a.maxEntries {
+		a.evictLocked(now)
+	}
+	a.entries[key] = affinityEntry{targetName: targetName, lastUsed: now, expiresAt: now.Add(ttl)}
+}
+
+// Touch refreshes the client's own live binding to targetName and reports
+// whether one existed. A sliding binding slides; a temporary one is left
+// untouched (it must end at its absolute expiry). A missing, expired or
+// different binding is not created or overwritten.
+func (a *affinityMap) Touch(key, targetName string, now time.Time, slidingTTL time.Duration) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e, ok := a.entries[key]
+	if !ok || e.expired(now) || e.targetName != targetName {
+		return false
+	}
+	if !e.temporary() {
+		e.lastUsed = now
+		e.ttl = slidingTTL
+		a.entries[key] = e
+	}
+	return true
+}
+
+// IsTemporary reports whether key holds a live temporary binding.
+func (a *affinityMap) IsTemporary(key string, now time.Time) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	e, ok := a.entries[key]
+	return ok && !e.expired(now) && e.temporary()
 }
 
 // evictLocked 淘汰陈旧条目以腾出空间。调用方必须持有 a.mu 写锁。

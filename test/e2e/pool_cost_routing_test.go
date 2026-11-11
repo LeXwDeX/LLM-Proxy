@@ -119,9 +119,10 @@ func clientCost(t *testing.T, clientName string) float64 {
 	return result.Totals.EstimatedCost
 }
 
-// A cost pool sends traffic to the member that is cheapest right now and,
-// after a price change, moves the next request (including the sticky client)
-// to the new cheapest member. Billing still uses the serving member's price.
+// A cost pool sends traffic to the member that is cheapest right now. A price
+// change never interrupts an existing sticky client (the bound member can still
+// serve); clients without affinity follow the new cheapest member. Billing
+// still uses the serving member's price.
 func TestPoolCostRoutingFollowsPricesE2E(t *testing.T) {
 	model := uniq("e2e-cost-model")
 	poolName := routingPool(t, "cost")
@@ -147,19 +148,41 @@ func TestPoolCostRoutingFollowsPricesE2E(t *testing.T) {
 		t.Fatalf("cost = %g, want %g at the serving member's price", got, want)
 	}
 
-	// The aggregator becomes the expensive member: the next request switches,
-	// although the client already has IP affinity to it.
+	// The aggregator becomes the expensive member. The client already has IP
+	// affinity to it and it is still healthy, so the binding is not interrupted;
+	// a client with no affinity goes to the new cheapest member.
 	setAgg(flatPrice(agg, model, 50, 50))
 	costRoutingCall(t, key, model)
-	events = usageFor(t, clientName, 4)
-	switched := 0
-	for _, ev := range events {
-		if ev.Target == official {
-			switched++
+	for _, ev := range usageFor(t, clientName, 4) {
+		if ev.Target != agg {
+			t.Fatalf("sticky client moved to %s after a price change, want to stay on %s", ev.Target, agg)
 		}
 	}
-	if switched != 1 {
-		t.Fatalf("after the price change %d requests went to %s, want exactly the next one", switched, official)
+	freshName, freshKey := client(t, nil, []string{poolName})
+	costRoutingCall(t, freshKey, model)
+	if got := usageFor(t, freshName, 1)[0].Target; got != official {
+		t.Fatalf("new client served by %s after the price change, want cheapest %s", got, official)
+	}
+}
+
+// An empty routing_strategy (legacy data and the default for new pools) means
+// cost priority: the cheapest member serves every request.
+func TestPoolEmptyStrategyRoutesByCostE2E(t *testing.T) {
+	model := uniq("e2e-default-cost-model")
+	poolName := routingPool(t, "")
+	pricey := poolMember(t, poolName, w.urlA+"/v1", model)
+	cheap := poolMember(t, poolName, w.urlB+"/v1", model)
+	clientName, key := client(t, nil, []string{poolName})
+	priceTemplate(t, flatPrice(pricey, model, 50, 50))
+	priceTemplate(t, flatPrice(cheap, model, 5, 5))
+
+	for i := 0; i < 3; i++ {
+		costRoutingCall(t, key, model)
+	}
+	for _, ev := range usageFor(t, clientName, 3) {
+		if ev.Target != cheap {
+			t.Fatalf("empty-strategy pool served by %s, want cheapest %s", ev.Target, cheap)
+		}
 	}
 }
 
@@ -229,27 +252,24 @@ func TestPoolCostRoutingComparesByClientAliasE2E(t *testing.T) {
 		t.Fatalf("fake B received model %q, want configured spelling %q", got, upstreamB)
 	}
 
-	// 2. A's upstream name is not reverse-expanded to the shared alias: only A
-	// declares it, so A serves even though B is cheaper.
-	costRoutingCall(t, key, upstreamA)
+	// 2. The alias again: the client is now sticky to B (a healthy member is
+	// never interrupted) and B is also the cheaper one.
+	costRoutingCall(t, key, alias)
 	events = usageFor(t, clientName, 2)
-	counts := map[string]int{}
-	for _, ev := range events {
-		counts[ev.Target]++
+	if events[0].Target != b || events[1].Target != b {
+		t.Fatalf("alias requests served by %s and %s, want both on %s", events[0].Target, events[1].Target, b)
 	}
-	if counts[a] != 1 || counts[b] != 1 {
-		t.Fatalf("serving targets = %v, want one request on each member", counts)
-	}
+
+	// 3. A's upstream name is not reverse-expanded to the shared alias: only A
+	// declares it, so A serves even though B is cheaper. Billing keeps each
+	// event at its serving member's unchanged price (B=5, A=10), records that
+	// member's upstream in lower case and cites that member's pricing template.
+	costRoutingCall(t, key, upstreamA)
 	if got := lastRecord(t, w.fakeA, "/v1/chat/completions").Model; got != upstreamA {
 		t.Fatalf("fake A received model %q, want configured spelling %q", got, upstreamA)
 	}
-
-	// 3. The alias again picks B; billing keeps each event at its serving
-	// member's unchanged price (B=5, A=10), records that member's upstream in
-	// lower case and cites that member's pricing template.
-	costRoutingCall(t, key, alias)
 	events = usageFor(t, clientName, 3)
-	counts = map[string]int{}
+	counts := map[string]int{}
 	want := 0.0
 	for _, ev := range events {
 		counts[ev.Target]++

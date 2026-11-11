@@ -96,6 +96,9 @@ func TestTargetIdentityHTTPRecovery(t *testing.T) {
 			}
 			assertLocalMute := func() {
 				t.Helper()
+				// Use up the early-probe slot: a single transient-cooling
+				// target otherwise admits one probe per spacing interval.
+				svc.targetOrder[0].lastEarlyProbe.Store(time.Now().UnixNano())
 				rr := request()
 				if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "all targets muted") || calls.Load() != wantCalls {
 					t.Fatalf("local cooldown: status=%d body=%s calls=%d want=%d", rr.Code, rr.Body.String(), calls.Load(), wantCalls)

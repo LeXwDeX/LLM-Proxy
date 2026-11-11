@@ -151,6 +151,9 @@ func TestWSErrNativeHandshake429ErrorEvent(t *testing.T) {
 // Standard counterexample: an ordinary 403 handshake is not a key failure. It
 // is passed through as an error event; the other key is not tried and the key
 // is not disabled.
+// A native WS handshake 403 follows the HTTP rule: each rejected key cools as
+// "forbidden" and the loop tries the next key; with every key rejected and
+// no other candidate the real 403 reaches the client as an error event.
 func TestWSErrNativeHandshake403StandardPassThrough(t *testing.T) {
 	bad, good, alias := uniq("sk-ws403-bad"), uniq("sk-ws403-good"), uniq("ws403")
 	tg := wsResponsesTarget(t, w.urlA, alias, []string{bad, good}, nil)
@@ -165,12 +168,12 @@ func TestWSErrNativeHandshake403StandardPassThrough(t *testing.T) {
 	if last["type"] != "error" || last["status"] != float64(403) {
 		t.Fatalf("expected a 403 error event: %v", last)
 	}
-	if h := hits(w.fakeA, bad, from) + hits(w.fakeA, good, from); h != 1 {
-		t.Fatalf("ordinary 403 retried another key: handshakes=%d", h)
+	if h := hits(w.fakeA, bad, from) + hits(w.fakeA, good, from); h != 2 {
+		t.Fatalf("403 should try each key once: handshakes=%d", h)
 	}
 	for i := 0; i < 2; i++ {
-		if st := keyStatus(t, tg, i); st.Exhausted {
-			t.Fatalf("ordinary 403 disabled key %d: %+v", i, st)
+		if st := keyStatus(t, tg, i); !st.Exhausted || st.ExhaustReason != "forbidden" {
+			t.Fatalf("key %d after 403: %+v, want the forbidden cooldown", i, st)
 		}
 	}
 }

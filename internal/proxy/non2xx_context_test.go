@@ -223,7 +223,11 @@ func TestNon2xxParentCancellation(t *testing.T) {
 					t.Error("missing interrupted body diagnostic")
 				}
 			}
-			if !reading && s.targetOrder[0].keyPool.exhaustReasonAt(0) == "" && s.targetOrder[1].keyPool.exhaustReasonAt(0) == "" {
+			keyMarked := func(i int) bool {
+				pool := s.targetOrder[i].keyPool
+				return pool.exhaustReasonAt(0) != "" || len(pool.entries[0].modelLimits) > 0 // key-level, or a (key, model) 429
+			}
+			if !reading && !keyMarked(0) && !keyMarked(1) {
 				t.Error("cancellation unmarked exhausted key")
 			}
 			assertRejectionResources(t, s)
@@ -336,7 +340,13 @@ func TestNon2xxReadPolicyRealHTTP(t *testing.T) {
 						if status == 402 {
 							wantReason = "billing_error"
 						}
-						if got := state.keyPool.exhaustReasonAt(0); got != wantReason {
+						if status == 429 && adapter != "glm" {
+							// A generic 429 limits the (key, model) pair; the key stays active
+							// (a GLM-selected target keeps the key-level classification).
+							if got := state.keyPool.exhaustReasonAt(0); got != "" || len(state.keyPool.entries[0].modelLimits) != 1 {
+								t.Errorf("bad key reason=%q model_limits=%d, want a (key, model) limit", got, len(state.keyPool.entries[0].modelLimits))
+							}
+						} else if got := state.keyPool.exhaustReasonAt(0); got != wantReason {
 							t.Errorf("bad key reason=%q want %q", got, wantReason)
 						}
 						if got := state.keyPool.exhaustReasonAt(1); got != "" {

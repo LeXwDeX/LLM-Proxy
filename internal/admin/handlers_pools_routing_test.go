@@ -16,7 +16,7 @@ func TestPoolRoutingStrategyCRUD(t *testing.T) {
 	if rec := postPool(t, h, map[string]any{"name": "legacy"}); rec.Code != http.StatusCreated {
 		t.Fatalf("create default: %d %s", rec.Code, rec.Body.String())
 	}
-	if got := mustGetPool(t, pools, "legacy"); got.EffectiveRoutingStrategy() != config.PoolRoutingLoad {
+	if got := mustGetPool(t, pools, "legacy"); got.EffectiveRoutingStrategy() != config.PoolRoutingCost {
 		t.Fatalf("default strategy = %q", got.RoutingStrategy)
 	}
 
@@ -88,7 +88,7 @@ func TestSchemaPublishesPoolRoutingStrategies(t *testing.T) {
 	if len(schema.Strategies) != 2 || schema.Strategies[0].Value != config.PoolRoutingLoad || schema.Strategies[1].Value != config.PoolRoutingCost {
 		t.Fatalf("strategies = %#v", schema.Strategies)
 	}
-	if schema.Defaults.Strategy != config.PoolRoutingLoad {
+	if schema.Defaults.Strategy != config.PoolRoutingCost {
 		t.Fatalf("default = %q", schema.Defaults.Strategy)
 	}
 }

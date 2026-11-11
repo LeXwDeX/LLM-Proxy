@@ -288,6 +288,8 @@ func run(args []string) int {
 	}
 	cfg.Pools = pools
 	manager.Replace(cfg)
+	// 升级后空值策略池按成本优先调度；成员未设并发上限时软上限不触发，启动时提示一次。
+	config.LogCostPoolCapacityWarnings(appLogger, cfg, nil)
 
 	appLogger.Info("configuration loaded",
 		"config_path", *configPath,

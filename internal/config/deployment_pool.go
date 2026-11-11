@@ -12,8 +12,10 @@ type DeploymentPool struct {
 	DisplayName string `json:"display_name,omitempty"`
 	Description string `json:"description,omitempty"`
 	Paused      bool   `json:"paused,omitempty"`
-	// RoutingStrategy 选择池成员间的分流方式：空值与 load 为现行负载均衡；
-	// cost 在可用成员中按各自计价模板于请求时刻的估算成本优先（见 internal/proxy/cost_routing.go）。
+	// RoutingStrategy 选择池成员间的灾备/分流逻辑：cost（成本优先）按各自计价模板于请求时刻的
+	// 估算成本分层，同层负载均衡并互为灾备（见 internal/proxy/cost_routing.go）；
+	// load（性能优先）按负载与存活 key 加权均衡，不看价格。空值（含旧数据）等同 cost，
+	// 不做数据迁移，存量显式 load 的池保持性能优先。
 	RoutingStrategy string `json:"routing_strategy,omitempty"`
 }
 
@@ -23,8 +25,8 @@ const (
 )
 
 var poolRoutingStrategyOptions = []EnumOption{
-	{PoolRoutingLoad, "负载均衡（默认）"},
-	{PoolRoutingCost, "成本优先（按计价模板分流）"},
+	{PoolRoutingLoad, "性能优先"},
+	{PoolRoutingCost, "成本优先"},
 }
 
 // AllPoolRoutingStrategyOptions 经 /admin/data/schema 下发，前端不重复声明。
@@ -32,15 +34,15 @@ func AllPoolRoutingStrategyOptions() []EnumOption {
 	return cloneEnumOptions(poolRoutingStrategyOptions)
 }
 
-// IsValidPoolRoutingStrategy 接受空值（旧数据，等同 load）与公开枚举。
+// IsValidPoolRoutingStrategy 接受空值（旧数据，等同 cost）与公开枚举。
 func IsValidPoolRoutingStrategy(strategy string) bool {
 	return strategy == "" || enumContains(poolRoutingStrategyOptions, strategy)
 }
 
-// EffectiveRoutingStrategy 返回生效策略，空值按 load 处理。
+// EffectiveRoutingStrategy 返回生效策略，空值按 cost 处理；显式 load 保持性能优先。
 func (p DeploymentPool) EffectiveRoutingStrategy() string {
 	if p.RoutingStrategy == "" {
-		return PoolRoutingLoad
+		return PoolRoutingCost
 	}
 	return p.RoutingStrategy
 }

@@ -36,7 +36,7 @@ func TestService503MultiKeyNoRetryStorm(t *testing.T) {
 			Name:               "openai",
 			Endpoint:           upstream.URL,
 			ResourcePathPrefix: "/openai",
-			APIKey:             "k1",              // 多 key 目标 → keyPool != nil
+			APIKey:             "k1", // 多 key 目标 → keyPool != nil
 			APIKeys:            []string{"k2", "k3"},
 		}},
 		Logging: config.LoggingConfig{Level: "info", AccessLog: "logs/test-access.log", ErrorLog: "logs/test-error.log"},
@@ -162,9 +162,10 @@ func TestConvergenceAccountFailureMarksTargetFailure(t *testing.T) {
 	rr := httptest.NewRecorder()
 	service.ServeHTTP(rr, req)
 
-	// 透传真实 401 给客户端（收敛的设计目的）。
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 passthrough, got %d body=%s", rr.Code, rr.Body.String())
+	// 收敛后回放真实上游错误体；代理 key 的 401 对客户端显示为 503，
+	// 上游状态保留在 X-Upstream-Status，避免客户端误判自己的 key 失效。
+	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get(headerUpstreamStatus) != "401" || !bytes.Contains(rr.Body.Bytes(), []byte("invalid_api_key")) {
+		t.Fatalf("expected the upstream 401 replayed as 503, got %d %q body=%s", rr.Code, rr.Header().Get(headerUpstreamStatus), rr.Body.String())
 	}
 	// 关键断言：账户级失败应 mute 目标（修复前是 MarkSuccess → 不 mute）。
 	statuses := service.TargetStatuses(time.Now())
@@ -253,7 +254,7 @@ func TestService429BackoffContextAware(t *testing.T) {
 		keys = append(keys, "k"+string(rune('1'+i)))
 	}
 	cfg := &config.Config{
-		Server:   config.ServerConfig{Bind: "127.0.0.1:0", RequestTimeoutSeconds: 60},
+		Server: config.ServerConfig{Bind: "127.0.0.1:0", RequestTimeoutSeconds: 60},
 		Targets: []config.Target{{
 			Name:               "openai",
 			Endpoint:           upstream.URL,

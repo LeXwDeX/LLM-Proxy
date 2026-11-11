@@ -26,6 +26,11 @@ AdminApp.register("targetsList", function (app) {
   var targetHealthCounts = app.bind("targetsHealth", "targetHealthCounts");
   var targetPhaseKnown = app.bind("targetsHealth", "targetPhaseKnown");
   var targetETag = app.bind("targetsHealth", "targetETag");
+  var targetMuteSummary = app.bind("targetsHealth", "targetMuteSummary");
+  var targetModelCooldownActive = app.bind("targetsHealth", "targetModelCooldownActive");
+  var targetModelCooldownSummary = app.bind("targetsHealth", "targetModelCooldownSummary");
+  var targetMuteReasonActive = app.bind("targetsHealth", "targetMuteReasonActive");
+  var targetRuntimeFor = app.bind("targetsHealth", "targetRuntimeFor");
   var etagHeaders = app.bind("targetsHealth", "etagHeaders");
   var targetFilterSpecs = [
     { key: "all", label: "全部" },
@@ -92,8 +97,34 @@ AdminApp.register("targetsList", function (app) {
     tb.innerHTML = html;
     renderedTableHtml = html;
   }
+  // Rejection cooldowns show a remaining-time countdown computed from muted_until.
+  // While one is on screen the list is repainted every 30s (no request); the timer
+  // stops by itself once none is left or the page is left.
+  var MUTE_TICK_MS = 30 * 1000;
+  var muteTicker = null;
+  function stopMuteTicker() {
+    if (muteTicker !== null) clearInterval(muteTicker);
+    muteTicker = null;
+  }
+  function syncMuteTicker() {
+    var any =
+      state.currentPage === "targets" &&
+      Array.isArray(state.targets) &&
+      state.targets.some(function (t) {
+        var rt = targetRuntimeFor(t);
+        return targetMuteReasonActive(rt) || targetModelCooldownActive(rt);
+      });
+    if (!any) return stopMuteTicker();
+    if (muteTicker !== null) return;
+    muteTicker = setInterval(function () {
+      if (state.currentPage !== "targets") return stopMuteTicker();
+      if (document.visibilityState === "hidden") return;
+      renderTargets();
+    }, MUTE_TICK_MS);
+  }
   function renderTargetsBody() {
     renderTargetStatusFilters();
+    syncMuteTicker();
     var tb = document.getElementById("targetsTableBody");
     var targets = filteredTargets();
     if (ts.targetsLoadFailed && !ts.targetsLoaded) {
@@ -298,14 +329,27 @@ AdminApp.register("targetsList", function (app) {
             fg: "var(--ink-3)",
           };
           ph.label = schemaLabel("target_phases", rt.phase);
-          phaseCell =
-            "<span style='background:" +
-            ph.bg +
-            ";color:" +
-            ph.fg +
-            ";padding:2px 8px;border-radius:4px;font-size:12px;'>" +
-            esc(ph.label) +
-            "</span> ";
+          var mute = targetMuteSummary(rt, Date.now());
+          if (mute) {
+            // Account-level upstream rejection: louder than the plain phase tag, with a way out.
+            phaseCell =
+              "<span class='target-mute-tag' style='background:var(--bad-soft);color:var(--bad);padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;' title='" +
+              esc(mute.title) +
+              "'>" +
+              esc(mute.text) +
+              "</span> <button type='button' class='btn btn-sm readonly-hide' data-unmute-tgt='" +
+              esc(t.name) +
+              "' title='解除冷却，立即恢复调度该目标' style='padding:1px 6px;font-size:11px;'>解除冷却</button> ";
+          } else {
+            phaseCell =
+              "<span style='background:" +
+              ph.bg +
+              ";color:" +
+              ph.fg +
+              ";padding:2px 8px;border-radius:4px;font-size:12px;'>" +
+              esc(ph.label) +
+              "</span> ";
+          }
           var recent = rt.window_15m;
           if (recent) {
             schedCell =
@@ -319,6 +363,16 @@ AdminApp.register("targetsList", function (app) {
               (recent.breaker_trips > 0 ? "var(--bad)" : "var(--ink-3)") +
               ";' title='过去15分钟进入或延长冷却的次数'>熔断 " +
               recent.breaker_trips +
+              "</span>";
+          }
+          // Per-model 429 cooldowns leave the phase at ready; say which models are limited.
+          var modelCooling = targetModelCooldownSummary(rt, Date.now());
+          if (modelCooling) {
+            schedCell +=
+              " <span class='target-model-limit-tag' style='font-size:12px;background:var(--warn-soft);color:var(--warn);padding:1px 6px;border-radius:4px;' title='" +
+              esc(modelCooling.title) +
+              "'>" +
+              esc(modelCooling.text) +
               "</span>";
           }
         }
@@ -614,6 +668,27 @@ AdminApp.register("targetsList", function (app) {
             endRowAction("resume:" + resumeName);
           }
         })();
+      }
+      if (t.dataset.unmuteTgt) {
+        var unmuteName = t.dataset.unmuteTgt;
+        showConfirm(
+          "确认解除目标「" + unmuteName + "」的冷却？\n将立即恢复调度；若上游仍拒绝，会再次进入冷却。",
+          async function () {
+            if (!beginRowAction("unmute:" + unmuteName)) return;
+            try {
+              await api(
+                "/admin/data/targets/" + encodeURIComponent(unmuteName) + "/unmute",
+                { method: "POST" },
+              );
+              toast("已解除冷却: " + unmuteName, "success");
+              await loadTargets();
+            } catch (e) {
+              toast("解除冷却失败: " + e.message, "error");
+            } finally {
+              endRowAction("unmute:" + unmuteName);
+            }
+          },
+        );
       }
       // 唤醒按钮处理
       if (t.dataset.wakeupTarget) {

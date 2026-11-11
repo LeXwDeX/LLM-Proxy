@@ -5,7 +5,6 @@ AdminApp.register("targetsHealth", function (app) {
   var ts = app.initializeModule("targets").shared;
   var state = app.state;
   var schemaLabel = app.bind("schema", "schemaLabel");
-  var targetHealthRanks = { attention: 0, healthy: 1, paused: 2 };
   // keypool.status keeps exhausted=true after an expired cooldown; only the
   // 可用(待激活) display label means the key can be retried without an issue.
   // 失效(待请求验证), blocked keys and active cooldowns still need attention.
@@ -226,18 +225,96 @@ AdminApp.register("targetsHealth", function (app) {
     });
     return counts;
   }
-  function targetSort(a, b) {
-    var ar = targetHealthRanks[targetHealth(a).key];
-    var br = targetHealthRanks[targetHealth(b).key];
-    if (ar === undefined) ar = 3;
-    if (br === undefined) br = 3;
-    return ar - br || String(a.name || "").localeCompare(String(b.name || ""));
+  // Classified cooldown: the runtime reports a mute_reason for every cooldown it
+  // classified (account rejections, 429, 5xx, timeouts, network). An unclassified
+  // breaker cooldown has none and keeps the plain phase label.
+  function targetMuteReasonActive(rt) {
+    return !!rt && rt.phase === "muted" && typeof rt.mute_reason === "string" && !!rt.mute_reason;
+  }
+  // 4xx/5xx-type trouble: a rejection cooldown, or any muted / half-open phase.
+  function targetRuntimeAbnormal(rt) {
+    return !!rt && (!!rt.mute_reason || rt.phase === "muted" || rt.phase === "half-open");
+  }
+  // "42 分", "<1 分", "1 时 5 分". Minutes are floored; up to 60 分 stays in minutes.
+  function formatMuteRemaining(ms) {
+    var minutes = Math.floor(Number(ms) / 60000);
+    if (!(minutes >= 1)) return "<1 分";
+    if (minutes <= 60) return minutes + " 分";
+    var hours = Math.floor(minutes / 60);
+    var rest = minutes % 60;
+    return hours + " 时" + (rest ? " " + rest + " 分" : "");
+  }
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  function formatLocalTime(date) {
+    return date.getFullYear() + "-" + pad2(date.getMonth() + 1) + "-" + pad2(date.getDate()) +
+      " " + pad2(date.getHours()) + ":" + pad2(date.getMinutes()) + ":" + pad2(date.getSeconds());
+  }
+  // The label comes from the schema (target_mute_reasons); an older server without it falls back to 冷却.
+  function muteReasonLabel(reason) {
+    var list = (state.schema && state.schema.target_mute_reasons) || [];
+    var entry = list.find(function (option) { return option.value === reason; });
+    return entry && entry.label ? entry.label : "冷却";
+  }
+  // Display model for a rejection cooldown, or null for anything else.
+  // text: "403 冷却 · 剩 42 分"; title: "上游返回 403（code），<到期时间> 后自动探测恢复".
+  function targetMuteSummary(rt, nowMs) {
+    if (!targetMuteReasonActive(rt)) return null;
+    var until = rt.muted_until ? new Date(rt.muted_until) : null;
+    if (until && isNaN(until.getTime())) until = null;
+    var text = muteReasonLabel(rt.mute_reason);
+    if (until) text += " · 剩 " + formatMuteRemaining(until.getTime() - nowMs);
+    var status = rt.mute_status || (/^upstream_(\d+)$/.exec(rt.mute_reason) || [])[1] || "";
+    var title = "上游返回 " + status + (rt.mute_code ? "（" + rt.mute_code + "）" : "");
+    if (String(status) === "504") title = "上游超时（504 或连续发送后超时）";
+    if (rt.mute_reason === "network") title = "网络错误（连接失败等）";
+    else if (!status) title = "上游拒绝请求" + (rt.mute_code ? "（" + rt.mute_code + "）" : "");
+    if (until) title += "，" + formatLocalTime(until) + " 后自动探测恢复";
+    return { text: text, title: title };
+  }
+  // Per-model 429 cooldowns (rt.model_cooldowns, read-only): the target keeps serving
+  // its other models, so phase stays ready; this only tells which models are limited.
+  // Entries whose deadline passed since the snapshot are dropped locally.
+  function activeModelCooldowns(rt, nowMs) {
+    var list = rt && Array.isArray(rt.model_cooldowns) ? rt.model_cooldowns : [];
+    return list.filter(function (c) {
+      if (!c || typeof c.model !== "string" || !c.model) return false;
+      var until = new Date(c.until);
+      return !isNaN(until.getTime()) && until.getTime() > nowMs;
+    });
+  }
+  function targetModelCooldownActive(rt, nowMs) {
+    return activeModelCooldowns(rt, nowMs === undefined ? Date.now() : nowMs).length > 0;
+  }
+  // Tag "部分模型限流"; title: "<模型> · <冷却来源> · 剩 N 分" per model.
+  function targetModelCooldownSummary(rt, nowMs) {
+    var active = activeModelCooldowns(rt, nowMs);
+    if (!active.length) return null;
+    var lines = active.map(function (c) {
+      var label = muteReasonLabel(c.reason);
+      var status = c.status ? "上游 " + c.status + " " : "";
+      return c.model + " · " + status + label + " · 剩 " + formatMuteRemaining(new Date(c.until).getTime() - nowMs);
+    });
+    return { text: "部分模型限流", title: lines.join("\n") + "\n其余模型照常调度" };
+  }
+  // Default list order: enabled switch above disabled, then name (zh-CN, numeric),
+  // then abnormal runtime first, then endpoint as the last tiebreaker. State filters
+  // apply afterwards, so they never change the relative order.
+  function compareTargets(a, b) {
+    var ap = a && a.paused ? 1 : 0;
+    var bp = b && b.paused ? 1 : 0;
+    if (ap !== bp) return ap - bp;
+    var byName = String((a && a.name) || "").localeCompare(String((b && b.name) || ""), "zh-CN", { numeric: true });
+    if (byName) return byName;
+    var aa = targetRuntimeAbnormal(targetRuntimeFor(a)) ? 0 : 1;
+    var ba = targetRuntimeAbnormal(targetRuntimeFor(b)) ? 0 : 1;
+    if (aa !== ba) return aa - ba;
+    return String((a && a.endpoint) || "").localeCompare(String((b && b.endpoint) || ""), "zh-CN", { numeric: true });
   }
   function filteredTargets() {
     var targets = Array.isArray(state.targets) ? state.targets : [];
     return targets
       .slice()
-      .sort(targetSort)
+      .sort(compareTargets)
       .filter(function (t) {
         return ts.targetFilter === "all" || targetHealth(t).key === ts.targetFilter;
       });
@@ -392,5 +469,12 @@ AdminApp.register("targetsHealth", function (app) {
     targetKeyStatusComplete: targetKeyStatusComplete,
     targetPhaseKnown: targetPhaseKnown,
     targetRuntimeFor: targetRuntimeFor,
+    targetMuteReasonActive: targetMuteReasonActive,
+    targetRuntimeAbnormal: targetRuntimeAbnormal,
+    targetMuteSummary: targetMuteSummary,
+    targetModelCooldownActive: targetModelCooldownActive,
+    targetModelCooldownSummary: targetModelCooldownSummary,
+    formatMuteRemaining: formatMuteRemaining,
+    compareTargets: compareTargets,
   };
 });

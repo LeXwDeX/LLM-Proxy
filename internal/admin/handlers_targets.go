@@ -847,6 +847,22 @@ func (h *Handler) handleSetTargetPaused(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": updatedTarget.Name, "paused": paused, "etag": h.targetETag(updatedTarget.Name)}, warning))
 }
 
+// handleUnmuteTarget 手动解除目标冷却。冷却是运行态（不落库、不改配置、不推进配置代次），
+// 因此不取 configMu、不要求 If-Match，但仍写审计 unmute_target。
+func (h *Handler) handleUnmuteTarget(w http.ResponseWriter, r *http.Request) {
+	name, err := targetNameParam(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
+		return
+	}
+	if !h.proxyService.ClearTargetMute(name) {
+		writeJSON(w, http.StatusNotFound, errorResponse(fmt.Sprintf("target %q not found", name)))
+		return
+	}
+	h.recordAudit(r, "unmute_target", name, "success", "")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (h *Handler) handleBlockTargetKey(w http.ResponseWriter, r *http.Request) {
 	h.handleSetTargetKeyBlocked(w, r, true)
 }

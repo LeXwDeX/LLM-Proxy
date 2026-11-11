@@ -103,6 +103,7 @@ func (h *Handler) routes() chi.Router {
 		guarded.Post("/targets/{name}/rename", h.handleRenameTarget)
 		guarded.Put("/targets/{name}/pause", h.handlePauseTarget)
 		guarded.Put("/targets/{name}/resume", h.handleResumeTarget)
+		guarded.Post("/targets/{name}/unmute", h.handleUnmuteTarget)
 		guarded.Post("/targets/{name}/test-model", h.handleTestModel)
 		guarded.Put("/targets/{name}/keys/{index}/block", h.handleBlockTargetKey)
 		guarded.Put("/targets/{name}/keys/{index}/unblock", h.handleUnblockTargetKey)

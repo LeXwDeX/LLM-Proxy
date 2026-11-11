@@ -105,6 +105,8 @@ func TestBreakerCooldownPeriodNotScheduled(t *testing.T) {
 
 	p := newAllowAllPrincipal(t, "token")
 	inCooldown := now.Add(base / 2)
+	// The early-probe slot was just used, so this pick sees the cooldown.
+	state.lastEarlyProbe.Store(inCooldown.UnixNano())
 	st, _, kind, err := svc.selectTarget(p, "10.9.9.1", "", "", nil, nil, "", "/v1/chat/completions", inCooldown)
 	if st != nil || err == nil {
 		t.Fatalf("muted-only pool must not route, got state=%v kind=%d err=%v", st, kind, err)

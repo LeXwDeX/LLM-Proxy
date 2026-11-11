@@ -3,13 +3,61 @@
 package e2e
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/fakellm"
 )
 
 // Standard keeps the wire contract and does not opt into vendor patches.
-func TestRegressF7Standard(t *testing.T) { vendorStandardGuard(t, "F7") }
+// Under standard the OpenRouter key-limit shape never activates the
+// OpenRouter Patch (whose reason would be quota_exceeded*). The generic
+// account-rejection rule for a non-moderation 403 still applies: each key
+// cools as "forbidden", both targets fail over and cool, the first real 403
+// is replayed, and the next request sees the cooldown envelope.
+func TestRegressF7Standard(t *testing.T) {
+	const body = `{"error":{"code":403,"message":"Key limit exceeded","metadata":{"provider_name":"fake"}},"user_id":"user_fake"}`
+	p, alias := pool(t), uniq("e2e-boundary")
+	keysA := []string{uniq("sk-boundary-a0"), uniq("sk-boundary-a1")}
+	keysB := []string{uniq("sk-boundary-b0"), uniq("sk-boundary-b1")}
+	tgA := keyedTarget(t, w.urlA, "/openrouter/api/v1", alias, keysA, map[string]any{"pool": p})
+	tgB := keyedTarget(t, w.urlB, "/openrouter/api/v1", alias, keysB, map[string]any{"pool": p})
+	_, key := client(t, nil, []string{p})
+	for _, k := range keysA {
+		w.fakeA.SetKeyScenario(k, &fakellm.Scenario{Preset: "openrouter_403_key_limit"})
+		defer w.fakeA.SetKeyScenario(k, nil)
+	}
+	for _, k := range keysB {
+		w.fakeB.SetKeyScenario(k, &fakellm.Scenario{Preset: "openrouter_403_key_limit"})
+		defer w.fakeB.SetKeyScenario(k, nil)
+	}
+	resp, wire := chat(t, key, alias, "hi")
+	if resp.StatusCode != 403 || string(wire) != body {
+		t.Fatalf("first request: HTTP %d %q, want the first real 403 replayed", resp.StatusCode, wire)
+	}
+	for _, tg := range []string{tgA, tgB} {
+		for i := 0; i < 2; i++ {
+			if st := keyStatus(t, tg, i); !st.Exhausted || st.ExhaustReason != "forbidden" {
+				t.Fatalf("%s key%d: %+v, want the generic forbidden cooldown (not the OpenRouter Patch)", tg, i, st)
+			}
+		}
+	}
+	fromA, fromB := w.fakeA.LastSeq(), w.fakeB.LastSeq()
+	resp, wire = chat(t, key, alias, "hi")
+	if resp.StatusCode != 403 || !strings.Contains(string(wire), `"upstream_rejected"`) {
+		t.Fatalf("second request: HTTP %d %s, want the cooldown envelope", resp.StatusCode, wire)
+	}
+	for _, k := range keysA {
+		if hits(w.fakeA, k, fromA) != 0 {
+			t.Fatal("cooling target A was called again")
+		}
+	}
+	for _, k := range keysB {
+		if hits(w.fakeB, k, fromB) != 0 {
+			t.Fatal("cooling target B was called again")
+		}
+	}
+}
 
 func TestRegressF7AllInflightKeysPassThrough(t *testing.T) {
 	p, alias := pool(t), uniq("e2e-f7-exhausted")
@@ -56,7 +104,6 @@ func vendorStandardGuard(t *testing.T, selected string) {
 		name, prefix, preset, body string
 		status                     int
 	}{
-		{"F7", "/openrouter/api/v1", "openrouter_403_key_limit", `{"error":{"code":403,"message":"Key limit exceeded","metadata":{"provider_name":"fake"}},"user_id":"user_fake"}`, 403},
 		{"F11", "/minimax/v1", "minimax_1008", `{"base_resp":{"status_code":1008,"status_msg":"insufficient balance"}}`, 200},
 	} {
 		if tc.name != selected {
@@ -127,7 +174,9 @@ func TestRegressF7OpenRouter(t *testing.T) {
 		{"openrouter_402_inflight", "rate_limited", 200, 1},
 		{"openrouter_403_budget", "quota_exceeded_api", 200, 1},
 		{"openrouter_401", "invalid_token", 200, 1},
-		{"openrouter_403_key_limit", "", 403, 1},
+		// No limit_source: not the Patch's budget shape, so the generic
+		// non-moderation 403 rule cools the key and the next key serves.
+		{"openrouter_403_key_limit", "forbidden", 200, 1},
 		{"openrouter_403_moderation", "", 403, 1},
 		{"openrouter_402_weight", "", 402, 1},
 		{"openrouter_429", "rate_limited", 200, 2},
@@ -147,7 +196,12 @@ func TestRegressF7OpenRouter(t *testing.T) {
 				t.Fatalf("hits=%d want=%d", n, tc.hits)
 			}
 			st := keyStatus(t, tg, 0)
-			if st.Exhausted != (tc.reason != "") || st.ExhaustReason != tc.reason {
+			if tc.preset == "openrouter_429" {
+				// A generic 429 limits the (key, upstream model) pair; the key stays usable.
+				if st.Exhausted || len(st.ModelLimits) != 1 {
+					t.Fatalf("state=%+v", st)
+				}
+			} else if st.Exhausted != (tc.reason != "") || st.ExhaustReason != tc.reason {
 				t.Fatalf("state=%+v", st)
 			}
 			if tc.reason != "" && hits(w.fakeA, k1, from) != 1 {

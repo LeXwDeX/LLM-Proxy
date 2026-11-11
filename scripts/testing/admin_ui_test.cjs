@@ -251,7 +251,7 @@ function schemaFixture() {
       option("offline", "暂停"),
     ],
     pool_routing_strategies: [
-      option("load", "Schema负载均衡"),
+      option("load", "Schema性能优先"),
       option("cost", "Schema成本优先"),
     ],
     defaults: {
@@ -261,7 +261,7 @@ function schemaFixture() {
       auth_mode: "",
       pricing_mode: "flat",
       pricing_timezone: "+06:00",
-      pool_routing_strategy: "load",
+      pool_routing_strategy: "cost",
       role: "admin",
       openai_prefix: "",
       anthropic_prefix: "",

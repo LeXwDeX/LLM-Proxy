@@ -30,6 +30,20 @@ type keyRuntime struct {
 	lastErrorAt          time.Time     // 最近一次错误时间
 	consecutiveRateLimit int           // 连续 429 限流次数（指数退避冷却依据，成功时清零）
 	consecutiveFails     int           // 连续失败次数（HTTP 429 或 GLM 1302，WP-3：RETRY≥2 降级依据，成功时清零）
+	// modelLimits：通用 429 限流按（key，上游模型）记录，key 本身保持可用——同一 key 上
+	// 一个模型被限流不影响它服务其他模型。账户类失败（401/402/403、额度耗尽）、GLM 业务码
+	// 限流仍是 key 级（exhausted）。键为上游模型原始拼写，每 key 至多 maxKeyModelLimits 项。
+	modelLimits map[string]*keyModelLimit
+}
+
+// maxKeyModelLimits bounds the per-key model limit map; a 429 for a further
+// model falls back to the key-level rate limit.
+const maxKeyModelLimits = 32
+
+// keyModelLimit is the 429 cooldown of one upstream model on one key.
+type keyModelLimit struct {
+	until time.Time
+	count int // consecutive 429s of this (key, model); cleared by that model's success
 }
 
 // keyEntry keeps a generation's immutable credential and index assignment.
@@ -187,6 +201,27 @@ func monthlyResetInMonth(year int, month time.Month, day int, loc *time.Location
 // 绝境探测：如果所有 key 都在冷却中，选冷却剩余最短的 key 做探测（返回该 key，但不自动恢复）。
 // 返回 (key, index)。如果无可用 key 返回 ("", -1)。
 func (p *keyPool) selectKey() (string, int) {
+	return p.selectKeyModel("")
+}
+
+// unusableLocked reports whether key i cannot serve a request for the upstream
+// model: exhausted or blocked, or rate limited for that model (model "" ignores
+// model limits). The caller holds p.mu.
+func (p *keyPool) unusableLocked(i int, model string, now time.Time) bool {
+	e := &p.entries[i]
+	if e.exhausted || e.blocked {
+		return true
+	}
+	return model != "" && e.modelLimited(model, now)
+}
+
+func (r *keyRuntime) modelLimited(model string, now time.Time) bool {
+	ml := r.modelLimits[model]
+	return ml != nil && ml.until.After(now)
+}
+
+// selectKeyModel is selectKey for a request of the given upstream model.
+func (p *keyPool) selectKeyModel(model string) (string, int) {
 	if p == nil || len(p.entries) == 0 {
 		return "", -1
 	}
@@ -200,7 +235,7 @@ func (p *keyPool) selectKey() (string, int) {
 	start := int(p.rrCounter) % n
 	for i := 0; i < n; i++ {
 		idx := (start + i) % n
-		if !p.entries[idx].exhausted && !p.entries[idx].blocked {
+		if !p.unusableLocked(idx, model, now) {
 			p.rrCounter++
 			return p.entries[idx].key, idx
 		}
@@ -216,8 +251,8 @@ func (p *keyPool) selectKey() (string, int) {
 	bestIdx := -1
 	shortestRemaining := time.Duration(0)
 	for i := range p.entries {
-		if p.entries[i].blocked {
-			continue
+		if p.entries[i].blocked || !p.entries[i].exhausted {
+			continue // active keys limited for this model are not probe candidates
 		}
 		// 跳过同账号共享配额类限流（探测也会被限或假阳性返回 200）：
 		// rate_limited + GLM 各类限流（5h/周月额度/QPS/服务过载）。注意 quota_exceeded 等额度耗尽
@@ -258,11 +293,17 @@ func (p *keyPool) selectKey() (string, int) {
 //
 // clientName 为空时退化为 selectKey（顺序消费）。
 func (p *keyPool) selectKeyForClient(clientName string) (string, int) {
+	return p.selectKeyForClientModel(clientName, "")
+}
+
+// selectKeyForClientModel is selectKeyForClient for a request of the given
+// upstream model: keys rate limited for that model are skipped.
+func (p *keyPool) selectKeyForClientModel(clientName, model string) (string, int) {
 	if p == nil || len(p.entries) == 0 {
 		return "", -1
 	}
 	if clientName == "" {
-		return p.selectKey()
+		return p.selectKeyModel(model)
 	}
 
 	p.mu.Lock()
@@ -270,16 +311,25 @@ func (p *keyPool) selectKeyForClient(clientName string) (string, int) {
 
 	now := time.Now()
 	n := len(p.entries)
+	// A pick that had to skip a key because it is limited for this model serves
+	// this request only: it must not create or move the client's key binding,
+	// which other models of the client keep using.
+	bind := func(idx int) {
+		if model != "" && p.modelOnlyLimitedLocked(model, now) {
+			return
+		}
+		p.bindLocked(clientName, idx, now)
+	}
 
 	// 1. 检查已有亲和绑定
 	if preferred, ok := p.clientAffinity[clientName]; ok && preferred >= 0 && preferred < n {
-		if !p.entries[preferred].exhausted && !p.entries[preferred].blocked {
+		if !p.unusableLocked(preferred, model, now) {
 			// #2 再平衡：绑定存活，但若超过 rebalanceInterval 未重新评估，
 			// 且存在负载更低的 active key，则迁移绑定（least-connections + least-token）。
 			// 仅在确有更优 key 时迁移，避免无意义抖动。
 			boundAt := p.clientAffinityAt[clientName]
 			if now.Sub(boundAt) >= p.rebalanceInterval {
-				best := p.bestActiveKeyLocked(now)
+				best := p.bestActiveKeyLocked(now, model)
 				if best >= 0 && best != preferred && p.scoreLessLocked(best, preferred, now) {
 					p.logger.Info("[keypool] affinity rebalanced",
 						"target", p.targetName,
@@ -301,7 +351,7 @@ func (p *keyPool) selectKeyForClient(clientName string) (string, int) {
 		bestIdx := -1
 		hasSignal := false // 有在途请求 或 有 token 数据
 		for i := 0; i < n; i++ {
-			if p.entries[i].exhausted || p.entries[i].blocked {
+			if p.unusableLocked(i, model, now) {
 				continue
 			}
 			if p.inFlight[i] > 0 || p.tokenSumInWindow(i, now) > 0 {
@@ -314,15 +364,15 @@ func (p *keyPool) selectKeyForClient(clientName string) (string, int) {
 		if bestIdx >= 0 {
 			if hasSignal {
 				// 负载感知调度：选在途最少、其次累计 token 最少的
-				p.bindLocked(clientName, bestIdx, now)
+				bind(bestIdx)
 				return p.entries[bestIdx].key, bestIdx
 			}
 			// 无负载信号（刚启动 / 全空闲），退化为轮询
 			for i := 0; i < n; i++ {
 				idx := int(p.rrCounter) % n
 				p.rrCounter++
-				if !p.entries[idx].exhausted && !p.entries[idx].blocked {
-					p.bindLocked(clientName, idx, now)
+				if !p.unusableLocked(idx, model, now) {
+					bind(idx)
 					return p.entries[idx].key, idx
 				}
 			}
@@ -334,8 +384,8 @@ func (p *keyPool) selectKeyForClient(clientName string) (string, int) {
 	start := int(p.rrCounter) % n
 	for i := 0; i < n; i++ {
 		idx := (start + i) % n
-		if !p.entries[idx].exhausted && !p.entries[idx].blocked {
-			p.bindLocked(clientName, idx, now)
+		if !p.unusableLocked(idx, model, now) {
+			bind(idx)
 			maskKey := maskAPIKey(p.entries[idx].key)
 			p.logger.Info("[keypool] affinity overflow",
 				"target", p.targetName,
@@ -648,6 +698,12 @@ func (p *keyPool) markRateLimitedWithBody(index int, body []byte) {
 // selectNextActiveKey 从指定 key 之后找下一个 active key。
 // 返回 (key, index)。如果无可用 key 返回 ("", -1)。
 func (p *keyPool) selectNextActiveKey(afterIndex int) (string, int) {
+	return p.selectNextActiveKeyModel(afterIndex, "")
+}
+
+// selectNextActiveKeyModel is selectNextActiveKey for a request of the given
+// upstream model: keys rate limited for that model are skipped.
+func (p *keyPool) selectNextActiveKeyModel(afterIndex int, model string) (string, int) {
 	if p == nil || len(p.entries) == 0 {
 		return "", -1
 	}
@@ -660,7 +716,7 @@ func (p *keyPool) selectNextActiveKey(afterIndex int) (string, int) {
 	// 从 afterIndex+1 开始找
 	for i := 1; i <= n; i++ {
 		idx := (afterIndex + i) % n
-		if !p.entries[idx].exhausted && !p.entries[idx].blocked {
+		if !p.unusableLocked(idx, model, now) {
 			return p.entries[idx].key, idx
 		}
 	}
@@ -859,6 +915,13 @@ func (p *keyPool) markKeySuccess(index int) {
 	p.entries[index].consecutiveRateLimit = 0
 }
 
+// markKeySuccessModel is markKeySuccess for a request of the given upstream
+// model; it also ends that model's limit on the key.
+func (p *keyPool) markKeySuccessModel(index int, model string) {
+	p.markKeySuccess(index)
+	p.clearKeyModelLimit(index, model, false)
+}
+
 // unmarkExhaustedForRetry 临时解除 key 的 exhausted 状态，允许下一次
 // selectKeyForClient 重新选中该 key。保留 consecutiveFails 和 consecutiveRateLimit
 // 不变（WP-3 RETRY<2 坚持同一个 key 时使用）。
@@ -912,7 +975,10 @@ type KeyStatus struct {
 	Blocked       bool      `json:"blocked"`
 	LastError     string    `json:"last_error,omitempty"`    // 最近一次上游错误的受控提示
 	LastErrorAt   time.Time `json:"last_error_at,omitempty"` // 最近一次错误时间
-	Status        string    `json:"status"`                  // 已屏蔽 / 额度超限 / 限流中 / 使用中 / 等待中 / 可用(待激活) / 失效(待请求验证) 等
+	// ModelLimits lists the active per-model 429 limits of this key (the key
+	// stays usable for its other models).
+	ModelLimits []KeyModelLimit `json:"model_limits,omitempty"`
+	Status      string          `json:"status"` // 已屏蔽 / 额度超限 / 限流中 / 使用中 / 等待中 / 可用(待激活) / 失效(待请求验证) 等
 }
 
 // isBlockedOnly 判断指定 key 是否为纯手动屏蔽（blocked 且非 exhausted）。
@@ -924,6 +990,150 @@ func (p *keyPool) isBlockedOnly(index int) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.entries[index].blocked && !p.entries[index].exhausted
+}
+
+// markRateLimitedFor records a 429 for one request. A generic 429 limits only
+// this (key, upstream model): the key stays active for its other models. A
+// GLM-selected target (glmPatch), an empty model or a full per-key model table
+// keeps the key-level rate limit. It
+// reports whether the limit was scoped to the model.
+func (p *keyPool) markRateLimitedFor(index int, model string, body []byte, glmPatch bool) (scoped bool) {
+	if p == nil || index < 0 || index >= len(p.entries) {
+		return false
+	}
+	// GLM limits are plan/account scoped (and carry their own business codes):
+	// a GLM-selected target keeps the key-level classification for every 429.
+	if !glmPatch && model != "" && p.markModelRateLimited(index, model, body) {
+		return true
+	}
+	if glmPatch {
+		p.markRateLimitedWithBody(index, body)
+	} else {
+		p.markRateLimited(index)
+	}
+	return false
+}
+
+// markModelRateLimited records the (key, model) limit with the key-level
+// exponential backoff (5s doubling to 60s per consecutive 429 of that pair).
+// It reports false when the key is exhausted already (key-level state wins) or
+// the table is full.
+func (p *keyPool) markModelRateLimited(index int, model string, body []byte) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := &p.entries[index]
+	if e.exhausted || e.blocked {
+		return false
+	}
+	now := time.Now()
+	ml := e.modelLimits[model]
+	if ml == nil {
+		if len(e.modelLimits) >= maxKeyModelLimits {
+			for k, v := range e.modelLimits {
+				if !v.until.After(now) {
+					delete(e.modelLimits, k)
+				}
+			}
+			if len(e.modelLimits) >= maxKeyModelLimits {
+				return false
+			}
+		}
+		if e.modelLimits == nil {
+			e.modelLimits = make(map[string]*keyModelLimit)
+		}
+		ml = &keyModelLimit{}
+		e.modelLimits[model] = ml
+	}
+	if ml.until.After(now) {
+		return true // late answer of the same incident: already limited
+	}
+	ml.count++
+	ml.until = now.Add(rateLimitedCooldownFor(ml.count))
+	if len(body) != 0 {
+		e.lastError = truncateErrBody(string(body))
+		e.lastErrorAt = now
+	}
+	p.logger.Warn("[keypool] key rate limited for model",
+		"target", p.targetName,
+		"key_index", index,
+		"key", maskAPIKey(e.key),
+		"model", model,
+		"cooldown_end", ml.until,
+	)
+	return true
+}
+
+// modelOnlyLimitedLocked reports whether some key is usable in general but
+// rate limited for the model. The caller holds p.mu.
+func (p *keyPool) modelOnlyLimitedLocked(model string, now time.Time) bool {
+	for i := range p.entries {
+		e := &p.entries[i]
+		if !e.exhausted && !e.blocked && e.modelLimited(model, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// keyModelLimited reports whether key index is rate limited for the model now.
+func (p *keyPool) keyModelLimited(index int, model string) bool {
+	if p == nil || index < 0 || index >= len(p.entries) || model == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.entries[index].modelLimited(model, time.Now())
+}
+
+// clearKeyModelLimit ends one (key, model) limit: that model's success. With
+// keepCount (a same-key retry) the backoff count survives.
+func (p *keyPool) clearKeyModelLimit(index int, model string, keepCount bool) {
+	if p == nil || index < 0 || index >= len(p.entries) || model == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := &p.entries[index]
+	ml := e.modelLimits[model]
+	if ml == nil {
+		return
+	}
+	if keepCount {
+		ml.until = time.Time{}
+		return
+	}
+	delete(e.modelLimits, model)
+}
+
+// allKeysModelLimited reports, when no key can serve the model, the earliest end
+// of the per-model limits of the keys that are active but limited for it. ok is
+// false when some key can serve it or no key is limited for it.
+func (p *keyPool) allKeysModelLimited(model string, now time.Time) (time.Time, bool) {
+	if p == nil || model == "" {
+		return time.Time{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var earliest time.Time
+	for i := range p.entries {
+		if !p.unusableLocked(i, model, now) {
+			return time.Time{}, false
+		}
+		e := &p.entries[i]
+		if e.exhausted || e.blocked {
+			continue
+		}
+		if ml := e.modelLimits[model]; ml != nil && (earliest.IsZero() || ml.until.Before(earliest)) {
+			earliest = ml.until
+		}
+	}
+	return earliest, !earliest.IsZero()
+}
+
+// KeyModelLimit is a read-only (key, upstream model) rate limit.
+type KeyModelLimit struct {
+	Model string    `json:"model"`
+	Until time.Time `json:"until"`
 }
 
 func (p *keyPool) status() []KeyStatus {
@@ -957,6 +1167,12 @@ func (p *keyPool) status() []KeyStatus {
 			ks.ExhaustedAt = e.exhaustedAt
 			ks.CooldownEnd = e.cooldownEnd
 		}
+		for model, ml := range e.modelLimits {
+			if ml.until.After(now) {
+				ks.ModelLimits = append(ks.ModelLimits, KeyModelLimit{Model: model, Until: ml.until})
+			}
+		}
+		sort.Slice(ks.ModelLimits, func(a, b int) bool { return ks.ModelLimits[a].Model < ks.ModelLimits[b].Model })
 		if e.lastError != "" {
 			ks.LastError = truncateErrBody(e.lastError)
 			ks.LastErrorAt = e.lastErrorAt
@@ -1187,10 +1403,10 @@ func (p *keyPool) scoreLessLocked(a, b int, now time.Time) bool {
 
 // bestActiveKeyLocked 返回当前负载最低（least-connections + least-token）的 active key。
 // 无 active key 返回 -1。调用方必须持有 p.mu。
-func (p *keyPool) bestActiveKeyLocked(now time.Time) int {
+func (p *keyPool) bestActiveKeyLocked(now time.Time, model string) int {
 	best := -1
 	for i := range p.entries {
-		if p.entries[i].exhausted || p.entries[i].blocked {
+		if p.unusableLocked(i, model, now) {
 			continue
 		}
 		if best == -1 || p.scoreLessLocked(i, best, now) {
@@ -1356,6 +1572,25 @@ func (p *keyPool) getExhaustedKeys() []int {
 	return result
 }
 
+// keyReasonForbidden marks a key whose account the upstream rejected with a
+// non-moderation 403. It cools for upstreamForbiddenCooldown and then rejoins.
+const keyReasonForbidden = "forbidden"
+
+// keyReasonUnauthorized marks a key whose credential the upstream rejected
+// with a 401 that matched no known credential rule. It cools briefly and
+// then rejoins (a recognised 401 keeps its invalid_token handling).
+const keyReasonUnauthorized = "unauthorized"
+
+// keyReasonForbiddenUnverified marks a key cooled briefly after a 403 without
+// a structured envelope (WAF/HTML page or bare 403).
+const keyReasonForbiddenUnverified = "forbidden_unverified"
+
+// keyReasonConfirmed reports whether a key's account-level reason is a
+// confirmed rejection (the unverified ones cool briefly first).
+func keyReasonConfirmed(reason string) bool {
+	return reason != keyReasonUnauthorized && reason != keyReasonForbiddenUnverified
+}
+
 // isAccountLevelExhaustion 判定耗尽原因是否为"账户级"失败——即同一账户下所有 key 大概率
 // 共享的失效（无效凭证、欠费、封禁、总额度永久耗尽）。这类失败换 key 重试无望，应停止
 // 逐 key 重试并把真实上游响应透传给客户端。
@@ -1365,7 +1600,8 @@ func (p *keyPool) getExhaustedKeys() []int {
 // 计而非账户失效）。
 func isAccountLevelExhaustion(reason string) bool {
 	switch reason {
-	case "invalid_token",
+	case keyReasonForbidden, keyReasonUnauthorized, keyReasonForbiddenUnverified,
+		"invalid_token",
 		"account_disabled",
 		"billing_error",
 		"quota_exceeded_api",
@@ -1385,7 +1621,8 @@ func isAccountLevelExhaustion(reason string) bool {
 // 廉价的 GET /models 探测无法可靠验证（部分上游对任意 key 都放行 /models，会造成假阳性）。
 func isHardFailureReason(reason string) bool {
 	switch reason {
-	case "invalid_token",
+	case keyReasonForbidden, keyReasonUnauthorized, keyReasonForbiddenUnverified,
+		"invalid_token",
 		"account_disabled",
 		"billing_error",
 		"rate_limited",
@@ -1420,7 +1657,8 @@ func isHardFailureReason(reason string) bool {
 // 因此不会在此函数被判 true；这里只覆盖"如果它们恰好过期了，是否算真恢复"。
 func isRecoverableAfterCooldown(reason string) bool {
 	switch reason {
-	case "rate_limited",
+	case keyReasonForbidden, keyReasonUnauthorized, keyReasonForbiddenUnverified, // 403/401 冷却到期即重新参与（仍被拒会再次标记）
+		"rate_limited",
 		glmRateLimitQPS,               // 1302：速率/QPS 限流（瞬时）
 		glmRateLimitOverload,          // 1305：服务过载（瞬时，60s 冷却过期=真恢复）
 		glmExhaustReason,              // 1308：5h 额度限流
@@ -1468,6 +1706,10 @@ func keyStatusLabelForReason(reason string) string {
 		return "额度超限"
 	case "rate_limited":
 		return "限流中"
+	case keyReasonForbidden, keyReasonForbiddenUnverified:
+		return "403 冷却"
+	case keyReasonUnauthorized:
+		return "401 冷却"
 	case glmRateLimitQPS:
 		// 1302：速率/QPS 限流
 		return "GLM速率限流"
@@ -1634,4 +1876,28 @@ func sameKeyPoolConfig(a, b *keyPool) bool {
 		}
 	}
 	return true
+}
+
+// hasServingOrTransientKey reports whether some key is active, or exhausted
+// only for a reason that recovers by itself once its cooldown passes (rate
+// limits, quota windows). Account-level reasons (forbidden, invalid token,
+// billing) and manually blocked keys do not count.
+func (p *keyPool) hasServingOrTransientKey() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, e := range p.entries {
+		if e.blocked {
+			continue
+		}
+		if !e.exhausted {
+			return true
+		}
+		if !isAccountLevelExhaustion(e.exhaustReason) && isRecoverableAfterCooldown(e.exhaustReason) {
+			return true
+		}
+	}
+	return false
 }

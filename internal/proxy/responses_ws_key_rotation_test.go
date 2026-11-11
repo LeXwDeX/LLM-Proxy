@@ -57,8 +57,8 @@ func TestResponsesWSAccountLevelHandshakeConvergenceMutesTarget(t *testing.T) {
 		`{"error":{"type":"invalid_request_error","code":"invalid_api_key","message":"bad key"}}`)
 	s := twoKeyWSService(t, u.URL)
 	w := wsTestRequest(t, s, "client", "/v1/responses", `{"model":"openai-test","input":"hi"}`)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("converged account failure was not passed through: %d %s", w.Code, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get(headerUpstreamStatus) != "401" {
+		t.Fatalf("converged account failure was not replayed (proxy-key 401 as 503): %d %s", w.Code, w.Body.String())
 	}
 	// Same account-level failure on every key is a target failure, as on HTTP.
 	if state, _ := s.targetByName("openai"); !state.IsMuted(time.Now()) {
