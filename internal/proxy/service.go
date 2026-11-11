@@ -1856,7 +1856,31 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			pendingNoUsage = nil
 		}
 		var delivered bool
-		completion, delivered = s.writeResponse(w, r, state, resp, cancel, attempt, upstreamModel, forwardBody, startedAt, keyIndex, accountLevelFailure, lease)
+		// Bindings are written before the 2xx headers are committed, not after
+		// the response: a client that opens a connection per request and sends
+		// the next one the moment it has read this response must already find
+		// the binding (issue #202). If the response then turns out not to be
+		// delivered in full they are taken back below.
+		var bindingIn bindingInputs
+		var prewritten []affinityUndo
+		prewriteDone := false
+		bindingEligible := !accountLevelFailure && principal != nil && target != nil
+		if bindingEligible {
+			bindingIn = bindingInputs{
+				principal: principal, target: target, clientIP: clientIP(r),
+				selKind: selKind, affinityBound: affinityBound, probe: lease != nil,
+				sessionKey: sessionKey, sessionBoundTarget: sessionBoundTarget,
+				allowed: allowed, model: model, upstreamModel: upstreamModel, path: origURLPath,
+			}
+		}
+		var beforeCommit func()
+		if bindingEligible {
+			beforeCommit = func() {
+				prewriteDone = true
+				prewritten = s.writeBindings(bindingIn, time.Now())
+			}
+		}
+		completion, delivered = s.writeResponse(w, r, state, resp, cancel, attempt, upstreamModel, forwardBody, startedAt, keyIndex, accountLevelFailure, lease, beforeCommit)
 		if waited && delivered {
 			s.metrics.totalInProxyWaitSuccess.Add(1)
 		}
@@ -1866,57 +1890,19 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 指向同一上游的请求归到同一条粘连记录，也与 selectTarget 中 Get side 的上游
 		// 查找 key 保持一致。
 		// MED-3: 收敛透传的账户级失败不应刷新/建立粘连到该坏目标。
-		// Bindings are written only for a response delivered in full: a failed
+		// Bindings are kept only for a response delivered in full: a failed
 		// answer (5xx, 429, unrecognised 401, moderation 403, broken stream)
 		// must not pin the client to that target. A client that disconnects after
 		// the whole response was written still counts (the request statistics
 		// may call that a cancel; the delivery was complete). A half-open probe request
 		// does not create a new binding either (it may refresh its own one).
-		if !accountLevelFailure && delivered && principal != nil && target != nil {
-			now := time.Now()
-			targetName := strings.ToLower(target.Name)
-			probe := lease != nil
-			// A hit refreshes the binding the request was routed by; a new
-			// binding is only written for a fresh pick, a new session or a
-			// permanently invalid session target.
-			ipHit := selKind == selectionAffinityHit
-			ipNew := selKind == selectionRoundRobin && !affinityBound && !probe
-			// Session writes are independent of the final selection kind: refresh
-			// the original target, or rebind only if it is permanently invalid.
-			// A temporary forwarding failover must not even refresh its TTL.
-			sessHit := sessionKey != "" && strings.EqualFold(sessionBoundTarget, targetName)
-			sessNew := sessionKey != "" && !sessHit && ((sessionBoundTarget == "" && !probe) || s.sessionTargetInvalid(sessionBoundTarget, allowed, model))
-			ipKey := affinityKey(clientIP(r), principal.Name, upstreamModel)
-			// A hit refreshes only a live sliding binding; a temporary one keeps
-			// its absolute expiry. If the binding expired while this request
-			// was in flight, it is recreated only on a preferred tier, so a
-			// temporary binding is never renewed by in-flight traffic.
-			needIP := ipNew || (ipHit && !s.affinity.Touch(ipKey, targetName, now, 0))
-			needSess := sessNew || (sessHit && !s.affinity.Touch(sessionKey, targetName, now, sessionAffinityTTL))
-			if needIP || needSess {
-				// A binding to a more expensive tier than this request could
-				// use (reached because the cheap tier was down or saturated)
-				// is temporary: it never slides, so the client returns to the
-				// cheap tier after it recovers. Established sliding bindings
-				// are refreshed, never demoted.
-				preferred := s.inPreferredCostTier(target, allowed, model, origURLPath, now)
-				if needIP {
-					switch {
-					case preferred:
-						s.affinity.Set(ipKey, targetName, now)
-					case ipNew:
-						s.affinity.SetTemporary(ipKey, targetName, now, 0, affinityTTL)
-					}
-				}
-				if needSess {
-					switch {
-					case preferred:
-						s.affinity.SetWithTTL(sessionKey, targetName, now, sessionAffinityTTL)
-					case sessNew:
-						s.affinity.SetTemporary(sessionKey, targetName, now, sessionAffinityTTL, temporarySessionAffinityTTL)
-					}
-				}
-			}
+		// A plain 2xx response wrote them in beforeCommit: keep or roll back.
+		// Other paths (WS, a passed-through non-2xx never delivers) write here.
+		switch {
+		case prewriteDone:
+			s.settlePrewrittenBindings(prewritten, bindingIn, delivered, time.Now())
+		case bindingEligible && delivered:
+			s.writeDeliveredBindings(bindingIn, time.Now())
 		}
 		requestOutcomeRecorded = true
 		return

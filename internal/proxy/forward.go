@@ -885,6 +885,12 @@ func (s *Service) writeResponse(
 	keyIndex int,
 	accountLevelFailure bool, // MED-3: 收敛透传的账户级 4xx 应按失败计（mute + 不计 success）
 	lease *probeLease,
+	// beforeCommit, when set, runs once right before a plain HTTP 2xx response
+	// commits its headers (never for WS, native-WS turns, a passed-through
+	// non-2xx or an account-level failure). The caller uses it to write the
+	// client's bindings ahead of the first byte and rolls them back when the
+	// response turns out not to be delivered in full (issue #202).
+	beforeCommit func(),
 ) (completion requeststats.Outcome, delivered bool) {
 	defer deferCancel(cancel)
 	defer resp.Body.Close()
@@ -919,6 +925,11 @@ func (s *Service) writeResponse(
 	if guardClaudeStream {
 		// A terminated stream has a different length from the upstream body.
 		w.Header().Del("Content-Length")
+	}
+	if beforeCommit != nil && !accountLevelFailure && wsBody == nil && nativeRejection == nil &&
+		resp.StatusCode >= 200 && resp.StatusCode < 300 &&
+		r.Context().Value(responsesWebsocketContextKey{}) == nil {
+		beforeCommit()
 	}
 	w.WriteHeader(resp.StatusCode)
 

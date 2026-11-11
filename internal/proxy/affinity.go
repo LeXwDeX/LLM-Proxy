@@ -26,6 +26,8 @@ type affinityEntry struct {
 	ttl        time.Duration // 零值沿用 IP 粘连的默认 TTL
 	// expiresAt 非零表示临时绑定：绝对到期，不随使用滑动。
 	expiresAt time.Time
+	// prov 非空表示该条目由尚未结算的预写产生（见 affinityProv）；nil 为已确认。
+	prov *affinityProv
 }
 
 func (e affinityEntry) temporary() bool { return !e.expiresAt.IsZero() }
@@ -120,12 +122,16 @@ func (a *affinityMap) Set(key, targetName string, now time.Time) {
 // Each successful write refreshes lastUsed, making the TTL sliding.
 func (a *affinityMap) SetWithTTL(key, targetName string, now time.Time, ttl time.Duration) {
 	a.mu.Lock()
+	a.setWithTTLLocked(key, targetName, now, ttl)
+	a.mu.Unlock()
+}
+
+func (a *affinityMap) setWithTTLLocked(key, targetName string, now time.Time, ttl time.Duration) {
 	// 新增条目前检查容量（更新已有条目不触发淘汰）
 	if _, exists := a.entries[key]; !exists && len(a.entries) >= a.maxEntries {
 		a.evictLocked(now)
 	}
 	a.entries[key] = affinityEntry{targetName: targetName, lastUsed: now, ttl: ttl}
-	a.mu.Unlock()
 }
 
 // SetTemporary writes a binding that expires at an absolute time and never
@@ -136,6 +142,10 @@ func (a *affinityMap) SetWithTTL(key, targetName string, now time.Time, ttl time
 func (a *affinityMap) SetTemporary(key, targetName string, now time.Time, slidingTTL, ttl time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.setTemporaryLocked(key, targetName, now, slidingTTL, ttl)
+}
+
+func (a *affinityMap) setTemporaryLocked(key, targetName string, now time.Time, slidingTTL, ttl time.Duration) {
 	existing, exists := a.entries[key]
 	if exists && !existing.expired(now) && existing.targetName == targetName {
 		if !existing.temporary() {
@@ -158,6 +168,10 @@ func (a *affinityMap) SetTemporary(key, targetName string, now time.Time, slidin
 func (a *affinityMap) Touch(key, targetName string, now time.Time, slidingTTL time.Duration) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.touchLocked(key, targetName, now, slidingTTL)
+}
+
+func (a *affinityMap) touchLocked(key, targetName string, now time.Time, slidingTTL time.Duration) bool {
 	e, ok := a.entries[key]
 	if !ok || e.expired(now) || e.targetName != targetName {
 		return false
@@ -168,6 +182,157 @@ func (a *affinityMap) Touch(key, targetName string, now time.Time, slidingTTL ti
 		a.entries[key] = e
 	}
 	return true
+}
+
+// provisional status of a prewrite.
+const (
+	provPending = iota
+	provConfirmed
+	provFailed
+)
+
+// affinityProv is one prewrite of a key. Prewrites that overlap form a chain
+// (prev is the state this one was written over), so a rollback never falls
+// back to a state that was itself never delivered: it walks to the newest
+// confirmed state, or to the plain binding the chain started from, or to
+// nothing. All fields are guarded by affinityMap.mu.
+type affinityProv struct {
+	status int
+	// value is the entry this prewrite produced (without prov).
+	value affinityEntry
+	// prev is the earlier prewrite this one was written over; nil when it
+	// was written over a plain entry (prevEntry, if hadPrev) or over nothing.
+	prev      *affinityProv
+	prevEntry affinityEntry
+	hadPrev   bool
+}
+
+// affinityUndo is the settlement token of one binding written ahead of the
+// response headers.
+type affinityUndo struct {
+	key  string
+	node *affinityProv // nil when the write changed nothing
+	// target and slidingTTL describe the sliding binding the request asserts
+	// (slidingTTL 0 is the IP default), for refresh or rebuild on success.
+	target     string
+	slidingTTL time.Duration
+	rebuild    rebuildPolicy
+}
+
+// rebuildPolicy says whether a success may recreate a lapsed binding.
+type rebuildPolicy int
+
+const (
+	rebuildNever       rebuildPolicy = iota // temporary bindings keep their absolute expiry
+	rebuildAlways                           // written as a sliding binding on a preferred tier
+	rebuildIfPreferred                      // a hit: recreated only on a preferred tier
+)
+
+// Prewrite runs op (which must use only the *Locked writers) on key under the
+// map's lock and returns the token that settles it. Reading the previous entry
+// and writing are one critical section, so the token never describes a state
+// another writer replaced in between.
+func (a *affinityMap) Prewrite(key string, now time.Time, op func()) affinityUndo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	raw, existed := a.entries[key]
+	op()
+	u := affinityUndo{key: key}
+	after, ok := a.entries[key]
+	if !ok || (existed && after == raw) {
+		return u
+	}
+	n := &affinityProv{value: after}
+	n.value.prov = nil
+	switch {
+	case existed && raw.prov != nil && raw.prov.status != provFailed && !raw.expired(now):
+		n.prev = raw.prov
+	case existed && !raw.expired(now):
+		n.prevEntry, n.hadPrev = raw, true
+		n.prevEntry.prov = nil
+	}
+	after.prov = n
+	a.entries[key] = after
+	u.node = n
+	return u
+}
+
+// Rollback settles a failed request's prewrite. Only if the key still holds
+// that prewrite does it change anything: it then restores the newest state
+// that was not itself a failed prewrite (a confirmed one, a pending one of an
+// overlapping request, the plain binding before the chain), or removes the
+// key. A binding another request rewrote since is theirs and stays.
+func (a *affinityMap) Rollback(u affinityUndo) {
+	n := u.node
+	if n == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n.status = provFailed
+	if cur, ok := a.entries[u.key]; !ok || cur.prov != n {
+		return
+	}
+	for p := n; ; {
+		prev := p.prev
+		if prev == nil {
+			if p.hadPrev {
+				a.entries[u.key] = p.prevEntry
+			} else {
+				delete(a.entries, u.key)
+			}
+			return
+		}
+		switch prev.status {
+		case provConfirmed:
+			a.entries[u.key] = prev.value
+			return
+		case provPending:
+			e := prev.value
+			e.prov = prev
+			a.entries[u.key] = e
+			return
+		}
+		p = prev
+	}
+}
+
+// Confirm settles a delivered request's prewrite: the prewrite becomes a plain
+// binding. A live sliding binding to the request's target is refreshed to now
+// (a temporary one is never renewed). It reports whether the key no longer
+// holds a live binding (the response outlived the sliding TTL); the caller
+// decides, by the rebuild policy, whether to Revive it.
+func (a *affinityMap) Confirm(u affinityUndo, now time.Time) (lapsed bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e, ok := a.entries[u.key]
+	if n := u.node; n != nil {
+		n.status = provConfirmed
+		n.prev, n.prevEntry, n.hadPrev = nil, affinityEntry{}, false
+		if ok && e.prov == n {
+			e.prov = nil
+			a.entries[u.key] = e
+		}
+	}
+	if !ok || e.expired(now) {
+		return true
+	}
+	if e.targetName == u.target && !e.temporary() {
+		e.lastUsed, e.ttl = now, u.slidingTTL
+		a.entries[u.key] = e
+	}
+	return false
+}
+
+// Revive recreates a lapsed sliding binding at now, only while the key holds
+// no live binding: one another request put there meanwhile is not overwritten.
+func (a *affinityMap) Revive(key, targetName string, now time.Time, slidingTTL time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if e, ok := a.entries[key]; ok && !e.expired(now) {
+		return
+	}
+	a.setWithTTLLocked(key, targetName, now, slidingTTL)
 }
 
 // IsTemporary reports whether key holds a live temporary binding.
