@@ -190,9 +190,28 @@ func TestDualProtocolPrefixMatrixE2E(t *testing.T) {
 				wantEvents = 3
 			}
 
+			// Wait for every expected path, not a bare event count: the
+			// count_tokens call may record its own event, which would satisfy
+			// a count before the /v1/responses event is written.
+			wantPaths := []string{"/v1/chat/completions", "/v1/messages"}
+			if tc.supportsResp {
+				wantPaths = append(wantPaths, "/v1/responses")
+			}
 			byPath := map[string]usageEvent{}
-			for _, ev := range usageFor(t, clientName, wantEvents) {
-				byPath[ev.Path] = ev
+			for deadline := time.Now().Add(10 * time.Second); ; {
+				for _, ev := range usageFor(t, clientName, wantEvents) {
+					byPath[ev.Path] = ev
+				}
+				missing := false
+				for _, p := range wantPaths {
+					if _, ok := byPath[p]; !ok {
+						missing = true
+					}
+				}
+				if !missing || time.Now().After(deadline) {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
 			}
 			for _, expected := range []struct {
 				path, model string
