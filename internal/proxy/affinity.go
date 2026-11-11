@@ -120,12 +120,16 @@ func (a *affinityMap) Set(key, targetName string, now time.Time) {
 // Each successful write refreshes lastUsed, making the TTL sliding.
 func (a *affinityMap) SetWithTTL(key, targetName string, now time.Time, ttl time.Duration) {
 	a.mu.Lock()
+	a.setWithTTLLocked(key, targetName, now, ttl)
+	a.mu.Unlock()
+}
+
+func (a *affinityMap) setWithTTLLocked(key, targetName string, now time.Time, ttl time.Duration) {
 	// 新增条目前检查容量（更新已有条目不触发淘汰）
 	if _, exists := a.entries[key]; !exists && len(a.entries) >= a.maxEntries {
 		a.evictLocked(now)
 	}
 	a.entries[key] = affinityEntry{targetName: targetName, lastUsed: now, ttl: ttl}
-	a.mu.Unlock()
 }
 
 // SetTemporary writes a binding that expires at an absolute time and never
@@ -136,6 +140,10 @@ func (a *affinityMap) SetWithTTL(key, targetName string, now time.Time, ttl time
 func (a *affinityMap) SetTemporary(key, targetName string, now time.Time, slidingTTL, ttl time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.setTemporaryLocked(key, targetName, now, slidingTTL, ttl)
+}
+
+func (a *affinityMap) setTemporaryLocked(key, targetName string, now time.Time, slidingTTL, ttl time.Duration) {
 	existing, exists := a.entries[key]
 	if exists && !existing.expired(now) && existing.targetName == targetName {
 		if !existing.temporary() {
@@ -158,6 +166,10 @@ func (a *affinityMap) SetTemporary(key, targetName string, now time.Time, slidin
 func (a *affinityMap) Touch(key, targetName string, now time.Time, slidingTTL time.Duration) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.touchLocked(key, targetName, now, slidingTTL)
+}
+
+func (a *affinityMap) touchLocked(key, targetName string, now time.Time, slidingTTL time.Duration) bool {
 	e, ok := a.entries[key]
 	if !ok || e.expired(now) || e.targetName != targetName {
 		return false
@@ -168,6 +180,52 @@ func (a *affinityMap) Touch(key, targetName string, now time.Time, slidingTTL ti
 		a.entries[key] = e
 	}
 	return true
+}
+
+// affinityUndo records one binding written ahead of the response headers:
+// the key's previous live entry (if any) and the entry the write produced. It
+// is the compare-and-restore token of rollback.
+type affinityUndo struct {
+	key       string
+	before    affinityEntry
+	hadBefore bool // before is a live entry; otherwise the key had none
+	after     affinityEntry
+	wrote     bool // the operation changed the entry
+}
+
+// Prewrite runs op (which must use only the *Locked writers) on key under the
+// map's lock and returns the token that undoes it. Reading the previous entry
+// and writing are one critical section, so the token never describes a state
+// another writer replaced in between.
+func (a *affinityMap) Prewrite(key string, now time.Time, op func()) affinityUndo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	raw, existed := a.entries[key]
+	op()
+	u := affinityUndo{key: key, before: raw, hadBefore: existed && !raw.expired(now)}
+	if after, ok := a.entries[key]; ok && (!existed || after != raw) {
+		u.after, u.wrote = after, true
+	}
+	return u
+}
+
+// Rollback undoes a Prewrite, only while the key still holds exactly the entry
+// the Prewrite wrote: a binding another request rewrote or refreshed since is
+// theirs and stays. An absent previous binding is removed again.
+func (a *affinityMap) Rollback(u affinityUndo) {
+	if !u.wrote {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if cur, ok := a.entries[u.key]; !ok || cur != u.after {
+		return
+	}
+	if u.hadBefore {
+		a.entries[u.key] = u.before
+	} else {
+		delete(a.entries, u.key)
+	}
 }
 
 // IsTemporary reports whether key holds a live temporary binding.
