@@ -78,7 +78,9 @@ func TestNativeResponsesWebSocket(t *testing.T) {
 	if !rec.WebSocket || rec.Model != "gpt-ws" || rec.Auth != "bearer" {
 		t.Fatalf("upstream turn %+v", rec)
 	}
-	evsBilled := usageFor(t, name, 2)
+	// Turn 3 (the upstream error frame) may also record an event; wait for the
+	// two successful turns specifically instead of any two events.
+	evsBilled := usageForWant(t, name, usageWant{StatusCode: 200}, usageWant{StatusCode: 200})
 	ok := 0
 	for _, ev := range evsBilled {
 		if ev.StatusCode == 200 {

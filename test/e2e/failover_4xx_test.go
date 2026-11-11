@@ -144,7 +144,9 @@ func Test400DequeueWritesOnlySuccessfulUsage(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("client saw %d %s", resp.StatusCode, body)
 		}
-		events := usageFor(t, clientName, 1)
+		// Wait for the successful candidate's event itself; the exact-count
+		// check below still rejects any extra event from the 400 attempt.
+		events := usageForWant(t, clientName, usageWant{Model: "up-b-" + alias})
 		if len(events) != 1 {
 			t.Fatalf("usage events = %d, want exactly 1", len(events))
 		}
