@@ -415,6 +415,34 @@ func (s *Service) attemptUsesClientCredential(target *Target, r *http.Request) b
 	return ok && az.AllowBearer && az.AzureAuthValue != ""
 }
 
+// classifyDeferredKeyRejection completes the key classification that
+// forwardRequest defers for a 403 whose body exceeded its 4 KiB pre-read. Only
+// a complete body (at most maxCachedUpstreamErrorBody, read without error) is
+// judged: a content-moderation 403 describes the request and cools nothing; any
+// other 403 rejects this key's credential and cools it (confirmed or
+// unconfirmed, as markKeyAccountRejection decides). A longer or unreadable body
+// keeps the old behaviour (left to the cross-target dequeue), as does a key that
+// is already marked, the client's own credential and a native handshake
+// rejection (classified on its complete envelope already). The body is always
+// restored for the response.
+func (s *Service) classifyDeferredKeyRejection(state *targetState, target *Target, r *http.Request, resp *http.Response, keyIndex int) {
+	if state == nil || state.keyPool == nil || keyIndex < 0 || resp == nil || resp.StatusCode != http.StatusForbidden ||
+		responseWebsocketRejection(resp) != nil || responseWSBody(resp) != nil ||
+		s.attemptUsesClientCredential(target, r) || state.keyPool.exhaustReasonAt(keyIndex) != "" {
+		return
+	}
+	cached, read, ok := readUpstreamErrorForCache(resp, target, "")
+	restoreUpstreamErrorBody(resp, read)
+	if !ok {
+		return
+	}
+	body, decoded := decodedUpstreamErrorBody(resp, cached.body)
+	if !decoded || upstreamContentModeration(target, body) {
+		return
+	}
+	s.markKeyAccountRejection(state, target, ResolveProtocol(r.URL.Path), keyIndex, resp.StatusCode, body, false)
+}
+
 // targetHasServingKeys reports whether a multi-key target still has a key
 // that can serve now or soon (only a transient rate limit or quota window). An account rejection that converged or ran out on
 // some keys then only dequeues this request; the key pool keeps managing the

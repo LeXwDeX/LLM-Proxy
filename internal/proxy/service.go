@@ -1471,6 +1471,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if state.keyPool == nil || keyIndex < 0 {
 				break
 			}
+			// A 403 whose body is larger than the pre-read was left unclassified by
+			// forwardRequest (a prefix cannot rule out moderation). Judge it on the
+			// complete body now, so the rejected key is cooled and the loop tries
+			// the next key before the response is settled.
+			s.classifyDeferredKeyRejection(state, target, r, resp, keyIndex)
 			// HIGH-1: 只有当当前 key 真正被标记耗尽（reason != ""）才换 key；通用 5xx / 4xx
 			// （非 key 问题）换 key 无意义，直接透传，避免多 key 目标的无界 key 轮换风暴。
 			reason := state.keyPool.exhaustReasonAt(keyIndex)
@@ -1707,7 +1712,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 					skipReason := ""
 					switch {
-					case (cached.status == http.StatusUnauthorized || cached.status == http.StatusForbidden) && s.attemptUsesClientCredential(target, r):
+					case upstreamRejectionMutesTarget(cached.status) && s.attemptUsesClientCredential(target, r):
 						// Bearer passthrough: the upstream judged the client's own
 						// token. Pass it through; never cool keys or the target.
 						skipReason = "client_credential"
