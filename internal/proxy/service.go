@@ -1900,9 +1900,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Other paths (WS, a passed-through non-2xx never delivers) write here.
 		switch {
 		case prewriteDone:
-			s.settlePrewrittenBindings(prewritten, delivered, time.Now())
+			s.settlePrewrittenBindings(prewritten, bindingIn, delivered, time.Now())
 		case bindingEligible && delivered:
-			s.writeBindings(bindingIn, time.Now())
+			s.writeDeliveredBindings(bindingIn, time.Now())
 		}
 		requestOutcomeRecorded = true
 		return

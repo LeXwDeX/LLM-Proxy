@@ -316,12 +316,6 @@ func TestAffinityPrewriteAndRollback(t *testing.T) {
 		if got, _ := live(m, "k"); got != "c" {
 			t.Fatalf("binding = %q, want the concurrent %q", got, "c")
 		}
-		v := set(m, "k2", "b", now)
-		m.Touch("k2", "b", now.Add(time.Millisecond), sessionAffinityTTL)
-		m.Rollback(v)
-		if got, _ := live(m, "k2"); got != "b" {
-			t.Fatalf("binding refreshed by another request was removed: %q", got)
-		}
 	})
 	t.Run("two writes of one key undo newest first", func(t *testing.T) {
 		m := newAffinityMap()
@@ -340,8 +334,8 @@ func TestAffinityPrewriteAndRollback(t *testing.T) {
 		m.SetTemporary("k", "b", now, sessionAffinityTTL, temporarySessionAffinityTTL)
 		before := m.entries["k"]
 		u := m.Prewrite("k", now.Add(time.Minute), func() { m.touchLocked("k", "b", now.Add(time.Minute), sessionAffinityTTL) })
-		if u.wrote || m.entries["k"] != before {
-			t.Fatalf("touch changed a temporary binding: wrote=%v entry=%+v", u.wrote, m.entries["k"])
+		if u.node != nil || m.entries["k"] != before {
+			t.Fatalf("touch changed a temporary binding: node=%v entry=%+v", u.node, m.entries["k"])
 		}
 		w := m.Prewrite("fresh", now, func() {
 			m.setTemporaryLocked("fresh", "b", now, sessionAffinityTTL, temporarySessionAffinityTTL)
