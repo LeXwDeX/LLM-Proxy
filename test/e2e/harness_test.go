@@ -350,40 +350,123 @@ type usageEvent struct {
 	ImageOutputTokens       int64  `json:"image_output_tokens"`
 }
 
-// usageFor polls the usage events of one client until want events exist.
-func usageFor(t *testing.T, clientName string, want int) []usageEvent {
+// usageEventsFor reads the usage events of one client once.
+func usageEventsFor(t *testing.T, clientName string) []usageEvent {
+	t.Helper()
+	q := url.Values{"from": {time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)},
+		"to": {time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339)}, "limit": {"1000"}}
+	code, body := w.adminDo("GET", "/admin/data/usage/events?"+q.Encode(), nil)
+	if code != 200 {
+		t.Fatalf("usage events: %d %s", code, body)
+	}
+	var page struct {
+		Events []usageEvent `json:"events"`
+	}
+	if err := json.Unmarshal(body, &page); err != nil {
+		t.Fatalf("usage events decode: %v", err)
+	}
+	var got []usageEvent
+	for _, ev := range page.Events {
+		if ev.ClientName == clientName {
+			got = append(got, ev)
+		}
+	}
+	return got
+}
+
+// usageForMatch polls the usage events of one client until match reports true
+// and returns that snapshot. Prefer it (or usageForWant) over a bare count
+// whenever the client can also produce events the test does not wait for
+// (count_tokens, probes, failed attempts, extra WS turns): such an event
+// satisfies a count before the awaited one is written. what names the awaited
+// condition in the timeout failure, which also prints the events seen.
+func usageForMatch(t *testing.T, clientName, what string, match func([]usageEvent) bool) []usageEvent {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
-	var got []usageEvent
-	for time.Now().Before(deadline) {
-		q := url.Values{"from": {time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)},
-			"to": {time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339)}, "limit": {"1000"}}
-		code, body := w.adminDo("GET", "/admin/data/usage/events?"+q.Encode(), nil)
-		if code != 200 {
-			t.Fatalf("usage events: %d %s", code, body)
-		}
-		var page struct {
-			Events []usageEvent `json:"events"`
-		}
-		if err := json.Unmarshal(body, &page); err != nil {
-			t.Fatalf("usage events decode: %v", err)
-		}
-		got = got[:0]
-		for _, ev := range page.Events {
-			if ev.ClientName == clientName {
-				got = append(got, ev)
-			}
-		}
-		if len(got) >= want {
+	for {
+		got := usageEventsFor(t, clientName)
+		if match(got) {
 			for _, ev := range got {
 				t.Logf("usage event: %+v", ev)
 			}
 			return got
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("client %s: usage events never satisfied %s; have %d: %+v", clientName, what, len(got), got)
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("client %s: %d usage events, want %d", clientName, len(got), want)
-	return nil
+}
+
+// usageFor polls the usage events of one client until want events exist. It
+// is only sound when every request of the client writes exactly the events
+// counted by want and nothing else (see usageForWant otherwise).
+func usageFor(t *testing.T, clientName string, want int) []usageEvent {
+	t.Helper()
+	return usageForMatch(t, clientName, fmt.Sprintf("%d events", want), func(events []usageEvent) bool {
+		return len(events) >= want
+	})
+}
+
+// usageWant describes one awaited usage event. Zero fields match anything.
+type usageWant struct {
+	Path       string
+	Model      string
+	Target     string
+	StatusCode int
+}
+
+func (u usageWant) matches(ev usageEvent) bool {
+	return (u.Path == "" || u.Path == ev.Path) && (u.Model == "" || u.Model == ev.Model) &&
+		(u.Target == "" || u.Target == ev.Target) && (u.StatusCode == 0 || u.StatusCode == ev.StatusCode)
+}
+
+func (u usageWant) String() string {
+	return fmt.Sprintf("{path=%q model=%q target=%q status=%d}", u.Path, u.Model, u.Target, u.StatusCode)
+}
+
+// coversUsageWants reports whether distinct events can be assigned to every
+// want (multiset semantics: two identical wants need two events). It runs a
+// bipartite matching so wildcard wants never steal an event a specific want
+// needs.
+func coversUsageWants(events []usageEvent, wants []usageWant) bool {
+	if len(events) < len(wants) {
+		return false
+	}
+	owner := make([]int, len(events)) // event index -> want index, -1 when free
+	for i := range owner {
+		owner[i] = -1
+	}
+	var assign func(wi int, seen []bool) bool
+	assign = func(wi int, seen []bool) bool {
+		for ei, ev := range events {
+			if seen[ei] || !wants[wi].matches(ev) {
+				continue
+			}
+			seen[ei] = true
+			if owner[ei] < 0 || assign(owner[ei], seen) {
+				owner[ei] = wi
+				return true
+			}
+		}
+		return false
+	}
+	for wi := range wants {
+		if !assign(wi, make([]bool, len(events))) {
+			return false
+		}
+	}
+	return true
+}
+
+// usageForWant polls until every awaited event is present, whatever other
+// events the client has produced meanwhile, and returns all of the client's
+// events. Several wants are a multiset: each needs its own event.
+func usageForWant(t *testing.T, clientName string, wants ...usageWant) []usageEvent {
+	t.Helper()
+	return usageForMatch(t, clientName, fmt.Sprintf("%v", wants), func(events []usageEvent) bool {
+		return coversUsageWants(events, wants)
+	})
 }
 
 // lastRecord returns the newest fake journal entry whose path has suffix.

@@ -330,7 +330,8 @@ func TestWSErrNativeFallbackConnectionRefusedFailsOver(t *testing.T) {
 		t.Fatalf("second target turns=%d retries=%d", wsTurns(w.fakeA, from, kB), proxyRetries(t)-retries)
 	}
 	found := false
-	for _, ev := range usageFor(t, name, 2) {
+	// Wait for the failed-over turn itself, not just any second event.
+	for _, ev := range usageForWant(t, name, usageWant{Target: tgB}, usageWant{}) {
 		if ev.Target == tgB && ev.InputTokens == 7 {
 			checkBilled(t, ev, billed{in: 7, out: 2})
 			found = true
