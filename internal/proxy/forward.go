@@ -885,7 +885,7 @@ func (s *Service) writeResponse(
 	keyIndex int,
 	accountLevelFailure bool, // MED-3: 收敛透传的账户级 4xx 应按失败计（mute + 不计 success）
 	lease *probeLease,
-) requeststats.Outcome {
+) (completion requeststats.Outcome, delivered bool) {
 	defer deferCancel(cancel)
 	defer resp.Body.Close()
 
@@ -1198,7 +1198,39 @@ func (s *Service) writeResponse(
 			lifecycleFailed = lifecycleFailed || !nativeWriter.terminal
 		}
 	}
-	return responseCompletion(r, resp.StatusCode, copyErr, clientWriteFailed, lifecycleFailed)
+	outcome := responseCompletion(r, resp.StatusCode, copyErr, clientWriteFailed, lifecycleFailed)
+	delivered = outcome == requeststats.Success
+	if !delivered && wsBody == nil && !websocketResponse {
+		var terminal bool
+		if usageReader != nil {
+			terminal = usageReader.streaming && usageReader.terminal && usageReader.err == nil
+		}
+		delivered = responseDeliveredInFull(resp.StatusCode, resp.ContentLength, copied, copyErr, clientWriteFailed, lifecycleFailed, terminal)
+	}
+	return outcome, delivered
+}
+
+// responseDeliveredInFull reports whether a plain HTTP response reached the
+// client complete: an upstream 2xx whose lifecycle did not fail and whose body
+// was written downstream without a write error. A client that disconnects after
+// that (the edge proxy closes the connection after every response, without
+// upstream keep-alive) cancels the request context while the handler still does
+// its post-copy work; that cancel is not a failure of the delivery. A cancel
+// that surfaces in the copy itself counts only with proof the body was complete:
+// the declared length was copied, or the stream's terminal event was seen. Used
+// for bindings and the wait's success count; request statistics keep
+// responseCompletion's reading.
+func responseDeliveredInFull(status int, contentLength, copied int64, copyErr error, clientWriteFailed, lifecycleFailed, streamTerminal bool) bool {
+	if status < 200 || status >= 300 || clientWriteFailed || lifecycleFailed {
+		return false
+	}
+	if copyErr == nil {
+		return true
+	}
+	if !errors.Is(copyErr, context.Canceled) {
+		return false
+	}
+	return (contentLength >= 0 && copied == contentLength) || streamTerminal
 }
 
 // Observe a Responses key failure without replaying the current generation.

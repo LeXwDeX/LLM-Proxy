@@ -1850,8 +1850,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if responseObservesUsage(resp) {
 			pendingNoUsage = nil
 		}
-		completion = s.writeResponse(w, r, state, resp, cancel, attempt, upstreamModel, forwardBody, startedAt, keyIndex, accountLevelFailure, lease)
-		if waited && completion == requeststats.Success {
+		var delivered bool
+		completion, delivered = s.writeResponse(w, r, state, resp, cancel, attempt, upstreamModel, forwardBody, startedAt, keyIndex, accountLevelFailure, lease)
+		if waited && delivered {
 			s.metrics.totalInProxyWaitSuccess.Add(1)
 		}
 		// 更新 IP 粘连：仅在粘连命中（刷新 TTL）或首次轮询（建立粘连）时更新。
@@ -1860,11 +1861,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 指向同一上游的请求归到同一条粘连记录，也与 selectTarget 中 Get side 的上游
 		// 查找 key 保持一致。
 		// MED-3: 收敛透传的账户级失败不应刷新/建立粘连到该坏目标。
-		// Bindings are written only for a successful response: a failed
+		// Bindings are written only for a response delivered in full: a failed
 		// answer (5xx, 429, unrecognised 401, moderation 403, broken stream)
-		// must not pin the client to that target. A half-open probe request
+		// must not pin the client to that target. A client that disconnects after
+		// the whole response was written still counts (the request statistics
+		// may call that a cancel; the delivery was complete). A half-open probe request
 		// does not create a new binding either (it may refresh its own one).
-		if !accountLevelFailure && completion == requeststats.Success && principal != nil && target != nil {
+		if !accountLevelFailure && delivered && principal != nil && target != nil {
 			now := time.Now()
 			targetName := strings.ToLower(target.Name)
 			probe := lease != nil
