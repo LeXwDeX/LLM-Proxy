@@ -312,9 +312,8 @@ AdminApp.register("targetsHealth", function (app) {
   }
   function filteredTargets() {
     var targets = Array.isArray(state.targets) ? state.targets : [];
-    return targets
-      .slice()
-      .sort(compareTargets)
+    var sorted = ts.targetSort ? ts.targetSort.apply(targets, compareTargets) : targets.slice().sort(compareTargets);
+    return sorted
       .filter(function (t) {
         return ts.targetFilter === "all" || targetHealth(t).key === ts.targetFilter;
       });

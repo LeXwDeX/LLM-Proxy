@@ -33,7 +33,8 @@ AdminApp.register("quotaModel", function (app) {
     return raw === "" ? null : Number(raw);
   }
   function modelGroupLabel(name) {
-    return name === "company_general" ? "公司通用" : name;
+    // Usage statistics bucket for history attributed to no model group.
+    return name === "company_general" ? "未归组" : name;
   }
 
   /* ===== Quota Management ===== */

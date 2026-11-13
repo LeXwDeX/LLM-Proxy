@@ -9,6 +9,7 @@ AdminApp.register("clients", function (app) {
   var fmtMoney = app.bind("core", "fmtMoney");
   var totalTok = app.bind("core", "totalTok");
   var maskKey = app.bind("core", "maskKey");
+  var createTableSort = app.bind("core", "createTableSort");
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
   var openModal = app.bind("core", "openModal");
@@ -32,6 +33,29 @@ AdminApp.register("clients", function (app) {
   var clientSavingName = "";
   var clientVersions = Object.create(null);
   var editingClientVersion = 0;
+  // Column sorting (shared createTableSort). Getters return the underlying value, not the display text:
+  // usage columns are numbers, the Access Key sorts by its masked text (the raw key never drives order),
+  // and a client without any target/pool restriction counts as having the most access.
+  function clientUsageOf(c) {
+    return (state.clientUsage && state.clientUsage[c.name]) || {};
+  }
+  var clientSort = createTableSort({
+    columns: {
+      name: function (c) { return String(c.name || ""); },
+      ip: function (c) { return c.ip_address || ""; },
+      key: function (c) { return c.access_key ? maskKey(c.access_key) : ""; },
+      targets: function (c) {
+        var granted = (Array.isArray(c.allowed_targets) ? c.allowed_targets.length : 0) +
+          (Array.isArray(c.allowed_pools) ? c.allowed_pools.length : 0);
+        return granted > 0 ? granted : Number.MAX_SAFE_INTEGER;
+      },
+      tokens: function (c) { return totalTok(clientUsageOf(c)); },
+      cost: function (c) { return Number(clientUsageOf(c).estimated_cost || 0); },
+      quota: function (c) { return c.job_level || ""; },
+    },
+    onChange: function () { renderClients(); },
+  });
+  clientSort.bind(document.getElementById("clientsTableHead"));
   ["input", "change"].forEach(function (eventName) {
     document.getElementById("clientModal").addEventListener(eventName, function () { clientDraftRevision++; });
   });
@@ -115,9 +139,8 @@ AdminApp.register("clients", function (app) {
         "<tr class='empty-row'><td colspan='8'>暂无客户端</td></tr>";
       return;
     }
-    tb.innerHTML = state.clients
-      .slice()
-      .sort(function (a, b) {
+    tb.innerHTML = clientSort
+      .apply(state.clients, function (a, b) {
         return String(a.name || "").localeCompare(String(b.name || ""));
       })
       .map(function (c) {

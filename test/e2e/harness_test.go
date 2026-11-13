@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -258,7 +259,81 @@ func client(t *testing.T, targets, pools []string) (string, string) {
 		t.Fatalf("create client: %d %s", code, body)
 	}
 	t.Cleanup(func() { w.adminDo("DELETE", "/admin/data/clients/"+name, nil) })
+	grantQuota(t, name, targets, pools)
 	return name, key
+}
+
+// grantQuota gives the client an unlimited plan group bound to every whole
+// target it may reach (its targets plus current members of its pools; every
+// target when both are empty). Quota is only granted through plan groups, so
+// without this every request would be rejected as quota_not_configured.
+// Tests that set their own plan (PUT /admin/data/quota/{name}) replace it.
+func grantQuota(t *testing.T, clientName string, targets, pools []string) {
+	t.Helper()
+	code, body := w.adminDo("GET", "/admin/data/targets", nil)
+	if code != 200 {
+		t.Fatalf("list targets: %d %s", code, body)
+	}
+	var page struct {
+		Targets []struct {
+			Name string `json:"name"`
+			Pool string `json:"pool"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(body, &page); err != nil {
+		t.Fatalf("decode targets: %v", err)
+	}
+	want := map[string]bool{}
+	for _, tg := range targets {
+		want[strings.ToLower(tg)] = true
+	}
+	inPool := map[string]bool{}
+	for _, p := range pools {
+		inPool[strings.ToLower(p)] = true
+	}
+	groups := []any{}
+	seen := map[string]bool{}
+	for _, tg := range page.Targets {
+		all := len(targets) == 0 && len(pools) == 0
+		if !all && !want[strings.ToLower(tg.Name)] && !(tg.Pool != "" && inPool[strings.ToLower(tg.Pool)]) {
+			continue
+		}
+		group := targetGrantGroup(t, tg.Name)
+		if !seen[group] {
+			seen[group] = true
+			groups = append(groups, map[string]any{"name": group, "coefficient": 1})
+		}
+	}
+	if len(groups) == 0 {
+		return
+	}
+	if code, body := w.adminDo("PUT", "/admin/data/quota/"+clientName, map[string]any{"job_level": "e2e-level", "quota_groups": groups}); code != 200 {
+		t.Fatalf("grant plan: %d %s", code, body)
+	}
+}
+
+var bindingOwner = regexp.MustCompile(`already used by model group \\?"([^"\\]+)`)
+
+// targetGrantGroup returns the model group holding the whole-target binding for
+// target, creating an unlimited one when none exists. A binding belongs to one
+// group only, so clients sharing a target share its group.
+func targetGrantGroup(t *testing.T, target string) string {
+	t.Helper()
+	group := "e2e-grant-" + strings.ToLower(target)
+	code, body := w.adminDo("POST", "/admin/data/model-groups", map[string]any{"name": group, "cost_coefficient": 1,
+		"bindings": []any{map[string]any{"target": target}}})
+	switch {
+	case code == 201:
+		t.Cleanup(func() { w.adminDo("DELETE", "/admin/data/model-groups/"+group, nil) })
+		return group
+	case strings.Contains(string(body), "already exists"):
+		return group
+	}
+	if m := bindingOwner.FindSubmatch(body); m != nil {
+		return string(m[1])
+	}
+	t.Fatalf("create grant group for %s: %d %s", target, code, body)
+	return ""
 }
 
 // call sends a client request through the proxy.
@@ -525,4 +600,29 @@ func keyStatus(t *testing.T, targetName string, index int) keyState {
 	}
 	t.Fatalf("no key %d status for target %s", index, targetName)
 	return keyState{}
+}
+
+// waitQuotaRefresh waits until the admin quota refresh queue is idle, so
+// admission reads the counters rebuilt after a binding-changing write
+// (rename, model-group edit) instead of the previous calibration.
+func waitQuotaRefresh(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		code, raw := w.adminDo("GET", "/admin/metrics", nil)
+		if code == 200 {
+			var m struct {
+				QuotaRefresh struct {
+					Pending bool `json:"pending"`
+				} `json:"quota_refresh"`
+			}
+			if json.Unmarshal(raw, &m) == nil && !m.QuotaRefresh.Pending {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("quota refresh still pending: %d %s", code, raw)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

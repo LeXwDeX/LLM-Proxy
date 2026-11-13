@@ -57,7 +57,7 @@ async function main() {
       window.usageFactories = [];
       // The usage page registers several modules (state, filters, tables, chart, ...);
       // overviewRange supplies the shared local-day range helper.
-      window.app = {state: {modelGroupsLoaded:true,modelGroups:["API","订阅","自定义模型组"],usageModelGroupExpanded:{},usageModelTargetExpanded:{}}, bind: (module,key) => module === "quota" ? name => name === "company_general" ? "公司通用" : name : (module === "core" ? core[key] : (...args) => usageModules[module][key](...args))};
+      window.app = {state: {modelGroupsLoaded:true,modelGroups:["API","订阅","自定义模型组"],usageModelGroupExpanded:{},usageModelTargetExpanded:{}}, bind: (module,key) => module === "quota" ? name => name === "company_general" ? "未归组" : name : (module === "core" ? core[key] : (...args) => usageModules[module][key](...args))};
       window.AdminApp = {register: (name,factory) => { usageFactories.push({name, factory}); }};
     });
     const rangeSupport = ["overviewState", "overviewUtil", "overviewRange"].map((name) => manifest().find((script) => script.rel === `pages/overview/${name}.js`).source).join("\n;\n");
@@ -191,10 +191,11 @@ async function main() {
     const actualOrder = await page.locator("#usageByModelBody tr").evaluateAll(rows => rows.map(r=>[r.cells[0].textContent,r.cells[1].textContent]));
     const expectedOrder = await page.evaluate(() => fixtureRows.slice().sort((a,b)=>a.model_group.localeCompare(b.model_group) || app.bind("core","totalTok")(b)-app.bind("core","totalTok")(a)).map(r=>[r.model_group,r.model]));
     assert.deepEqual(actualOrder, expectedOrder, "default model ordering groups rows together");
-    await page.locator('#usageByModelTable th[data-sort="total"]').click();
-    assert.equal(await page.locator("#usageByModelBody tr").first().locator("td").nth(1).textContent(), "Upstream-Model-With-A-Long-Name-And-Preserved-Case");
+    // The shared sorter cycles ascending, descending, then back to the default order.
     await page.locator('#usageByModelTable th[data-sort="total"]').click();
     assert.equal(await page.locator("#usageByModelBody tr").first().locator("td").nth(1).textContent(), "qwen-max");
+    await page.locator('#usageByModelTable th[data-sort="total"]').click();
+    assert.equal(await page.locator("#usageByModelBody tr").first().locator("td").nth(1).textContent(), "Upstream-Model-With-A-Long-Name-And-Preserved-Case");
     await page.locator('#usageByModelTable th[data-sort="model_group"]').click();
     assert.deepEqual(await page.locator("#usageByModelBody tr").evaluateAll(rows => rows.map(r=>[r.cells[0].textContent,r.cells[1].textContent])), expectedOrder);
 
@@ -299,9 +300,9 @@ async function main() {
       document.body.style.zoom = 1;
       const rows = fixtureRows.map(row => ({...row, reasoning_tokens:0, explicit_cache_read_tokens:0}));
       usage.selectUsageTab("client", false);
-      usage.renderAggregateTable({tbody:"usageByClientBody", rows, sort:{key:"cost",dir:-1},columnCount:8});
+      usage.renderAggregateTable({tbody:"usageByClientBody", rows, columnCount:8});
       usage.selectUsageTab("model", false);
-      usage.renderAggregateTable({tbody:"usageByModelBody", rows, sort:{key:"model_group",dir:1},columnCount:9});
+      usage.renderAggregateTable({tbody:"usageByModelBody", rows, columnCount:9});
       usage.selectUsageTab("group", false);
       usage.renderUsageModelGroups(rows);
     });
@@ -332,8 +333,8 @@ async function main() {
     await page.evaluate(() => {
       usage.selectUsageTab("group", false);
       const rows = fixtureRows.map(row => ({...row, reasoning_tokens:0, explicit_cache_read_tokens:0}));
-      usage.renderAggregateTable({tbody:"usageByClientBody", rows, sort:{key:"cost",dir:-1},columnCount:8});
-      usage.renderAggregateTable({tbody:"usageByModelBody", rows, sort:{key:"model_group",dir:1},columnCount:9});
+      usage.renderAggregateTable({tbody:"usageByClientBody", rows, columnCount:8});
+      usage.renderAggregateTable({tbody:"usageByModelBody", rows, columnCount:9});
       usage.renderUsageModelGroups(rows);
     });
     for (const [width, height, theme] of [[1440, 1200, "light"], [390, 844, "light"], [1440, 1200, "dark"], [390, 844, "dark"]]) {

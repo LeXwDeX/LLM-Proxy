@@ -210,8 +210,9 @@ func TestModelGroupStoreUpdatePreservesStaleBinding(t *testing.T) {
 	if err := groups.Create(config.ModelGroup{Name: "g", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "t1"}}}); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
-	if err := targets.Delete("t1"); err != nil {
-		t.Fatalf("delete target: %v", err)
+	// Renaming keeps the retired-name binding: "t1" is now a stale binding.
+	if _, err := targets.Rename(TargetRenameRequest{From: "t1", To: "t1-new"}); err != nil {
+		t.Fatalf("rename target: %v", err)
 	}
 	if _, err := groups.Update("g", config.ModelGroup{Name: "g", CostCoefficient: 2, Bindings: []config.QuotaGroupBinding{{Target: "t1"}}}); err != nil {
 		t.Fatalf("update with preserved stale binding: %v", err)

@@ -6,6 +6,9 @@ const vm = require("node:vm");
 const path = require("node:path");
 const { assembleAdminHTML } = require("../../../../scripts/testing/assemble_admin_html.cjs");
 const { pageSource } = require("../../../../scripts/testing/admin_ui_scripts.cjs");
+const { loadCore } = require("../../../../scripts/testing/load_core.cjs");
+// The real shared table sorter (core.createTableSort) backs every overview table.
+const realCore = loadCore();
 class Element {
   constructor(tag = "div") { this.tagName = tag.toUpperCase(); this.textContent = ""; this.innerHTML = ""; this.children = []; this.listeners = {}; this.attrs = {}; this.dataset = {}; this.hidden = false; this.value = ""; this.style = {}; }
   addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
@@ -78,9 +81,9 @@ function rangeButton(key) {
   button.attrs["aria-pressed"] = "false";
   return button;
 }
-function harness({sortButtons = [], infoButtons = [], rangeButtons = [], barButtons = [], storage} = {}) {
+function harness({infoButtons = [], rangeButtons = [], barButtons = [], storage} = {}) {
   const elements = new Map(); const get = id => { if (!elements.has(id)) elements.set(id, new Element(id === "activityClientsBody" ? "tbody" : "div")); return elements.get(id); };
-  const doc = {getElementById: get, querySelectorAll: selector => selector === "[data-activity-sort]" ? sortButtons : selector === "[data-activity-info]" ? infoButtons : selector === "[data-overview-range]" ? rangeButtons : selector === "[data-overview-bar]" ? barButtons : [], documentElement: {clientWidth: 390, clientHeight: 844}, createElement: tag => new Element(tag), listeners: {}, hidden: false, activeElement: null, addEventListener(name, fn) { this.listeners[name] = fn; }};
+  const doc = {getElementById: get, querySelectorAll: selector => selector === "[data-activity-info]" ? infoButtons : selector === "[data-overview-range]" ? rangeButtons : selector === "[data-overview-bar]" ? barButtons : [], documentElement: {clientWidth: 390, clientHeight: 844}, createElement: tag => new Element(tag), listeners: {}, hidden: false, activeElement: null, addEventListener(name, fn) { this.listeners[name] = fn; }};
   let module; let answer = activity(); let overview = {}; let metrics = {}; let aggregate = aggregateResult(); let aggregateHandler; let handler; const calls = []; const timers = new Map(); let nextTimer = 0; let now = Date.parse("2026-10-14T03:00:35Z");
   class TestDate extends Date { static now() { return now; } }
   async function advance(ms) {
@@ -95,7 +98,7 @@ function harness({sortButtons = [], infoButtons = [], rangeButtons = [], barButt
     now = end;
     for (let i = 0; i < 12; i++) await Promise.resolve();
   }
-  const core = {esc: v => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"), fmtNum: v => String(v || 0), fmtMoney: v => "$" + Number(v || 0).toFixed(2), fmtPct: v => v + "%", totalTok: d => (d.input_tokens || 0) + (d.output_tokens || 0) + (d.cached_tokens || 0) + (d.cache_creation_tokens || 0) + (d.tool_use_prompt_tokens || 0), offsetMinutes: d => -d.getTimezoneOffset(), schemaLabel: (list, value) => value, api: async (url, opts) => { calls.push({url, opts}); if (handler) return handler(url, opts); if (url.endsWith("activity")) return answer; if (url.endsWith("overview")) return overview; if (url.endsWith("/admin/metrics")) return metrics; if (url.includes("/admin/data/usage/aggregate")) return aggregateHandler ? aggregateHandler(url, opts) : aggregate; return overview; }};
+  const core = {esc: v => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;"), fmtNum: v => String(v || 0), fmtMoney: v => "$" + Number(v || 0).toFixed(2), fmtPct: v => v + "%", totalTok: d => (d.input_tokens || 0) + (d.output_tokens || 0) + (d.cached_tokens || 0) + (d.cache_creation_tokens || 0) + (d.tool_use_prompt_tokens || 0), offsetMinutes: d => -d.getTimezoneOffset(), createTableSort: realCore.createTableSort, schemaLabel: (list, value) => value, api: async (url, opts) => { calls.push({url, opts}); if (handler) return handler(url, opts); if (url.endsWith("activity")) return answer; if (url.endsWith("overview")) return overview; if (url.endsWith("/admin/metrics")) return metrics; if (url.includes("/admin/data/usage/aggregate")) return aggregateHandler ? aggregateHandler(url, opts) : aggregate; return overview; }};
   const state = {currentPage: "overview"};
   const factories = []; const modules = {};
   // Page files register several modules; initialize them in script order like AdminApp.initialize.
@@ -323,14 +326,23 @@ test("leaving home cancels late results; resume refresh cannot be overwritten by
   assert.equal(h.get("activityTotalTokens").textContent, "42"); h.module.stopOverviewAutoRefresh();
 });
 
+// A click on a sortable <th> reaches the shared sorter through the listener it registered on the <thead>.
+function clickSortHeader(head, key) {
+  return head.fire("click", {target: {closest: () => ({getAttribute: name => name === "data-sort" ? key : null})}});
+}
 test("sort changes ordering without replacing client buttons and persists over new samples", async () => {
-  const sort = new Element("button"); sort.dataset = {activitySort: "total_tokens", label: "5m 总量"}; sort.parentNode = new Element("th");
-  const h = harness({sortButtons: [sort]}); const data = activity();
+  const h = harness(); const data = activity();
   data.clients.push({...data.clients[0], name: "Second", configured: true, active_requests: 0, totals: {...data.clients[0].totals, total_tokens: 99}});
   h.setActivity(data); await h.module.loadOverview(); const firstRow = h.get("activityClientsBody").children[0];
-  await sort.fire("click"); assert.equal(h.get("activityClientsBody").children[1], firstRow); assert.equal(sort.parentNode.attrs["aria-sort"], "descending");
-  await h.module.loadOverview(); assert.equal(h.get("activityClientsBody").children[1], firstRow);
-  await sort.fire("click"); assert.equal(h.get("activityClientsBody").children[0], firstRow); assert.equal(sort.parentNode.attrs["aria-sort"], "ascending");
+  const secondRow = h.get("activityClientsBody").children[1];
+  const head = h.get("activityClientsTableHead");
+  assert.ok(head.listeners.click, "the shared sorter listens on the table header");
+  // Default order: busiest first. total_tokens ascending puts the smaller total first, then descending reverses it.
+  await clickSortHeader(head, "total_tokens"); assert.equal(h.get("activityClientsBody").children[0], firstRow);
+  await clickSortHeader(head, "total_tokens"); assert.equal(h.get("activityClientsBody").children[1], firstRow); assert.equal(h.get("activityClientsBody").children[0], secondRow);
+  await h.module.loadOverview(); assert.equal(h.get("activityClientsBody").children[1], firstRow, "the sort persists over a new sample and rows are reused");
+  assert.equal(h.get("activityClientsBody").children[0], secondRow);
+  await clickSortHeader(head, "total_tokens"); assert.equal(h.get("activityClientsBody").children[0], firstRow, "the third click restores the default order");
 });
 test("information tips update on hover, work on touch and focus, and close with Escape", async () => {
   const upper = new Element("button"); upper.dataset.activityInfo = "上方解释";
@@ -1803,7 +1815,7 @@ test("the historical summary table names its UTC and rolling windows", async () 
   assert.match(html, /昨日（UTC 日）/);
   assert.match(html, /近 7 天（滚动 7×24 小时）/);
   assert.match(html, /近 30 天（滚动 30×24 小时）/);
-  assert.match(html, /<th>请求权重<\/th>/);
+  assert.match(html, /<th[^>]*>请求权重<\/th>/);
 });
 
 test("recent changes with unparseable timestamps keep a stable order below dated ones", async () => {
@@ -1812,4 +1824,126 @@ test("recent changes with unparseable timestamps keep a stable order below dated
   await h.module.loadOverview(true);
   const ids = [...h.get("recentChangesBody").innerHTML.matchAll(/data-audit-id="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(ids, ["new", "old", "bad1", "bad2"]);
+});
+
+test("rankings sort the ten rows they show by any column and each panel keeps its own order", async () => {
+  const h = harness();
+  h.setOverview({client_count: 1, targets: [], usage_summary: {}, recent_audit: []});
+  h.setAggregate({
+    totals: {requests: 138, estimated_cost: 20},
+    by_client: [
+      {key: "c1", requests: 10, input_tokens: 1, output_tokens: 0, estimated_cost: 5},
+      {key: "c2", requests: 9, input_tokens: 1, output_tokens: 0, estimated_cost: 5},
+      {key: "c3", requests: 12, input_tokens: 1, output_tokens: 0, tool_use_prompt_tokens: 6, estimated_cost: 5},
+      {key: "c4", requests: 2, input_tokens: 1, output_tokens: 0, estimated_cost: 1},
+      {key: "c5", requests: 100, input_tokens: 1, output_tokens: 0, estimated_cost: 3},
+    ],
+    by_model: [
+      {key: "m-b", requests: 2, input_tokens: 1, output_tokens: 0, estimated_cost: 2},
+      {key: "m-a", requests: 2, input_tokens: 1, output_tokens: 0, estimated_cost: 2},
+      {key: "m-no-cost", requests: 3, input_tokens: 1, output_tokens: 0},
+    ],
+  });
+  await h.module.loadOverview();
+  const clients = () => [...h.get("topClientsBody").innerHTML.matchAll(/data-top-client="([^"]+)"/g)].map(m => m[1]);
+  const models = () => [...h.get("topModelsBody").innerHTML.matchAll(/data-top-model="([^"]+)"/g)].map(m => m[1]);
+  const clientsHead = h.get("topClientsTableHead"), modelsHead = h.get("topModelsTableHead");
+  assert.deepEqual(clients(), ["c3", "c1", "c2", "c5", "c4"], "default: cost, then requests");
+  await clickSortHeader(clientsHead, "requests"); assert.deepEqual(clients(), ["c4", "c2", "c1", "c3", "c5"]);
+  await clickSortHeader(clientsHead, "requests"); assert.deepEqual(clients(), ["c5", "c3", "c1", "c2", "c4"]);
+  await clickSortHeader(clientsHead, "requests"); assert.deepEqual(clients(), ["c3", "c1", "c2", "c5", "c4"], "the third click restores the default");
+  await clickSortHeader(clientsHead, "tokens"); assert.deepEqual(clients(), ["c1", "c2", "c5", "c4", "c3"], "total tokens (c3 includes tool input); equal rows keep the default order");
+  await clickSortHeader(clientsHead, "cost"); assert.deepEqual(clients(), ["c4", "c5", "c3", "c1", "c2"]);
+  await clickSortHeader(clientsHead, "share"); assert.deepEqual(clients(), ["c4", "c5", "c3", "c1", "c2"], "the cost share orders like the cost");
+  await clickSortHeader(clientsHead, "name"); await clickSortHeader(clientsHead, "name");
+  assert.deepEqual(clients(), ["c5", "c4", "c3", "c2", "c1"]);
+  assert.deepEqual(models(), ["m-a", "m-b", "m-no-cost"], "the models panel has its own sort state");
+  await clickSortHeader(modelsHead, "requests"); await clickSortHeader(modelsHead, "requests");
+  assert.deepEqual(models(), ["m-no-cost", "m-a", "m-b"]);
+  await clickSortHeader(modelsHead, "requests");
+  await clickSortHeader(modelsHead, "cost"); await clickSortHeader(modelsHead, "cost");
+  assert.deepEqual(models(), ["m-a", "m-b", "m-no-cost"], "a model without a cost is last in both directions");
+  assert.deepEqual(clients(), ["c5", "c4", "c3", "c2", "c1"], "sorting models leaves the client ranking alone");
+});
+
+test("target health, recent changes and the history summary sort without losing their default order", async () => {
+  const target = (name, phase, extra = {}) => ({
+    Name: name, Phase: phase, Paused: false, MutedUntil: "0001-01-01T00:00:00Z",
+    TotalKeys: 2, ActiveKeys: 2, ExhaustedSubscriptionKeys: 0, ExhaustedAPIKeys: 0,
+    RateLimitedKeys: 0, BlockedKeys: 0, OtherExhaustedKeys: 0,
+    Capacity: 4, InFlight: 1, Utilization: 0.25,
+    Window15m: {in_flight_peak: 2, affinity_hits: 1, breaker_trips: 0}, ...extra,
+  });
+  const h = harness();
+  h.setOverview({
+    client_count: 1,
+    targets: [
+      target("normal", "ready", {InFlight: 5, Window15m: {in_flight_peak: 9, affinity_hits: 0, breaker_trips: 0}}),
+      target("muted", "muted", {MutedUntil: "2099-01-01T00:00:00Z", InFlight: 0}),
+      target("half", "half-open"),
+      target("offline", "offline", {Paused: true}),
+      target("keyed", "ready", {TotalKeys: 3, ActiveKeys: 1, RateLimitedKeys: 2}),
+      target("zero", "ready", {TotalKeys: 0, ActiveKeys: 0, Window15m: null}),
+    ],
+    usage_summary: {
+      last_hour: {requests: 5, input_tokens: 1, output_tokens: 1, estimated_cost: 2},
+      today: {requests: 50, input_tokens: 10, output_tokens: 10, estimated_cost: 1},
+      yesterday: {},
+      last_7_days: {requests: 7, input_tokens: 100, output_tokens: 0, estimated_cost: 7},
+      last_30_days: {requests: 30, input_tokens: 5, output_tokens: 0, estimated_cost: 30},
+    },
+    recent_audit: [
+      {id: "A", timestamp: "2026-10-14T01:00:00Z", actor: "carol", action: "update", object: "obj-A", result: "ok"},
+      {id: "B", timestamp: "2026-10-14T03:00:00Z", actor: "alice", action: "create", object: "obj-B", result: "ok"},
+      {id: "C", timestamp: "2026-10-14T02:00:00Z", actor: "bob", action: "delete", object: "obj-C", result: "fail"},
+    ],
+  });
+  h.setAggregate(aggregateResult());
+  await h.module.loadOverview();
+
+  const health = () => [...h.get("targetHealthBody").innerHTML.matchAll(/data-target-name="([^"]+)"/g)].map(m => m[1]);
+  const head = h.get("targetHealthTableHead");
+  assert.deepEqual(health(), ["muted", "half", "keyed", "normal", "zero", "offline"], "default: attention first");
+  await clickSortHeader(head, "name"); assert.deepEqual(health(), ["half", "keyed", "muted", "normal", "offline", "zero"]);
+  await clickSortHeader(head, "name"); assert.deepEqual(health(), ["zero", "offline", "normal", "muted", "keyed", "half"]);
+  await clickSortHeader(head, "name");
+  assert.deepEqual(health(), ["muted", "half", "keyed", "normal", "zero", "offline"], "the third click restores the attention order");
+  await clickSortHeader(head, "status"); assert.deepEqual(health(), ["muted", "half", "keyed", "normal", "zero", "offline"], "cooling, recovering, ready, paused");
+  await clickSortHeader(head, "status"); assert.deepEqual(health(), ["offline", "keyed", "normal", "zero", "half", "muted"]);
+  await clickSortHeader(head, "status");
+  await clickSortHeader(head, "keys"); assert.deepEqual(health(), ["zero", "keyed", "muted", "half", "normal", "offline"], "available keys 0, 1, 2 ...");
+  await clickSortHeader(head, "in_flight"); assert.deepEqual(health(), ["muted", "half", "keyed", "zero", "offline", "normal"], "in-flight 0, 1 ..., 5");
+  await clickSortHeader(head, "peak"); assert.deepEqual(health(), ["muted", "half", "keyed", "offline", "normal", "zero"], "peak 2 ..., 9; a target without a window is last");
+  await clickSortHeader(head, "peak"); assert.deepEqual(health(), ["normal", "muted", "half", "keyed", "offline", "zero"], "...and still last when descending");
+  assert.match(h.get("targetHealthStatus").textContent, /需要关注/, "the summary line does not depend on the sort");
+
+  const changes = () => [...h.get("recentChangesBody").innerHTML.matchAll(/data-audit-id="([^"]+)"/g)].map(m => m[1]);
+  const changesHead = h.get("recentChangesTableHead");
+  assert.deepEqual(changes(), ["B", "C", "A"], "default: newest first");
+  await clickSortHeader(changesHead, "time"); assert.deepEqual(changes(), ["A", "C", "B"]);
+  await clickSortHeader(changesHead, "actor"); await clickSortHeader(changesHead, "actor");
+  assert.deepEqual(changes(), ["A", "C", "B"], "carol, bob, alice");
+  await clickSortHeader(changesHead, "result");
+  assert.deepEqual(changes(), ["C", "B", "A"], "fail before ok; the two ok events keep the newest-first order");
+  await clickSortHeader(changesHead, "result"); await clickSortHeader(changesHead, "result");
+  assert.deepEqual(changes(), ["B", "C", "A"], "default again");
+
+  // The history summary rows are generated with their header; the sorter listens on the stable container.
+  const periods = () => [...h.get("overviewUsageSummary").innerHTML.matchAll(/<th scope="row">([^<]+)<\/th>/g)].map(m => m[1].replace(/（.*$/, ""));
+  const summary = h.get("overviewUsageSummary");
+  assert.deepEqual(periods(), ["近 1 小时", "今日", "昨日", "近 7 天", "近 30 天"]);
+  assert.match(summary.innerHTML, /<th data-sort="requests">请求权重<\/th>/);
+  await clickSortHeader(summary, "requests");
+  assert.deepEqual(periods(), ["近 1 小时", "近 7 天", "近 30 天", "今日", "昨日"], "requests ascending; a period without data is last");
+  await clickSortHeader(summary, "requests");
+  assert.deepEqual(periods(), ["今日", "近 30 天", "近 7 天", "近 1 小时", "昨日"], "...and still last when descending");
+  await clickSortHeader(summary, "requests");
+  await clickSortHeader(summary, "tokens");
+  assert.deepEqual(periods(), ["近 1 小时", "近 30 天", "今日", "近 7 天", "昨日"], "total tokens 2, 5, 20, 100");
+  await clickSortHeader(summary, "cost");
+  assert.deepEqual(periods(), ["今日", "近 1 小时", "近 7 天", "近 30 天", "昨日"], "cost 1, 2, 7, 30");
+  await clickSortHeader(summary, "period"); await clickSortHeader(summary, "period");
+  assert.deepEqual(periods(), ["近 30 天", "近 7 天", "昨日", "今日", "近 1 小时"], "the period column reverses the fixed order");
+  await h.module.loadOverview(true);
+  assert.deepEqual(periods(), ["近 30 天", "近 7 天", "昨日", "今日", "近 1 小时"], "a refresh keeps the order");
 });

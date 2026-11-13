@@ -18,8 +18,8 @@ func TestAuditRegressionCalibrationWaitsForCompleteAccounting(t *testing.T) {
 	db := testOpenDB(t)
 	m := newTestManager(t, db)
 	defer m.Stop()
-	putClient(t, db, config.Client{Name: "alice", AccessKey: "k", JobLevel: "L5"})
-	putJobLevel(t, db, config.JobLevel{Name: "L5"})
+	putModelGroup(t, db, config.ModelGroup{Name: "plan", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "openai"}}})
+	putQuotaClient(t, db, []config.QuotaGroup{{Name: "plan"}}, "L5")
 	putModelCost(t, db, nosql.ModelCost{EndpointType: "openai", Model: "model", InputPer1MTokens: 10})
 	m.Evaluate("alice")
 	persisted := make(chan struct{}, 2)
@@ -36,7 +36,7 @@ func TestAuditRegressionCalibrationWaitsForCompleteAccounting(t *testing.T) {
 	})
 	for i := 0; i < 2; i++ {
 		go func() {
-			finished <- m.RecordUsage(recorder, usage.Event{Timestamp: time.Now().UTC(), ClientName: "alice", EndpointType: "openai", Model: "model", InputTokens: 500000, StatusCode: 200})
+			finished <- m.RecordUsage(recorder, usage.Event{Timestamp: time.Now().UTC(), ClientName: "alice", Target: "openai", EndpointType: "openai", Model: "model", InputTokens: 500000, StatusCode: 200})
 		}()
 	}
 	// Both writes must enter concurrently, preserving bbolt's batching ability.
@@ -65,14 +65,14 @@ func TestAuditRegressionCalibrationWaitsForCompleteAccounting(t *testing.T) {
 		}
 	}
 	<-calibrated
-	if used := m.Status("alice").Groups["company_general"].Quotas[DimensionDaily].Used; used != 10 {
+	if used := m.Status("alice").Groups["plan"].Quotas[DimensionDaily].Used; used != 10 {
 		t.Fatalf("cost counted incorrectly: %v, want 10", used)
 	}
 	writeErr := errors.New("record unavailable")
-	if err := m.RecordUsage(auditRecorderFunc(func(usage.Event) error { return writeErr }), usage.Event{ClientName: "alice", EndpointType: "openai", Model: "model", InputTokens: 500000}); !errors.Is(err, writeErr) {
+	if err := m.RecordUsage(auditRecorderFunc(func(usage.Event) error { return writeErr }), usage.Event{ClientName: "alice", Target: "openai", EndpointType: "openai", Model: "model", InputTokens: 500000}); !errors.Is(err, writeErr) {
 		t.Fatalf("write error lost: %v", err)
 	}
-	if used := m.Status("alice").Groups["company_general"].Quotas[DimensionDaily].Used; used != 10 {
+	if used := m.Status("alice").Groups["plan"].Quotas[DimensionDaily].Used; used != 10 {
 		t.Fatalf("failed write created a memory-only charge: %v", used)
 	}
 }

@@ -27,16 +27,16 @@
                     <col class="col-type"><col class="col-pool">
                     <col class="col-scheduling"><col><col class="col-actions">
                   </colgroup>
-                  <thead>
+                  <thead id="targetsTableHead">
                     <tr>
-                      <th>状态</th>
-                      <th>名称</th>
-                      <th>密钥状态</th>
-                      <th>类型</th>
-                      <th>部署池</th>
-                      <th>调度观测</th>
-                      <th>模型列表</th>
-                      <th>操作</th>
+                      <th data-sort="status">状态</th>
+                      <th data-sort="name">名称</th>
+                      <th data-sort="keys">密钥状态</th>
+                      <th data-sort="type">类型</th>
+                      <th data-sort="pool">部署池</th>
+                      <th data-sort="scheduling">调度观测</th>
+                      <th data-sort="models">模型列表</th>
+                      <th data-sort-none>操作</th>
                     </tr>
                   </thead>
                   <tbody id="targetsTableBody">
@@ -61,13 +61,13 @@
               </div>
               <div class="panel-body no-pad table-wrap">
                 <table class="pools-table">
-                  <thead>
+                  <thead id="poolsTableHead">
                     <tr>
-                      <th class="pool-name">名称</th>
-                      <th class="pool-strategy">灾备逻辑</th>
-                      <th class="pool-status">状态</th>
-                      <th class="pool-members">成员（节点调度状态）</th>
-                      <th class="pool-actions">操作</th>
+                      <th class="pool-name" data-sort="name">名称</th>
+                      <th class="pool-strategy" data-sort="strategy">灾备逻辑</th>
+                      <th class="pool-status" data-sort="status" title="运行中的池排在已暂停之前">状态</th>
+                      <th class="pool-members" data-sort="members" title="按成员节点数量排序">成员（节点调度状态）</th>
+                      <th class="pool-actions" data-sort-none>操作</th>
                     </tr>
                   </thead>
                   <tbody id="poolsTableBody">

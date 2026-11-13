@@ -9,6 +9,7 @@ AdminApp.register("pools", function (app) {
   var openModal = app.bind("core", "openModal");
   var closeModal = app.bind("core", "closeModal");
   var showConfirm = app.bind("core", "showConfirm");
+  var createTableSort = app.bind("core", "createTableSort");
   var schemaLabel = app.bind("schema", "schemaLabel");
   var fetchSchedulingRuntime = app.bind("targets", "fetchSchedulingRuntime");
   var beginSchedulingRefresh = app.bind("targets", "beginSchedulingRefresh");
@@ -25,6 +26,58 @@ AdminApp.register("pools", function (app) {
   function poolRoutingStrategy(pool) {
     return (pool && pool.routing_strategy) || state.schema.defaults.pool_routing_strategy;
   }
+  // Column sorting (shared createTableSort). Rows are wrapped as {pool, members} so the member count is
+  // computed once per render; the default order stays the pool name. A pool's open cost-preview detail row
+  // is emitted right after its row, so it stays attached whatever the order.
+  var poolSort = createTableSort({
+    columns: {
+      name: function (entry) { return poolDisplayName(entry.pool); },
+      strategy: function (entry) {
+        return schemaLabel("pool_routing_strategies", poolRoutingStrategy(entry.pool));
+      },
+      status: function (entry) { return entry.pool.paused ? 1 : 0; },
+      members: function (entry) { return entry.members; },
+    },
+    onChange: function () {
+      // Rebuilding the table rebuilds an open preview's detail row too: put back the request name that was
+      // typed and the last result, so sorting does not close or empty the preview.
+      var typed = document.getElementById("poolCostModel");
+      var model = typed ? typed.value : "";
+      renderPools();
+      if (!typed || !expandedCostPool) return;
+      var input = document.getElementById("poolCostModel");
+      if (input) input.value = model;
+      var result = document.getElementById("poolCostResult");
+      if (result && lastCostPreview && lastCostPreview.pool === expandedCostPool) {
+        result.innerHTML = renderPoolCostPreview(lastCostPreview.data);
+        costSort.paint();
+      }
+    },
+  });
+  poolSort.bind(document.getElementById("poolsTableHead"));
+  // The cost-preview table inside the open detail row sorts the members of the last response; its header is
+  // regenerated with every preview, so the sorter listens on the stable table body (bound after the row
+  // handlers below, which keep their listener positions).
+  var lastCostPreview = null;
+  var costSort = createTableSort({
+    columns: {
+      target: function (m) { return m.target || ""; },
+      upstream: function (m) { return m.upstream || ""; },
+      cost: function (m) { return m.estimated_cost_usd == null ? null : Number(m.estimated_cost_usd); },
+      tier: function (m) { return m.tier == null ? null : m.tier; },
+      state: function (m) {
+        var phase = m.phase ? schemaLabel("target_phases", m.phase) || m.phase : "";
+        return [phase, poolCostReasonLabel(m.reason)].filter(Boolean).join(" ");
+      },
+    },
+    onChange: function () {
+      var result = document.getElementById("poolCostResult");
+      if (!result || !lastCostPreview || lastCostPreview.pool !== expandedCostPool) return;
+      result.innerHTML = renderPoolCostPreview(lastCostPreview.data);
+      costSort.paint();
+    },
+  });
+
   // 成本优先池中启用且未设并发上限的成员（服务端只读字段，零写入）：软上限不触发，
   // 流量会集中到最便宜成员。仅提示，不阻断任何操作；成员名可能含任意字符，须转义。
   function poolCapacityWarning(pool) {
@@ -352,7 +405,8 @@ AdminApp.register("pools", function (app) {
     if (!members.length) {
       return meta + warning + "<div class='pool-cost-note'>该池暂无可展示的成员。</div>";
     }
-    var rows = members
+    var rows = costSort
+      .apply(members)
       .map(function (m) {
         var cost =
           m.estimated_cost_usd == null
@@ -402,7 +456,7 @@ AdminApp.register("pools", function (app) {
       meta +
       warning +
       "<div class='pool-cost-table-wrap'><table class='pool-cost-table'><thead><tr>" +
-      "<th>成员</th><th>上游（次要）</th><th>估算成本（USD）</th><th>层级</th><th>运行态/原因</th>" +
+      "<th data-sort='target'>成员</th><th data-sort='upstream'>上游（次要）</th><th data-sort='cost'>估算成本（USD）</th><th data-sort='tier'>层级</th><th data-sort='state'>运行态/原因</th>" +
       "</tr></thead><tbody>" +
       rows +
       "</tbody></table></div>" +
@@ -420,6 +474,7 @@ AdminApp.register("pools", function (app) {
       return;
     }
     var sequence = ++costPreviewSequence;
+    lastCostPreview = null;
     if (status) status.textContent = "加载中…";
     try {
       var data = await api(
@@ -429,10 +484,17 @@ AdminApp.register("pools", function (app) {
           encodeURIComponent(model),
       );
       if (sequence !== costPreviewSequence || expandedCostPool !== poolName) return;
+      // Sorting the pools while the request was pending rebuilt the detail row: write into the current one.
+      result = document.getElementById("poolCostResult") || result;
+      status = document.getElementById("poolCostStatus") || status;
       if (status) status.textContent = "";
+      lastCostPreview = { pool: poolName, data: data };
       result.innerHTML = renderPoolCostPreview(data);
+      costSort.paint();
     } catch (e) {
       if (sequence !== costPreviewSequence || expandedCostPool !== poolName) return;
+      result = document.getElementById("poolCostResult") || result;
+      status = document.getElementById("poolCostStatus") || status;
       if (status) status.textContent = "";
       result.innerHTML =
         "<div class='pool-cost-error'>预览失败: " + esc(e.message) + "</div>";
@@ -498,12 +560,18 @@ AdminApp.register("pools", function (app) {
         "<tr class='empty-row'><td colspan='5'>暂无部署池</td></tr>";
       return;
     }
-    tb.innerHTML = state.pools
-      .slice()
-      .sort(function (a, b) {
-        return String(a.name || "").localeCompare(String(b.name || ""));
-      })
-      .map(function (p) {
+    var memberCount = poolMemberCounter();
+    tb.innerHTML = poolSort
+      .apply(
+        state.pools.map(function (pool) {
+          return { pool: pool, members: memberCount(pool.name) };
+        }),
+        function (a, b) {
+          return String(a.pool.name || "").localeCompare(String(b.pool.name || ""));
+        },
+      )
+      .map(function (entry) {
+        var p = entry.pool;
         // Alias-first model info is a cost-routing concept; performance-first
         // (load) pools keep their previous chips-only runtime view.
         var isCost = poolRoutingStrategy(p) === "cost";
@@ -741,6 +809,7 @@ AdminApp.register("pools", function (app) {
 
   /* ===== Consumer Groups ===== */
 
+  costSort.bind(document.getElementById("poolsTableBody"));
   return {
     poolDisplayName: poolDisplayName,
     poolMemberCount: poolMemberCount,

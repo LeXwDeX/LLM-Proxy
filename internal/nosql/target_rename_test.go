@@ -263,14 +263,15 @@ func TestTargetRenameRejectsConflictsAtomically(t *testing.T) {
 				if err := env.groups.Create(config.ModelGroup{Name: "ga", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "a"}}}); err != nil {
 					t.Fatal(err)
 				}
-				// A stale whole-target binding for "x" left over from a deleted target.
+				// A stale whole-target binding for "x": renaming x→y retains the old-name
+				// binding (deleting a target removes its bindings, so only renames leave them).
 				if err := env.targets.Create(renameTestTarget("x")); err != nil {
 					t.Fatal(err)
 				}
 				if err := env.groups.Create(config.ModelGroup{Name: "gx", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "x"}}}); err != nil {
 					t.Fatal(err)
 				}
-				if err := env.targets.Delete("x"); err != nil {
+				if _, err := env.targets.Rename(TargetRenameRequest{From: "x", To: "y"}); err != nil {
 					t.Fatal(err)
 				}
 			},

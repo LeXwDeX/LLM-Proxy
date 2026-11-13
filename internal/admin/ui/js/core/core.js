@@ -608,7 +608,131 @@ AdminApp.register("core", function (app) {
     return "from=" + encodeURIComponent(new Date(start).toISOString()) +
       "&to=" + encodeURIComponent(new Date(end).toISOString());
   }
+  // Table column sorting shared by every list page. A header opts in with
+  // <th data-sort="key">; columns maps that key to a value getter (number or
+  // string). Clicking cycles ascending → descending → the page's default order.
+  // Empty values (null, undefined, "", NaN) always sort last, and rows that
+  // compare equal keep the page's default order, so the result is stable.
+  // bind() takes the <thead> (or a stable ancestor when the headers are
+  // regenerated with the rows, e.g. a nested detail table); call paint() after
+  // replacing header markup. A header that is deliberately not sortable (the
+  // actions column, an expand toggle) carries data-sort-none, which the table
+  // coverage gate (table-sort-coverage.test.cjs) requires of every <th>.
+  var tableSorts = []; // every instance, so the coverage gate can inspect them
+  var tableSortCollator = typeof Intl !== "undefined" && Intl.Collator
+    ? new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" })
+    : null;
+  function tableSortEmpty(v) {
+    return v === null || v === undefined || v === "" || (typeof v === "number" && isNaN(v));
+  }
+  function compareTableSortValues(a, b) {
+    var ea = tableSortEmpty(a), eb = tableSortEmpty(b);
+    if (ea || eb) return ea === eb ? 0 : ea ? 1 : -1;
+    if (typeof a === "number" && typeof b === "number") return a - b;
+    var sa = String(a), sb = String(b);
+    return tableSortCollator ? tableSortCollator.compare(sa, sb) : sa < sb ? -1 : sa > sb ? 1 : 0;
+  }
+  function createTableSort(opts) {
+    var columns = (opts && opts.columns) || {};
+    var onChange = opts && typeof opts.onChange === "function" ? opts.onChange : function () {};
+    var current = { key: "", dir: 0 };
+    var heads = [];
+    // Sortable header cells of one column inside a bound element, in document order.
+    function cellsOf(head, key) {
+      if (!head || typeof head.querySelectorAll !== "function") return [];
+      return Array.prototype.filter.call(head.querySelectorAll("th[data-sort]"), function (th) {
+        return th.getAttribute("data-sort") === key;
+      });
+    }
+    // Where the focused header of this column sits, so focus can follow it when the header is regenerated with
+    // the rows (detail tables, rebuilt reference tables): a keyboard user keeps their place after sorting.
+    function focusedCell(key) {
+      var active = typeof document !== "undefined" ? document.activeElement : null;
+      if (!active || typeof active.getAttribute !== "function" || active.getAttribute("data-sort") !== key) return null;
+      for (var i = 0; i < heads.length; i++) {
+        var index = cellsOf(heads[i], key).indexOf(active);
+        if (index >= 0) return { head: heads[i], key: key, index: index };
+      }
+      return null;
+    }
+    function toggle(key) {
+      if (!Object.prototype.hasOwnProperty.call(columns, key)) return;
+      var focused = focusedCell(key);
+      if (current.key !== key) current = { key: key, dir: 1 };
+      else if (current.dir === 1) current = { key: key, dir: -1 };
+      else current = { key: "", dir: 0 };
+      heads.forEach(paint);
+      onChange(state());
+      if (focused) {
+        var cell = cellsOf(focused.head, focused.key)[focused.index];
+        if (cell && cell !== document.activeElement && typeof cell.focus === "function") cell.focus({ preventScroll: true });
+      }
+    }
+    function state() {
+      return { key: current.key, dir: current.dir };
+    }
+    function apply(rows, defaultCompare) {
+      var list = Array.isArray(rows) ? rows.slice() : [];
+      var base = typeof defaultCompare === "function" ? defaultCompare : null;
+      if (base) list.sort(base);
+      if (!current.key) return list;
+      var getter = columns[current.key];
+      var dir = current.dir;
+      var indexed = list.map(function (row, i) { return { row: row, i: i, v: getter(row) }; });
+      indexed.sort(function (x, y) {
+        var ex = tableSortEmpty(x.v), ey = tableSortEmpty(y.v);
+        if (ex !== ey) return ex ? 1 : -1;
+        var c = ex ? 0 : compareTableSortValues(x.v, y.v) * dir;
+        return c || x.i - y.i;
+      });
+      return indexed.map(function (item) { return item.row; });
+    }
+    function paint(head) {
+      if (!head || typeof head.querySelectorAll !== "function") return;
+      Array.prototype.forEach.call(head.querySelectorAll("th[data-sort]"), function (th) {
+        var on = th.getAttribute("data-sort") === current.key && current.dir !== 0;
+        th.classList.remove("sorted-asc", "sorted-desc");
+        if (on) th.classList.add(current.dir > 0 ? "sorted-asc" : "sorted-desc");
+        th.setAttribute("aria-sort", on ? (current.dir > 0 ? "ascending" : "descending") : "none");
+        if (th.getAttribute("tabindex") === null) th.setAttribute("tabindex", "0");
+      });
+    }
+    function bind(head) {
+      if (!head || heads.indexOf(head) >= 0) return;
+      heads.push(head);
+      function fromEvent(event) {
+        var th = event.target && event.target.closest ? event.target.closest("th[data-sort]") : null;
+        return th ? th.getAttribute("data-sort") : "";
+      }
+      head.addEventListener("click", function (event) {
+        var key = fromEvent(event);
+        if (key) toggle(key);
+      });
+      head.addEventListener("keydown", function (event) {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        var key = fromEvent(event);
+        if (!key) return;
+        event.preventDefault();
+        toggle(key);
+      });
+      paint(head);
+    }
+    var sorter = {
+      toggle: toggle,
+      state: state,
+      apply: apply,
+      bind: bind,
+      paint: function () { heads.forEach(paint); },
+      keys: function () { return Object.keys(columns); },
+      heads: function () { return heads.slice(); },
+    };
+    tableSorts.push(sorter);
+    return sorter;
+  }
   return {
+    createTableSort: createTableSort,
+    compareTableSortValues: compareTableSortValues,
+    listTableSorts: function () { return tableSorts.slice(); },
     floorToMinute: floorToMinute,
     usageWindowQuery: usageWindowQuery,
     runGuarded: runGuarded,

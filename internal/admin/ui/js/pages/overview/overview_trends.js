@@ -6,6 +6,7 @@ AdminApp.register("overviewTrends", function (app) {
   var fmtMoney = app.bind("core", "fmtMoney");
   var fmtPct = app.bind("core", "fmtPct");
   var totalTok = app.bind("core", "totalTok");
+  var createTableSort = app.bind("core", "createTableSort");
   var S = app.bind("overviewState", "store")();
   var request = app.bind("overview", "request");
   var rangeOption = app.bind("overviewRange", "rangeOption");
@@ -245,6 +246,27 @@ AdminApp.register("overviewTrends", function (app) {
       return String(a && a.key || "").localeCompare(String(b && b.key || ""), "zh-CN");
     }).slice(0, 10);
   }
+  // Column sorting (shared createTableSort) over the ten rows each ranking shows; the default order stays
+  // cost, then requests. Figures that render as 不可用 or — have no value and sort last.
+  function topColumns() {
+    return {
+      name: function (entry) { return entry && entry.key ? String(entry.key) : ""; },
+      requests: function (entry) { return entry && counter(entry.requests) ? entry.requests : null; },
+      tokens: function (entry) {
+        return entry && counter(entry.input_tokens) && counter(entry.output_tokens) ? totalTok(entry) : null;
+      },
+      cost: function (entry) { return entry && counter(entry.estimated_cost) ? entry.estimated_cost : null; },
+      share: function (entry) {
+        var totals = rangeTotals();
+        var total = totals ? totals.estimated_cost : undefined;
+        return entry && counter(entry.estimated_cost) && counter(total) && total > 0 ? entry.estimated_cost / total : null;
+      },
+    };
+  }
+  var topClientSort = createTableSort({ columns: topColumns(), onChange: function () { renderTop(); } });
+  var topModelSort = createTableSort({ columns: topColumns(), onChange: function () { renderTop(); } });
+  topClientSort.bind(document.getElementById("topClientsTableHead"));
+  topModelSort.bind(document.getElementById("topModelsTableHead"));
   function costShare(entry, total) {
     if (!counter(entry && entry.estimated_cost) || !counter(total)) return "不可用";
     if (total <= 0) return "—";
@@ -258,7 +280,7 @@ AdminApp.register("overviewTrends", function (app) {
     return '<tr data-' + attribute + '="' + esc(name) + '"><td>' + esc(name) + '</td><td>' + requests + '</td><td>' + tokens + '</td><td>' + cost + '</td><td>' + esc(costShare(entry, total)) + '</td></tr>';
   }
   var topCaveat = "按估算费用、再按请求权重排序；费用为估算金额，已含模型组系数（模型组扣费系数），占比按区间总估算费用计算；$0.00 不推断为未定价或免费。";
-  function renderTopPanel(bodyID, statusID, list, kind, attribute) {
+  function renderTopPanel(bodyID, statusID, list, kind, attribute, sorter) {
     var body = el(bodyID);
     var status = el(statusID);
     if (!S.aggregateSnapshot) {
@@ -282,14 +304,14 @@ AdminApp.register("overviewTrends", function (app) {
       return;
     }
     var totals = rangeTotals();
-    body.innerHTML = topRows(list).map(function (entry) { return topRow(entry, attribute, totals ? totals.estimated_cost : undefined); }).join("");
+    body.innerHTML = sorter.apply(topRows(list)).map(function (entry) { return topRow(entry, attribute, totals ? totals.estimated_cost : undefined); }).join("");
     status.textContent = stale + "共 " + fmtNum(list.length) + " 个" + kind + (list.length > 10 ? "，显示前 10" : "") + "。" + topCaveat;
     status.dataset.state = stale ? "partial" : "ready";
   }
   function renderTop() {
     var data = S.aggregateSnapshot || {};
-    renderTopPanel("topClientsBody", "topClientsStatus", data.by_client, "客户端", "top-client");
-    renderTopPanel("topModelsBody", "topModelsStatus", data.by_model, "模型", "top-model");
+    renderTopPanel("topClientsBody", "topClientsStatus", data.by_client, "客户端", "top-client", topClientSort);
+    renderTopPanel("topModelsBody", "topModelsStatus", data.by_model, "模型", "top-model", topModelSort);
   }
   S.barButtons = Array.prototype.slice.call(document.querySelectorAll("[data-overview-bar]"));
   S.barButtons.forEach(function (button) {

@@ -44,7 +44,7 @@
           <div class="quota-tab-panel" id="quota-tab-policy">
             <div class="panel">
               <div class="panel-header"><h3>模型组扣费折算与额度基数</h3><button class="btn btn-primary readonly-hide" id="newModelGroupBtn">新建模型组</button></div>
-              <div class="panel-body no-pad table-wrap"><table><thead><tr><th>唯一标识</th><th>模型</th><th>扣费折算系数</th><th>日/周/月额度基数</th><th>操作</th></tr></thead><tbody id="modelGroupsBody"><tr class="empty-row"><td colspan="5">加载中...</td></tr></tbody></table></div>
+              <div class="panel-body no-pad table-wrap"><table><thead id="modelGroupsTableHead"><tr><th data-sort="name">唯一标识</th><th data-sort="models" title="按绑定的目标 / 模型排序">模型</th><th data-sort="coefficient">扣费折算系数</th><th data-sort="base" title="按日额度基数排序；0 表示已绑定职级时该周期不限，排在最大">日/周/月额度基数</th><th data-sort-none>操作</th></tr></thead><tbody id="modelGroupsBody"><tr class="empty-row"><td colspan="5">加载中...</td></tr></tbody></table></div>
             </div>
           </div>
 
@@ -80,7 +80,7 @@
               </div>
               <div class="panel">
                 <div class="panel-header"><h3>项目组</h3><button class="btn btn-primary readonly-hide" id="newProjectGroupBtn">新增项目组</button></div>
-                <div class="panel-body no-pad table-wrap"><table><thead><tr><th>项目组</th><th>操作</th></tr></thead><tbody id="projectGroupsBody"><tr class="empty-row"><td colspan="2">加载中...</td></tr></tbody></table></div>
+                <div class="panel-body no-pad table-wrap"><table><thead id="projectGroupsTableHead"><tr><th data-sort="name">项目组</th><th data-sort-none>操作</th></tr></thead><tbody id="projectGroupsBody"><tr class="empty-row"><td colspan="2">加载中...</td></tr></tbody></table></div>
               </div>
             </div>
           </div>

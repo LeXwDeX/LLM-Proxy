@@ -23,7 +23,7 @@ func TestSupplementaryAdmission(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/coefficient=%g", tc.name, coefficient), func(t *testing.T) {
 				alias, childAlias := uniq("executor"), uniq("child")
 				tg := target(t, map[string]any{"endpoint_type": "claude", "endpoint": w.urlA + "/anthropic", "api_key": uniq("sk-admission"),
-					"model_mappings": []any{map[string]any{"upstream": "Admission-Executor", "fallback": alias}, map[string]any{"upstream": "Admission-Child", "fallback": childAlias}}})
+					"model_mappings": []any{map[string]any{"upstream": "Admission-Executor", "fallback": alias}, map[string]any{"upstream": "Admission-Child", "fallback": childAlias}, map[string]any{"upstream": "Admission-Other"}}})
 				iterationPrice(t, tg, "Admission-Executor", usage.CostRates{InputPer1MTokens: 1, OutputPer1MTokens: 1})
 				iterationPrice(t, tg, "Admission-Child", usage.CostRates{InputPer1MTokens: 10, OutputPer1MTokens: 10})
 				level := uniq("admission-level")
@@ -38,8 +38,12 @@ func TestSupplementaryAdmission(t *testing.T) {
 						factor = coefficient
 					}
 					group := groups[i]
+					bindings := []any{map[string]any{"target": tg, "model": model}}
+					if i == 0 { // Admission-Other is granted with the executor's group.
+						bindings = append(bindings, map[string]any{"target": tg, "model": "Admission-Other"})
+					}
 					if code, raw := w.adminDo("POST", "/admin/data/model-groups", map[string]any{"name": group, "daily_usd": 1, "cost_coefficient": factor,
-						"bindings": []any{map[string]any{"target": tg, "model": model}}}); code != 201 {
+						"bindings": bindings}); code != 201 {
 						t.Fatalf("group HTTP %d: %s", code, raw)
 					}
 					t.Cleanup(func() { w.adminDo("DELETE", "/admin/data/model-groups/"+group, nil) })

@@ -15,17 +15,17 @@
             </div>
             <div class="panel-body no-pad table-wrap">
               <table id="catalogTable">
-                <thead>
+                <thead id="catalogTableHead">
                   <tr>
-                    <th>渠道</th>
-                    <th>模型名</th>
-                    <th>显示名</th>
-                    <th>模型家族</th>
-                    <th>上下文窗口</th>
-                    <th>最大输出</th>
-                    <th>能力标签</th>
-                    <th>输入价格 /1M</th>
-                    <th>输出价格 /1M</th>
+                    <th data-sort="endpoint">渠道</th>
+                    <th data-sort="model">模型名</th>
+                    <th data-sort="display">显示名</th>
+                    <th data-sort="family">模型家族</th>
+                    <th data-sort="context">上下文窗口</th>
+                    <th data-sort="output">最大输出</th>
+                    <th data-sort="capabilities" title="按能力标签数量排序">能力标签</th>
+                    <th data-sort="input_price">输入价格 /1M</th>
+                    <th data-sort="output_price">输出价格 /1M</th>
                   </tr>
                 </thead>
                 <tbody id="catalogTableBody">

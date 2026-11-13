@@ -23,20 +23,16 @@ AdminApp.register("usage", function (app) {
   var usageGroupBy = app.bind("usageRange", "usageGroupBy");
   var usageQueryGroupBy = app.bind("usageRange", "usageQueryGroupBy");
   var addUsageTotals = app.bind("usageTables", "addUsageTotals");
-  var compareUsageModelGroupItems = app.bind("usageTables", "compareUsageModelGroupItems");
   var renderAggregateTable = app.bind("usageTables", "renderAggregateTable");
   var renderUsageTables = app.bind("usageTables", "renderUsageTables");
   var setUsageTableRows = app.bind("usageTables", "setUsageTableRows");
   var renderUsageModelGroups = app.bind("usageTables", "renderUsageModelGroups");
   var renderUsageSummary = app.bind("usageTables", "renderUsageSummary");
   var setUsageModelRequestHeader = app.bind("usageTables", "setUsageModelRequestHeader");
-  var updateUsageModelGroupSortArrows = app.bind("usageTables", "updateUsageModelGroupSortArrows");
-  var updateUsageSortArrows = app.bind("usageTables", "updateUsageSortArrows");
   var usageCostDenominator = app.bind("usageTables", "usageCostDenominator");
   var usageCostHtml = app.bind("usageTables", "usageCostHtml");
   var usageCostShare = app.bind("usageTables", "usageCostShare");
   var usageExpandButton = app.bind("usageTables", "usageExpandButton");
-  var usageModelGroupSortValue = app.bind("usageTables", "usageModelGroupSortValue");
   var usageModelRequestHeader = app.bind("usageTables", "usageModelRequestHeader");
   var usageNumber = app.bind("usageTables", "usageNumber");
   var usageSortValue = app.bind("usageTables", "usageSortValue");
@@ -330,5 +326,5 @@ AdminApp.register("usage", function (app) {
       selectUsageTab(usageTabItems[index].name, true);
     });
   selectUsageTab("group", false);
-  return {getTimeRange: getTimeRange, usageGroupBy: usageGroupBy, usageNumber: usageNumber, usageCostDenominator: usageCostDenominator, usageCostShare: usageCostShare, usageModelRequestHeader: usageModelRequestHeader, setUsageModelRequestHeader: setUsageModelRequestHeader, renderUsageSummary: renderUsageSummary, selectUsageTab: selectUsageTab, setUsageChartMetric: setUsageChartMetric, populateUsageClientFilter: populateUsageClientFilter, populateUsageModelGroupFilter: populateUsageModelGroupFilter, appendUsageModelGroupOption: appendUsageModelGroupOption, updateUsageModelGroupFilterButton: updateUsageModelGroupFilterButton, refreshUsageModelGroupFilter: refreshUsageModelGroupFilter, ensureModelGroupsLoaded: ensureModelGroupsLoaded, usageModelGroupValues: usageModelGroupValues, appendUsageModelGroups: appendUsageModelGroups, loadUsage: loadUsage, usageSortValue: usageSortValue, renderAggregateTable: renderAggregateTable, usageSubsetHtml: usageSubsetHtml, usageCostHtml: usageCostHtml, usageTotals: usageTotals, addUsageTotals: addUsageTotals, usageTotalCells: usageTotalCells, usageExpandButton: usageExpandButton, usageModelGroupSortValue: usageModelGroupSortValue, compareUsageModelGroupItems: compareUsageModelGroupItems, updateUsageModelGroupSortArrows: updateUsageModelGroupSortArrows, renderUsageModelGroups: renderUsageModelGroups, renderDailyChart: renderDailyChart, updateUsageSortArrows: updateUsageSortArrows};
+  return {getTimeRange: getTimeRange, usageGroupBy: usageGroupBy, usageNumber: usageNumber, usageCostDenominator: usageCostDenominator, usageCostShare: usageCostShare, usageModelRequestHeader: usageModelRequestHeader, setUsageModelRequestHeader: setUsageModelRequestHeader, renderUsageSummary: renderUsageSummary, selectUsageTab: selectUsageTab, setUsageChartMetric: setUsageChartMetric, populateUsageClientFilter: populateUsageClientFilter, populateUsageModelGroupFilter: populateUsageModelGroupFilter, appendUsageModelGroupOption: appendUsageModelGroupOption, updateUsageModelGroupFilterButton: updateUsageModelGroupFilterButton, refreshUsageModelGroupFilter: refreshUsageModelGroupFilter, ensureModelGroupsLoaded: ensureModelGroupsLoaded, usageModelGroupValues: usageModelGroupValues, appendUsageModelGroups: appendUsageModelGroups, loadUsage: loadUsage, usageSortValue: usageSortValue, renderAggregateTable: renderAggregateTable, usageSubsetHtml: usageSubsetHtml, usageCostHtml: usageCostHtml, usageTotals: usageTotals, addUsageTotals: addUsageTotals, usageTotalCells: usageTotalCells, usageExpandButton: usageExpandButton, renderUsageModelGroups: renderUsageModelGroups, renderDailyChart: renderDailyChart};
 });

@@ -8,8 +8,8 @@ AdminApp.register("quota", function (app) {
   "quotaModel": ["modelGroupModels", "modelGroupLabel", "quotaTargetByName", "quotaModelLabel", "quotaTargetOptions", "quotaModelOptions", "globalQuotaGroupByName", "jobLevelEntryName", "jobLevelByName", "jobLevelCoef", "jobLevelCoefText", "quotaNumber", "quotaResetText"],
   "quotaData": ["loadQuotaEditorData", "loadQuotaManagement", "loadDictOptions"],
   "quotaGroups": ["renderModelGroups", "renderModelGroupBindings", "collectModelGroupBindings", "openModelGroupModal"],
-  "quotaLevels": ["dictEmptyLabel", "dictOptionsHTML", "renderDictTables", "openJobLevelModal", "openDictModal"],
-  "quotaSummary": ["quotaConvertedDetail", "quotaRowStatus", "quotaBarCell", "quotaGroupSummary", "renderQuotaSummaryFilters", "quotaTotalTok", "renderQuotaSummary"],
+  "quotaLevels": ["dictEmptyLabel", "dictOptionsHTML", "renderDictTables", "paintJobLevelSort", "openJobLevelModal", "openDictModal"],
+  "quotaSummary": ["quotaConvertedDetail", "quotaRowStatus", "quotaBarCell", "quotaGroupSummary", "renderQuotaSummaryFilters", "paintQuotaSummarySort", "quotaTotalTok", "renderQuotaSummary"],
   "quotaDrawer": ["openQuotaEditDrawer", "renderQuotaEditGroups", "quotaEffectivePreview", "syncQuotaEditGroups"],
   "quotaSync": ["renderQuotaSyncClients", "applyQuotaSyncMode", "updateQuotaSyncTargetsLabel", "renderQuotaSyncTargets"],
   };
@@ -41,24 +41,28 @@ AdminApp.register("quota", function (app) {
         })
         .join("");
     });
+    // Sort keys (data-sort) match the getters in quota-summary.js / quota-levels.js: name, dim_<key>, ...
+    // Each header is replaced here, so the owning sorter repaints it afterwards.
     document.getElementById("quotaSummaryTableHead").innerHTML =
-      "<tr><th></th><th>客户端</th>" +
+      "<tr><th data-sort-none></th><th data-sort='name'>客户端</th>" +
       quotaDimensions
         .map(function (dim) {
-          return "<th>" + esc(dim.label) + "已用 / 可用</th>";
+          return "<th data-sort='dim_" + esc(dim.key) + "' title='按已用占可用上限的比例排序；不限与不可用排在最后'>" + esc(dim.label) + "已用 / 可用</th>";
         })
         .join("") +
-      "<th title='普通输入 + 输出 + 缓存读取 + 缓存写入 + 工具输入；缺失显示不可用'>近30天 Token</th>" +
-      "<th title='聚合接口 estimated_cost 已含模型组扣费系数，前端不再次折算；返回 0 显示 $0.00，缺失显示不可用'>估算费用（含模型组系数）</th>" +
-      "<th title='各模型组额度独立生效，不是共享额度池'>模型组</th><th>状态</th><th>操作</th></tr>";
+      "<th data-sort='tokens' title='普通输入 + 输出 + 缓存读取 + 缓存写入 + 工具输入；缺失显示不可用'>近30天 Token</th>" +
+      "<th data-sort='cost' title='聚合接口 estimated_cost 已含模型组扣费系数，前端不再次折算；返回 0 显示 $0.00，缺失显示不可用'>估算费用（含模型组系数）</th>" +
+      "<th data-sort='groups' title='各模型组额度独立生效，不是共享额度池'>模型组</th><th data-sort='status' title='按严重程度排序：计费校准不可用、职级未配置、模型组超限、接近限额、正常、不限、未配置'>状态</th><th data-sort-none>操作</th></tr>";
+    exported.paintQuotaSummarySort();
     document.getElementById("jobLevelTableHead").innerHTML =
-      "<tr><th>职级</th>" +
+      "<tr><th data-sort='name'>职级</th>" +
       quotaDimensions
         .map(function (dim) {
-          return "<th>" + esc(dim.label) + "额度倍率</th>";
+          return "<th data-sort='dim_" + esc(dim.key) + "' title='缺省为 ×1；0 表示不限，排在最大'>" + esc(dim.label) + "额度倍率</th>";
         })
         .join("") +
-      "<th>操作</th></tr>";
+      "<th data-sort-none>操作</th></tr>";
+    exported.paintJobLevelSort();
   }
   renderQuotaDimensionControls();
   window.modelGroupModels = exported.modelGroupModels;

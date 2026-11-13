@@ -6,6 +6,7 @@ AdminApp.register("pricingList", function (app) {
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
   var showConfirm = app.bind("core", "showConfirm");
+  var createTableSort = app.bind("core", "createTableSort");
   var epDisplayName = app.bind("schema", "epDisplayName");
   var schemaLabel = app.bind("schema", "schemaLabel");
   var loadQuotaEditorData = app.bind("quota", "loadQuotaEditorData");
@@ -21,6 +22,22 @@ AdminApp.register("pricingList", function (app) {
   var pricingRangeHtml = app.bind("pricingShared", "pricingRangeHtml");
   var pricingTargetMissing = app.bind("pricingShared", "pricingTargetMissing");
   var openPricingModal = app.bind("pricingModal", "openPricingModal");
+  // Column sorting (shared createTableSort) over the grouped rows. The default order stays the group key
+  // order; a group's expanded detail row is emitted with its summary row, so sorting never detaches it.
+  var pricingSort = createTableSort({
+    columns: {
+      targets: function (g) {
+        return g.targets.map(function (name) { return name || "默认"; }).join("、");
+      },
+      models: function (g) { return g.models.join("、"); },
+      count: function (g) { return g.list.length; },
+      mode: function (g) {
+        return g.list.some(function (t) { return t.mode === "schedule"; }) ? 1 : 0;
+      },
+    },
+    onChange: function () { renderPricingTemplates(); },
+  });
+  pricingSort.bind(document.getElementById("modelCostsTableHead"));
   function conditionsDetail(conditions) {
     if (!(conditions || []).length) return "";
     return "<ul class='pricing-condition-summary'>" + conditions.map(function (c) {
@@ -124,13 +141,15 @@ AdminApp.register("pricingList", function (app) {
     templates.forEach(function (t) {
       var targets = pricingTargets(t), models = pricingModels(t);
       var key = pricingGroupKey(targets, models);
-      if (!groups[key]) groups[key] = {targets: targets, models: models, list: []};
+      if (!groups[key]) groups[key] = {key: key, targets: targets, models: models, list: []};
       groups[key].list.push(t);
     });
-    var keys = Object.keys(groups).sort();
+    var ordered = pricingSort.apply(Object.keys(groups).sort().map(function (key) {
+      return groups[key];
+    }));
     var html = "";
-    keys.forEach(function (key) {
-      var group = groups[key], targets = group.targets, models = group.models;
+    ordered.forEach(function (group) {
+      var key = group.key, targets = group.targets, models = group.models;
       var list = group.list;
       var hasSchedule = list.some(function (t) {
         return t.mode === "schedule";

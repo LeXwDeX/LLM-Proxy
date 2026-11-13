@@ -68,7 +68,9 @@ func TestGPTBillingThroughProxy(t *testing.T) {
 					rates := usage.CostRates{InputPer1MTokens: 4, OutputPer1MTokens: 20, CacheReadPer1MToken: 0.4, CacheWritePer1MToken: 5}
 					templates := []pricing.PricingTemplate{{Target: "upstream", Model: "gpt-5.6-sol", BaseRates: rates}}
 					cache := pricing.NewPricingCache(func() ([]pricing.PricingTemplate, error) { return templates, nil }, nil)
-					qm, err := quota.New(quota.Options{CostCache: cache, UsageStore: store, ClientStore: clients, JobLevelStore: nosql.NewJobLevelStore(db), Logger: newTestLogger()})
+					grantWholeTargets(t, db, "tester", "upstream")
+					qm, err := quota.New(quota.Options{CostCache: cache, UsageStore: store, ClientStore: clients, JobLevelStore: nosql.NewJobLevelStore(db), Logger: newTestLogger(),
+						ModelGroupStore: nosql.NewModelGroupStore(db), ClientQuotaStore: nosql.NewClientQuotaStore(db)})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -127,8 +129,8 @@ func TestGPTBillingThroughProxy(t *testing.T) {
 					}
 					checkQuota := func(stage string) {
 						t.Helper()
-						// tester 无 plan → 全部流量归 company_general（系数 1，折算=原价）。
-						got := qm.Status("tester").Groups["company_general"].Quotas["daily"].Used
+						// tester 的 plan 只有整目标绑定的 granted 组（系数 1，折算=原价）。
+						got := qm.Status("tester").Groups["granted"].Quotas["daily"].Used
 						if math.IsNaN(got) || math.Abs(got-wantCost) > 1e-10 {
 							t.Fatalf("%s quota=%g want %g", stage, got, wantCost)
 						}

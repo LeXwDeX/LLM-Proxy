@@ -27,17 +27,17 @@
               <div class="trace-stats" id="traceStats"></div>
               <div class="table-wrap">
               <table>
-                <thead>
+                <thead id="traceTableHead">
                   <tr>
-                    <th>时间</th>
-                    <th>Request ID</th>
-                    <th>客户端</th>
-                    <th>目标</th>
-                    <th>模型</th>
-                    <th>状态</th>
-                    <th>耗时</th>
-                    <th>Tokens</th>
-                    <th>操作</th>
+                    <th data-sort="time" title="仅对已加载的记录排序">时间</th>
+                    <th data-sort="id">Request ID</th>
+                    <th data-sort="client">客户端</th>
+                    <th data-sort="target">目标</th>
+                    <th data-sort="model">模型</th>
+                    <th data-sort="status">状态</th>
+                    <th data-sort="duration">耗时</th>
+                    <th data-sort="tokens" title="按输入 + 输出 Token 合计排序">Tokens</th>
+                    <th data-sort-none>操作</th>
                   </tr>
                 </thead>
                 <tbody id="traceTableBody">
