@@ -40,7 +40,9 @@ func TestCoreReviewAccountingUnavailableReturns503UntilRawHistoryRecovers(t *tes
 	cache := pricing.NewPricingCache(func() ([]pricing.PricingTemplate, error) {
 		return []pricing.PricingTemplate{{Model: "test", Mode: pricing.ModeSchedule, Timezone: "+00:00", BaseRates: usage.CostRates{InputPer1MTokens: 1}, Periods: []pricing.PricingPeriod{{Weekdays: []int{1, 2, 3, 4, 5, 6, 7}, Start: "00:30", End: "24:00", Rates: usage.CostRates{InputPer1MTokens: 1}}}}}, nil
 	}, nil)
-	manager, err := quota.New(quota.Options{ClientStore: clients, JobLevelStore: levels, UsageStore: events, CostCache: cache, Logger: newTestLogger()})
+	grantWholeTargets(t, db, "tester", "test-target")
+	manager, err := quota.New(quota.Options{ClientStore: clients, JobLevelStore: levels, UsageStore: events, CostCache: cache, Logger: newTestLogger(),
+		ModelGroupStore: nosql.NewModelGroupStore(db), ClientQuotaStore: nosql.NewClientQuotaStore(db)})
 	if err != nil {
 		t.Fatal(err)
 	}

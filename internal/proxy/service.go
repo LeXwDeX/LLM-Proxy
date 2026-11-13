@@ -1945,7 +1945,7 @@ func deferCancel(cancel context.CancelFunc) {
 	}
 }
 
-// writeQuotaExceededResponse 渲染 429 超限响应（OpenAI 兼容 JSON）。
+// writeQuotaExceededResponse 渲染额度拒绝响应（OpenAI 兼容 JSON）：超限 429，校准不可用 503，路由未配置额度 403。
 // 字段：error.message / error.type / error.code / error.quota.{dimension, limit_usd, used_usd, resets_at}。
 // 额度体系 v2：scope=job_level 表示客户端未绑定职级（未配置额度），渲染专属文案。
 func writeQuotaExceededResponse(w http.ResponseWriter, info quota.ExceededInfo) {
@@ -1958,6 +1958,21 @@ func writeQuotaExceededResponse(w http.ResponseWriter, info quota.ExceededInfo) 
 				"message": "Usage accounting is temporarily unavailable. Please retry later.",
 				"type":    "service_unavailable",
 				"code":    "accounting_unavailable",
+			},
+		})
+		return
+	}
+	// The selected route is not granted by any plan model group: a 403 (not a
+	// rate limit, nothing resets), so clients do not back off and retry.
+	if info.Scope == quota.ScopeUnconfigured {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Quota is not configured for this model on the selected route. Contact the administrator to add it to one of your model groups.",
+				"type":    "quota_not_configured",
+				"code":    "quota_not_configured",
+				"quota":   map[string]any{"scope": info.Scope, "dimension": info.Dimension},
 			},
 		})
 		return

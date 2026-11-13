@@ -12,8 +12,8 @@ import (
 // 后台校准完成后自动收敛。
 func TestRequestPathCalibrationTimeoutBlocksAndConverges(t *testing.T) {
 	db := testOpenDB(t)
-	putJobLevel(t, db, config.JobLevel{Name: "L5"})
-	putClient(t, db, config.Client{Name: "alice", AccessKey: "k1", JobLevel: "L5"})
+	putModelGroup(t, db, config.ModelGroup{Name: "plan", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "t"}}})
+	putQuotaClient(t, db, []config.QuotaGroup{{Name: "plan"}}, "L5")
 	m := newTestManager(t, db)
 
 	old := calibrationRequestTimeout

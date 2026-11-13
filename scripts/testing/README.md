@@ -14,6 +14,12 @@ node scripts/testing/admin_ui_test.cjs
 (cd internal/admin/ui && node --test)
 ```
 
+## 表格排序门禁与核心加载器（table-sort-coverage.test.cjs / load_core.cjs）
+
+`internal/admin/ui/table-sort-coverage.test.cjs` 是共享表格排序组件 `core.createTableSort` 的门禁，随上面的 `(cd internal/admin/ui && node --test)` 运行：每个静态或脚本生成的 `<th>` 必须声明 `data-sort="key"` 或 `data-sort-none`，每个 `<table>` 必须有 `<thead>`，每个可排序表头都要绑定到某个 `createTableSort` 实例且其 key 有取值函数。组件本身的循环、空值与稳定性由 `internal/admin/ui/js/table-sort-core.test.cjs` 覆盖，各页面的默认顺序与行操作寻址由 `internal/admin/ui/table-sort-pages.test.cjs` 覆盖。
+
+`load_core.cjs`（`loadCore()`、`loadCoreEnv()`）在一次性 VM 上下文里用桩 DOM 加载真实的 `core/core.js` 并返回其导出；`loadCoreEnv` 另返回桩 document，便于测试操纵 `document.activeElement`。不走完整 `admin_ui_test.cjs` harness、使用自备 fake document 的单元测试（如 `js/overview.test.cjs`、`js/table-sort-core.test.cjs`）用它取得 `createTableSort` 等共享函数，而不是重写。
+
 ## 管理后台网页全流程模拟（admin_ui_sim.cjs / admin_ui_sim_flows.cjs）
 
 ```sh

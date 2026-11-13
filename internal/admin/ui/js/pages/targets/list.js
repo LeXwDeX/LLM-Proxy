@@ -32,6 +32,30 @@ AdminApp.register("targetsList", function (app) {
   var targetMuteReasonActive = app.bind("targetsHealth", "targetMuteReasonActive");
   var targetRuntimeFor = app.bind("targetsHealth", "targetRuntimeFor");
   var etagHeaders = app.bind("targetsHealth", "etagHeaders");
+  var createTableSort = app.bind("core", "createTableSort");
+  var targetHealthRank = { attention: 0, healthy: 1, paused: 2 };
+  ts.targetSort = createTableSort({
+    columns: {
+      status: function (t) {
+        var key = targetHealth(t).key;
+        return Object.prototype.hasOwnProperty.call(targetHealthRank, key) ? targetHealthRank[key] : 3;
+      },
+      name: function (t) { return String((t && t.name) || ""); },
+      keys: function (t) {
+        return (t && t.has_api_key ? 1 : 0) + (t && Array.isArray(t.api_keys) ? t.api_keys.length : 0);
+      },
+      type: function (t) { return epDisplayName(t && t.endpoint_type) || ""; },
+      pool: function (t) { return t && t.pool ? poolDisplayName(t.pool) : ""; },
+      scheduling: function (t) {
+        var rt = targetRuntimeFor(t);
+        var recent = rt && rt.window_15m;
+        return recent && typeof recent.in_flight_peak === "number" ? recent.in_flight_peak : null;
+      },
+      models: function (t) { return t && Array.isArray(t.model_mappings) ? t.model_mappings.length : 0; },
+    },
+    onChange: function () { renderTargets(); },
+  });
+  ts.targetSort.bind(document.getElementById("targetsTableHead"));
   var targetFilterSpecs = [
     { key: "all", label: "全部" },
     { key: "attention", label: "异常" },
@@ -766,6 +790,7 @@ AdminApp.register("targetsList", function (app) {
     setTargetFilter: setTargetFilter,
     switchTargetPageTab: switchTargetPageTab,
     renderTargets: renderTargets,
+    setTargetSort: function (key) { ts.targetSort.toggle(key); },
     hideModelHint: hideModelHint,
     showModelHint: showModelHint,
   };

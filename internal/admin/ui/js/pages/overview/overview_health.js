@@ -6,6 +6,7 @@ AdminApp.register("overviewHealth", function (app) {
   var fmtMoney = app.bind("core", "fmtMoney");
   var fmtPct = app.bind("core", "fmtPct");
   var totalTok = app.bind("core", "totalTok");
+  var createTableSort = app.bind("core", "createTableSort");
   var S = app.bind("overviewState", "store")();
   var request = app.bind("overview", "request");
   var showTooltip = app.bind("overview", "showTooltip");
@@ -46,6 +47,50 @@ AdminApp.register("overviewHealth", function (app) {
     var window = isObject(target.Window15m) ? "峰值 " + (counter(target.Window15m.in_flight_peak) ? fmtNum(target.Window15m.in_flight_peak) : "不可用") + " · 熔断 " + (counter(target.Window15m.breaker_trips) ? fmtNum(target.Window15m.breaker_trips) : "不可用") : "不可用";
     return '<tr data-target-name="' + esc(String(target.Name || "")) + '" data-target-phase="' + esc(phase) + '" data-target-key-issue="' + issue + '"><td>' + esc(String(target.Name || "未知目标")) + '</td><td>' + status + '</td><td>' + esc(keySummary(target)) + '</td><td>' + esc(inflight + " / " + capacity) + '</td><td>' + esc(window) + '</td></tr>';
   }
+  // Column sorting (shared createTableSort). Target health keeps its attention-first default order (a rank, then
+  // the server order); recent changes sorts the five newest events it shows; the usage summary sorts its fixed
+  // period rows (its header is rebuilt with the rows, so the sorter listens on the stable container).
+  var targetPhaseRank = { muted: 0, "half-open": 1, ready: 2, offline: 3, unknown: 4 };
+  var targetHealthSort = createTableSort({
+    columns: {
+      name: function (entry) { return String(entry.target.Name || ""); },
+      status: function (entry) { return targetPhaseRank[targetPhase(entry.target)]; },
+      keys: function (entry) { return counter(entry.target.ActiveKeys) ? entry.target.ActiveKeys : null; },
+      in_flight: function (entry) { return counter(entry.target.InFlight) ? entry.target.InFlight : null; },
+      peak: function (entry) {
+        var recent = entry.target.Window15m;
+        return isObject(recent) && counter(recent.in_flight_peak) ? recent.in_flight_peak : null;
+      },
+    },
+    onChange: function () { renderTargetHealth(); },
+  });
+  targetHealthSort.bind(document.getElementById("targetHealthTableHead"));
+  function eventTime(event) {
+    var time = Date.parse(event && event.timestamp);
+    return isFinite(time) ? time : null;
+  }
+  var recentChangesSort = createTableSort({
+    columns: {
+      time: eventTime,
+      actor: function (event) { return event && event.actor || ""; },
+      action: function (event) { return event && event.action || ""; },
+      object: function (event) { return event && event.object || ""; },
+      result: function (event) { return event && event.result || ""; },
+    },
+    onChange: function () { renderRecentChanges(); },
+  });
+  recentChangesSort.bind(document.getElementById("recentChangesTableHead"));
+  var usagePeriods = [{k: "last_hour", l: "近 1 小时（滚动）"}, {k: "today", l: "今日（UTC 日）"}, {k: "yesterday", l: "昨日（UTC 日）"}, {k: "last_7_days", l: "近 7 天（滚动 7×24 小时）"}, {k: "last_30_days", l: "近 30 天（滚动 30×24 小时）"}];
+  var usageSummarySort = createTableSort({
+    columns: {
+      period: function (row) { return row.index; },
+      requests: function (row) { return row.requests; },
+      tokens: function (row) { return row.tokens; },
+      cost: function (row) { return row.cost; },
+    },
+    onChange: function () { renderUsageSummary(); },
+  });
+  usageSummarySort.bind(document.getElementById("overviewUsageSummary"));
   function renderTargetHealth() {
     var body = el("targetHealthBody");
     var count = el("targetHealthCount");
@@ -62,7 +107,7 @@ AdminApp.register("overviewHealth", function (app) {
       var difference = targetRank(a.target) - targetRank(b.target);
       return difference || a.index - b.index;
     });
-    body.innerHTML = targets.length ? targets.map(function (entry) { return targetRow(entry.target); }).join("") : '<tr><td colspan="5">暂无已配置目标</td></tr>';
+    body.innerHTML = targets.length ? targetHealthSort.apply(targets).map(function (entry) { return targetRow(entry.target); }).join("") : '<tr><td colspan="5">暂无已配置目标</td></tr>';
     count.textContent = fmtNum(S.historySnapshot.targets.length) + " 个目标";
     var attention = targets.filter(function (entry) { return targetRank(entry.target) <= 4; }).length;
     var unknown = targets.filter(function (entry) { return targetPhase(entry.target) === "unknown"; }).length;
@@ -250,12 +295,34 @@ AdminApp.register("overviewHealth", function (app) {
       return bt === at ? 0 : bt > at ? 1 : -1;
     });
     events = events.slice(0, 5);
-    body.innerHTML = events.map(function (event, index) {
+    body.innerHTML = recentChangesSort.apply(events).map(function (event, index) {
       var id = event && event.id ? String(event.id) : String(event && event.timestamp || index);
       return '<tr data-audit-id="' + esc(id) + '"><td><time datetime="' + esc(event && event.timestamp || "") + '">' + esc(localDate(event && event.timestamp)) + '</time></td><td>' + esc(event && event.actor || "—") + '</td><td>' + esc(event && event.action || "—") + '</td><td>' + esc(event && event.object || "—") + '</td><td>' + esc(event && event.result || "—") + '</td></tr>';
     }).join("");
     status.textContent = "最近 " + fmtNum(events.length) + " 条变更" + (S.historyError ? "；最近变更" + historyStaleText() : "");
     status.dataset.state = S.historyError ? "partial" : "ready";
+  }
+  // The period rows come from the latest history snapshot; sorting re-renders them from it.
+  function renderUsageSummary() {
+    var ov = S.historySnapshot;
+    var summary = ov && isObject(ov.usage_summary) ? ov.usage_summary : null;
+    var rows = usagePeriods.map(function (period, index) {
+      var data = summary && isObject(summary[period.k]) ? summary[period.k] : null;
+      return {
+        index: index,
+        label: period.l,
+        requests: data && counter(data.requests) ? data.requests : null,
+        tokens: data && counter(data.input_tokens) && counter(data.output_tokens) ? totalTok(data) : null,
+        cost: data && counter(data.estimated_cost) ? data.estimated_cost : null,
+      };
+    });
+    el("overviewUsageSummary").innerHTML = '<table class="activity-history-table"><thead><tr><th data-sort="period">区间（服务端口径）</th><th data-sort="requests">请求权重</th><th data-sort="tokens">总 Token</th><th data-sort="cost">历史费用</th></tr></thead><tbody>' + usageSummarySort.apply(rows).map(function (row) {
+      var requests = row.requests === null ? "不可用" : fmtNum(row.requests);
+      var total = row.tokens === null ? "不可用" : fmtNum(row.tokens);
+      var cost = row.cost === null ? "不可用" : fmtMoney(row.cost);
+      return '<tr><th scope="row">' + esc(row.label) + '</th><td>' + esc(requests) + '</td><td>' + esc(total) + '</td><td>' + esc(cost) + '</td></tr>';
+    }).join("") + '</tbody></table>';
+    usageSummarySort.paint();
   }
   // Historical completion samples and cost keep their existing API and semantics.
   function renderHistory(ov) {
@@ -280,15 +347,7 @@ AdminApp.register("overviewHealth", function (app) {
     text("ovTargets", counter(ov.active_targets) ? fmtNum(ov.active_targets) : "不可用");
     text("ovClients", counter(ov.client_count) ? fmtNum(ov.client_count) : "不可用");
     text("ovModelCosts", counter(ov.model_cost_count) ? fmtNum(ov.model_cost_count) : "不可用");
-    var summary = isObject(ov.usage_summary) ? ov.usage_summary : null;
-    var periods = [{k: "last_hour", l: "近 1 小时（滚动）"}, {k: "today", l: "今日（UTC 日）"}, {k: "yesterday", l: "昨日（UTC 日）"}, {k: "last_7_days", l: "近 7 天（滚动 7×24 小时）"}, {k: "last_30_days", l: "近 30 天（滚动 30×24 小时）"}];
-    el("overviewUsageSummary").innerHTML = '<table class="activity-history-table"><thead><tr><th>区间（服务端口径）</th><th>请求权重</th><th>总 Token</th><th>历史费用</th></tr></thead><tbody>' + periods.map(function (period) {
-      var data = summary && isObject(summary[period.k]) ? summary[period.k] : null;
-      var requests = data && counter(data.requests) ? fmtNum(data.requests) : "不可用";
-      var total = data && counter(data.input_tokens) && counter(data.output_tokens) ? fmtNum(totalTok(data)) : "不可用";
-      var cost = data && counter(data.estimated_cost) ? fmtMoney(data.estimated_cost) : "不可用";
-      return '<tr><th scope="row">' + esc(period.l) + '</th><td>' + esc(requests) + '</td><td>' + esc(total) + '</td><td>' + esc(cost) + '</td></tr>';
-    }).join("") + '</tbody></table>';
+    renderUsageSummary();
     renderTargetHealth();
     renderRecentChanges();
     renderChain();

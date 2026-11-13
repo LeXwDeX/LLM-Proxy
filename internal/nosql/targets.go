@@ -285,6 +285,9 @@ func (s *TargetStore) deleteTarget(name string, expected *string) error {
 		if err := b.Delete([]byte(key)); err != nil {
 			return err
 		}
+		if err := removeModelGroupBindingsForTarget(tx, key); err != nil {
+			return err
+		}
 		return updateTargetOrder(tx, func(order []string) []string {
 			next := order[:0]
 			for _, existing := range order {
@@ -295,6 +298,66 @@ func (s *TargetStore) deleteTarget(name string, expected *string) error {
 			return next
 		})
 	})
+}
+
+// removeModelGroupBindingsForTarget drops every model-group binding that
+// references the deleted target (whole-target and exact-model alike) in the
+// same transaction as the delete, so quota management never keeps bindings to
+// a target that no longer exists. Other fields of each group record are kept
+// byte-for-byte; groups without such a binding are not rewritten. Rename and
+// merge do not come through here and keep their retained-name bindings.
+func removeModelGroupBindingsForTarget(tx *bolt.Tx, targetKey string) error {
+	b := tx.Bucket([]byte(BucketModelGroups))
+	if b == nil {
+		return nil
+	}
+	type rewrite struct {
+		key []byte
+		raw []byte
+	}
+	var rewrites []rewrite
+	if err := b.ForEach(func(k, v []byte) error {
+		record := map[string]json.RawMessage{}
+		if err := json.Unmarshal(v, &record); err != nil {
+			return fmt.Errorf("decode model group %q: %w", string(k), err)
+		}
+		rawBindings, ok := record["bindings"]
+		if !ok || len(rawBindings) == 0 {
+			return nil
+		}
+		var bindings []config.QuotaGroupBinding
+		if err := json.Unmarshal(rawBindings, &bindings); err != nil {
+			return fmt.Errorf("decode model group %q bindings: %w", string(k), err)
+		}
+		kept := make([]config.QuotaGroupBinding, 0, len(bindings))
+		for _, binding := range bindings {
+			if strings.ToLower(strings.TrimSpace(binding.Target)) != targetKey {
+				kept = append(kept, binding)
+			}
+		}
+		if len(kept) == len(bindings) {
+			return nil
+		}
+		encoded, err := json.Marshal(kept)
+		if err != nil {
+			return err
+		}
+		record["bindings"] = encoded
+		raw, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		rewrites = append(rewrites, rewrite{key: append([]byte(nil), k...), raw: raw})
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, r := range rewrites {
+		if err := b.Put(r.key, r.raw); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // MigrateTargetsFromConfig copies legacy config.json targets into bbolt when

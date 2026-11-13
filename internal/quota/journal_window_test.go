@@ -39,6 +39,7 @@ func TestCalibrationJournalUnresolvedWindow(t *testing.T) {
 			db := testOpenDB(t)
 			m := newTestManager(t, db)
 			putQuotaClient(t, db, []config.QuotaGroup{{Name: "models"}}, "employee")
+			putModelGroup(t, db, config.ModelGroup{Name: "models", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "anthropic"}}})
 			event := quotaBundle()
 			event.Components = nil
 			event.Timestamp = tc.at(time.Now().UTC())

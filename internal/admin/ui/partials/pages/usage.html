@@ -82,7 +82,7 @@
               <div class="panel-header"><h3>模型组 → 目标 → 模型</h3></div>
               <div class="panel-body no-pad table-wrap">
                 <table id="usageByModelGroupTable" class="usage-table">
-                  <thead><tr>
+                  <thead id="usageByModelGroupTableHead"><tr>
                     <th data-sort="model_group">消费归属</th><th data-sort="requests" title="成功请求权重（状态码 1–499），不是记录数">请求（成功）</th><th data-sort="input_tokens" title="普通输入，不含缓存读取和写入">普通输入</th>
                     <th data-sort="output_tokens">输出</th><th data-sort="cached_tokens" title="显式缓存读取是其中子集，不重复相加">缓存读取</th><th data-sort="cache_creation_tokens">缓存写入</th><th data-sort="total" title="普通输入 + 输出 + 缓存读取 + 缓存写入 + 工具输入">总 Token</th><th data-sort="cost" title="已含模型组系数（模型组扣费系数）；占比分母为当前筛选估算总费用">估算费用</th>
                   </tr></thead>
@@ -97,7 +97,7 @@
               <div class="panel-header"><h3>按客户端聚合</h3></div>
               <div class="panel-body no-pad table-wrap">
                 <table id="usageByClientTable" class="usage-table">
-                  <thead>
+                  <thead id="usageByClientTableHead">
                     <tr>
                       <th data-sort="key">客户端</th>
                       <th data-sort="requests" title="请求权重；未选模型组时含全部请求，选中模型组时只含成功请求">请求权重</th>
@@ -121,7 +121,7 @@
               <div class="panel-header"><h3>按模型组和模型聚合</h3></div>
               <div class="panel-body no-pad table-wrap">
                 <table id="usageByModelTable" class="usage-table">
-                  <thead>
+                  <thead id="usageByModelTableHead">
                     <tr>
                       <th data-sort="model_group">模型组</th>
                       <th data-sort="model">模型名</th>

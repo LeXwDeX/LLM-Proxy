@@ -14,7 +14,13 @@ const (
 	ScopeJobLevel   = "job_level"
 	ScopeModelGroup = "model_group"
 	ScopeAccounting = "accounting"
+	// ScopeUnconfigured 表示请求实际选中的 (target, 上游模型) 不属于客户端
+	// plan 中任何模型组的绑定：未授予额度，准入拒绝（没有不限额的兜底组）。
+	ScopeUnconfigured = "unconfigured"
 )
+
+// UnconfiguredDimension 是 unconfigured scope 的固定维度名。
+const UnconfiguredDimension = "unconfigured"
 
 // AllScopeOptions provides display names for the runtime quota scopes.
 func AllScopeOptions() []config.EnumOption {
@@ -22,14 +28,15 @@ func AllScopeOptions() []config.EnumOption {
 		{Value: ScopeJobLevel, Label: "职级"},
 		{Value: ScopeModelGroup, Label: "模型组"},
 		{Value: ScopeAccounting, Label: "计费校准"},
+		{Value: ScopeUnconfigured, Label: "未配置额度"},
 	}
 }
 
 // ExceededInfo 内存超限标记结构。超限标记由 internal/quota 在准入检查时写入。
 type ExceededInfo struct {
-	Scope     string    `json:"scope,omitempty"` // job_level | model_group
+	Scope     string    `json:"scope,omitempty"` // job_level | model_group | accounting | unconfigured
 	GroupName string    `json:"group_name,omitempty"`
-	Dimension string    `json:"dimension"` // "daily" | "weekly" | "monthly" | "unassigned"(job_level)
+	Dimension string    `json:"dimension"` // "daily" | "weekly" | "monthly" | "unassigned"(job_level) | "unconfigured"
 	Limit     float64   `json:"limit"`     // 触发的限额值 (USD)
 	Used      float64   `json:"used"`      // 评估时的累计用量 (USD)
 	ResetsAt  time.Time `json:"resets_at"` // 下个自然周期起始 (UTC)

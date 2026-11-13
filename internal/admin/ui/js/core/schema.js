@@ -5,6 +5,7 @@ AdminApp.register("schema", function (app) {
   var state = app.state;
   var api = app.bind("core", "api");
   var esc = app.bind("core", "esc");
+  var createTableSort = app.bind("core", "createTableSort");
   /* ===== Targets ===== */
   // endpoint_type 元数据由 GET /admin/data/schema 在 bootstrap 时注入到
   // state.endpointTypeMetas，下面的 helper 全部从该缓存派生，禁止再硬编码列表。
@@ -229,6 +230,17 @@ AdminApp.register("schema", function (app) {
       });
   }
 
+  // The compatibility summary is a read-only reference table; its three text columns sort like every
+  // other table. The header is regenerated with the rows, so the sorter listens on the stable container.
+  var schemaSummarySort = createTableSort({
+    columns: {
+      category: function (row) { return row.category; },
+      value: function (row) { return row.value; },
+      detail: function (row) { return row.detail; },
+    },
+    onChange: function () { renderSchemaSummary(); },
+  });
+  schemaSummarySort.bind(document.getElementById("adminSchemaSummary"));
   function renderSchemaSummary() {
     var lists = {
       protocols: "协议",
@@ -257,55 +269,37 @@ AdminApp.register("schema", function (app) {
             return schemaLabel("request_schemas", value);
           })
           .join(" / ");
-      rows.push(
-        "<tr><td>上游类型</td><td><code>" +
-          esc(meta.code) +
-          "</code></td><td>" +
-          esc(meta.display_name + " · " + detail) +
-          "</td></tr>",
-      );
+      rows.push({ category: "上游类型", value: meta.code, detail: meta.display_name + " · " + detail });
     });
     Object.keys(lists).forEach(function (key) {
       state.schema[key].forEach(function (option) {
-        rows.push(
-          "<tr><td>" +
-            esc(lists[key]) +
-            "</td><td><code>" +
-            esc(option.value || "（默认空值）") +
-            "</code></td><td>" +
-            esc(option.label) +
-            "</td></tr>",
-        );
+        rows.push({ category: lists[key], value: option.value || "（默认空值）", detail: option.label });
       });
     });
     state.schema.quota_dimensions.forEach(function (dim) {
-      rows.push(
-        "<tr><td>额度维度</td><td><code>" +
-          esc(dim.value) +
-          "</code></td><td>" +
-          esc(
-            dim.label +
-              " · 基数 " +
-              dim.base_field +
-              " · 职级倍率 " +
-              dim.job_coefficient_field,
-          ) +
-          "</td></tr>",
-      );
+      rows.push({
+        category: "额度维度",
+        value: dim.value,
+        detail: dim.label + " · 基数 " + dim.base_field + " · 职级倍率 " + dim.job_coefficient_field,
+      });
     });
     Object.keys(state.schema.defaults).forEach(function (key) {
-      rows.push(
-        "<tr><td>默认值</td><td><code>" +
-          esc(key) +
-          "</code></td><td>" +
-          esc(state.schema.defaults[key] === "" ? "（空值）" : String(state.schema.defaults[key])) +
-          "</td></tr>",
-      );
+      rows.push({
+        category: "默认值",
+        value: key,
+        detail: state.schema.defaults[key] === "" ? "（空值）" : String(state.schema.defaults[key]),
+      });
     });
     document.getElementById("adminSchemaSummary").innerHTML =
-      "<div class='table-wrap'><table><thead><tr><th>配置分类</th><th>配置值</th><th>显示名与兼容能力</th></tr></thead><tbody>" +
-      rows.join("") +
+      "<div class='table-wrap'><table><thead><tr><th data-sort='category'>配置分类</th><th data-sort='value'>配置值</th><th data-sort='detail'>显示名与兼容能力</th></tr></thead><tbody>" +
+      schemaSummarySort
+        .apply(rows)
+        .map(function (row) {
+          return "<tr><td>" + esc(row.category) + "</td><td><code>" + esc(row.value) + "</code></td><td>" + esc(row.detail) + "</td></tr>";
+        })
+        .join("") +
       "</tbody></table></div>";
+    schemaSummarySort.paint();
   }
 
   async function loadSchema() {

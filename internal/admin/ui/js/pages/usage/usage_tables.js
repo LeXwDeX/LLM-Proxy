@@ -7,6 +7,7 @@ AdminApp.register("usageTables", function (app) {
   var fmtNum = app.bind("core", "fmtNum");
   var fmtMoney = app.bind("core", "fmtMoney");
   var totalTok = app.bind("core", "totalTok");
+  var createTableSort = app.bind("core", "createTableSort");
   var S = app.bind("usageState", "store")();
   state.usageModelGroupExpanded = usageSafeMap(state.usageModelGroupExpanded);
   state.usageModelTargetExpanded = usageSafeMap(state.usageModelTargetExpanded);
@@ -25,26 +26,71 @@ AdminApp.register("usageTables", function (app) {
     "cache_creation_tokens",
     "tool_use_prompt_tokens",
   ];
+  // Column sorting (shared createTableSort). Each table keeps its default order (client: cost, then total
+  // tokens, both descending; model: the visible model-group label, then total tokens descending; model-group
+  // tree: total tokens descending, then name) and a header click cycles ascending, descending, default.
+  // Cells that render as "不可用" have no value and sort last.
+  var usageNumericKeys = [
+    "requests",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cache_creation_tokens",
+    "total",
+    "cost",
+  ];
+  function usageAggregateColumns(textKeys) {
+    var columns = {};
+    textKeys.concat(usageNumericKeys).forEach(function (key) {
+      columns[key] = function (row) {
+        return usageSortValue(row, key);
+      };
+    });
+    return columns;
+  }
+  function usageClientDefault(a, b) {
+    return (
+      Number(b.estimated_cost || 0) - Number(a.estimated_cost || 0) ||
+      totalTok(b) - totalTok(a)
+    );
+  }
+  function usageModelDefault(a, b) {
+    return (
+      String(modelGroupLabel(a.model_group || "-")).localeCompare(
+        String(modelGroupLabel(b.model_group || "-")),
+      ) || totalTok(b) - totalTok(a)
+    );
+  }
   var usageTables = [
     {
       table: "usageByClientTable",
+      head: "usageByClientTableHead",
       tbody: "usageByClientBody",
       rows: [],
       columnCount: 8,
-      sort: { key: "cost", dir: -1 },
+      columns: usageAggregateColumns(["key"]),
+      defaultCompare: usageClientDefault,
     },
     {
       table: "usageByModelTable",
+      head: "usageByModelTableHead",
       tbody: "usageByModelBody",
       rows: [],
       columnCount: 9,
-      sort: { key: "model_group", dir: 1 },
+      columns: usageAggregateColumns(["model_group", "model"]),
+      defaultCompare: usageModelDefault,
     },
   ];
-  var usageModelGroupSort = { key: "total", dir: -1 };
   var usageTableMap = {};
   usageTables.forEach(function (t) {
     usageTableMap[t.tbody] = t;
+    t.sort = createTableSort({
+      columns: t.columns,
+      onChange: function () {
+        if (S.usageSnapshot) renderAggregateTable(t);
+      },
+    });
+    t.sort.bind(document.getElementById(t.head));
   });
 
   function setUsageTableRows(tbody, rows) {
@@ -61,9 +107,9 @@ AdminApp.register("usageTables", function (app) {
     if (key === "model_group")
       return String(modelGroupLabel(r.model_group || "-"));
     if (key === "model") return String(r.model || r.key || "");
-    if (key === "total") return totalTok(r);
-    if (key === "cost") return Number(r.estimated_cost || 0);
-    return Number(r[key] || 0);
+    if (key === "total") return usageTokensAvailable(r) ? totalTok(r) : null;
+    if (key === "cost") return usageNumber(r.estimated_cost);
+    return usageNumber(r[key]);
   }
 
   function renderAggregateTable(t) {
@@ -75,18 +121,10 @@ AdminApp.register("usageTables", function (app) {
         "'>当前时间段无数据</td></tr>";
       return;
     }
-    tb.innerHTML = t.rows
-      .slice()
-      .sort(function (a, b) {
-        var va = usageSortValue(a, t.sort.key),
-          vb = usageSortValue(b, t.sort.key);
-        var cmp =
-          ["key", "model_group", "model"].indexOf(t.sort.key) >= 0
-            ? va.localeCompare(vb)
-            : va - vb;
-        if (cmp !== 0) return cmp * t.sort.dir;
-        return totalTok(b) - totalTok(a);
-      })
+    // Callers may pass an ad-hoc descriptor ({tbody, rows}); ordering always comes from the registered table.
+    var registered = usageTableMap[t.tbody] || t;
+    tb.innerHTML = registered.sort
+      .apply(t.rows, registered.defaultCompare)
       .map(function (r) {
         var group = r.model_group || "-";
         var model = r.model || r.key || r.bucket_start || "unknown";
@@ -301,49 +339,44 @@ AdminApp.register("usageTables", function (app) {
       "</button>"
     );
   }
-  function usageModelGroupSortValue(item, key) {
-    if (key === "model_group")
-      return String(item.name || item.target || item.model || "");
-    if (key === "total") return totalTok(item.totals || item);
-    if (key === "cost")
-      return Number((item.totals || item).estimated_cost || 0);
-    return Number((item.totals || item)[key] || 0);
+  // The model-group tree sorts each level (groups, the targets inside a group, the models inside a target)
+  // by the same column. Items are group {name, label, totals, targets}, target {name, totals, models} or a raw
+  // model row; the name column sorts a group by its visible label.
+  function usageTreeTotals(item) {
+    return item.totals || item;
   }
-
-  function compareUsageModelGroupItems(a, b, key, level) {
-    var va = usageModelGroupSortValue(a, key),
-      vb = usageModelGroupSortValue(b, key);
-    var cmp;
-    if (key === "model_group") {
-      var aName =
-        level === "group" ? a.name : level === "target" ? a.name : a.model;
-      var bName =
-        level === "group" ? b.name : level === "target" ? b.name : b.model;
-      cmp = String(aName || "").localeCompare(String(bName || ""));
-    } else {
-      cmp = va - vb;
-    }
-    if (cmp !== 0) return cmp * usageModelGroupSort.dir;
-    var aFallback =
-      level === "group" ? a.name : level === "target" ? a.name : a.model;
-    var bFallback =
-      level === "group" ? b.name : level === "target" ? b.name : b.model;
-    return String(aFallback || "").localeCompare(String(bFallback || ""));
+  function usageTreeName(item) {
+    return String(item.name != null ? item.name : item.model || "");
   }
-
-  function updateUsageModelGroupSortArrows() {
-    document
-      .getElementById("usageByModelGroupTable")
-      .querySelectorAll("thead th[data-sort]")
-      .forEach(function (th) {
-        th.classList.remove("sorted-asc", "sorted-desc");
-        if (th.getAttribute("data-sort") === usageModelGroupSort.key) {
-          th.classList.add(
-            usageModelGroupSort.dir > 0 ? "sorted-asc" : "sorted-desc",
-          );
-        }
-      });
+  function usageTreeLabel(item) {
+    if (item.targets) return String(item.label || item.name || "");
+    return usageTreeName(item);
   }
+  function usageTreeValue(item, key) {
+    var totals = usageTreeTotals(item);
+    if (key === "total") return usageTokensAvailable(totals) ? totalTok(totals) : null;
+    if (key === "cost") return usageNumber(totals.estimated_cost);
+    return usageNumber(totals[key]);
+  }
+  function usageTreeDefault(a, b) {
+    return (
+      totalTok(usageTreeTotals(b)) - totalTok(usageTreeTotals(a)) ||
+      usageTreeName(a).localeCompare(usageTreeName(b))
+    );
+  }
+  var usageTreeColumns = { model_group: usageTreeLabel };
+  usageNumericKeys.forEach(function (key) {
+    usageTreeColumns[key] = function (item) {
+      return usageTreeValue(item, key);
+    };
+  });
+  var usageModelGroupSort = createTableSort({
+    columns: usageTreeColumns,
+    onChange: function () {
+      if (S.usageSnapshot) renderUsageModelGroups(state.usageModelGroupRows || []);
+    },
+  });
+  usageModelGroupSort.bind(document.getElementById("usageByModelGroupTableHead"));
 
   function renderUsageModelGroups(rows, denominator) {
     var tb = document.getElementById("usageByModelGroupBody");
@@ -378,39 +411,29 @@ AdminApp.register("usageTables", function (app) {
       target.models.push(row);
     });
     var html = [];
-    Object.keys(groups)
-      .map(function (groupName) {
-        var group = groups[groupName];
-        return {
-          name: groupName,
-          totals: group.totals,
-          targets: group.targets,
-        };
-      })
-      .sort(function (a, b) {
-        return compareUsageModelGroupItems(
-          a,
-          b,
-          usageModelGroupSort.key,
-          "group",
-        );
-      })
+    usageModelGroupSort
+      .apply(
+        Object.keys(groups).map(function (groupName) {
+          var group = groups[groupName];
+          return {
+            name: groupName,
+            label: modelGroupLabel(groupName),
+            totals: group.totals,
+            targets: group.targets,
+          };
+        }),
+        usageTreeDefault,
+      )
       .forEach(function (groupItem) {
         var groupName = groupItem.name;
         var group = groups[groupName],
           groupExpanded = state.usageModelGroupExpanded[groupName] !== false;
-        var targetNames = Object.keys(group.targets)
-          .map(function (targetName) {
+        var targetNames = usageModelGroupSort.apply(
+          Object.keys(group.targets).map(function (targetName) {
             return group.targets[targetName];
-          })
-          .sort(function (a, b) {
-            return compareUsageModelGroupItems(
-              a,
-              b,
-              usageModelGroupSort.key,
-              "target",
-            );
-          });
+          }),
+          usageTreeDefault,
+        );
         html.push(
           "<tr class='usage-tree-row usage-group-row'><td>" +
             usageExpandButton("group", groupName, groupExpanded) +
@@ -445,16 +468,8 @@ AdminApp.register("usageTables", function (app) {
               "</tr>",
           );
           if (!targetExpanded) return;
-          target.models
-            .slice()
-            .sort(function (a, b) {
-              return compareUsageModelGroupItems(
-                a,
-                b,
-                usageModelGroupSort.key,
-                "model",
-              );
-            })
+          usageModelGroupSort
+            .apply(target.models, usageTreeDefault)
             .forEach(function (model) {
               html.push(
                 "<tr class='usage-tree-row usage-model-row'><td class='usage-tree-indent-model'>↳ " +
@@ -486,54 +501,5 @@ AdminApp.register("usageTables", function (app) {
       renderUsageModelGroups(state.usageModelGroupRows || [], S.usageDenominator);
     });
 
-  usageTables.forEach(function (t) {
-    document
-      .getElementById(t.table)
-      .querySelectorAll("thead th[data-sort]")
-      .forEach(function (th) {
-        th.addEventListener("click", function () {
-          var key = th.getAttribute("data-sort");
-          if (t.sort.key === key) {
-            t.sort.dir = -t.sort.dir;
-          } else {
-            t.sort.key = key;
-            t.sort.dir = ["key", "model_group", "model"].indexOf(key) >= 0 ? 1 : -1;
-          }
-          if (S.usageSnapshot) renderAggregateTable(t);
-          updateUsageSortArrows();
-        });
-      });
-  });
-  document
-    .getElementById("usageByModelGroupTable")
-    .querySelectorAll("thead th[data-sort]")
-    .forEach(function (th) {
-      th.addEventListener("click", function () {
-        var key = th.getAttribute("data-sort");
-        if (usageModelGroupSort.key === key) {
-          usageModelGroupSort.dir = -usageModelGroupSort.dir;
-        } else {
-          usageModelGroupSort.key = key;
-          usageModelGroupSort.dir = key === "model_group" ? 1 : -1;
-        }
-        if (S.usageSnapshot) renderUsageModelGroups(state.usageModelGroupRows || []);
-        updateUsageModelGroupSortArrows();
-      });
-    });
-  function updateUsageSortArrows() {
-    usageTables.forEach(function (t) {
-      document
-        .getElementById(t.table)
-        .querySelectorAll("thead th[data-sort]")
-        .forEach(function (th) {
-          th.classList.remove("sorted-asc", "sorted-desc");
-          if (th.getAttribute("data-sort") === t.sort.key) {
-            th.classList.add(t.sort.dir > 0 ? "sorted-asc" : "sorted-desc");
-          }
-        });
-    });
-  }
-  updateUsageSortArrows();
-  updateUsageModelGroupSortArrows();
-  return {addUsageTotals: addUsageTotals, compareUsageModelGroupItems: compareUsageModelGroupItems, renderAggregateTable: renderAggregateTable, renderUsageModelGroups: renderUsageModelGroups, renderUsageSummary: renderUsageSummary, setUsageModelRequestHeader: setUsageModelRequestHeader, updateUsageModelGroupSortArrows: updateUsageModelGroupSortArrows, updateUsageSortArrows: updateUsageSortArrows, usageCell: usageCell, usageCostDenominator: usageCostDenominator, usageCostHtml: usageCostHtml, usageCostShare: usageCostShare, usageExpandButton: usageExpandButton, usageModelGroupSortValue: usageModelGroupSortValue, usageModelRequestHeader: usageModelRequestHeader, usageNumber: usageNumber, usageSortValue: usageSortValue, usageSubsetHtml: usageSubsetHtml, usageTokensAvailable: usageTokensAvailable, usageTotalCells: usageTotalCells, usageTotals: usageTotals, setUsageTableRows: setUsageTableRows, renderUsageTables: renderUsageTables};
+  return {addUsageTotals: addUsageTotals, renderAggregateTable: renderAggregateTable, renderUsageModelGroups: renderUsageModelGroups, renderUsageSummary: renderUsageSummary, setUsageModelRequestHeader: setUsageModelRequestHeader, usageCell: usageCell, usageCostDenominator: usageCostDenominator, usageCostHtml: usageCostHtml, usageCostShare: usageCostShare, usageExpandButton: usageExpandButton, usageModelRequestHeader: usageModelRequestHeader, usageNumber: usageNumber, usageSortValue: usageSortValue, usageSubsetHtml: usageSubsetHtml, usageTokensAvailable: usageTokensAvailable, usageTotalCells: usageTotalCells, usageTotals: usageTotals, setUsageTableRows: setUsageTableRows, renderUsageTables: renderUsageTables};
 });

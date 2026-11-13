@@ -84,12 +84,12 @@ type clientCounters struct {
 }
 
 type groupCounters struct {
-	coefficient float64 // 组系数（cost_coefficient；company_general = 1）
+	coefficient float64 // 组系数（cost_coefficient）
 	// 透明字段（额度公式推导，供 Status/UI 展示）：
 	planCoefficient  float64            // 个人系数（plan；默认 1，0=不限）
 	rankCoefficients map[string]float64 // 职级系数（daily/weekly/monthly；默认 1，0=不限）
 	baseLimits       map[string]float64 // 组基数（额度策略日/周/月额度）
-	inPlan           bool               // plan 显式添加（company_general 兜底为 false）
+	inPlan           bool               // plan 显式添加（计数器只为 plan 组建立，恒为 true）
 	bindings         []config.QuotaGroupBinding
 	dims             map[string]*dimCounter
 }
@@ -429,16 +429,13 @@ func (m *Manager) IncrementEvent(event usage.Event) {
 			}
 		}
 	}
-	groupName, coefficient := quotaGroupForCounters(cc, target, model)
-	if cc.groups == nil {
-		cc.groups = make(map[string]*groupCounters)
-	}
+	groupName, coefficient, matched := quotaGroupForCounters(cc, target, model)
 	gc := cc.groups[groupName]
-	if gc == nil {
-		// 兜底组（company_general 或未入 plan 的归属）：无基数 → 各维不限，
-		// 折算累计仅用于计量展示。
-		gc = newFallbackGroupCounters(coefficient, now)
-		cc.groups[groupName] = gc
+	if !matched || gc == nil {
+		// 不属于 plan 任一组的用量（准入已拒绝，仅绑定变更窗口内可能出现）
+		// 不计入任何组：额度只由 plan 组显式授予，没有兜底组。
+		m.mu.Unlock()
+		return
 	}
 
 	if groups := m.groupExceeded[clientName]; groups != nil {
@@ -716,11 +713,10 @@ func calibratedCounters(client string, qc quotaConfig, now time.Time, read func(
 		return nil, err
 	}
 	for _, cell := range cells {
-		groupName, coefficient := quotaGroupForCounters(cc, cell.Target, cell.Model)
+		groupName, coefficient, matched := quotaGroupForCounters(cc, cell.Target, cell.Model)
 		gc := cc.groups[groupName]
-		if gc == nil {
-			gc = newFallbackGroupCounters(coefficient, now)
-			cc.groups[groupName] = gc
+		if !matched || gc == nil {
+			continue // 不属于 plan 任一组的历史用量不计入任何组
 		}
 		for dim, from := range starts {
 			if !cell.At.Before(from) {
@@ -837,13 +833,17 @@ func accountingUnavailableInfo() ExceededInfo {
 // jobLevelExceededInfo is the client-level rejection marker for an unassigned
 // (or unknown) job level. ResetsAt is zero: the marker is not period-bound and
 // only clears when a valid job level is bound (Evaluate/RefreshAll).
+func unconfiguredInfo() ExceededInfo {
+	return ExceededInfo{Scope: ScopeUnconfigured, Dimension: UnconfiguredDimension}
+}
+
 func jobLevelExceededInfo() ExceededInfo {
 	return ExceededInfo{Scope: ScopeJobLevel, Dimension: JobLevelUnassignedDimension}
 }
 
 // CheckTarget evaluates, for the actually selected target and upstream model,
-// the model-group dimension first, then the client-level job-level gate
-// (most specific first; any exceeded layer blocks).
+// the model-group dimension first, then the client-level job-level gate, and
+// finally rejects a route that no plan group grants (scope unconfigured).
 func (m *Manager) CheckTarget(clientName, target, model string) (ExceededInfo, bool) {
 	// Start preloading has a deadline, so a valid client can reach admission
 	// before its counters exist. Load its persisted usage and job-level gate on
@@ -855,9 +855,11 @@ func (m *Manager) CheckTarget(clientName, target, model string) (ExceededInfo, b
 		m.mu.RUnlock()
 		return accountingUnavailableInfo(), true
 	}
+	unconfigured := false
 	if cc != nil {
-		groupName, _ := quotaGroupForCounters(cc, target, model)
-		if gc := cc.groups[groupName]; gc != nil {
+		groupName, _, matched := quotaGroupForCounters(cc, target, model)
+		unconfigured = !matched
+		if gc := cc.groups[groupName]; matched && gc != nil {
 			now := time.Now().UTC()
 			for _, dim := range []string{DimensionDaily, DimensionWeekly, DimensionMonthly} {
 				dc := gc.dims[dim]
@@ -869,8 +871,12 @@ func (m *Manager) CheckTarget(clientName, target, model string) (ExceededInfo, b
 		}
 	}
 	m.mu.RUnlock()
+	// 客户端级门槛（校准失败、未绑职级）优先于路由级「未配置额度」。
 	if info, exceeded := m.Check(clientName); exceeded {
 		return info, true
+	}
+	if unconfigured {
+		return unconfiguredInfo(), true
 	}
 	return ExceededInfo{}, false
 }
@@ -1180,60 +1186,37 @@ func buildGroupCounters(plan config.QuotaGroup, spec config.ModelGroup, level co
 	return gc
 }
 
-// newFallbackGroupCounters builds counters for a group the client's plan does
-// not explicitly contain (company_general 兜底或未入 plan 的归属流量)：无基数
-// → 各维不限，折算累计仅用于计量展示。
-func newFallbackGroupCounters(coefficient float64, now time.Time) *groupCounters {
-	if coefficient < 0 {
-		coefficient = 1
-	}
-	gc := &groupCounters{
-		coefficient:      coefficient,
-		planCoefficient:  1,
-		rankCoefficients: map[string]float64{DimensionDaily: 1, DimensionWeekly: 1, DimensionMonthly: 1},
-		baseLimits:       map[string]float64{DimensionDaily: 0, DimensionWeekly: 0, DimensionMonthly: 0},
-		dims:             make(map[string]*dimCounter),
-	}
-	for _, dim := range []string{DimensionDaily, DimensionWeekly, DimensionMonthly} {
-		reset, err := NextResetAt(dim, now)
-		if err != nil {
-			continue
-		}
-		gc.dims[dim] = &dimCounter{limit: 0, resetsAt: reset, period: dim}
-	}
-	return gc
-}
-
-func quotaGroupForCounters(cc *clientCounters, target, model string) (string, float64) {
+// quotaGroupForCounters resolves the plan group that owns (target, model):
+// an exact (target, model) binding wins over a whole-target binding, both
+// case-insensitive. matched=false means no plan group grants this route; the
+// caller rejects admission and counts no usage (there is no fallback group).
+func quotaGroupForCounters(cc *clientCounters, target, model string) (string, float64, bool) {
 	if cc == nil {
-		return "company_general", 1
+		return "", 0, false
 	}
 	target, model = strings.ToLower(strings.TrimSpace(target)), strings.ToLower(strings.TrimSpace(model))
 	for name, group := range cc.groups {
 		for _, binding := range group.bindings {
 			if strings.EqualFold(binding.Target, target) && binding.Model != "" && strings.EqualFold(binding.Model, model) {
-				return name, group.coefficient
+				return name, group.coefficient, true
 			}
 		}
 	}
 	for name, group := range cc.groups {
 		for _, binding := range group.bindings {
 			if strings.EqualFold(binding.Target, target) && binding.Model == "" {
-				return name, group.coefficient
+				return name, group.coefficient, true
 			}
 		}
 	}
-	return "company_general", 1
+	return "", 0, false
 }
 
 // groupSpec resolves a plan group name against the global catalog, returning
 // the full ModelGroup (base limits + cost coefficient + bindings) used by the
-// quota v2 formula. Unknown names and the built-in company_general group fall
+// quota v2 formula. Unknown names (including a legacy company_general entry) fall
 // back to a neutral spec (coefficient 1, zero bases → unlimited, no bindings).
 func groupSpec(catalog map[string]config.ModelGroup, name string) config.ModelGroup {
-	if strings.EqualFold(strings.TrimSpace(name), "company_general") {
-		return config.ModelGroup{Name: "company_general", CostCoefficient: 1}
-	}
 	if catalog != nil {
 		if mg, ok := catalog[strings.ToLower(strings.TrimSpace(name))]; ok {
 			return mg

@@ -23,7 +23,8 @@ import (
 )
 
 // Each test owns its database; group A is billed independently of executor B.
-func supplementaryQuota(t *testing.T, targets []string, groupFactor, rankFactor, personalFactor float64, spent bool) *quota.Manager {
+// freeTargets get an extra unlimited whole-target group so routes there are granted.
+func supplementaryQuota(t *testing.T, targets []string, groupFactor, rankFactor, personalFactor float64, spent bool, freeTargets ...string) *quota.Manager {
 	t.Helper()
 	db, err := nosql.OpenDB(filepath.Join(t.TempDir(), "quota.db"))
 	if err != nil {
@@ -50,11 +51,20 @@ func supplementaryQuota(t *testing.T, targets []string, groupFactor, rankFactor,
 	}
 	put(nosql.BucketModelGroups, "a", config.ModelGroup{Name: "a", DailyUSD: 1, CostCoefficient: groupFactor, Bindings: bindings})
 	put(nosql.BucketModelGroups, "b", config.ModelGroup{Name: "b", DailyUSD: 1, CostCoefficient: 1,
-		Bindings: []config.QuotaGroupBinding{{Target: targets[0], Model: "Executor-Model"}}})
+		Bindings: []config.QuotaGroupBinding{{Target: targets[0], Model: "Executor-Model"}, {Target: targets[0], Model: "Other-Model"}, {Target: targets[0], Model: "Another-Model"}}})
+	plan := []config.QuotaGroup{{Name: "a", Coefficient: &personalFactor}, {Name: "b"}}
+	if len(freeTargets) > 0 {
+		var free []config.QuotaGroupBinding
+		for _, target := range freeTargets {
+			free = append(free, config.QuotaGroupBinding{Target: target})
+		}
+		put(nosql.BucketModelGroups, "free", config.ModelGroup{Name: "free", CostCoefficient: 1, Bindings: free})
+		plan = append(plan, config.QuotaGroup{Name: "free"})
+	}
 	put(nosql.BucketClientQuotaGroups, "tester", struct {
 		Name   string              `json:"name"`
 		Groups []config.QuotaGroup `json:"groups"`
-	}{"tester", []config.QuotaGroup{{Name: "a", Coefficient: &personalFactor}, {Name: "b"}}})
+	}{"tester", plan})
 	costs := nosql.NewModelCostStore(db)
 	if err := costs.Upsert(nosql.ModelCost{Model: "Advisor-Model", InputPer1MTokens: 10}); err != nil {
 		t.Fatal(err)
@@ -85,8 +95,8 @@ func TestSupplementaryAdmissionExhaustedGroup(t *testing.T) {
 	for _, tc := range []struct{ name, fields string }{
 		{"advisor", `,"tools":[{"type":"advisor_20260301","name":"advisor","model":"Advisor-Model"}]`},
 		{"fallback", `,"fallback_model":"Fallback-Model"`},
-		{"official first", `,"fallbacks":[{"model":"Fallback-Model"},{"model":"Unbound-Model"}]`},
-		{"official later", `,"fallbacks":[{"model":"Unbound-Model"},{"model":"Fallback-Model"}]`},
+		{"official first", `,"fallbacks":[{"model":"Fallback-Model"},{"model":"Other-Model"}]`},
+		{"official later", `,"fallbacks":[{"model":"Other-Model"},{"model":"Fallback-Model"}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var hits atomic.Int64
@@ -205,15 +215,17 @@ func TestSupplementaryAdmissionFinalBody(t *testing.T) {
 		name, fields, path, wantModel string
 		custom                        map[string]any
 		factor                        string
-		unspent, reject               bool
+		unspent, reject, forbidden    bool
 	}{
 		{name: "both groups usable", fields: advisor, unspent: true, wantModel: "Advisor-Model"},
 		{name: "group free", fields: advisor, factor: "group", wantModel: "Advisor-Model"},
 		{name: "rank unlimited", fields: advisor, factor: "rank", wantModel: "Advisor-Model"},
 		{name: "personal unlimited", fields: advisor, factor: "personal", wantModel: "Advisor-Model"},
 		{name: "same group", fields: strings.ReplaceAll(advisor, "Advisor-Model", "Executor-Model"), wantModel: "Executor-Model"},
-		{name: "unbound model", fields: strings.ReplaceAll(advisor, "Advisor-Model", "Unbound-Model"), wantModel: "Unbound-Model"},
-		{name: "child alias is not rewritten", fields: strings.ReplaceAll(advisor, "Advisor-Model", "advisor-alias"), wantModel: "advisor-alias"},
+		{name: "other group model", fields: strings.ReplaceAll(advisor, "Advisor-Model", "Other-Model"), wantModel: "Other-Model"},
+		// The child alias is checked as written (no alias mapping); no plan group grants it.
+		{name: "child alias is not rewritten", fields: strings.ReplaceAll(advisor, "Advisor-Model", "advisor-alias"), forbidden: true},
+		{name: "ungranted supplementary model", fields: `,"fallbacks":[{"model":"Ungranted-Model"}]`, forbidden: true},
 		{name: "OpenAI custom tools", path: "/v1/chat/completions", fields: advisor + `,"fallback_model":"Fallback-Model"`, wantModel: "Advisor-Model"},
 		{name: "ordinary Claude tool", fields: `,"tools":[{"name":"advisor","model":"Advisor-Model","input_schema":{}}]`, wantModel: "Advisor-Model"},
 		{name: "arbitrary nested model", fields: `,"metadata":{"model":"Advisor-Model"},"tools":[{"type":"custom","name":"x","input_schema":{"model":"Advisor-Model"}}]`},
@@ -229,24 +241,24 @@ func TestSupplementaryAdmissionFinalBody(t *testing.T) {
 		{name: "custom duplicate advisor", custom: map[string]any{"tools": json.RawMessage(`[{"type":"advisor_20260301","name":"advisor","Model":"Executor-Model","model":"Advisor-Model"}]`)}, reject: true},
 		{name: "duplicate fallback last exhausted", fields: `,"fallback_model":"Executor-Model","fallback_model":"Fallback-Model"`, reject: true},
 		{name: "fallback variant does not override", fields: `,"fallback_model":"Fallback-Model","Fallback_Model":"Executor-Model"`, reject: true},
-		{name: "official both groups usable", fields: `,"fallbacks":[{"model":"Unbound-Model"},{"model":"Fallback-Model"}]`, unspent: true},
+		{name: "official both groups usable", fields: `,"fallbacks":[{"model":"Other-Model"},{"model":"Fallback-Model"}]`, unspent: true},
 		{name: "official group free", fields: `,"fallbacks":[{"model":"Fallback-Model"}]`, factor: "group"},
 		{name: "official rank unlimited", fields: `,"fallbacks":[{"model":"Fallback-Model"}]`, factor: "rank"},
 		{name: "official personal unlimited", fields: `,"fallbacks":[{"model":"Fallback-Model"}]`, factor: "personal"},
-		{name: "official all explicit items", fields: `,"fallbacks":[{"model":"Unbound-Model"},{"model":"Another-Unbound"},{"model":"Fallback-Model"}]`, reject: true},
+		{name: "official all explicit items", fields: `,"fallbacks":[{"model":"Other-Model"},{"model":"Another-Model"},{"model":"Fallback-Model"}]`, reject: true},
 		{name: "official default not inferred", fields: `,"fallbacks":"default"`},
 		{name: "official non Anthropic untouched", path: "/v1/chat/completions", fields: `,"fallbacks":[{"model":"Fallback-Model"}]`},
-		{name: "official nested model not scanned", fields: `,"metadata":{"fallbacks":[{"model":"Fallback-Model"}]},"fallbacks":[{"model":"Unbound-Model","thinking":{"model":"Fallback-Model"}}]`},
-		{name: "official custom injects later item", custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Unbound-Model"},{"model":"Fallback-Model"}]`)}, reject: true},
-		{name: "official custom overrides allowed value", fields: `,"fallbacks":[{"model":"Unbound-Model"}]`, custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Fallback-Model"}]`)}, reject: true},
-		{name: "official custom replaces exhausted first", fields: `,"fallbacks":[{"model":"Fallback-Model"},{"model":"Unbound-Model"}]`, custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Unbound-Model"}]`)}},
-		{name: "official custom replaces exhausted later", fields: `,"fallbacks":[{"model":"Unbound-Model"},{"model":"Fallback-Model"}]`, custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Unbound-Model"}]`)}},
+		{name: "official nested model not scanned", fields: `,"metadata":{"fallbacks":[{"model":"Fallback-Model"}]},"fallbacks":[{"model":"Other-Model","thinking":{"model":"Fallback-Model"}}]`},
+		{name: "official custom injects later item", custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Other-Model"},{"model":"Fallback-Model"}]`)}, reject: true},
+		{name: "official custom overrides allowed value", fields: `,"fallbacks":[{"model":"Other-Model"}]`, custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Fallback-Model"}]`)}, reject: true},
+		{name: "official custom replaces exhausted first", fields: `,"fallbacks":[{"model":"Fallback-Model"},{"model":"Other-Model"}]`, custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Other-Model"}]`)}},
+		{name: "official custom replaces exhausted later", fields: `,"fallbacks":[{"model":"Other-Model"},{"model":"Fallback-Model"}]`, custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Other-Model"}]`)}},
 		{name: "official custom removes models", fields: `,"fallbacks":[{"model":"Fallback-Model"}]`, custom: map[string]any{"fallbacks": "default"}},
 		{name: "official top duplicate last exhausted", fields: `,"fallbacks":[],"fallbacks":[{"model":"Fallback-Model"}]`, reject: true},
 		{name: "official top variant does not override", fields: `,"fallbacks":[{"model":"Fallback-Model"}],"Fallbacks":[]`, reject: true},
-		{name: "official model duplicate last exhausted", fields: `,"fallbacks":[{"model":"Unbound-Model","model":"Fallback-Model"}]`, reject: true},
-		{name: "official model variant does not override", fields: `,"fallbacks":[{"model":"Fallback-Model","Model":"Unbound-Model"}]`, reject: true},
-		{name: "official injected model variants", custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Fallback-Model","Model":"Unbound-Model"}]`)}, reject: true},
+		{name: "official model duplicate last exhausted", fields: `,"fallbacks":[{"model":"Other-Model","model":"Fallback-Model"}]`, reject: true},
+		{name: "official model variant does not override", fields: `,"fallbacks":[{"model":"Fallback-Model","Model":"Other-Model"}]`, reject: true},
+		{name: "official injected model variants", custom: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Fallback-Model","Model":"Other-Model"}]`)}, reject: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var captured []byte
@@ -280,13 +292,17 @@ func TestSupplementaryAdmissionFinalBody(t *testing.T) {
 			if tc.reject {
 				want = http.StatusTooManyRequests
 			}
+			if tc.forbidden {
+				want = http.StatusForbidden
+			}
+			rejected := tc.reject || tc.forbidden
 			if got.Code != want {
 				t.Fatalf("status=%d want=%d body=%s", got.Code, want, got.Body.String())
 			}
-			if tc.reject && captured != nil {
+			if rejected && captured != nil {
 				t.Fatalf("rejected request reached upstream: %s", captured)
 			}
-			if !tc.reject && captured == nil {
+			if !rejected && captured == nil {
 				t.Fatal("allowed request did not reach upstream")
 			}
 			if tc.wantModel != "" {
@@ -364,10 +380,10 @@ func TestSupplementaryAdmissionFailover(t *testing.T) {
 		{name: "second target removes", fields: `,"tools":` + string(advisor), second: map[string]any{"tools": nil}, allowed: true},
 		{name: "fallback actual target", fields: `,"fallback_model":"Fallback-Model"`},
 		{name: "fallback original restored", fields: `,"fallback_model":"Fallback-Model"`, first: map[string]any{"fallback_model": "Executor-Model"}},
-		{name: "official actual target", fields: `,"fallbacks":[{"model":"Unbound-Model"},{"model":"Fallback-Model"}]`},
-		{name: "official original restored", fields: `,"fallbacks":[{"model":"Unbound-Model"},{"model":"Fallback-Model"}]`, first: map[string]any{"fallbacks": "default"}},
-		{name: "official second target injects", second: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Unbound-Model"},{"model":"Fallback-Model"}]`)}},
-		{name: "official second target overrides", fields: `,"fallbacks":[{"model":"Fallback-Model"}]`, second: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Unbound-Model"}]`)}, allowed: true},
+		{name: "official actual target", fields: `,"fallbacks":[{"model":"Other-Model"},{"model":"Fallback-Model"}]`},
+		{name: "official original restored", fields: `,"fallbacks":[{"model":"Other-Model"},{"model":"Fallback-Model"}]`, first: map[string]any{"fallbacks": "default"}},
+		{name: "official second target injects", second: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Other-Model"},{"model":"Fallback-Model"}]`)}},
+		{name: "official second target overrides", fields: `,"fallbacks":[{"model":"Fallback-Model"}]`, second: map[string]any{"fallbacks": json.RawMessage(`[{"model":"Other-Model"}]`)}, allowed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var hits atomic.Int64
@@ -387,7 +403,7 @@ func TestSupplementaryAdmissionFailover(t *testing.T) {
 			defer svc.Close()
 			secondURL, _ := url.Parse(second.URL)
 			svc.httpClient = &http.Client{Transport: &failingTransport{successHost: secondURL.Host}}
-			svc.SetQuotaManager(supplementaryQuota(t, []string{"second"}, 1, 1, 1, true))
+			svc.SetQuotaManager(supplementaryQuota(t, []string{"second"}, 1, 1, 1, true, "first"))
 			svc.affinity.Set(sessionAffinityKey("tester", "admission-session", "executor"), "first", time.Now())
 			r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"executor","messages":[]`+tc.fields+`}`))
 			r.Header.Set("Content-Type", "application/json")
@@ -420,7 +436,7 @@ func TestSupplementaryAdmissionInvalidFieldsRemainUpstreamValidated(t *testing.T
 	}))
 	defer upstream.Close()
 	svc, err := NewService(&config.Config{Targets: []config.Target{{Name: "upstream", EndpointType: "claude", Endpoint: upstream.URL, APIKey: "test-key",
-		ModelMappings: []config.ModelMapping{{Upstream: "executor"}}}}}, newTestLogger())
+		ModelMappings: []config.ModelMapping{{Upstream: "Executor-Model", Fallback: "executor"}}}}}, newTestLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

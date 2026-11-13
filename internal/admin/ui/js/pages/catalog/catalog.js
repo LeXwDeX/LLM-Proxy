@@ -9,6 +9,7 @@ AdminApp.register("catalog", function (app) {
   var toast = app.bind("core", "toast");
   var epDisplayName = app.bind("schema", "epDisplayName");
   var epBadgeStyle = app.bind("schema", "epBadgeStyle");
+  var createTableSort = app.bind("core", "createTableSort");
   /* ===== Shared catalog helpers ===== */
   async function loadCatalog(epType, opts) {
     // opts.force=true 跳过缓存（用于打开 modal 等需要新鲜数据的场景，
@@ -47,6 +48,31 @@ AdminApp.register("catalog", function (app) {
   var catalogPage = 1;
   var catalogPageSize = 30;
 
+  // Column sorting (shared createTableSort). The whole filtered list is sorted before it is paged, so the
+  // order holds across pages; the default order is the catalog order the server returned. Context window,
+  // output limit and prices that render as "—" sort last, and a missing price is not the same as $0.
+  function catalogPrice(m, field) {
+    var value = m && m.default_cost ? m.default_cost[field] : null;
+    return value == null ? null : Number(value);
+  }
+  var catalogSort = createTableSort({
+    columns: {
+      endpoint: function (m) { return epDisplayName(m.endpoint_type) || m.endpoint_type || ""; },
+      model: function (m) { return m.model || ""; },
+      display: function (m) { return m.display_name || ""; },
+      family: function (m) { return m.model_family || ""; },
+      context: function (m) { return m.context_window || null; },
+      output: function (m) { return m.max_output_tokens || null; },
+      capabilities: function (m) {
+        return m.capabilities && m.capabilities.length ? m.capabilities.length : null;
+      },
+      input_price: function (m) { return catalogPrice(m, "input_per_1m_tokens"); },
+      output_price: function (m) { return catalogPrice(m, "output_per_1m_tokens"); },
+    },
+    onChange: function () { applyCatalogFilter(); },
+  });
+  catalogSort.bind(document.getElementById("catalogTableHead"));
+
   async function loadModelCatalog() {
     // 优先用缓存；无缓存则全量拉取（使用 /admin/data/catalog 不带 endpoint_type 参数）
     if (!state.catalogAllCache) {
@@ -71,7 +97,7 @@ AdminApp.register("catalog", function (app) {
     var kw = (document.getElementById("catalogSearch").value || "")
       .toLowerCase()
       .trim();
-    catalogFiltered = catalogAllModels.filter(function (m) {
+    var matched = catalogAllModels.filter(function (m) {
       if (epFilter && m.endpoint_type !== epFilter) return false;
       if (kw) {
         var haystack = (
@@ -85,6 +111,7 @@ AdminApp.register("catalog", function (app) {
       }
       return true;
     });
+    catalogFiltered = catalogSort.apply(matched);
     catalogPage = 1;
     renderCatalogPage();
   }

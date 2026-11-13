@@ -12,14 +12,14 @@
             <div class="panel-body billing-basis-note" id="pricingBillingBasis" role="note" style="color:var(--text-muted);font-size:12px;"><strong>计费口径：</strong>费用 = 上游官方 token 用量 × 适用的价格（目标模板、全局模板或目录默认价，均无则按 0 计），系统不估算 token。</div>
             <div class="panel-body no-pad pricing-table-wrap">
               <table class="pricing-table">
-                <thead>
+                <thead id="modelCostsTableHead">
                   <tr>
-                    <th style="width:40px;"></th>
-                    <th>Target</th>
-                    <th>模型</th>
-                    <th>模板数</th>
-                    <th>模式</th>
-                    <th>操作</th>
+                    <th style="width:40px;" data-sort-none></th>
+                    <th data-sort="targets">Target</th>
+                    <th data-sort="models">模型</th>
+                    <th data-sort="count">模板数</th>
+                    <th data-sort="mode" title="含分时段规则的排在全天价格之后">模式</th>
+                    <th data-sort-none>操作</th>
                   </tr>
                 </thead>
                 <tbody id="modelCostsTableBody">

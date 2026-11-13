@@ -7,14 +7,14 @@
             </div>
             <div class="panel-body no-pad table-wrap">
               <table>
-                <thead>
+                <thead id="auditTableHead">
                   <tr>
-                    <th>时间</th>
-                    <th>操作者</th>
-                    <th>动作</th>
-                    <th>对象</th>
-                    <th>结果</th>
-                    <th>详情</th>
+                    <th data-sort="time" title="仅对已加载的最近记录排序">时间</th>
+                    <th data-sort="actor">操作者</th>
+                    <th data-sort="action">动作</th>
+                    <th data-sort="object">对象</th>
+                    <th data-sort="result">结果</th>
+                    <th data-sort="detail">详情</th>
                   </tr>
                 </thead>
                 <tbody id="auditTableBody">

@@ -29,8 +29,10 @@ AdminApp.register("quotaDrawer", function (app) {
     state.editingQuotaClient = c.name;
     document.getElementById("quotaEditDrawerTitle").textContent =
       "编辑可用额度 — " + c.name;
-    document.getElementById("quotaEditDrawerInfo").textContent =
-      (c.ip_address || "-") + (c.project_group ? " · " + c.project_group : "");
+    // Only facts that exist: an unset IP or project group is omitted, not shown as "-".
+    var drawerInfo = document.getElementById("quotaEditDrawerInfo");
+    drawerInfo.textContent = [c.ip_address, c.project_group].filter(Boolean).join(" · ");
+    drawerInfo.hidden = !drawerInfo.textContent;
     // The select matches names case-insensitively; keep the stored spelling to submit
     // unless the user actually picks a job level.
     state.quotaEditJobLevelOriginal = c.job_level || "";

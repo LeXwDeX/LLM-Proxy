@@ -10,19 +10,29 @@ test("model group sorting uses the visible label and keeps total-token tie break
   const h = createHarness();
   const app = await h.run();
   const usage = app.modules.usage;
-  assert.equal(usage.usageSortValue({ model_group: "company_general" }, "model_group"), "公司通用");
+  assert.equal(usage.usageSortValue({ model_group: "company_general" }, "model_group"), "未归组");
   const rows = [
     { model_group: "z-custom", model: "z-small", output_tokens: 1 },
     { model_group: "company_general", model: "company", output_tokens: 999 },
     { model_group: "z-custom", model: "z-large", output_tokens: 100 },
   ];
-  usage.renderAggregateTable({ tbody: "usageByModelBody", rows, sort: {key: "model_group", dir: 1} });
+  // Default order: the visible model-group label, then total tokens descending.
+  usage.renderAggregateTable({ tbody: "usageByModelBody", rows });
   const html = h.document.getElementById("usageByModelBody").innerHTML;
   const names = [...html.matchAll(/<td>(z-small|company|z-large)<\/td>/g)].map(m => m[1]);
   const expected = rows.slice().sort((a,b) => usage.usageSortValue(a,"model_group").localeCompare(usage.usageSortValue(b,"model_group")) || b.output_tokens-a.output_tokens).map(r=>r.model);
   assert.deepEqual(names, expected);
-  usage.renderAggregateTable({ tbody: "usageByModelBody", rows, sort: {key: "total", dir: -1} });
+  // Header clicks reach the shared sorter through the bound <thead>: total ascending, then descending.
+  clickHeader(h, "usageByModelTableHead", "total");
+  usage.renderAggregateTable({ tbody: "usageByModelBody", rows });
+  assert.match(h.document.getElementById("usageByModelBody").innerHTML, /z-small.*z-large.*company/);
+  clickHeader(h, "usageByModelTableHead", "total");
+  usage.renderAggregateTable({ tbody: "usageByModelBody", rows });
   assert.match(h.document.getElementById("usageByModelBody").innerHTML, /company.*z-large.*z-small/);
+  clickHeader(h, "usageByModelTableHead", "total");
+  usage.renderAggregateTable({ tbody: "usageByModelBody", rows });
+  const restored = [...h.document.getElementById("usageByModelBody").innerHTML.matchAll(/<td>(z-small|company|z-large)<\/td>/g)].map(m => m[1]);
+  assert.deepEqual(restored, expected, "the third click returns to the default order");
 });
 
 test("usage loading defaults to visible model group order, then total tokens descending", async () => {
@@ -40,10 +50,17 @@ test("usage loading defaults to visible model group order, then total tokens des
   await app.modules.usage.loadUsage();
   const html = h.document.getElementById("usageByModelBody").innerHTML;
   const names = [...html.matchAll(/<td>(small|middle|large|company|missing-group)<\/td>/g)].map(m=>m[1]);
-  const label = r=>r.model_group === "company_general" ? "公司通用" : r.model_group || "-";
+  const label = r=>r.model_group === "company_general" ? "未归组" : r.model_group || "-";
   assert.deepEqual(names, rows.slice().sort((a,b)=>label(a).localeCompare(label(b)) || b.output_tokens-a.output_tokens).map(r=>r.model));
   assert.ok(names.indexOf("large")+1 === names.indexOf("small"));
 });
+
+// Simulates a click on a sortable <th> through the listener the shared sorter registered on the <thead>.
+function clickHeader(harness, headId, key) {
+  const head = harness.document.getElementById(headId);
+  const th = {getAttribute: name => name === "data-sort" ? key : null};
+  for (const listener of head.listeners.click || []) listener({target: {closest: () => th}});
+}
 
 function aggregate(overrides = {}) {
   return Object.assign({

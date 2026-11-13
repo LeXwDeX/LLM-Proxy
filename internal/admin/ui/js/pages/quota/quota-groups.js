@@ -9,6 +9,7 @@ AdminApp.register("quotaGroups", function (app) {
   var openModal = app.bind("core", "openModal");
   var closeModal = app.bind("core", "closeModal");
   var showConfirm = app.bind("core", "showConfirm");
+  var createTableSort = app.bind("core", "createTableSort");
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var modelGroupModels = app.bind("quotaModel", "modelGroupModels");
   var modelGroupLabel = app.bind("quotaModel", "modelGroupLabel");
@@ -19,11 +20,41 @@ AdminApp.register("quotaGroups", function (app) {
   var quotaInputNumber = app.bind("quotaModel", "quotaInputNumber");
   var quotaDimensions = app.modules.quotaModel.quotaDimensions;
   var shared = app.modules.quotaModel.shared;
+  // Column sorting (shared createTableSort). Rows are wrapped with their index in state.modelGroups because the
+  // edit button addresses a group by that index, not by its position on screen. A base of 0 means unlimited
+  // once a job level is bound, so it sorts as the largest value; the default order is the server's.
+  var modelGroupSort = createTableSort({
+    columns: {
+      name: function (entry) { return modelGroupLabel(entry.group.name); },
+      models: function (entry) {
+        return (entry.group.bindings || [])
+          .map(function (binding) {
+            return binding.target + (binding.model ? " · " + binding.model : "");
+          })
+          .join(", ");
+      },
+      coefficient: function (entry) {
+        return entry.group.cost_coefficient == null ? null : Number(entry.group.cost_coefficient);
+      },
+      base: function (entry) {
+        var dim = quotaDimensions[0];
+        if (!dim) return null;
+        var base = Number(entry.group[dim.base_field] || 0);
+        return base === 0 ? Infinity : base;
+      },
+    },
+    onChange: function () { renderModelGroups(); },
+  });
+  modelGroupSort.bind(document.getElementById("modelGroupsTableHead"));
   function renderModelGroups() {
     document.getElementById("modelGroupsBody").innerHTML = state.modelGroups
       .length
-      ? state.modelGroups
-          .map(function (group, index) {
+      ? modelGroupSort
+          .apply(state.modelGroups.map(function (group, index) {
+            return { group: group, index: index };
+          }))
+          .map(function (entry) {
+            var group = entry.group, index = entry.index;
             return (
               "<tr><td><strong>" +
               esc(modelGroupLabel(group.name)) +
@@ -80,9 +111,9 @@ AdminApp.register("quotaGroups", function (app) {
           : "<select class='form-control readonly-disable' data-model-binding-model>" +
             quotaModelOptions(binding.target || "", binding.model || "") +
             "</select>";
-        var removeBtn = stale
-          ? ""
-          : "<button class='btn btn-sm btn-danger readonly-hide' type='button' data-remove-model-binding>移除</button>";
+        // Orphan bindings (target deleted) are removable too: saving without the
+        // row drops the binding, and the server accepts omitted stale bindings.
+        var removeBtn = "<button class='btn btn-sm btn-danger readonly-hide' type='button' data-remove-model-binding>移除</button>";
         return (
           "<div class='quota-binding-row' data-model-binding-index='" +
           index +

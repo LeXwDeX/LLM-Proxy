@@ -661,7 +661,7 @@ const list = [
               columns: getComputedStyle(grid).gridTemplateColumns.split(" ").filter(Boolean).length,
               gridWidth: grid.getBoundingClientRect().width, panelWidth: panel.getBoundingClientRect().width,
               tableWidth: table.getBoundingClientRect().width,
-              overflowing: heads.filter(th => th.querySelector("button").getBoundingClientRect().width > th.getBoundingClientRect().width + 1).map(th => th.textContent.trim()),
+              overflowing: heads.filter(th => th.scrollWidth > th.clientWidth + 1).map(th => th.textContent.trim()),
               scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
             };
           })()`);

@@ -488,16 +488,6 @@ func TestManagerEvaluate_ZeroGroupCoefficientMeansUnlimitedAndNoFoldedUsage(t *t
 	}
 }
 
-func TestFallbackGroupPreservesFreeCoefficient(t *testing.T) {
-	group := newFallbackGroupCounters(0, time.Now())
-	if group.coefficient != 0 {
-		t.Fatalf("free group coefficient = %v, want 0", group.coefficient)
-	}
-	if group.dims[DimensionDaily].limit != 0 {
-		t.Fatalf("free fallback group must remain unlimited")
-	}
-}
-
 // TestManagerEvaluate_FoldedDeduction：扣费 = 计费原价 × 组系数（折算口径），
 // 与有效额度同币种。
 func TestManagerEvaluate_FoldedDeduction(t *testing.T) {
@@ -563,60 +553,6 @@ func TestManagerEvaluate_UnlimitedExplicitGroupShowsFoldedUsage(t *testing.T) {
 	}
 	if group.Exceeded != nil {
 		t.Fatalf("unlimited group must not be exceeded: %+v", *group.Exceeded)
-	}
-}
-
-func TestManagerEvaluate_CompanyGeneralShowsFoldedUsage(t *testing.T) {
-	db := testOpenDB(t)
-	putClient(t, db, config.Client{Name: "alice", AccessKey: "k1", JobLevel: "L5"})
-	putJobLevel(t, db, config.JobLevel{Name: "L5"})
-	quotaTestCost(t, db)
-	usageStore := nosql.NewUsageStore(db)
-	if err := usageStore.Record(usage.Event{
-		Timestamp: time.Now().UTC(), ClientName: "alice", Target: "unbound",
-		Model: "gpt-4o", EndpointType: "openai", InputTokens: 2_000_000, StatusCode: 200,
-	}); err != nil {
-		t.Fatalf("Record: %v", err)
-	}
-
-	m := newTestManager(t, db)
-	m.Evaluate("alice")
-	status := m.Status("alice")
-	group, ok := status.Groups["company_general"]
-	if !ok {
-		t.Fatal("company_general missing from status after ungrouped usage")
-	}
-	if group.InPlan {
-		t.Fatal("company_general fallback must not be marked in-plan")
-	}
-	for _, dim := range []string{DimensionDaily, DimensionWeekly, DimensionMonthly} {
-		q, ok := group.Quotas[dim]
-		if !ok {
-			t.Fatalf("company_general missing %s counter", dim)
-		}
-		if q.Limit != 0 || q.Used != 20 {
-			t.Fatalf("company_general %s = %+v, want limit=0 used=20", dim, q)
-		}
-	}
-}
-
-func TestManagerIncrement_CompanyGeneralWithoutConfiguredQuota(t *testing.T) {
-	db := testOpenDB(t)
-	putClient(t, db, config.Client{Name: "alice", AccessKey: "k1", JobLevel: "L5"})
-	putJobLevel(t, db, config.JobLevel{Name: "L5"})
-	quotaTestCost(t, db)
-	m := newTestManager(t, db)
-
-	quotaTestInput(t, m, "alice", "unbound", "gpt-4o", 1_000_000)
-	group, ok := m.Status("alice").Groups["company_general"]
-	if !ok {
-		t.Fatal("company_general missing after first ungrouped request")
-	}
-	for _, dim := range []string{DimensionDaily, DimensionWeekly, DimensionMonthly} {
-		q, ok := group.Quotas[dim]
-		if !ok || q.Limit != 0 || q.Used != 10 {
-			t.Fatalf("company_general %s = %+v, present=%v; want limit=0 used=10", dim, q, ok)
-		}
 	}
 }
 
@@ -688,13 +624,16 @@ func TestQuotaGroupForPrefersExactModelBinding(t *testing.T) {
 		config.QuotaGroup{Name: "exact"},
 		config.ModelGroup{Name: "exact", CostCoefficient: 2, Bindings: []config.QuotaGroupBinding{{Target: "openai", Model: "gpt-4o"}}},
 		config.JobLevel{}, now)
-	name, coefficient := quotaGroupForCounters(cc, "OPENAI", "GPT-4O")
-	if name != "exact" || coefficient != 2 {
+	name, coefficient, matched := quotaGroupForCounters(cc, "OPENAI", "GPT-4O")
+	if !matched || name != "exact" || coefficient != 2 {
 		t.Fatalf("exact binding = %q, %v; want exact, 2", name, coefficient)
 	}
-	name, coefficient = quotaGroupForCounters(cc, "openai", "gpt-4.1")
-	if name != "target" || coefficient != 1 {
+	name, coefficient, matched = quotaGroupForCounters(cc, "openai", "gpt-4.1")
+	if !matched || name != "target" || coefficient != 1 {
 		t.Fatalf("target binding = %q, %v; want target, 1", name, coefficient)
+	}
+	if name, _, matched = quotaGroupForCounters(cc, "other", "gpt-4o"); matched {
+		t.Fatalf("unbound target resolved to %q; want no group", name)
 	}
 }
 
@@ -770,8 +709,8 @@ func TestManagerIncrementConsistentWithEvaluate(t *testing.T) {
 	db := testOpenDB(t)
 	m := newTestManager(t, db)
 
-	putClient(t, db, config.Client{Name: "alice", AccessKey: "k1", JobLevel: "L5"})
-	putJobLevel(t, db, config.JobLevel{Name: "L5"})
+	putModelGroup(t, db, config.ModelGroup{Name: "plan", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "claude"}}})
+	putQuotaClient(t, db, []config.QuotaGroup{{Name: "plan"}}, "L5")
 	putModelCost(t, db, nosql.ModelCost{
 		EndpointType:         "claude",
 		Model:                "claude-opus-4-1",
@@ -781,12 +720,12 @@ func TestManagerIncrementConsistentWithEvaluate(t *testing.T) {
 		CacheReadPer1MToken:  1.50,
 	})
 
-	// First, record via Increment (no group bindings → company_general, 系数 1).
-	m.Increment("alice", "claude", "claude-opus-4-1",
+	// First, record via Increment (whole-target binding → plan, 系数 1).
+	m.IncrementForTarget("alice", "claude", "claude", "claude-opus-4-1", time.Now().UTC(),
 		/*input*/ 1_000_000 /*output*/, 2_000_000 /*cacheRead*/, 500_000 /*cacheCreation*/, 3_000_000)
 
 	m.mu.RLock()
-	incrementUsed := m.counters["alice"].groups["company_general"].dims[DimensionDaily].used
+	incrementUsed := m.counters["alice"].groups["plan"].dims[DimensionDaily].used
 	m.mu.RUnlock()
 
 	// Now simulate the post-restart / calibration path: write the same usage
@@ -801,7 +740,7 @@ func TestManagerIncrementConsistentWithEvaluate(t *testing.T) {
 	m.Evaluate("alice")
 
 	m.mu.RLock()
-	evaluateUsed := m.counters["alice"].groups["company_general"].dims[DimensionDaily].used
+	evaluateUsed := m.counters["alice"].groups["plan"].dims[DimensionDaily].used
 	m.mu.RUnlock()
 
 	const eps = 1e-9
@@ -943,7 +882,7 @@ func TestManagerStart_PreloadClients(t *testing.T) {
 	_, hasCounters := m.counters["alice"]
 	m.mu.RUnlock()
 	if exceeded {
-		t.Error("expected alice NOT exceeded (job level bound, company_general unlimited)")
+		t.Error("expected alice NOT exceeded (job level bound, no plan group to exceed)")
 	}
 	if !hasCounters {
 		t.Error("expected alice counters preloaded at Start")
@@ -1079,14 +1018,15 @@ func TestManagerCheck_GroupFlipKeepsNewPeriodExceededState(t *testing.T) {
 	}
 }
 
-func TestManagerStatus_CompanyGeneralCounterFlipsWithoutLimit(t *testing.T) {
+func TestManagerStatus_UnlimitedGroupCounterFlipsWithoutLimit(t *testing.T) {
 	db := testOpenDB(t)
 	m := newTestManager(t, db)
 	m.mu.Lock()
 	m.counters["alice"] = &clientCounters{
 		groups: map[string]*groupCounters{
-			"company_general": {
+			"plan": {
 				coefficient: 1,
+				inPlan:      true,
 				dims: map[string]*dimCounter{
 					DimensionDaily: {used: 7, resetsAt: time.Now().UTC().Add(-time.Hour), period: DimensionDaily},
 				},
@@ -1095,9 +1035,9 @@ func TestManagerStatus_CompanyGeneralCounterFlipsWithoutLimit(t *testing.T) {
 	}
 	m.mu.Unlock()
 
-	usage := m.Status("alice").Groups["company_general"].Quotas[DimensionDaily]
+	usage := m.Status("alice").Groups["plan"].Quotas[DimensionDaily]
 	if usage.Limit != 0 || usage.Used != 0 {
-		t.Fatalf("company_general flipped usage = %+v, want zero used with no fabricated limit", usage)
+		t.Fatalf("unlimited group flipped usage = %+v, want zero used with no fabricated limit", usage)
 	}
 }
 
@@ -1157,7 +1097,9 @@ func TestManagerIncrementConcurrentColdStart(t *testing.T) {
 	db := testOpenDB(t)
 	m := newTestManager(t, db)
 
+	putModelGroup(t, db, config.ModelGroup{Name: "plan", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "openai"}}})
 	putClient(t, db, config.Client{Name: "concurrent", AccessKey: "k1", JobLevel: "L5"})
+	putClientQuotaGroups(t, db, "concurrent", []config.QuotaGroup{{Name: "plan"}})
 	putJobLevel(t, db, config.JobLevel{Name: "L5"})
 	putModelCost(t, db, nosql.ModelCost{
 		EndpointType:     "openai",
@@ -1174,7 +1116,7 @@ func TestManagerIncrementConcurrentColdStart(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			m.Increment("concurrent", "openai", "gpt-4o",
+			m.IncrementForTarget("concurrent", "openai", "openai", "gpt-4o", time.Now().UTC(),
 				tokensPerCall, 0, 0, 0)
 		}()
 	}
@@ -1186,7 +1128,7 @@ func TestManagerIncrementConcurrentColdStart(t *testing.T) {
 		m.mu.RUnlock()
 		t.Fatal("expected counters to be initialized after concurrent increments")
 	}
-	used := cc.groups["company_general"].dims[DimensionDaily].used
+	used := cc.groups["plan"].dims[DimensionDaily].used
 	m.mu.RUnlock()
 
 	// Each call adds exactly $1; total should be $50.
@@ -1221,7 +1163,7 @@ func TestManagerIncrementForTarget_FoldedByGroupCoefficient(t *testing.T) {
 	}
 }
 
-func TestManagerIncrementForTarget_ExactFallbackAndCompanyGeneral(t *testing.T) {
+func TestManagerIncrementForTarget_ExactFallbackAndUnboundIgnored(t *testing.T) {
 	db := testOpenDB(t)
 	putModelGroup(t, db, config.ModelGroup{Name: "target", CostCoefficient: 1, Bindings: []config.QuotaGroupBinding{{Target: "openai"}}})
 	putModelGroup(t, db, config.ModelGroup{Name: "exact", CostCoefficient: 0.5, Bindings: []config.QuotaGroupBinding{{Target: "openai", Model: "gpt-4o"}}})
@@ -1234,10 +1176,10 @@ func TestManagerIncrementForTarget_ExactFallbackAndCompanyGeneral(t *testing.T) 
 
 	quotaTestInput(t, m, "alice", "openai", "gpt-4o", 1_000_000)  // exact: $10 raw × 0.5 = $5
 	quotaTestInput(t, m, "alice", "openai", "other", 1_000_000)   // target fallback: $10 × 1 = $10
-	quotaTestInput(t, m, "alice", "unbound", "gpt-4o", 1_000_000) // company_general: $10 × 1 = $10
+	quotaTestInput(t, m, "alice", "unbound", "gpt-4o", 1_000_000) // no plan group: not counted
 
 	status := m.Status("alice")
-	// plan 聚合 = exact 5 + target 10 = 15（company_general 不入 plan 聚合）
+	// plan 聚合 = exact 5 + target 10 = 15（plan 外用量不计入任何组）
 	if got := status.Quotas[DimensionDaily].Used; got != 15 {
 		t.Fatalf("aggregate used = %v, want 15", got)
 	}
@@ -1247,8 +1189,8 @@ func TestManagerIncrementForTarget_ExactFallbackAndCompanyGeneral(t *testing.T) 
 	if got := status.Groups["target"].Quotas[DimensionDaily].Used; got != 10 {
 		t.Fatalf("target folded used = %v, want 10", got)
 	}
-	if got := status.Groups["company_general"].Quotas[DimensionDaily]; got.Limit != 0 || got.Used != 10 {
-		t.Fatalf("company_general daily = %+v, want unlimited folded used 10", got)
+	if _, ok := status.Groups["company_general"]; ok || len(status.Groups) != 2 {
+		t.Fatalf("groups = %v, want only the two plan groups", status.Groups)
 	}
 }
 

@@ -226,7 +226,8 @@ func TestIssue195MergeKeepsSourceHistoryPricingWithoutTouchingUsage(t *testing.T
 	if used := bundleUsed(f.m); used != renameTargetPrice {
 		t.Fatalf("source history spend after merge = %v, want %v", used, renameTargetPrice)
 	}
-	if info, blocked := f.m.CheckTarget("alice", "dest", "executor"); blocked {
-		t.Fatalf("merge destination blocked: %+v", info)
+	// 合并不改动目标方绑定：目标方未被任何 plan 组授予额度时按未配置拒绝。
+	if info, blocked := f.m.CheckTarget("alice", "dest", "executor"); !blocked || info.Scope != ScopeUnconfigured {
+		t.Fatalf("unbound merge destination = %+v blocked=%v; want unconfigured rejection", info, blocked)
 	}
 }

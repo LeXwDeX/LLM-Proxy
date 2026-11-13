@@ -5,8 +5,6 @@ AdminApp.register("overviewState", function (app) {
     snapshot: null,
     selectedClient: null,
     focusFrom: null,
-    sortKey: "active_requests",
-    sortDirection: -1,
     enabled: false,
     generation: 0,
     aggregateGeneration: 0,

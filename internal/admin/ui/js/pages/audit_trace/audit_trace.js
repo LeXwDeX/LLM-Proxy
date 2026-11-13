@@ -8,16 +8,40 @@ AdminApp.register("audit_trace", function (app) {
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
   var isTransientError = app.bind("core", "isTransientError");
+  var createTableSort = app.bind("core", "createTableSort");
   /* ===== Audit ===== */
   var auditFlight = null;
+  // Column sorting (shared createTableSort) over the audit events already loaded (the latest 50 from the
+  // server); the default order is the server's. A failed load clears the list so sorting never revives it.
+  var auditEvents = [];
+  function auditTime(ev) {
+    var time = Date.parse(ev.timestamp);
+    return isNaN(time) ? null : time;
+  }
+  var auditSort = createTableSort({
+    columns: {
+      time: auditTime,
+      actor: function (ev) { return ev.actor || ev.operator || ""; },
+      action: function (ev) { return ev.action || ""; },
+      object: function (ev) { return ev.object || ev.target || ""; },
+      result: function (ev) { return ev.result || ev.status || ""; },
+      detail: function (ev) { return ev.detail || ev.details || ""; },
+    },
+    onChange: function () {
+      if (auditEvents.length) renderAuditTable("auditTableBody", auditSort.apply(auditEvents), 6);
+    },
+  });
+  auditSort.bind(document.getElementById("auditTableHead"));
   // A refresh while one is already running reuses it instead of stacking requests.
   function loadAudit() {
     if (auditFlight) return auditFlight;
     auditFlight = (async function () {
       try {
         var data = await api("/admin/data/audit?limit=50");
-        renderAuditTable("auditTableBody", data.events || [], 6);
+        auditEvents = data.events || [];
+        renderAuditTable("auditTableBody", auditSort.apply(auditEvents), 6);
       } catch (e) {
+        auditEvents = [];
         toast("加载审计日志失败: " + e.message, "error");
         document.getElementById("auditTableBody").innerHTML =
           "<tr class='empty-row'><td colspan='6'>加载失败</td></tr>";
@@ -100,6 +124,31 @@ AdminApp.register("audit_trace", function (app) {
   var traceDetailVersion = 0;
   var traceClients = {};
   var traceTargets = {};
+  // Column sorting (shared createTableSort) over every record loaded so far (all "load earlier" pages, after
+  // the client/target/status filters); the server's order is the default. Only the browser's copy is sorted.
+  // The list is cleared whenever the table shows a message instead of records.
+  var traceShown = [];
+  var traceSort = createTableSort({
+    columns: {
+      time: function (r) {
+        var time = Date.parse(r.timestamp);
+        return isNaN(time) ? null : time;
+      },
+      id: function (r) { return r.trace_id || ""; },
+      client: function (r) { return r.client_name || ""; },
+      target: function (r) { return r.target || ""; },
+      model: function (r) { return r.model || ""; },
+      status: function (r) { return typeof r.status_code === "number" ? r.status_code : null; },
+      duration: function (r) { return typeof r.duration_ms === "number" ? r.duration_ms : null; },
+      tokens: function (r) {
+        return r.input_tokens || r.output_tokens ? (r.input_tokens || 0) + (r.output_tokens || 0) : null;
+      },
+    },
+    onChange: function () {
+      if (traceShown.length) renderTraceBody();
+    },
+  });
+  traceSort.bind(document.getElementById("traceTableHead"));
 
   // Braille spinner animation
   var brailleFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -234,6 +283,7 @@ AdminApp.register("audit_trace", function (app) {
 
   async function loadTrace() {
     if (!traceEnabled) {
+      traceShown = [];
       document.getElementById("traceTableBody").innerHTML =
         "<tr class='empty-row'><td colspan='9'>Trace Store 未启用</td></tr>";
       return;
@@ -281,6 +331,7 @@ AdminApp.register("audit_trace", function (app) {
     } catch (e) {
       if (version !== traceLoadVersion) return;
       toast("加载请求记录失败: " + e.message, "error");
+      traceShown = [];
       document.getElementById("traceTableBody").innerHTML =
         "<tr class='empty-row'><td colspan='9'>加载失败</td></tr>";
     } finally {
@@ -362,14 +413,18 @@ AdminApp.register("audit_trace", function (app) {
     );
   }
 
-  // One string, one assignment per page: no per-row innerHTML += reparsing.
+  // One string, one assignment per render: no per-row innerHTML += reparsing.
+  function renderTraceBody() {
+    document.getElementById("traceTableBody").innerHTML = traceSort
+      .apply(traceShown)
+      .map(traceRowHTML)
+      .join("");
+  }
   function appendTraceRecords(records) {
     if (!records || !records.length) return;
-    var tb = document.getElementById("traceTableBody");
-    var existing = tb.innerHTML;
-    // An empty/placeholder row must not stay mixed with real rows.
-    if (existing.indexOf("empty-row") >= 0) existing = "";
-    tb.innerHTML = existing + records.map(traceRowHTML).join("");
+    // A placeholder row never stays mixed with real rows: traceShown is empty while one is displayed.
+    traceShown = traceShown.concat(records);
+    renderTraceBody();
   }
 
   // Filter choices accumulate over every loaded page, so appended records can be
@@ -421,6 +476,7 @@ AdminApp.register("audit_trace", function (app) {
       "</span></div>";
 
     if (!records.length) {
+      traceShown = [];
       tb.innerHTML =
         "<tr class='empty-row'><td colspan='9'>" +
         (opts && opts.filtered
@@ -430,7 +486,8 @@ AdminApp.register("audit_trace", function (app) {
       return;
     }
 
-    tb.innerHTML = records.map(traceRowHTML).join("");
+    traceShown = records.slice();
+    renderTraceBody();
   }
 
   function utf8Bytes(str) {

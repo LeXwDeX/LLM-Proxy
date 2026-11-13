@@ -5,6 +5,7 @@ AdminApp.register("users", function (app) {
   var state = app.state;
   var esc = app.bind("core", "esc");
   var fmtTime = app.bind("core", "fmtTime");
+  var createTableSort = app.bind("core", "createTableSort");
   var toast = app.bind("core", "toast");
   var api = app.bind("core", "api");
   var openModal = app.bind("core", "openModal");
@@ -104,81 +105,98 @@ AdminApp.register("users", function (app) {
   var DEFAULT_ADMIN_USERNAME = "admin";
   var usersCache = [];
   var editingUser = null;
+  // Column sorting (shared createTableSort); the default order is the order the server returned.
+  var usersSort = createTableSort({
+    columns: {
+      username: function (u) { return String(u.username || ""); },
+      role: function (u) { return u.role === "admin" ? 0 : 1; },
+      status: function (u) { return u.disabled ? 1 : 0; },
+      updated: function (u) {
+        var time = Date.parse(u.updated_at);
+        return isNaN(time) ? null : time;
+      },
+    },
+    onChange: function () { renderUsers(); },
+  });
+  usersSort.bind(document.getElementById("usersTableHead"));
   async function loadUsers() {
     try {
       var data = await api("/admin/data/users");
-      var users = data && Array.isArray(data.users) ? data.users : [];
-      usersCache = users;
-      var tbody = document.getElementById("usersTableBody");
-      if (!users.length) {
-        tbody.innerHTML =
-          "<tr class='empty-row'><td colspan='5'>暂无用户</td></tr>";
-        return;
-      }
-      tbody.innerHTML = users
-        .map(function (u) {
-          var isAdmin = u.role === "admin";
-          var roleBadge =
-            "<span class='badge' style='background:" +
-            (isAdmin
-              ? "var(--primary-light);color:var(--primary);"
-              : "var(--bg);color:var(--text-secondary);") +
-            "padding:2px 8px;border-radius:4px;font-size:12px;'>" +
-            (isAdmin ? "管理" : "只读") +
-            "</span>";
-          var statusBadge = u.disabled
-            ? "<span style='color:var(--danger);font-size:12px;'>已禁用</span>"
-            : "<span style='color:var(--success);font-size:12px;'>正常</span>";
-          var ops;
-          if (u.username === DEFAULT_ADMIN_USERNAME) {
-            ops =
-              "<span class='badge' style='background:var(--bg);color:var(--text-secondary);padding:2px 8px;border-radius:4px;font-size:12px;'>默认账号</span>";
-          } else {
-            ops =
-              "<div class='btn-group' style='flex-wrap:nowrap;'>" +
-              "<button class='btn btn-sm' data-edit-user='" +
-              esc(u.username) +
-              "'>编辑</button>" +
-              // 禁止自禁用：自己的行不提供启用/禁用开关（后端亦拒绝）
-              (u.username === state.currentUser
-                ? ""
-                : "<button class='btn btn-sm' data-toggle-user='" +
-                  esc(u.username) +
-                  "'>" +
-                  (u.disabled ? "启用" : "禁用") +
-                  "</button>") +
-              "<button class='btn btn-danger btn-sm' data-del-user='" +
-              esc(u.username) +
-              "'>删除</button>" +
-              "</div>";
-          }
-          return (
-            "<tr>" +
-            "<td>" +
-            esc(u.username) +
-            "</td>" +
-            "<td>" +
-            roleBadge +
-            "</td>" +
-            "<td>" +
-            statusBadge +
-            "</td>" +
-            "<td>" +
-            esc(fmtTime(u.updated_at)) +
-            "</td>" +
-            "<td>" +
-            ops +
-            "</td>" +
-            "</tr>"
-          );
-        })
-        .join("");
+      usersCache = data && Array.isArray(data.users) ? data.users : [];
+      renderUsers();
     } catch (e) {
       document.getElementById("usersTableBody").innerHTML =
         "<tr class='empty-row'><td colspan='5'>加载失败: " +
         esc(e.message) +
         "</td></tr>";
     }
+  }
+  function renderUsers() {
+    var tbody = document.getElementById("usersTableBody");
+    if (!usersCache.length) {
+      tbody.innerHTML =
+        "<tr class='empty-row'><td colspan='5'>暂无用户</td></tr>";
+      return;
+    }
+    tbody.innerHTML = usersSort
+      .apply(usersCache)
+      .map(function (u) {
+        var isAdmin = u.role === "admin";
+        var roleBadge =
+          "<span class='badge' style='background:" +
+          (isAdmin
+            ? "var(--primary-light);color:var(--primary);"
+            : "var(--bg);color:var(--text-secondary);") +
+          "padding:2px 8px;border-radius:4px;font-size:12px;'>" +
+          (isAdmin ? "管理" : "只读") +
+          "</span>";
+        var statusBadge = u.disabled
+          ? "<span style='color:var(--danger);font-size:12px;'>已禁用</span>"
+          : "<span style='color:var(--success);font-size:12px;'>正常</span>";
+        var ops;
+        if (u.username === DEFAULT_ADMIN_USERNAME) {
+          ops =
+            "<span class='badge' style='background:var(--bg);color:var(--text-secondary);padding:2px 8px;border-radius:4px;font-size:12px;'>默认账号</span>";
+        } else {
+          ops =
+            "<div class='btn-group' style='flex-wrap:nowrap;'>" +
+            "<button class='btn btn-sm' data-edit-user='" +
+            esc(u.username) +
+            "'>编辑</button>" +
+            // 禁止自禁用：自己的行不提供启用/禁用开关（后端亦拒绝）
+            (u.username === state.currentUser
+              ? ""
+              : "<button class='btn btn-sm' data-toggle-user='" +
+                esc(u.username) +
+                "'>" +
+                (u.disabled ? "启用" : "禁用") +
+                "</button>") +
+            "<button class='btn btn-danger btn-sm' data-del-user='" +
+            esc(u.username) +
+            "'>删除</button>" +
+            "</div>";
+        }
+        return (
+          "<tr>" +
+          "<td>" +
+          esc(u.username) +
+          "</td>" +
+          "<td>" +
+          roleBadge +
+          "</td>" +
+          "<td>" +
+          statusBadge +
+          "</td>" +
+          "<td>" +
+          esc(fmtTime(u.updated_at)) +
+          "</td>" +
+          "<td>" +
+          ops +
+          "</td>" +
+          "</tr>"
+        );
+      })
+      .join("");
   }
   function findCachedUser(username) {
     for (var i = 0; i < usersCache.length; i++) {

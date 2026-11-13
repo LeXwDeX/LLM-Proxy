@@ -69,6 +69,8 @@ func TestTargetRenameKeepsHistoryPricingAndQuota(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("rename HTTP %d: %s", code, raw)
 	}
+	// The renamed binding reaches admission after the background quota refresh.
+	waitQuotaRefresh(t)
 	send()
 	events := usageFor(t, name, 2)
 	seen := map[string]bool{}

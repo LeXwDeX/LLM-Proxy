@@ -2,6 +2,7 @@
 // Overview live activity: five-minute activity snapshot, client table and activity charts.
 AdminApp.register("overviewActivity", function (app) {
   var esc = app.bind("core", "esc");
+  var createTableSort = app.bind("core", "createTableSort");
   var S = app.bind("overviewState", "store")();
   var renderChain = app.bind("overviewHealth", "renderChain");
   var request = app.bind("overview", "request");
@@ -170,6 +171,23 @@ AdminApp.register("overviewActivity", function (app) {
   function clientValue(client, key) {
     return key === "name" ? client.name : (key === "active_requests" || key === "websocket_sessions" ? client[key] : client.totals[key]);
   }
+  // Column sorting (shared createTableSort). The default order is busiest first (in-flight requests, then name);
+  // the sorter keeps its state across the five-second refreshes, and rows are reused, not replaced.
+  var clientSortKeys = ["name", "active_requests", "websocket_sessions", "input_tokens", "output_tokens", "total_tokens"];
+  var clientColumns = {};
+  clientSortKeys.forEach(function (key) {
+    clientColumns[key] = function (client) {
+      return key === "name" ? client.name : Number(clientValue(client, key));
+    };
+  });
+  function compareClientsDefault(a, b) {
+    return Number(clientValue(b, "active_requests")) - Number(clientValue(a, "active_requests")) || a.name.localeCompare(b.name, "zh-CN");
+  }
+  var clientSort = createTableSort({
+    columns: clientColumns,
+    onChange: function () { renderClients(); },
+  });
+  clientSort.bind(document.getElementById("activityClientsTableHead"));
   function selectClient(name) {
     if (S.selectedClient === name) return;
     S.selectedClient = name;
@@ -209,10 +227,7 @@ AdminApp.register("overviewActivity", function (app) {
     if (!S.snapshot) return;
     var filter = el("activityClientSearch").value.trim().toLocaleLowerCase();
     var list = S.snapshot.clients.filter(function (client) { return client.name.toLocaleLowerCase().includes(filter); });
-    list.sort(function (a, b) {
-      var result = S.sortKey === "name" ? a.name.localeCompare(b.name, "zh-CN") : Number(clientValue(a, S.sortKey)) - Number(clientValue(b, S.sortKey));
-      return result * S.sortDirection || a.name.localeCompare(b.name, "zh-CN");
-    });
+    list = clientSort.apply(list, compareClientsDefault);
     var body = el("activityClientsBody");
     var names = new Set(list.map(function (client) { return client.name; }));
     var configuredNames = new Set(S.snapshot.clients.map(function (client) { return client.name; }));
@@ -239,15 +254,6 @@ AdminApp.register("overviewActivity", function (app) {
     }
     if (focused && focused !== document.activeElement && typeof focused.focus === "function" && focused.isConnected) focused.focus({preventScroll: true});
     text("activityClientCount", list.length + " / " + S.snapshot.clients.length + " 个客户端");
-    document.querySelectorAll("[data-activity-sort]").forEach(function (button) {
-      var selected = button.dataset.activitySort === S.sortKey;
-      button.setAttribute("aria-label", button.dataset.label + (selected ? (S.sortDirection === 1 ? "，当前升序，点击降序" : "，当前降序，点击升序") : "，点击排序"));
-      var header = button.closest("th");
-      if (header) header.setAttribute("aria-sort", selected ? (S.sortDirection === 1 ? "ascending" : "descending") : "none");
-      button.dataset.direction = selected ? (S.sortDirection === 1 ? "asc" : "desc") : "none";
-      var icon = button.querySelector("path");
-      if (icon) icon.setAttribute("d", selected ? (S.sortDirection === 1 ? "m5 10 3-3 3 3" : "m5 6 3 3 3-3") : "m5 6 3-3 3 3M5 10l3 3 3-3");
-    });
   }
   function currentSeries() {
     if (!S.snapshot) return [];
@@ -344,12 +350,5 @@ AdminApp.register("overviewActivity", function (app) {
   }
   el("activityClientSearch").addEventListener("input", renderClients);
   el("activityResetScope").addEventListener("click", function () { selectClient(null); });
-  document.querySelectorAll("[data-activity-sort]").forEach(function (button) {
-    button.addEventListener("click", function () {
-      S.sortDirection = S.sortKey === button.dataset.activitySort ? -S.sortDirection : (button.dataset.activitySort === "name" ? 1 : -1);
-      S.sortKey = button.dataset.activitySort;
-      renderClients();
-    });
-  });
   return {loadActivity: loadActivity};
 });
