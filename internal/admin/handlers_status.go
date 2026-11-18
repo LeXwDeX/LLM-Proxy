@@ -6,6 +6,7 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 	"github.com/LeXwDeX/LLM-Proxy/internal/version"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -91,6 +92,9 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		} `json:"requests"`
 		Targets        int                    `json:"targets"`
 		TargetsRuntime []metricsTargetRuntime `json:"targets_runtime"`
+		// 性能优先池的影子选路对比（Issue #212）：每个池的 agree/disagree
+		// 与成员 share（后端计算）；无统计时整个字段省略。
+		ShadowRouting []proxy.ShadowPoolStats `json:"shadow_routing,omitempty"`
 		// Upstream Responses WebSocket pool counters and handshake phases.
 		ResponsesWS proxy.ResponsesWSMetrics `json:"responses_ws"`
 		// Asynchronous usage/statistics persistence backlog.
@@ -156,23 +160,35 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	response.Requests.ClientCanceled = metrics.TotalClientCanceled
 
+	// Issue #212：按 target 名（大小写不敏感）索引的上游生成性能估计；
+	// 无样本的 target 不输出该字段。
+	performanceByTarget := make(map[string][]proxy.TargetModelPerf)
+	for _, perf := range h.proxyService.TargetPerformanceSnapshot(now) {
+		if len(perf.Models) == 0 {
+			continue
+		}
+		performanceByTarget[strings.ToLower(perf.Target)] = perf.Models
+	}
+	response.ShadowRouting = h.proxyService.ShadowRoutingSnapshot()
+
 	// S5 调度可观测（议题 #18）：每节点运行态含派生调度相位与亲和/熔断计数。
 	for _, ts := range statuses {
 		response.TargetsRuntime = append(response.TargetsRuntime, metricsTargetRuntime{
-			Name:           ts.Name,
-			InFlight:       ts.InFlight,
-			MaxConcurrency: ts.Capacity,
-			Utilization:    ts.Utilization,
-			Paused:         ts.Paused,
-			Phase:          ts.Phase,
-			AffinityHits:   ts.AffinityHits,
-			BreakerTrips:   ts.BreakerTrips,
-			Window15m:      ts.Window15m,
-			MutedUntil:     ts.MutedUntil,
-			MuteReason:     ts.MuteReason,
-			MuteCode:       ts.MuteCode,
-			MuteStatus:     ts.MuteStatus,
-			ModelCooldowns: modelCooldownsOrEmpty(ts.ModelCooldowns),
+			Name:             ts.Name,
+			InFlight:         ts.InFlight,
+			MaxConcurrency:   ts.Capacity,
+			Utilization:      ts.Utilization,
+			Paused:           ts.Paused,
+			Phase:            ts.Phase,
+			AffinityHits:     ts.AffinityHits,
+			BreakerTrips:     ts.BreakerTrips,
+			Window15m:        ts.Window15m,
+			MutedUntil:       ts.MutedUntil,
+			MuteReason:       ts.MuteReason,
+			MuteCode:         ts.MuteCode,
+			MuteStatus:       ts.MuteStatus,
+			ModelCooldowns:   modelCooldownsOrEmpty(ts.ModelCooldowns),
+			ModelPerformance: performanceByTarget[strings.ToLower(ts.Name)],
 		})
 	}
 
@@ -205,6 +221,9 @@ type metricsTargetRuntime struct {
 	// ModelCooldowns 只读：该目标上各上游模型的 429 冷却。它们不改变 phase
 	// （目标其他模型照常调度），始终输出数组（无冷却时为 []）。
 	ModelCooldowns []proxy.ModelCooldown `json:"model_cooldowns"`
+	// ModelPerformance 只读：该 target 按上游模型的上游生成性能估计
+	// （Issue #212），无样本时省略。
+	ModelPerformance []proxy.TargetModelPerf `json:"model_performance,omitempty"`
 }
 
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {

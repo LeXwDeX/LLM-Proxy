@@ -31,6 +31,7 @@ AdminApp.register("targetsList", function (app) {
   var targetModelCooldownSummary = app.bind("targetsHealth", "targetModelCooldownSummary");
   var targetMuteReasonActive = app.bind("targetsHealth", "targetMuteReasonActive");
   var targetRuntimeFor = app.bind("targetsHealth", "targetRuntimeFor");
+  var performanceSummary = app.bind("targets", "performanceSummary");
   var etagHeaders = app.bind("targetsHealth", "etagHeaders");
   var createTableSort = app.bind("core", "createTableSort");
   var targetHealthRank = { attention: 0, healthy: 1, paused: 2 };
@@ -398,6 +399,17 @@ AdminApp.register("targetsList", function (app) {
               "'>" +
               esc(modelCooling.text) +
               "</span>";
+          }
+          // Issue 212: one compact upstream-performance line (no extra column).
+          var perf = performanceSummary(rt);
+          if (perf) {
+            schedCell +=
+              "<div class='target-perf-summary'" +
+              (perf.title ? " title='" + esc(perf.title) + "'" : "") +
+              ">" +
+              esc(perf.text) +
+              (perf.insufficient ? " <span class='quota-badge warn'>样本不足</span>" : "") +
+              "</div>";
           }
         }
         // The switch edits only the saved target pause flag. Effective pause can

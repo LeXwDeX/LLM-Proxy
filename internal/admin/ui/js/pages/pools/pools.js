@@ -18,6 +18,7 @@ AdminApp.register("pools", function (app) {
   var failSchedulingRefresh = app.bind("targets", "failSchedulingRefresh");
   var validPoolRoster = app.bind("targets", "validPoolRoster");
   var targetPoolsAvailable = app.bind("targets", "targetPoolsAvailable");
+  var performanceSummary = app.bind("targets", "performanceSummary");
   // Cost-preview state: at most one pool detail row is open. The sequence
   // guard drops responses that arrive after a refresh or another pool opened.
   var expandedCostPool = "";
@@ -232,11 +233,69 @@ AdminApp.register("pools", function (app) {
       "</div>"
     );
   }
+  // poolShadowStats：/admin/metrics 的 shadow_routing 按池名（大小写不敏感）
+  // 索引。只用于 performance-priority（load）池；cost 池不展示影子统计。
+  function poolShadowStats(poolName) {
+    var list = Array.isArray(state.shadowRouting) ? state.shadowRouting : [];
+    var key = String(poolName || "").toLowerCase();
+    return (
+      list.find(function (s) {
+        return s && typeof s === "object" && String(s.pool || "").toLowerCase() === key;
+      }) || null
+    );
+  }
+  function shadowMemberFor(stats, targetName) {
+    var members = stats && Array.isArray(stats.members) ? stats.members : [];
+    var key = String(targetName || "").toLowerCase();
+    return (
+      members.find(function (m) {
+        return m && typeof m === "object" && String(m.target || "").toLowerCase() === key;
+      }) || null
+    );
+  }
+  // share 由后端计算（0..1），前端只格式化，不重算。
+  function formatShadowShare(share) {
+    var n = Number(share);
+    if (!isFinite(n) || n < 0) n = 0;
+    return Math.round(n * 1000) / 10 + "%";
+  }
+  // 池行的影子摘要：影子一致 N / 不一致 M，title 列出各成员的选中次数与 share。
+  function poolShadowSummaryHtml(poolName) {
+    var stats = poolShadowStats(poolName);
+    if (!stats) return "";
+    var agree = Number(stats.agree);
+    var disagree = Number(stats.disagree);
+    if (!isFinite(agree) || !isFinite(disagree) || agree + disagree <= 0) return "";
+    var members = Array.isArray(stats.members) ? stats.members.filter(function (m) {
+      return m && typeof m === "object" && typeof m.target === "string" && !!m.target;
+    }) : [];
+    var title =
+      "影子选路对比（不改变实际选路）" +
+      (members.length
+        ? "\n" +
+          members
+            .map(function (m) {
+              return m.target + " · 影子选中 " + Number(m.shadow_selections || 0) + "（" + formatShadowShare(m.share) + "）";
+            })
+            .join("\n")
+        : "");
+    return (
+      "<div class='pool-shadow-summary' title='" +
+      esc(title) +
+      "'>影子一致 " +
+      agree +
+      " / 不一致 " +
+      disagree +
+      "</div>"
+    );
+  }
   // poolMemberChips：池成员节点调度状态 chips（S5）。每 chip = 相位色点 + 名称，
   // hover 展示在途/利用率/亲和命中/熔断次数；showModels 为 true 时（cost 池）
-  // 追加别名优先的模型映射。运行时快照缺失时显示名称与模型映射。
-  function poolMemberChips(poolName, showModels) {
+  // 追加别名优先的模型映射。showShadow 为 true 时（load 池）追加该成员的
+  // shadow_selections/share。运行时快照缺失时显示名称与模型映射。
+  function poolMemberChips(poolName, showModels, showShadow) {
     var key = String(poolName || "").toLowerCase();
+    var shadowStats = showShadow ? poolShadowStats(poolName) : null;
     var members = (state.targets || []).filter(function (t) {
       return t.pool && String(t.pool).toLowerCase() === key;
     });
@@ -278,11 +337,29 @@ AdminApp.register("pools", function (app) {
         }
         if (showModels)
           tip += "｜模型 " + (t.paused ? "目标已暂停 " : "") + poolMemberModelTip(t);
+        // Issue 212: upstream generation performance (representative model).
+        var perf = performanceSummary(rt);
+        if (perf) tip += "｜性能 " + esc(perf.text);
+        var shadowMember = showShadow ? shadowMemberFor(shadowStats, t.name) : null;
+        if (shadowMember) {
+          tip +=
+            "｜影子选中 " +
+            Number(shadowMember.shadow_selections || 0) +
+            "（" +
+            formatShadowShare(shadowMember.share) +
+            "）";
+        }
         var inFlightTxt = rt
           ? " <span class='pool-member-load'>" +
             rt.in_flight +
             (rt.max_concurrency > 0 ? "/" + rt.max_concurrency : "") +
             "</span>"
+          : "";
+        var perfChip = perf
+          ? "<span class='pool-member-perf'>" +
+            esc(perf.text) +
+            "</span>" +
+            (perf.insufficient ? "<span class='quota-badge warn'>样本不足</span>" : "")
           : "";
         return (
           "<span class='pool-member-chip' title='" +
@@ -295,6 +372,7 @@ AdminApp.register("pools", function (app) {
           esc(t.name) +
           "</span>" +
           inFlightTxt +
+          perfChip +
           "</span>"
         );
       })
@@ -575,8 +653,11 @@ AdminApp.register("pools", function (app) {
         // Alias-first model info is a cost-routing concept; performance-first
         // (load) pools keep their previous chips-only runtime view.
         var isCost = poolRoutingStrategy(p) === "cost";
-        var members = poolMemberChips(p.name, isCost);
+        var members = poolMemberChips(p.name, isCost, !isCost);
         var aliasGroups = isCost && !p.paused ? poolAliasGroupBadges(p.name) : "";
+        // Shadow routing compares performance-only picks with actual picks; it is
+        // collected for performance-priority pools only and never for cost pools.
+        var shadowSummary = isCost ? "" : poolShadowSummaryHtml(p.name);
         var pauseBadge = p.paused
           ? "<span class='quota-badge over'>已暂停（成员等效暂停）</span>"
           : "<span class='quota-badge ok'>运行中</span>";
@@ -620,6 +701,7 @@ AdminApp.register("pools", function (app) {
           members +
           "</div>" +
           aliasGroups +
+          shadowSummary +
           poolCapacityWarning(p) +
           "</td>" +
           "<td class='pool-actions'><div class='btn-group'>" +

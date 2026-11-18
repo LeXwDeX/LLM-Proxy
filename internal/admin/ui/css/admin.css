@@ -521,6 +521,16 @@
     .pool-member-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .pool-member-name { min-width: 0; overflow-wrap: anywhere; }
     .pool-member-load { color: var(--ink-3); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+    .pool-member-perf { color: var(--ink-3); font-size: 11px; min-width: 0; overflow-wrap: anywhere; }
+    .pool-member-chip .quota-badge { padding: 0 4px; font-size: 10px; line-height: 16px; }
+    .pool-shadow-summary { margin-top: 4px; font-size: 11px; color: var(--ink-3); }
+    .target-perf-summary { margin-top: 2px; font-size: 12px; color: var(--ink-2); }
+    .target-perf-summary .quota-badge { margin-left: 4px; padding: 0 5px; font-size: 10px; line-height: 16px; }
+    .target-perf-wrap { margin-top: 6px; overflow-x: auto; }
+    .target-perf-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .target-perf-table th, .target-perf-table td { text-align: left; padding: 2px 6px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+    .target-perf-table th { color: var(--ink-3); font-weight: 600; white-space: nowrap; }
+    .target-perf-empty { margin: 4px 0 0; color: var(--ink-3); font-size: 12px; }
     .pool-alias-groups { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
     .pool-alias-group { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; background: var(--accent-soft); color: var(--accent); overflow-wrap: anywhere; }
     .pool-capacity-warn { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--warn-soft); color: var(--warn); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }

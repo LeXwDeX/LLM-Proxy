@@ -22,6 +22,7 @@ AdminApp.register("targetsDetail", function (app) {
   var targetRuntimeFor = app.bind("targetsHealth", "targetRuntimeFor");
   var targetMuteSummary = app.bind("targetsHealth", "targetMuteSummary");
   var targetModelCooldownSummary = app.bind("targetsHealth", "targetModelCooldownSummary");
+  var performanceDetailHtml = app.bind("targets", "performanceDetailHtml");
   function detailRow(label, value) {
     return (
       "<div class='target-detail-row'><dt>" +
@@ -109,7 +110,8 @@ AdminApp.register("targetsDetail", function (app) {
           "部署池",
           t.pool ? esc(poolDisplayName(t.pool)) : "未加入部署池",
         ),
-        detailRow("调度观测", esc(runtimeText)),
+        // Issue 212: the per-model performance table is part of the scheduling row.
+        detailRow("调度观测", esc(runtimeText) + performanceDetailHtml(rt)),
         detailRow("密钥", esc(targetKeyDetailSummary(t))),
         detailRow(
           "模型",
