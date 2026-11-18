@@ -109,7 +109,14 @@ for (const [name, open, modal, delayedUrl] of [
     assert.ok(releaseNew);
     releaseOther(response(delayedUrl.endsWith("catalog") ? { models: [] } : { job_levels: [] }));
     for (let i = 0; i < 50; i++) await Promise.resolve();
-    assert.equal(harness.ids.get(modal).classList.contains("open"), false);
+    // Issue #208: the client editor opens at once; the model group editor still waits for the
+    // scheduling snapshot before it can render its binding options.
+    if (name === "client") {
+      assert.equal(harness.ids.get(modal).classList.contains("open"), true,
+        "the client editor opens immediately");
+    } else {
+      assert.equal(harness.ids.get(modal).classList.contains("open"), false);
+    }
     releaseNew(response({ targets: [{ name: "new" }] }));
     await Promise.all([editor, newer]);
     assert.equal(harness.ids.get(modal).classList.contains("open"), true);
@@ -224,12 +231,19 @@ for (const [name, open, modal] of [
     assert.equal(pending.length, 2);
     pending[0](response({ targets: [{ name: "old-target" }] }));
     for (let i = 0; i < 50; i++) await Promise.resolve();
-    assert.equal(harness.ids.get(modal).classList.contains("open"), false,
-      "the editor must not open with an obsolete snapshot while the newer request is pending");
+    if (name === "client") {
+      assert.equal(harness.ids.get(modal).classList.contains("open"), true,
+        "the client editor opens before the newer snapshot lands");
+    } else {
+      assert.equal(harness.ids.get(modal).classList.contains("open"), false,
+        "the editor must not open with an obsolete snapshot while the newer request is pending");
+    }
     pending[1](response({ targets: [{ name: "new-target" }] }));
     await Promise.all([editor, newer]);
     assert.equal(harness.ids.get(modal).classList.contains("open"), true);
     if (name === "client") {
+      // The background fill only lands after the newest snapshot, and it still replaces the
+      // stale options shown at open time because the user has not clicked a tag.
       assert.deepEqual(harness.ids.get("clientTargetTags").children.map(el => el.dataset.target), ["new-target"]);
     } else {
       assert.match(harness.ids.get("modelGroupBindingEditor").innerHTML, /new-target/);
@@ -254,7 +268,9 @@ for (const [name, open, modal] of [
     for (let i = 0; i < 50; i++) await Promise.resolve();
     pending[1]({ ok: false, status: 503, text: async () => '{"error":"new failure"}' });
     await Promise.all([editor, newer]);
-    assert.equal(harness.ids.get(modal).classList.contains("open"), false);
+    // Issue #208: the client editor no longer waits for the refresh, so a failed background
+    // refresh keeps it open and reports the failure instead of closing it.
+    assert.equal(harness.ids.get(modal).classList.contains("open"), name === "client");
     assert.ok(messages.some(m => m.kind === "error" && /new failure/.test(m.message)), "failure is visible");
   });
 }

@@ -24,9 +24,9 @@ function render(clients) {
   const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   // renderClients orders rows through the shared table sorter; the default order is all this test needs.
   const clientSort = {apply: (rows, compare) => rows.slice().sort(compare)};
-  const fn = new Function('document', 'state', 'esc', 'maskKey', 'totalTok', 'fmtNum', 'fmtMoney', 'poolDisplayName', 'targetPoolsAvailable', 'clientSort',
+  const fn = new Function('document', 'state', 'esc', 'maskKey', 'totalTok', 'fmtNum', 'fmtMoney', 'poolDisplayName', 'targetPoolsAvailable', 'clientSort', 'clientRenderCache',
     source.slice(start, end) + '\nreturn renderClients;');
-  fn(document, state, esc, () => '***', () => 0, () => '0', () => '$0', name => name, () => true, clientSort)();
+  fn(document, state, esc, () => '***', () => 0, () => '0', () => '$0', name => name, () => true, clientSort, {html: null})();
   return tbody.innerHTML;
 }
 

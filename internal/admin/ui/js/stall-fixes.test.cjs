@@ -70,14 +70,28 @@ function fillClient(h) {
   field(h, "clientAccessKey").value = "k1";
 }
 
+test("A2: the client list renders while the 30-day aggregate is held", async () => {
+  const {h, app} = await clientsFixture();
+  const hold = holdAggregate(h);
+  const load = app.modules.clients.loadClients();
+  assert.equal(await settled(load), true, "the list load must not wait for the aggregate");
+  assert.match(h.ids.get("clientsTableBody").innerHTML, /c1/);
+  assert.equal(app.state.clientUsageStatus, "pending");
+  hold.releaseAll();
+  await tick();
+  assert.equal(app.state.clientUsageStatus, "ready");
+});
+
 test("A3: client save releases its lock without waiting for the aggregate", async () => {
   const {h, app} = await clientsFixture();
-  await app.modules.clients.loadClients();
   const hold = holdAggregate(h);
+  await app.modules.clients.loadClients();
   await app.modules.clients.openClientModal(app.state.clients[0]);
   fillClient(h);
+  h.requests.length = 0;
   const save = field(h, "saveClientBtn").listeners.click[0]();
   assert.equal(await settled(save), true, "save must not wait for the aggregate");
+  assert.equal(aggregateUrls(h).length, 0, "a save never sends another aggregate");
   const before = h.requests.filter(r => r.options?.method === "PUT").length;
   await app.modules.clients.openClientModal(app.state.clients[0]);
   fillClient(h);
@@ -87,7 +101,7 @@ test("A3: client save releases its lock without waiting for the aggregate", asyn
   await tick();
 });
 
-test("A3: client save refreshes the list from the server (lightweight) before releasing", async () => {
+test("A3: client save refreshes the list from the server once, with no aggregate", async () => {
   const {h, app} = await clientsFixture();
   await app.modules.clients.loadClients();
   holdAggregate(h);
@@ -95,8 +109,11 @@ test("A3: client save refreshes the list from the server (lightweight) before re
   await app.modules.clients.openClientModal(app.state.clients[0]);
   fillClient(h);
   await field(h, "saveClientBtn").listeners.click[0]();
+  const listGets = h.requests.filter(r => r.url === "/admin/data/clients" && !r.options?.method);
   const urls = h.requests.map(r => r.url);
+  assert.equal(listGets.length, 1, "exactly one client list GET after saving");
   assert.ok(urls.indexOf("/admin/data/clients") > urls.findIndex((u, i) => h.requests[i].options?.method === "PUT"));
+  assert.equal(aggregateUrls(h).length, 0, "saving never refreshes the 30-day aggregate");
 });
 
 test("A11: aggregate windows are floored to the minute", async () => {
