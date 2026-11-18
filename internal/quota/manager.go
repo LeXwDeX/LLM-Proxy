@@ -704,6 +704,13 @@ func (m *Manager) evaluateOnce(clientName string) bool {
 // per eligible dimension. The ISO week may begin before the month's first day.
 func calibratedCounters(client string, qc quotaConfig, now time.Time, read func(usage.Filter) ([]nosql.CostUnit, error)) (*clientCounters, error) {
 	cc := newClientCounters(qc, now)
+	// Issue #211: no plan group can accumulate usage, so the authoritative read
+	// cannot change any counter or admission decision. Skipping it keeps the
+	// result identical while avoiding a full-history scan for new/unquotad
+	// clients (the client-level job-level gate is unaffected).
+	if len(cc.groups) == 0 {
+		return cc, nil
+	}
 	starts, earliest, err := quotaPeriodStarts(now)
 	if err != nil {
 		return nil, err
