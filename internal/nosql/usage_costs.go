@@ -423,25 +423,38 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 		}
 		var progress *indexProgress
 		var scoped *clientScopedRead
-		scopeNeedsEvidence := rawFrom != nil || (needsExact && (strings.TrimSpace(filter.Model) == "" || usage.RequiresEventTimestampsForModel(resolver, filter.Model)))
-		if scopeNeedsEvidence {
+		// indexEvidence: the exact-price path below reads raw identity through
+		// the client index, so an unusable index is a fail-closed error here.
+		indexEvidence := rawFrom != nil || (needsExact && (strings.TrimSpace(filter.Model) == "" || usage.RequiresEventTimestampsForModel(resolver, filter.Model)))
+		// Issue #211: a client-filtered quota read can narrow the exhaustive
+		// integrity walks to that client even when the result units come from
+		// hourly rollups (needsExact=false, e.g. flat/all-hour pricing). The
+		// probe proves the index enumerates the client's window exactly; a
+		// declined probe keeps the exhaustive walks unchanged.
+		scopeValidation := strings.TrimSpace(filter.ClientName) != "" && hooks.windowKeys && rawFrom == nil &&
+			!from.IsZero() && !hooks.forceLegacy && allow == nil && strings.TrimSpace(filter.Model) == "" && !clientScopeDisabled(ctx)
+		if indexEvidence || scopeValidation {
 			progress, err = loadIndexProgress(tx)
 			if err != nil {
-				// A lost v1 completion marker can fall back only to independent
-				// raw-owner evidence; validation below enforces that per hour.
-				p, stateErr := loadIndexProgressState(tx, false)
-				if stateErr != nil || p == nil || p.Phase != "complete" || meta.Get([]byte(usageClientIndexDone)) != nil || meta.Get([]byte(usageClientIndexCursor)) != nil {
-					return fmt.Errorf("%w: invalid client index progress: %v", ErrUsageHistoryIncomplete, err)
+				if !indexEvidence {
+					// Rollup reads do not depend on the index: keep the
+					// exhaustive walks instead of failing the read.
+					progress = nil
+				} else {
+					// A lost v1 completion marker can fall back only to independent
+					// raw-owner evidence; validation below enforces that per hour.
+					p, stateErr := loadIndexProgressState(tx, false)
+					if stateErr != nil || p == nil || p.Phase != "complete" || meta.Get([]byte(usageClientIndexDone)) != nil || meta.Get([]byte(usageClientIndexCursor)) != nil {
+						return fmt.Errorf("%w: invalid client index progress: %v", ErrUsageHistoryIncomplete, err)
+					}
+					progress = p
 				}
-				progress = p
 			}
 			// Issue #125 P2: a client-filtered quota read enumerates only that
 			// client's window through the index. The probe proves completeness
 			// before the walks below run scoped; otherwise the read stays
 			// exhaustive and records one countable fallback.
-			scopeEligible := useIndex && hooks.windowKeys && rawFrom == nil && allow == nil &&
-				strings.TrimSpace(filter.Model) == "" && !clientScopeDisabled(ctx)
-			if scopeEligible {
+			if scopeValidation {
 				if fast := integrityFastFrom(ctx, tx); fast != nil {
 					if scoped = probeClientScopedRead(ctx, tx, filter.ClientName, start, end, progress, fast); scoped != nil {
 						ctx = withIntegrityClientScope(ctx, tx, scoped.scope)
@@ -454,8 +467,10 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 					}
 				}
 			}
-			if err := refs.checkOrphans(ctx, progress, filter, from, to, allow); err != nil {
-				return err
+			if indexEvidence {
+				if err := refs.checkOrphans(ctx, progress, filter, from, to, allow); err != nil {
+					return err
+				}
 			}
 		}
 		// 全量校验：窗口外「小时部分无法解析」的畸形键同样必须使额度读取 fail-closed。
@@ -630,7 +645,7 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 				}
 			}
 		}
-		if scopeNeedsEvidence {
+		if indexEvidence {
 			if _, err := validateCostRawHourEvidence(ctx, tx, progress, evidence); err != nil {
 				return err
 			}

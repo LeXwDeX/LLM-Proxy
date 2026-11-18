@@ -15,6 +15,7 @@ AdminApp.register("clients", function (app) {
   var openModal = app.bind("core", "openModal");
   var closeModal = app.bind("core", "closeModal");
   var showConfirm = app.bind("core", "showConfirm");
+  var isUnconfirmedOutcome = app.bind("core", "isUnconfirmedOutcome");
   var epShortLabel = app.bind("schema", "epShortLabel");
   var poolMemberCounter = app.bind("pools", "poolMemberCounter");
   var poolDisplayName = app.bind("pools", "poolDisplayName");
@@ -216,6 +217,190 @@ AdminApp.register("clients", function (app) {
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
   }
+  // Issue 211: after a write whose outcome is unknown, read the client list back and judge
+  // by content. This is a plain list GET, never the 30-day aggregate; null means the
+  // readback itself failed or a newer load superseded it, and the caller must keep whatever
+  // it already shows (never write an older list over a newer one).
+  async function readbackClients() {
+    var version = ++clientLoadVersion;
+    try {
+      var r = await api("/admin/data/clients");
+      if (version !== clientLoadVersion) return null;
+      return Array.isArray(r.clients) ? r.clients : [];
+    } catch (e) {
+      return null;
+    }
+  }
+  function trimmedClientField(value) {
+    return typeof value === "string" ? value.trim() : "";
+  }
+  // Mirrors normalizeClient for allowed_targets/allowed_pools: trim, lowercase, drop empty
+  // entries and duplicates, then sort so order never decides the comparison.
+  function normalizedClientGrants(list) {
+    var seen = Object.create(null);
+    var out = [];
+    (Array.isArray(list) ? list : []).forEach(function (item) {
+      var value = String(item == null ? "" : item).trim().toLowerCase();
+      if (!value || seen[value]) return;
+      seen[value] = true;
+      out.push(value);
+    });
+    return out.sort();
+  }
+  function clientIPv4(text) {
+    var match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+    if (!match) return null;
+    var octets = [];
+    for (var i = 1; i <= 4; i++) {
+      var part = match[i];
+      // netip rejects leading zeros, so "01.2.3.4" is not an address the server masks.
+      if (part.length > 1 && part.charAt(0) === "0") return null;
+      var value = Number(part);
+      if (value > 255) return null;
+      octets.push(value);
+    }
+    return octets;
+  }
+  function maskedIPv4(octets, bits) {
+    var value =
+      ((((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3]) >>> 0);
+    var mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    value = (value & mask) >>> 0;
+    return [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join(".");
+  }
+  // Mirrors clientip.Parse (internal/clientip): comma/whitespace separated IPv4 hosts and
+  // CIDR ranges, each masked to its network, first occurrence per prefix wins, joined with
+  // commas. null means the value is not canonicalizable; callers compare it trimmed.
+  function canonicalClientIP(raw) {
+    var text = String(raw == null ? "" : raw).trim();
+    if (!text) return "";
+    var seen = Object.create(null);
+    var out = [];
+    var groups = text.split(",");
+    for (var i = 0; i < groups.length; i++) {
+      var group = groups[i].trim();
+      if (!group) return null;
+      var entries = group.split(/\s+/);
+      for (var j = 0; j < entries.length; j++) {
+        var entry = entries[j];
+        var prefix = false;
+        var bits = 32;
+        var address = entry;
+        var slash = entry.indexOf("/");
+        if (slash >= 0) {
+          prefix = true;
+          address = entry.slice(0, slash);
+          var rawBits = entry.slice(slash + 1);
+          if (!/^\d{1,2}$/.test(rawBits)) return null;
+          if (rawBits.length > 1 && rawBits.charAt(0) === "0") return null;
+          bits = Number(rawBits);
+          if (bits > 32) return null;
+        }
+        var octets = clientIPv4(address);
+        if (!octets) return null;
+        // A bare host is compared as its /32 network, so it dedupes against the same CIDR.
+        var key = maskedIPv4(octets, bits) + "/" + bits;
+        if (seen[key]) continue;
+        seen[key] = true;
+        out.push(prefix ? key : octets.join("."));
+      }
+    }
+    return out.join(",");
+  }
+  function clientIPEqual(submitted, stored) {
+    var a = canonicalClientIP(submitted);
+    var b = canonicalClientIP(stored);
+    if (a !== null && b !== null) return a === b;
+    return trimmedClientField(submitted) === trimmedClientField(stored);
+  }
+  function clientGrantsEqual(submitted, stored) {
+    var a = normalizedClientGrants(submitted);
+    var b = normalizedClientGrants(stored);
+    return a.length === b.length && a.every(function (value, i) { return value === b[i]; });
+  }
+  // Does the server's copy hold the fields this request actually sent? A field absent from
+  // the payload never participates in the decision.
+  function clientHoldsRequest(fresh, sent) {
+    if (!fresh || !sent) return false;
+    var sameText = function (a, b) {
+      return trimmedClientField(a) === trimmedClientField(b);
+    };
+    var checks = {
+      name: sameText,
+      access_key: sameText,
+      ip_address: clientIPEqual,
+      allowed_targets: clientGrantsEqual,
+      allowed_pools: clientGrantsEqual,
+      job_level: sameText,
+      project_group: sameText,
+    };
+    return Object.keys(checks).every(function (field) {
+      if (!Object.prototype.hasOwnProperty.call(sent, field)) return true;
+      return checks[field](sent[field], fresh[field]);
+    });
+  }
+  function findClientByName(clients, name) {
+    return clients.find(function (client) {
+      return trimmedClientField(client.name) === name;
+    });
+  }
+  // The follow-ups of a committed save: version bump and the draft/close decision. The caller
+  // repaints once from the server's list, whether it came from the write itself or a readback.
+  function adoptSavedClient(payload, saveVersion, saveRevision, wasEditing) {
+    var name = payload.name;
+    ++clientLoadVersion;
+    clientVersions[name] = (clientVersions[name] || 0) + 1;
+    if (saveVersion === clientOpenVersion && wasEditing) editingClientVersion = clientVersions[name];
+    if (saveVersion === clientOpenVersion && saveRevision === clientDraftRevision) {
+      closeModal("clientModal");
+    } else if (saveVersion === clientOpenVersion) {
+      if (!wasEditing) clientCreatedDraftNeedsReopen = true;
+      toast(wasEditing ? "请求时的内容已保存，后续修改尚未保存。" :
+        "客户端已创建，后续修改未保存。请复制草稿并重新打开客户端编辑。", "error");
+    }
+  }
+  // Issue 211: after a timeout, network error, 5xx or non-JSON error body the save may have
+  // been applied. Read the list back and decide by content: the server holds the request ->
+  // saved, with the normal success follow-ups; a different or missing record -> keep the
+  // draft and report the unconfirmed outcome; a failed readback -> keep the list and retry.
+  async function reconcileUnconfirmedSave(payload, saveVersion, saveRevision, wasEditing) {
+    var clients = await readbackClients();
+    if (!clients) {
+      toast("保存结果未确认，可重试", "warn");
+      return;
+    }
+    state.clients = clients;
+    renderClients();
+    var fresh = findClientByName(clients, payload.name);
+    if (clientHoldsRequest(fresh, payload)) {
+      toast("已保存（已回读确认）", "success");
+      adoptSavedClient(payload, saveVersion, saveRevision, wasEditing);
+      return;
+    }
+    toast(
+      fresh
+        ? "保存结果未确认，服务器内容与提交不一致，请刷新后重试"
+        : "保存结果未确认，可重试",
+      "warn",
+    );
+  }
+  // Issue 211: a DELETE whose outcome is unknown. An absent record means it was deleted
+  // (the success path, applied locally); a record still there only refreshes the table.
+  async function reconcileUnconfirmedDelete(name) {
+    var clients = await readbackClients();
+    if (!clients) {
+      toast("删除结果未确认，可重试", "warn");
+      return;
+    }
+    state.clients = clients;
+    if (findClientByName(clients, name)) {
+      toast("删除结果未确认，列表已刷新", "warn");
+    } else {
+      toast("已删除客户端: " + name, "success");
+      if (state.clientUsage) delete state.clientUsage[name];
+    }
+    renderClients();
+  }
   function renderClients() {
     var tb = document.getElementById("clientsTableBody");
     var usageStatus = state.clientUsageStatus || "pending";
@@ -360,7 +545,8 @@ AdminApp.register("clients", function (app) {
               if (state.clientUsage) delete state.clientUsage[name];
               renderClients();
             } catch (e) {
-              toast("删除失败: " + e.message, "error");
+              if (isUnconfirmedOutcome(e)) await reconcileUnconfirmedDelete(name);
+              else toast("删除失败: " + e.message, "error");
             }
           },
         );
@@ -777,16 +963,14 @@ AdminApp.register("clients", function (app) {
         else state.clients.push(payload);
         // The optimistic record keeps the save visible if the list GET below fails; the single
         // repaint happens after that GET, and no usage summary is requested (Issue #208).
-        if (saveVersion === clientOpenVersion && saveRevision === clientDraftRevision) {
-          closeModal("clientModal");
-        } else if (saveVersion === clientOpenVersion) {
-          if (!wasEditing) clientCreatedDraftNeedsReopen = true;
-          toast(wasEditing ? "请求时的内容已保存，后续修改尚未保存。" :
-            "客户端已创建，后续修改未保存。请复制草稿并重新打开客户端编辑。", "error");
-        }
+        adoptSavedClient(payload, saveVersion, saveRevision, wasEditing);
         await refreshClientsLight();
       } catch (e) {
-        toast("保存失败: " + e.message, "error");
+        if (isUnconfirmedOutcome(e)) {
+          await reconcileUnconfirmedSave(payload, saveVersion, saveRevision, wasEditing);
+        } else {
+          toast("保存失败: " + e.message, "error");
+        }
       } finally {
         clientSaveInFlight = false;
         clientSavingName = "";
