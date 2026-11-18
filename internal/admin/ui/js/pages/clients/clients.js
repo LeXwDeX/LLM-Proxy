@@ -45,14 +45,14 @@ AdminApp.register("clients", function (app) {
   var clientSearchTimer = null;
   var clientPage = 1;
   var clientPageSize = CLIENT_PAGE_SIZE_DEFAULT;
-  // "pending" | "ready" | "error": the 30-day aggregate is fetched separately from the list, so
+  // "pending" | "ready" | "error": the 30-day usage summary is fetched separately from the list, so
   // the usage columns (and their sort values) have a state of their own.
   if (!state.clientUsageStatus) state.clientUsageStatus = "pending";
   function clientUsageReady() {
     return state.clientUsageStatus === "ready";
   }
   // Column sorting (shared createTableSort). Getters return the underlying value, not the display text:
-  // usage columns are numbers while the aggregate is ready and null (empty, always last) otherwise,
+  // usage columns are numbers while the summary is ready and null (empty, always last) otherwise,
   // the Access Key sorts by its masked text (the raw key never drives order),
   // and a client without any target/pool restriction counts as having the most access.
   function clientUsageOf(c) {
@@ -89,9 +89,9 @@ AdminApp.register("clients", function (app) {
     }
   });
   /* ===== Clients ===== */
-  // The client list and the 30-day aggregate are independent: GET /admin/data/clients assigns
-  // state.clients and renders at once, while the aggregate fills only the usage columns. A hung
-  // or failed aggregate never blocks the list or its row actions (Issue #208).
+  // The client list and the 30-day usage summary are independent: GET /admin/data/clients assigns
+  // state.clients and renders at once, while the summary fills only the usage columns. A hung
+  // or failed summary never blocks the list or its row actions (Issue #208).
   async function loadClients() {
     var version = ++clientLoadVersion;
     var prefetch = null;
@@ -116,7 +116,7 @@ AdminApp.register("clients", function (app) {
       if (version === clientLoadVersion) renderClients();
     }
   }
-  // The aggregate is cancelled by the next usage load and when the page goes away; an AbortError
+  // The usage summary is cancelled by the next usage load and when the page goes away; an AbortError
   // is a cancellation, never a failure.
   function cancelClientUsageLoad() {
     if (!clientUsageAbort) return;
@@ -133,14 +133,14 @@ AdminApp.register("clients", function (app) {
     renderClientUsageStatus();
     renderClients();
     return api(
-      "/admin/data/usage/aggregate?group_by=day&" + usageWindowQuery(30),
+      "/admin/data/usage/by-client?" + usageWindowQuery(30),
       { timeoutMs: 60000, signal: controller ? controller.signal : undefined },
     )
       .then(
         function (r) {
           if (seq !== clientUsageSeq) return;
           state.clientUsage = {};
-          ((r && r.by_client) || []).forEach(function (item) {
+          ((r && r.clients) || []).forEach(function (item) {
             state.clientUsage[item.key] = item;
           });
           state.clientUsageStatus = "ready";
@@ -175,7 +175,7 @@ AdminApp.register("clients", function (app) {
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
     window.addEventListener("pagehide", cancelClientUsageLoad);
   }
-  // After a write only the server-normalized client records are needed; the slow 30-day aggregate
+  // After a write only the server-normalized client records are needed; the slow 30-day usage summary
   // is never re-requested by a save or delete, and an in-flight one simply finishes on its own.
   async function refreshClientsLight() {
     var version = ++clientLoadVersion;
@@ -352,7 +352,7 @@ AdminApp.register("clients", function (app) {
               });
               toast("已删除客户端: " + name, "success");
               // The deleted record is known locally: drop it and its usage entry, repaint once,
-              // and do not reload the list or the aggregate (Issue #208).
+              // and do not reload the list or the usage summary (Issue #208).
               ++clientLoadVersion;
               state.clients = state.clients.filter(function (client) {
                 return client.name !== name;
@@ -776,7 +776,7 @@ AdminApp.register("clients", function (app) {
         if (savedIndex >= 0) state.clients[savedIndex] = Object.assign({}, state.clients[savedIndex], payload);
         else state.clients.push(payload);
         // The optimistic record keeps the save visible if the list GET below fails; the single
-        // repaint happens after that GET, and no usage aggregate is requested (Issue #208).
+        // repaint happens after that GET, and no usage summary is requested (Issue #208).
         if (saveVersion === clientOpenVersion && saveRevision === clientDraftRevision) {
           closeModal("clientModal");
         } else if (saveVersion === clientOpenVersion) {

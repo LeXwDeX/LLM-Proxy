@@ -62,6 +62,27 @@ func (h *Handler) handleAggregateUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// handleUsageByClient serves the clients page's per-client summary. It is a
+// display-only read: the store's lightweight path reads hourly rollups only and
+// falls back to the full aggregate (exact=false) when event-level prices are
+// required.
+func (h *Handler) handleUsageByClient(w http.ResponseWriter, r *http.Request) {
+	filter, err := parseUsageFilter(r, false)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
+		return
+	}
+	summary, err := h.usageStore.AggregateClientTotalsContext(r.Context(), filter, h.getResolver(), h.targetStore, h.modelGroupStore)
+	if err != nil {
+		if clientAborted(r, err) {
+			return
+		}
+		h.writeInternalError(w, "failed to aggregate usage by client", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
 func (h *Handler) handleUsageModelGroups(w http.ResponseWriter, r *http.Request) {
 	filter, err := parseUsageFilter(r, false)
 	if err != nil {

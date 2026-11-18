@@ -186,6 +186,11 @@ func (h *Handler) cachedReport(next http.HandlerFunc) http.HandlerFunc {
 // rescanning recent usage on each poll while staying fresher than the poll.
 const activityCacheTTL = 2 * time.Second
 
+// clientUsageCacheTTL backs the clients page's 30-day summary. It is much
+// longer than the poll interval because the window is rounded to minutes and
+// the data is display-only; rows may lag up to one TTL.
+const clientUsageCacheTTL = 60 * time.Second
+
 // cachedReportTTL is cachedReport with a per-route TTL (<= 0 = cache default).
 func (h *Handler) cachedReportTTL(ttl time.Duration, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
