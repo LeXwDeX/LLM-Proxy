@@ -19,7 +19,6 @@ AdminApp.register("clients", function (app) {
   var poolMemberCounter = app.bind("pools", "poolMemberCounter");
   var poolDisplayName = app.bind("pools", "poolDisplayName");
   var loadTargets = app.bind("targets", "loadTargets");
-  var awaitSchedulingRefresh = app.bind("targets", "awaitSchedulingRefresh");
   var targetPoolsAvailable = app.bind("targets", "targetPoolsAvailable");
   var isReadonlyMode = app.bind("users", "isReadonlyMode");
   var loadDictOptions = app.bind("quota", "loadDictOptions");
@@ -33,8 +32,19 @@ AdminApp.register("clients", function (app) {
   var clientSavingName = "";
   var clientVersions = Object.create(null);
   var editingClientVersion = 0;
+  var clientPickerTouched = false;
+  var clientUsageAbort = null;
+  var clientUsageSeq = 0;
+  var clientRenderCache = { html: null };
+  // "pending" | "ready" | "error": the 30-day aggregate is fetched separately from the list, so
+  // the usage columns (and their sort values) have a state of their own.
+  if (!state.clientUsageStatus) state.clientUsageStatus = "pending";
+  function clientUsageReady() {
+    return state.clientUsageStatus === "ready";
+  }
   // Column sorting (shared createTableSort). Getters return the underlying value, not the display text:
-  // usage columns are numbers, the Access Key sorts by its masked text (the raw key never drives order),
+  // usage columns are numbers while the aggregate is ready and null (empty, always last) otherwise,
+  // the Access Key sorts by its masked text (the raw key never drives order),
   // and a client without any target/pool restriction counts as having the most access.
   function clientUsageOf(c) {
     return (state.clientUsage && state.clientUsage[c.name]) || {};
@@ -49,8 +59,8 @@ AdminApp.register("clients", function (app) {
           (Array.isArray(c.allowed_pools) ? c.allowed_pools.length : 0);
         return granted > 0 ? granted : Number.MAX_SAFE_INTEGER;
       },
-      tokens: function (c) { return totalTok(clientUsageOf(c)); },
-      cost: function (c) { return Number(clientUsageOf(c).estimated_cost || 0); },
+      tokens: function (c) { return clientUsageReady() ? totalTok(clientUsageOf(c)) : null; },
+      cost: function (c) { return clientUsageReady() ? Number(clientUsageOf(c).estimated_cost || 0) : null; },
       quota: function (c) { return c.job_level || ""; },
     },
     onChange: function () { renderClients(); },
@@ -60,54 +70,25 @@ AdminApp.register("clients", function (app) {
     document.getElementById("clientModal").addEventListener(eventName, function () { clientDraftRevision++; });
   });
   document.getElementById("clientModal").addEventListener("click", function (event) {
-    if (event.target.dataset.target || event.target.dataset.pool) clientDraftRevision++;
+    if (event.target.dataset.target || event.target.dataset.pool) {
+      clientDraftRevision++;
+      clientPickerTouched = true;
+    }
   });
   /* ===== Clients ===== */
+  // The client list and the 30-day aggregate are independent: GET /admin/data/clients assigns
+  // state.clients and renders at once, while the aggregate fills only the usage columns. A hung
+  // or failed aggregate never blocks the list or its row actions (Issue #208).
   async function loadClients() {
     var version = ++clientLoadVersion;
-    try {
-      var jobs = [
-        api("/admin/data/clients").then(function (r) {
-          return { key: "clients", data: r };
-        }),
-        api(
-          "/admin/data/usage/aggregate?group_by=day&" + usageWindowQuery(30),
-          { timeoutMs: 60000 }, // 30-day aggregate scans many usage events
-        ).then(function (r) {
-          return { key: "agg", data: r };
-        }),
-      ];
-      // Targets feed the access pickers only. Prefetch when none are loaded, and
-      // never let that side request fail the clients list itself.
-      // Also retry when the pools roster is unavailable (an earlier fetch failed).
-      if (!state.targets || !state.targets.length || !targetPoolsAvailable()) {
-        jobs.push(loadTargets(true).catch(function () { return null; }));
-      }
-      var results = await Promise.all(jobs);
-      if (version !== clientLoadVersion) return;
-      var byKey = {};
-      results.forEach(function (x) {
-        if (x && x.key) byKey[x.key] = x.data;
-      });
-      state.clients = Array.isArray(byKey.clients.clients)
-        ? byKey.clients.clients
-        : [];
-      // Build per-client usage map from by_client breakdown
-      state.clientUsage = {};
-      var byClient = (byKey.agg && byKey.agg.by_client) || [];
-      byClient.forEach(function (item) {
-        state.clientUsage[item.key] = item;
-      });
-      renderClients();
-    } catch (e) {
-      if (version !== clientLoadVersion) return;
-      toast("加载客户端失败: " + e.message, "error");
+    var prefetch = null;
+    // Targets feed the access pickers only. Prefetch when none are loaded, and never let that
+    // side request fail the clients list itself.
+    // Also retry when the pools roster is unavailable (an earlier fetch failed).
+    if (!state.targets || !state.targets.length || !targetPoolsAvailable()) {
+      prefetch = loadTargets(true).catch(function () { return null; });
     }
-  }
-  // After a write only the server-normalized client records are needed to unlock the UI; the slow
-  // 30-day aggregate refreshes in the background (dropped if a newer load starts meanwhile).
-  async function refreshClientsLight() {
-    var version = ++clientLoadVersion;
+    loadClientUsage();
     try {
       var r = await api("/admin/data/clients");
       if (version !== clientLoadVersion) return;
@@ -117,108 +98,179 @@ AdminApp.register("clients", function (app) {
       if (version !== clientLoadVersion) return;
       toast("加载客户端失败: " + e.message, "error");
     }
-  }
-  async function refreshClientUsage() {
-    var version = clientLoadVersion;
-    try {
-      var r = await api("/admin/data/usage/aggregate?group_by=day&" + usageWindowQuery(30), { timeoutMs: 60000 });
-      if (version !== clientLoadVersion) return;
-      state.clientUsage = {};
-      ((r && r.by_client) || []).forEach(function (item) {
-        state.clientUsage[item.key] = item;
-      });
-      renderClients();
-    } catch (e) {
-      // Usage columns keep their previous values; the list itself is already current.
+    if (prefetch) {
+      await prefetch;
+      if (version === clientLoadVersion) renderClients();
     }
+  }
+  // The aggregate is cancelled by the next usage load and when the page goes away; an AbortError
+  // is a cancellation, never a failure.
+  function cancelClientUsageLoad() {
+    if (!clientUsageAbort) return;
+    var controller = clientUsageAbort;
+    clientUsageAbort = null;
+    controller.abort();
+  }
+  function loadClientUsage() {
+    var seq = ++clientUsageSeq;
+    cancelClientUsageLoad();
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    clientUsageAbort = controller;
+    state.clientUsageStatus = "pending";
+    renderClientUsageStatus();
+    renderClients();
+    return api(
+      "/admin/data/usage/aggregate?group_by=day&" + usageWindowQuery(30),
+      { timeoutMs: 60000, signal: controller ? controller.signal : undefined },
+    )
+      .then(
+        function (r) {
+          if (seq !== clientUsageSeq) return;
+          state.clientUsage = {};
+          ((r && r.by_client) || []).forEach(function (item) {
+            state.clientUsage[item.key] = item;
+          });
+          state.clientUsageStatus = "ready";
+        },
+        function (e) {
+          if (seq !== clientUsageSeq) return;
+          if (e && e.name === "AbortError") return;
+          state.clientUsageStatus = "error";
+        },
+      )
+      .then(function () {
+        if (clientUsageAbort === controller) clientUsageAbort = null;
+        if (seq !== clientUsageSeq) return;
+        renderClientUsageStatus();
+        renderClients();
+      });
+  }
+  function renderClientUsageStatus() {
+    var bar = document.getElementById("clientsUsageStatus");
+    if (!bar) return;
+    var status = state.clientUsageStatus || "pending";
+    bar.style.display = status === "ready" ? "none" : "";
+    var text = document.getElementById("clientsUsageStatusText");
+    if (text) {
+      text.textContent = status === "error"
+        ? "近30天用量加载失败，Token 与费用暂不可用。"
+        : "近30天用量加载中…";
+    }
+    var retry = document.getElementById("retryClientsUsageBtn");
+    if (retry) retry.style.display = status === "error" ? "" : "none";
+  }
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("pagehide", cancelClientUsageLoad);
+  }
+  // After a write only the server-normalized client records are needed; the slow 30-day aggregate
+  // is never re-requested by a save or delete, and an in-flight one simply finishes on its own.
+  async function refreshClientsLight() {
+    var version = ++clientLoadVersion;
+    try {
+      var r = await api("/admin/data/clients");
+      if (version !== clientLoadVersion) return;
+      state.clients = Array.isArray(r.clients) ? r.clients : [];
+    } catch (e) {
+      if (version !== clientLoadVersion) return;
+      toast("加载客户端失败: " + e.message, "error");
+    }
+    renderClients();
   }
   function renderClients() {
     var tb = document.getElementById("clientsTableBody");
+    var usageStatus = state.clientUsageStatus || "pending";
+    var usagePlaceholder =
+      usageStatus === "ready" ? null : usageStatus === "error" ? "加载失败" : "加载中…";
+    var html;
     if (!state.clients.length) {
-      tb.innerHTML =
-        "<tr class='empty-row'><td colspan='8'>暂无客户端</td></tr>";
-      return;
+      html = "<tr class='empty-row'><td colspan='8'>暂无客户端</td></tr>";
+    } else {
+      html = clientSort
+        .apply(state.clients, function (a, b) {
+          return String(a.name || "").localeCompare(String(b.name || ""));
+        })
+        .map(function (c) {
+          var hasTargets =
+            Array.isArray(c.allowed_targets) && c.allowed_targets.length > 0;
+          var hasPools =
+            Array.isArray(c.allowed_pools) && c.allowed_pools.length > 0;
+          var targets;
+          if (hasTargets || hasPools) {
+            var parts = [];
+            // Direct targets and pools on separate lines, direct first.
+            if (hasTargets) {
+              parts.push(
+                "<div class='client-target-line client-target-direct'>" +
+                  c.allowed_targets
+                    .map(function (target) {
+                      return "<span class='client-target-direct-tag'>" + esc(target) + "</span>";
+                    })
+                    .join("") +
+                  "</div>",
+              );
+            }
+            if (hasPools) {
+              parts.push(
+                "<div class='client-target-line client-target-pool'>" +
+                  c.allowed_pools
+                    .map(function (pn) {
+                      return "<span class='client-target-pool-tag'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='3' y='4' width='18' height='7' rx='2'></rect><rect x='3' y='13' width='18' height='7' rx='2'></rect><path d='M7 7.5h.01M7 16.5h.01'></path></svg> " + esc(poolDisplayName(pn)) + (targetPoolsAvailable() ? "" : "（部署池信息不可用）") + "</span>";
+                    })
+                    .join("") +
+                  "</div>",
+              );
+            }
+            targets = "<div class='client-target-list'>" + parts.join("") + "</div>";
+          } else {
+            targets = "全部目标";
+          }
+          var usage = (state.clientUsage && state.clientUsage[c.name]) || {};
+          var tok = totalTok(usage);
+          var cost = Number(usage.estimated_cost || 0);
+          // 额度 v2：客户端额度入口 = 职级绑定（上限由策略基数 × 职级系数
+          // × 个人系数推导，模型原价按组系数折算已用，明细在额度管理页）。
+          var quotaLabel = c.job_level
+            ? "职级: " + esc(c.job_level)
+            : "<span class='quota-badge warn'>未配置职级</span>";
+          return (
+            "<tr><td>" +
+            esc(c.name) +
+            "</td>" +
+            "<td style='max-width:220px;overflow-wrap:anywhere;'>" +
+            esc(c.ip_address || "-") +
+            "</td>" +
+            "<td><span class='key-mask'>" +
+            esc(maskKey(c.access_key)) +
+            "</span></td>" +
+            "<td>" +
+            targets +
+            "</td>" +
+            "<td>" +
+            (usagePlaceholder === null ? fmtNum(tok) : usagePlaceholder) +
+            "</td>" +
+            "<td>" +
+            (usagePlaceholder === null ? fmtMoney(cost) : usagePlaceholder) +
+            "</td>" +
+            "<td>" +
+            quotaLabel +
+            "</td>" +
+            "<td><div class='btn-group'>" +
+            "<button class='btn btn-sm readonly-hide' data-edit-client='" +
+            esc(c.name) +
+            "'>编辑</button>" +
+            "<button class='btn btn-danger btn-sm readonly-hide' data-del-client='" +
+            esc(c.name) +
+            "'>删除</button>" +
+            "</div></td></tr>"
+          );
+        })
+        .join("");
     }
-    tb.innerHTML = clientSort
-      .apply(state.clients, function (a, b) {
-        return String(a.name || "").localeCompare(String(b.name || ""));
-      })
-      .map(function (c) {
-        var hasTargets =
-          Array.isArray(c.allowed_targets) && c.allowed_targets.length > 0;
-        var hasPools =
-          Array.isArray(c.allowed_pools) && c.allowed_pools.length > 0;
-        var targets;
-        if (hasTargets || hasPools) {
-          var parts = [];
-          // Direct targets and pools on separate lines, direct first.
-          if (hasTargets) {
-            parts.push(
-              "<div class='client-target-line client-target-direct'>" +
-                c.allowed_targets
-                  .map(function (target) {
-                    return "<span class='client-target-direct-tag'>" + esc(target) + "</span>";
-                  })
-                  .join("") +
-                "</div>",
-            );
-          }
-          if (hasPools) {
-            parts.push(
-              "<div class='client-target-line client-target-pool'>" +
-                c.allowed_pools
-                  .map(function (pn) {
-                    return "<span class='client-target-pool-tag'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='3' y='4' width='18' height='7' rx='2'></rect><rect x='3' y='13' width='18' height='7' rx='2'></rect><path d='M7 7.5h.01M7 16.5h.01'></path></svg> " + esc(poolDisplayName(pn)) + (targetPoolsAvailable() ? "" : "（部署池信息不可用）") + "</span>";
-                  })
-                  .join("") +
-                "</div>",
-            );
-          }
-          targets = "<div class='client-target-list'>" + parts.join("") + "</div>";
-        } else {
-          targets = "全部目标";
-        }
-        var usage = (state.clientUsage && state.clientUsage[c.name]) || {};
-        var tok = totalTok(usage);
-        var cost = Number(usage.estimated_cost || 0);
-        // 额度 v2：客户端额度入口 = 职级绑定（上限由策略基数 × 职级系数
-        // × 个人系数推导，模型原价按组系数折算已用，明细在额度管理页）。
-        var quotaLabel = c.job_level
-          ? "职级: " + esc(c.job_level)
-          : "<span class='quota-badge warn'>未配置职级</span>";
-        return (
-          "<tr><td>" +
-          esc(c.name) +
-          "</td>" +
-          "<td style='max-width:220px;overflow-wrap:anywhere;'>" +
-          esc(c.ip_address || "-") +
-          "</td>" +
-          "<td><span class='key-mask'>" +
-          esc(maskKey(c.access_key)) +
-          "</span></td>" +
-          "<td>" +
-          targets +
-          "</td>" +
-          "<td>" +
-          fmtNum(tok) +
-          "</td>" +
-          "<td>" +
-          fmtMoney(cost) +
-          "</td>" +
-          "<td>" +
-          quotaLabel +
-          "</td>" +
-          "<td><div class='btn-group'>" +
-          "<button class='btn btn-sm readonly-hide' data-edit-client='" +
-          esc(c.name) +
-          "'>编辑</button>" +
-          "<button class='btn btn-danger btn-sm readonly-hide' data-del-client='" +
-          esc(c.name) +
-          "'>删除</button>" +
-          "</div></td></tr>"
-        );
-      })
-      .join("");
+    // A refresh that returns the same markup (tab switch, manual refresh, usage arriving before
+    // the list changes) must not swap the DOM under the pointer and keyboard focus.
+    if (clientRenderCache.html === html) return;
+    clientRenderCache.html = html;
+    tb.innerHTML = html;
   }
   document
     .getElementById("clientsTableBody")
@@ -240,8 +292,14 @@ AdminApp.register("clients", function (app) {
                 method: "DELETE",
               });
               toast("已删除客户端: " + name, "success");
-              await refreshClientsLight();
-              refreshClientUsage();
+              // The deleted record is known locally: drop it and its usage entry, repaint once,
+              // and do not reload the list or the aggregate (Issue #208).
+              ++clientLoadVersion;
+              state.clients = state.clients.filter(function (client) {
+                return client.name !== name;
+              });
+              if (state.clientUsage) delete state.clientUsage[name];
+              renderClients();
             } catch (e) {
               toast("删除失败: " + e.message, "error");
             }
@@ -249,42 +307,104 @@ AdminApp.register("clients", function (app) {
         );
       }
     });
-  // The client editor needs fresh targets and pools for its pickers, nothing
-  // else. loadTargets(true) settles the refresh itself and rethrows its error.
-  async function loadClientEditorData() {
-    await loadTargets(true);
+  // The editor opens immediately; targets/pools and dictionaries load in the background and
+  // unknown pickers show a loading state until they land.
+  function renderClientPickerLoading(id, label) {
+    var container = document.getElementById(id);
+    if (!container) return;
+    container.innerHTML =
+      "<span role='status' style='color:var(--text-muted);font-size:12px;'>" +
+      label +
+      "加载中…</span>";
   }
-  async function openClientModal(c) {
+  function renderClientDictOptions(c) {
+    document.getElementById("clientJobLevel").innerHTML = dictOptionsHTML(
+      state.jobLevels,
+      c && c.job_level ? c.job_level : "",
+      state.dictsLoaded ? dictEmptyLabel("job") : "加载中…",
+    );
+    document.getElementById("clientProjectGroup").innerHTML = dictOptionsHTML(
+      state.projectGroups,
+      c && c.project_group ? c.project_group : "",
+      state.dictsLoaded ? dictEmptyLabel("project") : "加载中…",
+    );
+  }
+  // Re-fill the dictionaries without discarding what the user selected meanwhile.
+  function fillClientDictOptions(c) {
+    var levelEl = document.getElementById("clientJobLevel");
+    var groupEl = document.getElementById("clientProjectGroup");
+    var level = levelEl.value || (c && c.job_level ? c.job_level : "");
+    var group = groupEl.value || (c && c.project_group ? c.project_group : "");
+    levelEl.innerHTML = dictOptionsHTML(state.jobLevels, level, dictEmptyLabel("job"));
+    groupEl.innerHTML = dictOptionsHTML(state.projectGroups, group, dictEmptyLabel("project"));
+  }
+  // Fills the pickers with the data the background refresh landed. The caller skips this when
+  // the user already clicked a tag, so late data never rewrites a choice; a failed refresh
+  // explains itself instead of leaving the loading placeholder forever.
+  function fillClientPickerTags(c, targetsFailed) {
+    var targetBox = document.getElementById("clientTargetTags");
+    if (targetBox) {
+      if (targetsFailed && !(state.targets && state.targets.length)) {
+        targetBox.innerHTML =
+          "<span role='status' style='color:var(--text-muted);font-size:12px;'>目标加载失败，请刷新后重试。</span>";
+      } else {
+        renderClientTargetTags(c && c.allowed_targets ? c.allowed_targets : []);
+      }
+    }
+    var poolBox = document.getElementById("clientPoolTags");
+    if (poolBox) {
+      if (targetsFailed && !targetPoolsAvailable() && !(state.pools && state.pools.length)) {
+        poolBox.innerHTML =
+          "<span role='status' style='color:var(--text-muted);font-size:12px;'>部署池加载失败，请刷新后重试。</span>";
+      } else {
+        renderClientPoolTags(c && c.allowed_pools ? c.allowed_pools : []);
+      }
+    }
+  }
+  async function loadClientEditorDataInBackground(c, clientVersion, version) {
+    var targetsFailed = false;
+    var failure = null;
+    var targetsRefresh = loadTargets(true).catch(function (e) {
+      targetsFailed = true;
+      failure = failure || e;
+      return null;
+    });
+    var dicts = state.dictsLoaded
+      ? Promise.resolve()
+      : loadDictOptions().catch(function (e) {
+        failure = failure || e;
+        return null;
+      });
+    await Promise.all([targetsRefresh, dicts]);
+    if (version !== clientOpenVersion) return;
+    if (!document.getElementById("clientModal").classList.contains("open")) return;
+    if (c) {
+      var currentVersion = clientVersions[c.name] || 0;
+      // A version advanced by this editor's own save is already what the draft shows; only an
+      // update the editor did not observe forces a reopen.
+      var ownSave = state.editingClient === c && editingClientVersion === currentVersion;
+      if (currentVersion !== clientVersion && !ownSave) {
+        toast("客户端已更新，请重新打开以确认最新授权。", "error");
+        closeModal("clientModal");
+        return;
+      }
+    }
+    fillClientDictOptions(c);
+    if (!clientPickerTouched) fillClientPickerTags(c, targetsFailed);
+    if (failure) toast("加载客户端编辑数据失败: " + failure.message, "error");
+  }
+  function openClientModal(c) {
     if (document.body.classList.contains("readonly-mode")) {
       toast("只读用户无法执行此操作", "error");
-      return;
+      return Promise.resolve();
     }
     if (c && clientSaveInFlight && clientSavingName === c.name) {
       toast("该客户端正在保存，请等待完成后重新打开。", "error");
-      return;
+      return Promise.resolve();
     }
     var clientVersion = c ? (clientVersions[c.name] || 0) : 0;
     var version = ++clientOpenVersion;
-    try {
-      await loadClientEditorData();
-      await loadDictOptions();
-      // A refresh that started while the dictionaries loaded must land before
-      // the pickers are filled.
-      await awaitSchedulingRefresh();
-    } catch (e) {
-      if (version !== clientOpenVersion) return;
-      toast("加载客户端编辑数据失败: " + e.message, "error");
-      return;
-    }
-    if (version !== clientOpenVersion) return;
-    if (c && clientSaveInFlight && clientSavingName === c.name) {
-      toast("该客户端正在保存，请等待完成后重新打开。", "error");
-      return;
-    }
-    if (c && (clientVersions[c.name] || 0) !== clientVersion) {
-      toast("客户端已更新，请重新打开以确认最新授权。", "error");
-      return;
-    }
+    clientPickerTouched = false;
     clientCreatedDraftNeedsReopen = false;
     editingClientVersion = clientVersion;
     state.editingClient = c || null;
@@ -296,19 +416,21 @@ AdminApp.register("clients", function (app) {
     document.getElementById("clientAccessKey").value = c ? c.access_key : "";
     document.getElementById("clientIPAddress").value =
       c && c.ip_address ? c.ip_address : "";
-    renderClientTargetTags(c && c.allowed_targets ? c.allowed_targets : []);
-    renderClientPoolTags(c && c.allowed_pools ? c.allowed_pools : []);
-    document.getElementById("clientJobLevel").innerHTML = dictOptionsHTML(
-      state.jobLevels,
-      c && c.job_level ? c.job_level : "",
-      dictEmptyLabel("job"),
-    );
-    document.getElementById("clientProjectGroup").innerHTML = dictOptionsHTML(
-      state.projectGroups,
-      c && c.project_group ? c.project_group : "",
-      dictEmptyLabel("project"),
-    );
+    // The modal opens at once. Known picker data is shown immediately and refreshed in the
+    // background; unknown data shows a loading state and is filled when it arrives.
+    if (state.targets && state.targets.length) {
+      renderClientTargetTags(c && c.allowed_targets ? c.allowed_targets : []);
+    } else {
+      renderClientPickerLoading("clientTargetTags", "目标");
+    }
+    if ((state.pools && state.pools.length) || targetPoolsAvailable()) {
+      renderClientPoolTags(c && c.allowed_pools ? c.allowed_pools : []);
+    } else {
+      renderClientPickerLoading("clientPoolTags", "部署池");
+    }
+    renderClientDictOptions(c);
     openModal("clientModal");
+    return loadClientEditorDataInBackground(c, clientVersion, version);
   }
   // ensureClientPickerData：对话框打开时目标/池列表数据缺失则后台补拉。
   // 仅在容器尚无可选标签（用户未开始选择）时重渲染，避免覆盖已选项。
@@ -392,6 +514,12 @@ AdminApp.register("clients", function (app) {
     tags.forEach(function (tag) {
       if (tag.dataset.selected === "1") result.push(tag.dataset.target);
     });
+    // Nothing rendered yet (still loading or unavailable): keep the saved grant rather than
+    // submitting an empty list.
+    if (!tags.length && state.editingClient &&
+        Array.isArray(state.editingClient.allowed_targets)) {
+      return state.editingClient.allowed_targets.slice();
+    }
     return result;
   }
   // renderClientPoolTags 渲染客户端表单的允许池 chips（交互与目标 tags 一致）。
@@ -444,11 +572,32 @@ AdminApp.register("clients", function (app) {
     tags.forEach(function (tag) {
       if (tag.dataset.selected === "1") result.push(tag.dataset.pool);
     });
+    if (!tags.length && state.editingClient &&
+        Array.isArray(state.editingClient.allowed_pools)) {
+      return state.editingClient.allowed_pools.slice();
+    }
     return result;
   }
   function onSchedulingRefresh() {
     if (!document.getElementById("clientModal").classList.contains("open")) return;
-    renderClientPoolTags(getSelectedClientPools());
+    var pools = getSelectedClientPools();
+    // Before the pool picker has any tags (still loading, or a failed roster), the editing
+    // client's saved grants are the only source; use them so a refresh cannot drop them.
+    var hasTags = document
+      .getElementById("clientPoolTags")
+      .querySelectorAll("span[data-pool]").length > 0;
+    if (!hasTags && state.editingClient &&
+        Array.isArray(state.editingClient.allowed_pools)) {
+      pools = state.editingClient.allowed_pools.slice();
+    }
+    renderClientPoolTags(pools);
+  }
+  // While the dictionary request is still pending the selects say so; a stored value stays
+  // selectable so a save during the load cannot silently clear it.
+  function clientDictValue(id, fallback) {
+    var value = document.getElementById(id).value.trim();
+    if (value || state.dictsLoaded) return value;
+    return fallback || "";
   }
 
   // ensureClientPickerData：对话框打开时目标/池列表数据缺失则后台补拉。
@@ -462,6 +611,11 @@ AdminApp.register("clients", function (app) {
     .getElementById("refreshClientsBtn")
     .addEventListener("click", function () {
       loadClients();
+    });
+  document
+    .getElementById("retryClientsUsageBtn")
+    .addEventListener("click", function () {
+      loadClientUsage();
     });
   document
     .getElementById("saveClientBtn")
@@ -494,15 +648,18 @@ AdminApp.register("clients", function (app) {
         ip_address: ipAddress,
         allowed_targets: targets,
         allowed_pools: pools,
-        job_level: document.getElementById("clientJobLevel").value.trim(),
-        project_group: document
-          .getElementById("clientProjectGroup")
-          .value.trim(),
+        job_level: clientDictValue(
+          "clientJobLevel",
+          state.editingClient && state.editingClient.job_level,
+        ),
+        project_group: clientDictValue(
+          "clientProjectGroup",
+          state.editingClient && state.editingClient.project_group,
+        ),
       };
       var saveVersion = clientOpenVersion;
       var saveRevision = clientDraftRevision;
       var wasEditing = !!state.editingClient;
-      var refreshUsageAfterSave = false;
       clientSaveInFlight = true;
       clientSavingName = name;
       // B3 按渠道分层限额：收集非空行（池名必填）
@@ -523,7 +680,8 @@ AdminApp.register("clients", function (app) {
         var savedIndex = state.clients.findIndex(function (client) { return client.name === name; });
         if (savedIndex >= 0) state.clients[savedIndex] = Object.assign({}, state.clients[savedIndex], payload);
         else state.clients.push(payload);
-        renderClients();
+        // The optimistic record keeps the save visible if the list GET below fails; the single
+        // repaint happens after that GET, and no usage aggregate is requested (Issue #208).
         if (saveVersion === clientOpenVersion && saveRevision === clientDraftRevision) {
           closeModal("clientModal");
         } else if (saveVersion === clientOpenVersion) {
@@ -532,14 +690,12 @@ AdminApp.register("clients", function (app) {
             "客户端已创建，后续修改未保存。请复制草稿并重新打开客户端编辑。", "error");
         }
         await refreshClientsLight();
-        refreshUsageAfterSave = true;
       } catch (e) {
         toast("保存失败: " + e.message, "error");
       } finally {
         clientSaveInFlight = false;
         clientSavingName = "";
       }
-      if (refreshUsageAfterSave) refreshClientUsage();
     });
 
   return {

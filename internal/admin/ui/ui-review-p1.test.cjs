@@ -27,7 +27,7 @@ test("cannot reopen a client using its old ACL while its save is in flight", asy
   assert.equal(h.requests.filter(req => req.url === "/admin/data/clients/A" && req.options?.method === "PUT").length, 1);
 });
 
-test("an open started before a client save cannot later install the old ACL", async () => {
+test("an open started before a client save cannot reinstall the old ACL after the save", async () => {
   let releaseOpen, releaseSave, delayOpen = false, writes = 0;
   const h = createHarness({routes: routes(), fetch: (url, options, fallback) => {
     if (url === "/admin/data/clients/A" && options?.method === "PUT") {
@@ -45,6 +45,9 @@ test("an open started before a client save cannot later install the old ACL", as
   tag.listeners.click[0].call(tag);
   delayOpen = true;
   const openOld = app.modules.clients.openClientModal(client);
+  // Issue #208: the editor opens and renders its draft synchronously, so the save below sends
+  // the ACL the open displayed. What must not happen is the held response reinstalling the old
+  // ACL in the list after the save's own refresh.
   const save = h.ids.get("saveClientBtn").listeners.click[0]();
   delayOpen = false;
   releaseOpen(response({targets: []}));
@@ -53,8 +56,10 @@ test("an open started before a client save cannot later install the old ACL", as
   await save;
   const put = h.requests.filter(req => req.url === "/admin/data/clients/A" && req.options?.method === "PUT");
   assert.equal(put.length, 1);
-  assert.deepEqual(JSON.parse(put[0].options.body).allowed_targets, []);
+  assert.deepEqual(JSON.parse(put[0].options.body).allowed_targets, ["old"]);
   assert.equal(h.ids.get("clientModal").classList.contains("open"), false);
+  assert.doesNotMatch(h.ids.get("clientsTableBody").innerHTML, /old/,
+    "the late open cannot reinstall the saved-away ACL");
 });
 
 for (const mode of ["newer editor", "same editor draft"]) test(`model group save keeps ${mode}`, async () => {

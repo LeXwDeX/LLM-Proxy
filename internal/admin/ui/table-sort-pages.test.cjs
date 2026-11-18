@@ -41,6 +41,7 @@ test("clients: every column sorts by its underlying value, the default order is 
     carol: { input_tokens: 1000, estimated_cost: 1 },
     dave: { input_tokens: 70, estimated_cost: 12.5 },
   };
+  state.clientUsageStatus = "ready";
   app.modules.clients.renderClients();
   const order = () => [...html(h, "clientsTableBody").matchAll(/<tr><td>(\w+)<\/td>/g)].map((m) => m[1]);
   assert.deepEqual(order(), ["alice", "bob", "carol", "dave"], "default: by name");
@@ -76,10 +77,34 @@ test("clients: the Access Key column sorts by the masked text that is shown", as
   assert.deepEqual([...html(h, "clientsTableBody").matchAll(/<tr><td>(\w+)<\/td>/g)].map((m) => m[1]), ["c2", "c1"]);
 });
 
+test("clients: usage columns sort as empty until the aggregate is ready", async () => {
+  const { h, app, state } = await boot();
+  state.clients = [
+    { name: "b", access_key: "k1" },
+    { name: "a", access_key: "k2" },
+  ];
+  state.clientUsage = { b: { estimated_cost: 9, input_tokens: 900 }, a: { estimated_cost: 1, input_tokens: 1 } };
+  state.clientUsageStatus = "pending";
+  const order = () => [...html(h, "clientsTableBody").matchAll(/<tr><td>(\w+)<\/td>/g)].map((m) => m[1]);
+  app.modules.clients.renderClients();
+  assert.match(html(h, "clientsTableBody"), /加载中/, "pending usage shows the placeholder");
+  click(h, "clientsTableHead", "cost");
+  assert.deepEqual(order(), ["a", "b"], "every value is empty, so the default name order holds");
+  click(h, "clientsTableHead", "tokens");
+  assert.deepEqual(order(), ["a", "b"], "token sorting is disabled while usage is pending");
+  state.clientUsageStatus = "ready";
+  app.modules.clients.renderClients();
+  click(h, "clientsTableHead", "cost"); // tokens -> cost ascending
+  assert.deepEqual(order(), ["a", "b"]);
+  click(h, "clientsTableHead", "cost");
+  assert.deepEqual(order(), ["b", "a"], "ready usage restores numeric sorting");
+});
+
 test("clients: sorting keeps the edit and delete buttons on their own client", async () => {
   const { h, app, state } = await boot();
   state.clients = [{ name: "b", access_key: "k1" }, { name: "a", access_key: "k2" }];
   state.clientUsage = { b: { estimated_cost: 9 }, a: { estimated_cost: 1 } };
+  state.clientUsageStatus = "ready";
   app.modules.clients.renderClients();
   clicks(h, "clientsTableHead", "cost", 2);
   const rows = [...html(h, "clientsTableBody").matchAll(/<tr><td>(\w+)<\/td>[\s\S]*?data-edit-client='(\w+)'[\s\S]*?data-del-client='(\w+)'/g)];
