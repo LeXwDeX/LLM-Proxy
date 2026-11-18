@@ -46,6 +46,7 @@ func TestUIStartupTransportResilience(t *testing.T) {
 func TestUILongAdminQueriesDeclareTimeout(t *testing.T) {
 	long := map[string]string{
 		`"/admin/data/usage/aggregate`: "timeoutMs: 60000",
+		`"/admin/data/usage/by-client`: "timeoutMs: 60000",
 		`tracePath(`:                   "timeoutMs: 60000", // builds /admin/data/trace?limit=…&offset=…&view=summary
 		`"/sync"`:                      "timeoutMs: 60000",
 		`"/test-model"`:                "timeoutMs: 0",
@@ -74,8 +75,11 @@ func TestUILongAdminQueriesDeclareTimeout(t *testing.T) {
 			t.Errorf("未找到 %s 的 api() 调用，检查用例是否过期", endpoint)
 		}
 	}
-	if seen[`"/admin/data/usage/aggregate`] < 3 {
-		t.Errorf("usage/aggregate 调用数 %d，应覆盖 clients/quota/usage 三处", seen[`"/admin/data/usage/aggregate`])
+	if seen[`"/admin/data/usage/aggregate`] < 2 {
+		t.Errorf("usage/aggregate 调用数 %d，应覆盖 quota/usage 两处", seen[`"/admin/data/usage/aggregate`])
+	}
+	if seen[`"/admin/data/usage/by-client`] < 1 {
+		t.Errorf("usage/by-client 调用数 %d，应覆盖 clients 一处", seen[`"/admin/data/usage/by-client`])
 	}
 }
 

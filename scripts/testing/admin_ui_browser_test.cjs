@@ -135,6 +135,13 @@ async function main() {
       "/admin/api/overview": {},
       "/admin/api/activity": activityFixture(),
       "/admin/data/usage/aggregate": aggregateFixture(),
+      "/admin/data/usage/by-client": {
+        from: new Date(Date.now() - 30 * 86400000).toISOString(),
+        to: new Date().toISOString(),
+        clients: [],
+        exact: true,
+        source: "aggregate",
+      },
       "/admin/data/targets": { targets: [target, {...target, name: "z-fixture-target", model_prefix: "Other/"}] },
       "/admin/data/pools": {
         pools: [{ name: "fixture-pool", display_name: "Fixture-POOL", description: "Fixture pool", routing_strategy: "cost" }],

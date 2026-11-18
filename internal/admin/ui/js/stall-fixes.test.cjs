@@ -9,11 +9,21 @@ const json = value => ({ok: true, status: 200, text: async () => JSON.stringify(
 const tick = async (n = 10) => { for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve)); };
 const field = (h, id) => h.ids.get(id);
 const aggregateUrls = h => h.requests.map(r => r.url).filter(u => String(u).startsWith("/admin/data/usage/aggregate"));
+const usageSummaryUrls = h => h.requests.map(r => r.url).filter(u => String(u).startsWith("/admin/data/usage/by-client"));
 // Holds every aggregate request until released.
 function holdAggregate(h, body = {by_client: []}) {
   const base = h.context.fetch;
   const held = [];
   h.context.fetch = (url, options) => String(url).startsWith("/admin/data/usage/aggregate")
+    ? new Promise(resolve => { h.requests.push({url, options}); held.push(() => resolve(json(body))); })
+    : base(url, options);
+  return {held, releaseAll: () => held.splice(0).forEach(r => r())};
+}
+// Holds every clients usage-summary request until released.
+function holdClientsUsage(h, body = {clients: []}) {
+  const base = h.context.fetch;
+  const held = [];
+  h.context.fetch = (url, options) => String(url).startsWith("/admin/data/usage/by-client")
     ? new Promise(resolve => { h.requests.push({url, options}); held.push(() => resolve(json(body))); })
     : base(url, options);
   return {held, releaseAll: () => held.splice(0).forEach(r => r())};
@@ -70,11 +80,11 @@ function fillClient(h) {
   field(h, "clientAccessKey").value = "k1";
 }
 
-test("A2: the client list renders while the 30-day aggregate is held", async () => {
+test("A2: the client list renders while the 30-day usage summary is held", async () => {
   const {h, app} = await clientsFixture();
-  const hold = holdAggregate(h);
+  const hold = holdClientsUsage(h);
   const load = app.modules.clients.loadClients();
-  assert.equal(await settled(load), true, "the list load must not wait for the aggregate");
+  assert.equal(await settled(load), true, "the list load must not wait for the usage summary");
   assert.match(h.ids.get("clientsTableBody").innerHTML, /c1/);
   assert.equal(app.state.clientUsageStatus, "pending");
   hold.releaseAll();
@@ -84,14 +94,14 @@ test("A2: the client list renders while the 30-day aggregate is held", async () 
 
 test("A3: client save releases its lock without waiting for the aggregate", async () => {
   const {h, app} = await clientsFixture();
-  const hold = holdAggregate(h);
+  const hold = holdClientsUsage(h);
   await app.modules.clients.loadClients();
   await app.modules.clients.openClientModal(app.state.clients[0]);
   fillClient(h);
   h.requests.length = 0;
   const save = field(h, "saveClientBtn").listeners.click[0]();
-  assert.equal(await settled(save), true, "save must not wait for the aggregate");
-  assert.equal(aggregateUrls(h).length, 0, "a save never sends another aggregate");
+  assert.equal(await settled(save), true, "save must not wait for the usage summary");
+  assert.equal(usageSummaryUrls(h).length, 0, "a save never sends another usage summary");
   const before = h.requests.filter(r => r.options?.method === "PUT").length;
   await app.modules.clients.openClientModal(app.state.clients[0]);
   fillClient(h);
@@ -101,10 +111,10 @@ test("A3: client save releases its lock without waiting for the aggregate", asyn
   await tick();
 });
 
-test("A3: client save refreshes the list from the server once, with no aggregate", async () => {
+test("A3: client save refreshes the list from the server once, with no usage summary", async () => {
   const {h, app} = await clientsFixture();
   await app.modules.clients.loadClients();
-  holdAggregate(h);
+  holdClientsUsage(h);
   h.requests.length = 0;
   await app.modules.clients.openClientModal(app.state.clients[0]);
   fillClient(h);
@@ -113,15 +123,16 @@ test("A3: client save refreshes the list from the server once, with no aggregate
   const urls = h.requests.map(r => r.url);
   assert.equal(listGets.length, 1, "exactly one client list GET after saving");
   assert.ok(urls.indexOf("/admin/data/clients") > urls.findIndex((u, i) => h.requests[i].options?.method === "PUT"));
-  assert.equal(aggregateUrls(h).length, 0, "saving never refreshes the 30-day aggregate");
+  assert.equal(usageSummaryUrls(h).length, 0, "saving never refreshes the 30-day usage summary");
 });
 
-test("A11: aggregate windows are floored to the minute", async () => {
+test("A11: clients usage windows are floored to the minute", async () => {
   const {h, app} = await clientsFixture();
   h.requests.length = 0;
   await app.modules.clients.loadClients();
-  const urls = aggregateUrls(h);
+  const urls = usageSummaryUrls(h);
   assert.equal(urls.length, 1);
+  assert.equal(aggregateUrls(h).length, 0, "the clients page no longer requests the usage aggregate");
   const p = new URLSearchParams(urls[0].split("?")[1]);
   for (const k of ["from", "to"]) {
     const d = new Date(p.get(k));
