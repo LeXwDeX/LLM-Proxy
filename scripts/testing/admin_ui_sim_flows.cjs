@@ -439,6 +439,26 @@ const list = [
     },
   },
   {
+    name: "grant-client-quota", critical: true,
+    async run({ page }) {
+      // Issue 218 / #207: quota is only granted by explicit plan groups now, so the
+      // traffic step must bind the UI-created model group to the two targets and
+      // grant it to the UI-created client. This is test setup, not a UI-flow claim.
+      const result = await page.eval(`(async () => {
+        const groups = await fetch("/admin/data/model-groups").then(r => r.json());
+        const group = (groups.model_groups || []).find(g => g.name === ${js(S.group)});
+        if (!group) return "missing group";
+        const body = Object.assign({}, group, { bindings: [{ target: ${js(S.tgtOpenAI)} }, { target: ${js(S.tgtGLM)} }] });
+        const groupPut = await fetch("/admin/data/model-groups/" + encodeURIComponent(${js(S.group)}), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        if (!groupPut.ok) return "group:" + groupPut.status + ":" + await groupPut.text();
+        const planPut = await fetch("/admin/data/quota/" + encodeURIComponent(${js(S.client)}), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ job_level: ${js(S.level)}, quota_groups: [{ name: ${js(S.group)}, coefficient: 1 }] }) });
+        if (!planPut.ok) return "plan:" + planPut.status + ":" + await planPut.text();
+        return "ok";
+      })()`);
+      assert.equal(result, "ok", "grant client quota: " + result);
+    },
+  },
+  {
     name: "client-traffic-through-ui-config", critical: true,
     async run({ stack, clientCall }) {
       // OpenAI target (pooled upstream WS, prefer_websocket on) and GLM target.
