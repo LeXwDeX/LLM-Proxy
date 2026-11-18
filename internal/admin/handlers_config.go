@@ -196,18 +196,3 @@ func (h *Handler) overlayStoredPools(cfg *config.Config) error {
 	}
 	return nil
 }
-
-func (h *Handler) reloadAuthFromClientStore() error {
-	clients, err := h.clientStore.List()
-	if err != nil {
-		return err
-	}
-	var targets []config.Target
-	if h.targetStore != nil {
-		targets, err = h.targetStore.List()
-		if err != nil {
-			return err
-		}
-	}
-	return h.authStore.LoadFromConfigWithPools(clients, targets)
-}

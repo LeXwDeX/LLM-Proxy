@@ -2,10 +2,10 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
@@ -33,8 +33,10 @@ func (h *Handler) handleListClients(w http.ResponseWriter, r *http.Request) {
 }
 
 // 客户端写入与目标/部署池写入共用 configMu：commitConfigChange 在锁内读取 clients 并应用 auth，
-// 客户端写入若不持锁，会被其落库后的 auth 应用以旧 clients 列表覆盖。锁内只做 clientStore 写入与
-// reloadAuthFromClientStore；配额评估（可能较慢）在释放 configMu 之后执行，不阻塞目标保存。
+// 客户端写入若不持锁，会被其落库后的 auth 应用以旧 clients 列表覆盖。锁内的客户端写路径为
+// “读取 → 投影 → 在独立 Store 上构建 → 落库 → Swap”：构建失败不落库，落库成功后 Swap 不可失败，
+// 因此不存在“已落库但 auth 未应用”的窗口。配额评估（可能较慢）在释放 configMu 之后执行，
+// 不阻塞目标保存。
 
 // evaluateClientQuota 触发该客户端的配额评估（配置可能已变化）。调用方不得持有 configMu。
 func (h *Handler) evaluateClientQuota(name string) {
@@ -47,39 +49,109 @@ func (h *Handler) evaluateClientQuota(name string) {
 	}
 }
 
-// authReloadAttempts 限制客户端写路径的同步 auth 重载次数：记录已落库后，
-// 瞬时失败不能让运行时 auth 表停留在旧数据，同时重试必须快速有界（
-// 调用方持有 configMu）。authReloadBaseDelay 是第 n 次重试前的退避基数。
-const (
-	authReloadAttempts  = 3
-	authReloadBaseDelay = 10 * time.Millisecond
-)
+// clientChangeError 标记“本次请求的投影无法构建 auth 表”的校验类失败（空 access_key、
+// 非法 IP、重复 access_key 等）。它与读取失败、现有数据无法构建等内部故障区分：
+// 后者是 500，前者沿用 store 校验错误的 4xx 语义。
+type clientChangeError struct{ err error }
 
-// reloadAuthAfterClientWrite 以短退避重试 reloadAuthFromClientStore。调用方
-// 与首次重载一样持有 configMu，因此重试窗口内不会插入其他配置提交。
-func (h *Handler) reloadAuthAfterClientWrite() error {
-	var err error
-	for attempt := 1; attempt <= authReloadAttempts; attempt++ {
-		if attempt > 1 {
-			time.Sleep(time.Duration(attempt-1) * authReloadBaseDelay)
-		}
-		if err = h.reloadAuthFromClientStore(); err == nil {
-			return nil
-		}
-		h.logger.Warn("client write: auth reload attempt failed", "attempt", attempt, "max_attempts", authReloadAttempts, "error", err)
+func (e *clientChangeError) Error() string { return e.err.Error() }
+func (e *clientChangeError) Unwrap() error { return e.err }
+
+// buildNextAuthStore 在落库前为客户端写路径构建下一份 auth 表（调用方持有 configMu）。
+// 它只读当前 clients/targets 并构建独立 Store，不触碰运行时 auth。任何读取或构建失败
+// 都返回错误：调用方必须中止本次写入，数据库与运行时 auth 均保持旧状态。
+func (h *Handler) buildNextAuthStore(project func([]config.Client) []config.Client) (*auth.Store, error) {
+	if h.authStore == nil {
+		return nil, errors.New("auth store unavailable")
 	}
-	return err
+	clients, err := h.clientStore.List()
+	if err != nil {
+		return nil, fmt.Errorf("load clients: %w", err)
+	}
+	var targets []config.Target
+	if h.targetStore != nil {
+		targets, err = h.targetStore.List()
+		if err != nil {
+			return nil, fmt.Errorf("load targets: %w", err)
+		}
+	}
+	next, err := auth.NewStoreFromConfig(project(clients), targets)
+	if err != nil {
+		// 现有列表本身可构建 → 失败来自本次请求，按 store 校验错误返回 4xx；
+		// 现有数据也无法构建才是内部故障。
+		if _, baseErr := auth.NewStoreFromConfig(clients, targets); baseErr == nil {
+			return nil, &clientChangeError{err: err}
+		}
+		return nil, err
+	}
+	return next, nil
 }
 
-// writeAuthReloadPending 报告已提交但 auth 重载最终失败的客户端写：记录已持久化，
-// 运行时 auth 表仍是旧数据（删除的 key 可能仍可认证、更新的 ACL/密钥尚未生效），
-// 因此不能谎报 2xx。前端据 code=auth_reload_pending 提示待重载。
-func (h *Handler) writeAuthReloadPending(w http.ResponseWriter, err error) {
-	h.logger.Error("client write: auth reload pending", "error", err)
-	writeJSON(w, http.StatusInternalServerError, map[string]string{
-		"error": "client saved but auth reload pending",
-		"code":  "auth_reload_pending",
-	})
+// writeClientChangeError 响应落库前的读取/构建失败：请求校验失败沿用 store 的
+// 4xx 语义（重复 access_key → 409，其余 → 400），内部故障 → 500。
+func (h *Handler) writeClientChangeError(w http.ResponseWriter, err error) {
+	var changeErr *clientChangeError
+	if !errors.As(err, &changeErr) {
+		h.writeInternalError(w, "failed to apply client change", err)
+		return
+	}
+	status := http.StatusBadRequest
+	if errors.Is(changeErr.err, auth.ErrDuplicateAccessKey) {
+		status = http.StatusConflict
+	}
+	writeJSON(w, status, errorResponse(changeErr.Error()))
+}
+
+// authProjectionClient 返回与 clientStore 落库结果一致的 auth 相关视图：store 的
+// normalizeClient 会丢弃空白 allowed_targets 条目，而 allowAll 按原始字段判空，
+// 投影不能把这些条目算进去，否则新表与落库后的表在 [""] 边缘上不一致。
+func authProjectionClient(client config.Client) config.Client {
+	if len(client.AllowedTargets) == 0 {
+		return client
+	}
+	targets := make([]string, 0, len(client.AllowedTargets))
+	for _, target := range client.AllowedTargets {
+		if strings.TrimSpace(target) != "" {
+			targets = append(targets, target)
+		}
+	}
+	client.AllowedTargets = targets
+	return client
+}
+
+// projectCreatedClient 把新建请求追加到当前列表。
+func projectCreatedClient(clients []config.Client, req config.Client) []config.Client {
+	projected := make([]config.Client, 0, len(clients)+1)
+	projected = append(projected, clients...)
+	return append(projected, authProjectionClient(req))
+}
+
+// projectUpdatedClient 按 name 替换，找不到时保留原列表，由 store 报告 not found。
+// 匹配键必须与 store 的 bucket 键完全一致（strings.ToLower(strings.TrimSpace(name))）；
+// strings.EqualFold 在 U+0130（"İ"）上与 ToLower 语义不同，会导致落库成功而投影未命中。
+func projectUpdatedClient(clients []config.Client, name string, req config.Client) []config.Client {
+	projected := make([]config.Client, len(clients))
+	copy(projected, clients)
+	name = strings.ToLower(strings.TrimSpace(name))
+	for i := range projected {
+		if strings.ToLower(strings.TrimSpace(projected[i].Name)) == name {
+			projected[i] = authProjectionClient(req)
+			return projected
+		}
+	}
+	return projected
+}
+
+// projectDeletedClient 从当前列表移除 name（匹配键与 store 的 bucket 键一致）。
+func projectDeletedClient(clients []config.Client, name string) []config.Client {
+	name = strings.ToLower(strings.TrimSpace(name))
+	projected := make([]config.Client, 0, len(clients))
+	for _, client := range clients {
+		if strings.ToLower(strings.TrimSpace(client.Name)) != name {
+			projected = append(projected, client)
+		}
+	}
+	return projected
 }
 
 func (h *Handler) handleCreateClient(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +181,14 @@ func (h *Handler) createClientLocked(w http.ResponseWriter, r *http.Request) (co
 		return req, false
 	}
 
+	next, err := h.buildNextAuthStore(func(clients []config.Client) []config.Client {
+		return projectCreatedClient(clients, req)
+	})
+	if err != nil {
+		h.writeClientChangeError(w, err)
+		return req, false
+	}
+
 	if err := h.clientStore.Create(req); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "already exists") {
@@ -118,10 +198,8 @@ func (h *Handler) createClientLocked(w http.ResponseWriter, r *http.Request) (co
 		return req, false
 	}
 
-	if err := h.reloadAuthAfterClientWrite(); err != nil {
-		h.writeAuthReloadPending(w, err)
-		return req, false
-	}
+	// 落库成功：发布已构建的表（不可失败），新 key/ACL 在响应返回前生效。
+	h.authStore.Swap(next)
 	return req, true
 }
 
@@ -157,6 +235,14 @@ func (h *Handler) updateClientLocked(w http.ResponseWriter, r *http.Request) (st
 		return name, req, false
 	}
 
+	next, err := h.buildNextAuthStore(func(clients []config.Client) []config.Client {
+		return projectUpdatedClient(clients, name, req)
+	})
+	if err != nil {
+		h.writeClientChangeError(w, err)
+		return name, req, false
+	}
+
 	if err := h.clientStore.Update(name, req); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
@@ -168,10 +254,8 @@ func (h *Handler) updateClientLocked(w http.ResponseWriter, r *http.Request) (st
 		return name, req, false
 	}
 
-	if err := h.reloadAuthAfterClientWrite(); err != nil {
-		h.writeAuthReloadPending(w, err)
-		return name, req, false
-	}
+	// 落库成功：发布已构建的表（不可失败），新 key/ACL 在响应返回前生效。
+	h.authStore.Swap(next)
 	return name, req, true
 }
 
@@ -205,6 +289,14 @@ func (h *Handler) deleteClientLocked(w http.ResponseWriter, r *http.Request) (st
 		return name, false
 	}
 
+	next, err := h.buildNextAuthStore(func(clients []config.Client) []config.Client {
+		return projectDeletedClient(clients, name)
+	})
+	if err != nil {
+		h.writeClientChangeError(w, err)
+		return name, false
+	}
+
 	if h.clientQuotaStore != nil {
 		if err := h.clientQuotaStore.DeleteClientAndArchive(*existing); err != nil {
 			h.writeInternalError(w, "failed to delete client", err)
@@ -219,10 +311,8 @@ func (h *Handler) deleteClientLocked(w http.ResponseWriter, r *http.Request) (st
 		return name, false
 	}
 
-	if err := h.reloadAuthAfterClientWrite(); err != nil {
-		h.writeAuthReloadPending(w, err)
-		return name, false
-	}
+	// 落库成功：发布已构建的表（不可失败），被删 key 在响应返回前失效。
+	h.authStore.Swap(next)
 	return name, true
 }
 
