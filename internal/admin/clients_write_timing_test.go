@@ -3,7 +3,7 @@ package admin
 // Issue #211 先实测：POST/PUT/DELETE /admin/data/clients 各阶段耗时。
 //
 // 只测量、不改变生产行为。锁内段（clientStore 写 + 唯一性检查 +
-// reloadAuthFromClientStore）按包内可访问函数分段计时；整请求用 httptest +
+// buildNextAuthStore 预构建 auth 表）按包内可访问函数分段计时；整请求用 httptest +
 // 真实 session/路由计时。Evaluate 的分段测量在 internal/quota 的同名用例中。
 
 import (
@@ -197,14 +197,14 @@ type adminTimingResult struct {
 	n, m    int
 	pricing string
 
-	lockCreate, lockUpdate, lockDelete adminDurationSet
+	lockCreate, lockUpdate, lockDelete    adminDurationSet
 	storeCreate, storeUpdate, storeDelete adminDurationSet
-	auth                                adminDurationSet
-	audit                               adminDurationSet
-	eval                                adminDurationSet
-	totalPost, totalPut, totalDelete    adminDurationSet
-	fast                                 uint64
-	fallbacks                            map[string]uint64
+	auth                                  adminDurationSet
+	audit                                 adminDurationSet
+	eval                                  adminDurationSet
+	totalPost, totalPut, totalDelete      adminDurationSet
+	fast                                  uint64
+	fallbacks                             map[string]uint64
 }
 
 func (e *clientTimingEnv) doTimed(t *testing.T, method, path string, body []byte) (time.Duration, int) {
@@ -226,19 +226,20 @@ func (e *clientTimingEnv) timedLocked(t *testing.T, storeFn func() error) (lock,
 	t.Helper()
 	start := time.Now()
 	e.h.configMu.Lock()
+	// 生产顺序：落库前先在独立 Store 上构建下一份 auth 表，落库成功后 Swap。
+	authStart := time.Now()
+	_, authErr := e.h.buildNextAuthStore(func(clients []config.Client) []config.Client { return clients })
+	auth = time.Since(authStart)
 	storeStart := time.Now()
 	err := storeFn()
 	store = time.Since(storeStart)
-	authStart := time.Now()
-	authErr := e.h.reloadAuthFromClientStore()
-	auth = time.Since(authStart)
 	e.h.configMu.Unlock()
 	lock = time.Since(start)
 	if err != nil {
 		t.Fatalf("store write: %v", err)
 	}
 	if authErr != nil {
-		t.Fatalf("auth reload: %v", authErr)
+		t.Fatalf("auth build: %v", authErr)
 	}
 	return lock, store, auth
 }

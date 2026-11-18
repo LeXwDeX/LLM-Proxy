@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LeXwDeX/LLM-Proxy/internal/pricing"
 	"github.com/LeXwDeX/LLM-Proxy/internal/usage"
 	bolt "go.etcd.io/bbolt"
 )
@@ -67,11 +68,13 @@ func (v clientScopeVisits) scopedIndexRead() bool {
 }
 
 // clientScopeReadOptions shapes one quota read: the fast path can be forced
-// (tests of the scoped enumeration) and the legacy scan requested, exactly as
-// the production hooks do.
+// (tests of the scoped enumeration), the legacy scan requested, and the client
+// scope disabled (the exhaustive counterpart a scoped read must narrow), all
+// exactly as the production hooks do.
 type clientScopeReadOptions struct {
-	forceFast   bool
-	forceLegacy bool
+	forceFast    bool
+	forceLegacy  bool
+	disableScope bool
 }
 
 func readClientScopeUnitsOpt(store *UsageStore, filter usage.Filter, resolver usage.RateResolver, precise bool, opts clientScopeReadOptions) (clientScopeVisits, []CostUnit, error) {
@@ -88,7 +91,11 @@ func readClientScopeUnitsOpt(store *UsageStore, filter usage.Filter, resolver us
 	defer func() {
 		clientScopeProbeHourState, clientScopeProbeRangeSeek, clientScopeProbeDecoded = savedHour, savedSeek, savedDecoded
 	}()
-	result, err := store.readCostUnitsInScope(context.Background(), filter, resolver, precise, nil, costReadHooks{
+	ctx := context.Background()
+	if opts.disableScope {
+		ctx = context.WithValue(ctx, noClientScopeKey{}, true)
+	}
+	result, err := store.readCostUnitsInScope(ctx, filter, resolver, precise, nil, costReadHooks{
 		windowKeys:  true,
 		forceLegacy: opts.forceLegacy,
 		evidenceRaw: func() { visits.evidence++ },
@@ -561,7 +568,7 @@ func TestClientScopedQuotaReadPerClientWork(t *testing.T) {
 // row has an attributable owner (rows with an empty or "unknown" client fail
 // every client filter by design, and writeRawOwner writes no owner for them,
 // so a v2 migration cannot prove them), and the client index migration runs
-// once, at the end, to completion. The event generator, prune and all 26
+// once, at the end, to completion. The event generator, prune and all 27
 // damage cases (including legacy no-record-id rows, cross-hour index proofs
 // and unowned rows) are the shared ones; damage may still make individual
 // reads fail, and the differential comparison covers those verdicts too.
@@ -591,6 +598,13 @@ func buildClientScopeFuzzDB(t *testing.T, rng *rand.Rand, damage int) *integrity
 	for i := 0; i < rng.Intn(3); i++ {
 		record(fuzzEvent(rng))
 	}
+	// Seed the legacy odd row before both migrations. It must be in the client
+	// index (seeding after the migration leaves the classification with a
+	// window-exempt raw row that has no index entry, which declines the client
+	// scope for every window that contains it) and it must be located by hour
+	// in the proof-odd index, or damage kind 26 has no entry to damage and
+	// silently skips.
+	seedLegacyProofOddRow(t, f)
 	// Record leaves the v1 index populated but unproven for v2; one completed
 	// migration is what requireClientIndex and the proof checks need.
 	migrateClientIndex(t, db)
@@ -604,6 +618,58 @@ func buildClientScopeFuzzDB(t *testing.T, rng *rand.Rand, damage int) *integrity
 		applyIntegrityDamage(t, rng, f)
 	}
 	return f
+}
+
+// TestClientScopeFuzzDBProofOddDamageApplies pins the client-scope fuzz
+// builder against the silent no-op the shared damage injector reports when the
+// #114 proof-odd index has no location entries: the builder must seed the
+// legacy odd row before the index is built, and damage kind 26 must then
+// actually delete or corrupt an entry instead of logging a skip.
+func TestClientScopeFuzzDBProofOddDamageApplies(t *testing.T) {
+	f := buildClientScopeFuzzDB(t, rand.New(rand.NewSource(1)), 0)
+	locations, pointers := 0, 0
+	if err := f.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucketUsageProofOdd))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, _ []byte) error {
+			if len(k) == 0 {
+				return nil
+			}
+			switch k[0] {
+			case proofOddRawHour, proofOddReceiptHour:
+				locations++
+			case proofOddRawPointer, proofOddReceiptPointer:
+				pointers++
+			}
+			return nil
+		})
+	}); err != nil {
+		t.Fatalf("scan proof odd index: %v", err)
+	}
+	if locations == 0 || pointers == 0 {
+		t.Fatalf("proof odd index has %d location and %d pointer entries; the seeded legacy odd row did not reach the index, so damage kind 26 is a no-op", locations, pointers)
+	}
+	var kindSeed int64 = -1
+	for seed := int64(0); seed < 10000; seed++ {
+		if rand.New(rand.NewSource(seed)).Intn(27) == 26 {
+			kindSeed = seed
+			break
+		}
+	}
+	if kindSeed < 0 {
+		t.Fatal("no seed draws damage kind 26")
+	}
+	before := len(f.log)
+	applyIntegrityDamage(t, rand.New(rand.NewSource(kindSeed)), f)
+	applied := strings.Join(f.log[before:], "\n")
+	if strings.Contains(applied, "proof odd index not current") || strings.Contains(applied, "no proof odd entry to damage") {
+		t.Fatalf("damage kind 26 did not mutate the proof odd index: %s", applied)
+	}
+	if !strings.Contains(applied, "delete proof odd entry") && !strings.Contains(applied, "garbage proof odd entry") {
+		t.Fatalf("damage kind 26 did not reach a proof odd entry: %s", applied)
+	}
 }
 
 // TestClientScopedQuotaReadEqualsFullFuzz runs the differential harness on
@@ -639,6 +705,119 @@ func TestClientScopedQuotaReadEqualsFullFuzz(t *testing.T) {
 		t.Fatalf("the client-scoped enumeration never engaged in %d successful fast reads; the fast read still scans every raw row of the window", succeeded)
 	}
 	t.Logf("client-scoped read engaged in %d of %d successful fast reads", engaged, succeeded)
+}
+
+// TestClientScopedQuotaReadStableEqualsFullFuzz is the stable-price
+// (needsExact=false, non-empty client) counterpart of
+// TestClientScopedQuotaReadEqualsFullFuzz. The hourly-rollup path still
+// attaches the client scope to the integrity walks, but the exact-price fuzz
+// never drives that combination. For random databases with random damage the
+// scoped read must return the same verdict and cost units as the exhaustive
+// read. A failed read must have replayed the exhaustive read and counted
+// exactly one client_scope fallback. A successful read without a counted
+// fallback must have run the scope probe, and the same read with the scope
+// disabled must visit at least as many raw rows: the run must observe the
+// narrowing on a damage-free database at least once.
+func TestClientScopedQuotaReadStableEqualsFullFuzz(t *testing.T) {
+	productionIntegrityMode(t)
+	iterations := integrityFuzzIterations(20)
+	engaged, succeeded := 0, 0
+	narrowed, healthyNarrowed := 0, 0
+	from, to := integrityFuzzBase, integrityFuzzBase.Add(40*time.Hour)
+	clients := []string{"alice", "bob", "carol"}
+	for seed := 0; seed < iterations; seed++ {
+		rng := rand.New(rand.NewSource(int64(seed)))
+		damage := rng.Intn(5)
+		f := buildClientScopeFuzzDB(t, rng, damage)
+		if err := RunClassificationOnce(context.Background(), f.db); err != nil {
+			f.note("classify: %v", err)
+			continue
+		}
+		if !UsageIntegrityStats(f.db).Complete {
+			// Classification unavailable (overflow or a discarded attempt):
+			// the read is exhaustive and the probe never runs.
+			f.note("classification unavailable")
+			continue
+		}
+		type stableOutcome struct {
+			delta  int
+			units  []CostUnit
+			err    error
+			visits clientScopeVisits
+		}
+		outcomes := make(map[string]stableOutcome, len(clients))
+		for _, client := range clients {
+			before := clientScopeFallbacks(f.db)
+			visits, units, err := readClientScopeUnitsOpt(f.store, usage.Filter{ClientName: client, From: &from, To: &to}, replayCosts, false, clientScopeReadOptions{})
+			delta := clientScopeFallbacks(f.db) - before
+			outcomes[client] = stableOutcome{delta: delta, units: units, err: err, visits: visits}
+			// A failed read can only have replayed the exhaustive read: either
+			// the probe declined or the scoped attempt failed during its walks,
+			// and both count exactly one fallback. A successful read counts none
+			// only when it stayed scoped to a result; a declined probe still
+			// reads exhaustively and counts one.
+			if err != nil && delta != 1 {
+				t.Fatalf("seed %d read of %s failed with %d client_scope fallbacks, want exactly one replay\n damage: %v", seed, client, delta, f.log)
+			}
+			if delta != 0 && delta != 1 {
+				t.Fatalf("seed %d read of %s counted %d client_scope fallbacks, want 0 or 1", seed, client, delta)
+			}
+		}
+		// Narrowing evidence, collected before the exhaustive reference below
+		// drops the classification. Counting no fallback alone does not prove
+		// the scope attached: a read whose scope was never attempted (no
+		// usable classification for the transaction) also counts none. The
+		// probe counters prove the enumeration ran, and the same read with the
+		// scope disabled proves the walks were actually narrowed.
+		for _, client := range clients {
+			got := outcomes[client]
+			if got.err != nil || got.delta != 0 {
+				continue
+			}
+			if got.visits.hourStates == 0 {
+				t.Fatalf("seed %d read of %s counted no client_scope fallback but never ran the scope probe: a read whose scope was not attempted must not pass as engaged\n damage: %v", seed, client, f.log)
+			}
+			filter := usage.Filter{ClientName: client, From: &from, To: &to}
+			fullVisits, _, fullErr := readClientScopeUnitsOpt(f.store, filter, replayCosts, false, clientScopeReadOptions{disableScope: true})
+			if fullErr != nil {
+				t.Fatalf("seed %d read of %s finished scoped but the same read without the scope failed with %v: the scope skipped an object whose walk is not neutral\n damage: %v", seed, client, fullErr, f.log)
+			}
+			if got.visits.raw > fullVisits.raw {
+				t.Fatalf("seed %d read of %s visited %d raw rows scoped and %d without the scope: the scope widened the walk\n damage: %v", seed, client, got.visits.raw, fullVisits.raw, f.log)
+			}
+			if got.visits.raw < fullVisits.raw {
+				narrowed++
+				if damage == 0 {
+					healthyNarrowed++
+				}
+			}
+		}
+		for _, client := range clients {
+			got := outcomes[client]
+			filter := usage.Filter{ClientName: client, From: &from, To: &to}
+			clientScopeAssertSameVerdict(t, fmt.Sprintf("seed %d / %s", seed, client), got.units, got.err, func() ([]CostUnit, error) {
+				return clientScopeFullReference(t, f.db, filter, replayCosts, false)
+			})
+			if got.err == nil {
+				succeeded++
+				// Every zero-fallback success has a live probe above, so it
+				// finished on the scoped enumeration.
+				if got.delta == 0 {
+					engaged++
+				}
+			}
+		}
+	}
+	if succeeded == 0 {
+		t.Fatalf("no stable-price scoped read succeeded in %d seeds", iterations)
+	}
+	if engaged == 0 {
+		t.Fatalf("the client scope never attached in %d successful stable-price reads; the stable path still walks every client's window", succeeded)
+	}
+	if healthyNarrowed == 0 {
+		t.Fatalf("no damage-free seed proved the scoped stable read visits fewer raw rows than the same read without the scope (%d narrowing reads); the engaged counter would accept a silent full scan", narrowed)
+	}
+	t.Logf("stable-price client scope engaged in %d of %d successful reads; narrowed the raw walk in %d (%d on damage-free seeds)", engaged, succeeded, narrowed, healthyNarrowed)
 }
 
 // TestClientScopedQuotaReadFallbacks pins the explicit fallbacks: a receipt
@@ -934,9 +1113,12 @@ func TestClientScopedQuotaReadCancellationIsNotAFallback(t *testing.T) {
 }
 
 // TestClientScopedQuotaReadNotEligible pins the read shapes that never attach
-// a client scope: an empty client, a model filter, stable pricing and an
-// explicit legacy scan. None of them is a fallback, so no reason is counted,
-// and the verdict still equals today's exhaustive read.
+// a client scope: an empty client, a model filter and an explicit legacy scan.
+// Stable pricing is not one of them (Issue #211): it attaches the scope and is
+// covered by the stable-price tests. An ineligible shape must not run the
+// probe and must not count a client_scope fallback; the same read with the
+// scope disabled must visit exactly the same objects, so the verdict comes
+// from the exhaustive read either way.
 func TestClientScopedQuotaReadNotEligible(t *testing.T) {
 	productionIntegrityMode(t)
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
@@ -950,7 +1132,6 @@ func TestClientScopedQuotaReadNotEligible(t *testing.T) {
 	}{
 		{"empty client", usage.Filter{From: &from, To: &now}, exactCostTable{replayCosts}, true, clientScopeReadOptions{}},
 		{"model filter", usage.Filter{ClientName: "alice", Model: "executor", From: &from, To: &now}, exactCostTable{replayCosts}, true, clientScopeReadOptions{}},
-		{"stable pricing", usage.Filter{ClientName: "alice", From: &from, To: &now}, replayCosts, false, clientScopeReadOptions{}},
 		{"force legacy", usage.Filter{ClientName: "alice", From: &from, To: &now}, exactCostTable{replayCosts}, true, clientScopeReadOptions{forceLegacy: true}},
 	}
 	for _, tc := range cases {
@@ -961,12 +1142,35 @@ func TestClientScopedQuotaReadNotEligible(t *testing.T) {
 				t.Fatalf("classify: %v", err)
 			}
 			before := clientScopeFallbacks(db)
-			_, units, err := readClientScopeUnitsOpt(store, tc.filter, tc.resolver, tc.precise, tc.opts)
+			visits, units, readErr := readClientScopeUnitsOpt(store, tc.filter, tc.resolver, tc.precise, tc.opts)
 			if got := clientScopeFallbacks(db) - before; got != 0 {
 				t.Fatalf("ineligible read counted %d client_scope fallbacks, want 0: the shape never attempts the scope", got)
 			}
+			if visits.hourStates != 0 || visits.seeks != 0 || visits.emptyDecoded != 0 {
+				t.Fatalf("ineligible read ran the scope probe (%d hour states, %d range seeks, %d empty-client decodes), want none: the shape never attempts the scope", visits.hourStates, visits.seeks, visits.emptyDecoded)
+			}
+			noScopeOpts := tc.opts
+			noScopeOpts.disableScope = true
+			noScopeVisits, noScopeUnits, noScopeErr := readClientScopeUnitsOpt(store, tc.filter, tc.resolver, tc.precise, noScopeOpts)
+			if noScopeErr != nil {
+				t.Fatalf("scope-disabled read failed: %v", noScopeErr)
+			}
+			if visits != noScopeVisits {
+				t.Fatalf("ineligible read visits %+v differ from the scope-disabled read %+v: an ineligible shape must be exhaustive", visits, noScopeVisits)
+			}
+			wantJSON, err := jsonUnits(noScopeUnits)
+			if err != nil {
+				t.Fatalf("units: %v", err)
+			}
+			gotJSON, err := jsonUnits(units)
+			if err != nil {
+				t.Fatalf("units: %v", err)
+			}
+			if gotJSON != wantJSON {
+				t.Fatalf("ineligible read units differ from the scope-disabled read:\n got %s\nwant %s", gotJSON, wantJSON)
+			}
 			filter := tc.filter
-			clientScopeAssertSameVerdict(t, tc.name, units, err, func() ([]CostUnit, error) {
+			clientScopeAssertSameVerdict(t, tc.name, units, readErr, func() ([]CostUnit, error) {
 				return clientScopeFullReference(t, db, filter, tc.resolver, tc.precise)
 			})
 		})
@@ -1219,6 +1423,368 @@ func TestClientScopedQuotaReadEqualsFullShapes(t *testing.T) {
 					return clientScopeFullReference(t, db, filter, exactCostTable{replayCosts}, true)
 				})
 			}
+		})
+	}
+}
+
+// Stable-price (needsExact=false) client scope coverage. scopeValidation also
+// applies when usage.RequiresEventTimestamps is false: the units come from the
+// hourly rollups of the filter client, while the same client scope narrows the
+// integrity walks (quota cells, receipts, raw identity, unresolved evidence
+// and fresh roots). The exact-priced matrix above never drives that
+// combination, so the cases below judge it against the exhaustive read on
+// healthy and damaged stores: same error class ("QuotaStatus") and the same
+// CostUnits, field by field, through clientScopeAssertSameVerdict.
+
+// clientScopeStableResolvers returns the two whole-hour stable-price shapes: a
+// flat rate and a peak/off-peak schedule whose boundaries fall on whole UTC
+// hours. Both report RequiresEventTimestamps()==false, so readCostUnitsInScope
+// assembles hourly rollups instead of event-priced units.
+func clientScopeStableResolvers() []struct {
+	name     string
+	resolver usage.RateResolver
+} {
+	return []struct {
+		name     string
+		resolver usage.RateResolver
+	}{
+		{name: "flat hourly", resolver: replayCosts},
+		{
+			name: "peak/off-peak hourly",
+			resolver: pricing.NewResolver([]pricing.PricingTemplate{{
+				Target: "anthropic", Model: "executor", Mode: pricing.ModeSchedule, Timezone: "UTC",
+				Periods: []pricing.PricingPeriod{
+					{Weekdays: []int{1, 2, 3, 4, 5, 6, 7}, Start: "00:00", End: "08:00", Rates: usage.CostRates{InputPer1MTokens: 1}},
+					{Weekdays: []int{1, 2, 3, 4, 5, 6, 7}, Start: "08:00", End: "24:00", Rates: usage.CostRates{InputPer1MTokens: 4}},
+				},
+			}}, nil),
+		},
+	}
+}
+
+// clientScopeStableEvent builds a realtime row for the stable-price cases. The
+// input size keeps the expected costs exact integers.
+func clientScopeStableEvent(at time.Time, client string, id, inputTokens int64) usage.Event {
+	e := clientScopeSyntheticEvent(at, client, fmt.Sprintf("bbbbbbbb-bbbb-4bbb-8bbb-%012d", id))
+	e.InputTokens = inputTokens
+	e.OutputTokens = 0
+	return e
+}
+
+// buildClientScopeStableStore records events through the real write path
+// (raw, owner, index, hour state and both rollups) and completes the v2 client
+// index migration, so a later classification and probe have the state a live
+// writer leaves.
+func buildClientScopeStableStore(t *testing.T, now time.Time, events []usage.Event) (*UsageStore, *bolt.DB) {
+	t.Helper()
+	db := testDB(t)
+	store := NewUsageStore(db)
+	store.now = func() time.Time { return now }
+	if err := store.RecordBatch(events); err != nil {
+		t.Fatalf("RecordBatch: %v", err)
+	}
+	migrateClientIndex(t, db)
+	return store, db
+}
+
+// clientScopeRawRowCount counts the raw identity rows a full scan visits.
+func clientScopeRawRowCount(t *testing.T, db *bolt.DB) int {
+	t.Helper()
+	count := 0
+	if err := db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket([]byte(BucketUsageEvents))
+		if raw == nil {
+			return nil
+		}
+		return raw.ForEach(func(_, value []byte) error {
+			if value != nil {
+				count++
+			}
+			return nil
+		})
+	}); err != nil {
+		t.Fatalf("count raw rows: %v", err)
+	}
+	return count
+}
+
+type clientScopeStableCase struct {
+	name     string
+	resolver usage.RateResolver
+	events   []usage.Event
+	from, to time.Time
+	damage   func(t *testing.T, store *UsageStore, db *bolt.DB)
+	// skipClassification reads without a cached classification, so the
+	// scope cannot be proven and the read must stay exhaustive.
+	skipClassification bool
+	// requireProbeDecline asserts the probe itself declines before the read.
+	requireProbeDecline bool
+	wantDelta           int
+	wantErr             string  // "", "ok", "incomplete"
+	wantUnits           int     // -1: not asserted
+	wantCost            float64 // -1: not asserted
+	// wantRawVisits is the exact number of direct raw-walk visits; -1 skips
+	// it. With a scope the walk visits only the client's indexed rows plus
+	// the classification's anomalous rows.
+	wantRawVisits int
+	// wantFullScan asserts the direct walk visited every raw row, the
+	// fallback a missing classification takes.
+	wantFullScan bool
+}
+
+// TestClientScopedQuotaReadStableShapes runs the stable-price client-scope
+// cases named by the v1.11.1 review: whole-hour flat and peak/off-peak prices,
+// an empty quota owner, the window's from-1ns/from/to/to+1ns boundaries,
+// other clients' events, other clients' malformed quota keys, a missing
+// classification, a window-exempt raw row without an index entry
+// (rawUnindexed), a foreign proof naming an unknown scope and a receipt inside
+// the window. Every read must reproduce the exhaustive verdict and units.
+func TestClientScopedQuotaReadStableShapes(t *testing.T) {
+	productionIntegrityMode(t)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	from := now.Add(-24 * time.Hour)
+	resolvers := clientScopeStableResolvers()
+	for _, r := range resolvers {
+		// The matrix is about the stable hourly path: needsExact=false is what
+		// keeps the units rollup-based while the client scope narrows the walks.
+		if usage.RequiresEventTimestamps(r.resolver) || usage.RequiresEventTimestampsForModel(r.resolver, "executor") {
+			t.Fatalf("%s resolver requires event timestamps; the stable matrix must run on the hourly-rollup path", r.name)
+		}
+	}
+	flat, peak := resolvers[0].resolver, resolvers[1].resolver
+	day := now.AddDate(0, 0, -1).Truncate(24 * time.Hour)
+	peakFrom, peakTo := day, day.Add(24*time.Hour)
+	boundFrom, boundTo := day.Add(12*time.Hour), day.Add(14*time.Hour)
+
+	otherClientEvents := []usage.Event{
+		clientScopeStableEvent(now.Add(-20*time.Hour), "alice", 20, 1_000_000),
+		clientScopeStableEvent(now.Add(-19*time.Hour), "alice", 21, 1_000_000),
+	}
+	for i := 0; i < 30; i++ {
+		otherClientEvents = append(otherClientEvents, clientScopeStableEvent(now.Add(-time.Duration(2+i)*time.Hour), "bob", int64(30+i), 1_000_000))
+	}
+
+	receiptEvents := make([]usage.Event, 0, 10)
+	for i := 0; i < 10; i++ {
+		receiptEvents = append(receiptEvents, clientScopeStableEvent(now.Add(-time.Duration(1+i)*time.Hour), "alice", int64(70+i), 1_000_000))
+	}
+
+	missingClassEvents := []usage.Event{
+		clientScopeStableEvent(now.Add(-20*time.Hour), "alice", 90, 1_000_000),
+		clientScopeStableEvent(now.Add(-19*time.Hour), "alice", 91, 1_000_000),
+	}
+	for i := 0; i < 10; i++ {
+		missingClassEvents = append(missingClassEvents, clientScopeStableEvent(now.Add(-time.Duration(2+i)*time.Hour), "bob", int64(100+i), 1_000_000))
+	}
+
+	cases := []clientScopeStableCase{
+		{
+			name: "flat whole-hour price", resolver: flat,
+			events: []usage.Event{
+				clientScopeStableEvent(now.Add(-20*time.Hour), "alice", 1, 1_000_000),
+				clientScopeStableEvent(now.Add(-19*time.Hour), "alice", 2, 1_000_000),
+				clientScopeStableEvent(now.Add(-3*time.Hour), "bob", 3, 1_000_000),
+			},
+			from: from, to: now,
+			wantDelta: 0, wantErr: "ok", wantUnits: 2, wantCost: 4, wantRawVisits: 2,
+		},
+		{
+			name: "peak and off-peak whole-hour price", resolver: peak,
+			events: []usage.Event{
+				clientScopeStableEvent(day.Add(90*time.Minute), "alice", 4, 1_000_000),
+				clientScopeStableEvent(day.Add(9*time.Hour+30*time.Minute), "alice", 5, 1_000_000),
+			},
+			from: peakFrom, to: peakTo,
+			wantDelta: 0, wantErr: "ok", wantUnits: 2, wantCost: 5, wantRawVisits: 2,
+		},
+		{
+			name: "empty quota owner in window", resolver: flat,
+			events: []usage.Event{clientScopeStableEvent(now.Add(-5*time.Hour), "alice", 6, 1_000_000)},
+			from:   from, to: now,
+			damage: func(t *testing.T, _ *UsageStore, db *bolt.DB) {
+				at := now.Add(-2 * time.Hour)
+				clientScopeWriteIndexedRow(t, db, []byte(usageKey(at, "empty-owner-1")), clientScopeSyntheticEvent(at, "", "empty-owner-1"), true)
+			},
+			wantDelta: 1, wantErr: "incomplete", wantUnits: -1, wantCost: -1, wantRawVisits: -1,
+		},
+		{
+			// Hourly rollups include the whole hours of both bounds: from-1ns
+			// lies in the hour before from's and is excluded, while to+1ns
+			// shares to's hour and is included.
+			name: "hour boundary from-1ns from to to+1ns", resolver: flat,
+			events: []usage.Event{
+				clientScopeStableEvent(boundFrom.Add(-time.Nanosecond), "alice", 7, 1_000_000),
+				clientScopeStableEvent(boundFrom, "alice", 8, 1_000_000),
+				clientScopeStableEvent(boundTo, "alice", 9, 1_000_000),
+				clientScopeStableEvent(boundTo.Add(time.Nanosecond), "alice", 10, 1_000_000),
+			},
+			from: boundFrom, to: boundTo,
+			wantDelta: 0, wantErr: "ok", wantUnits: 2, wantCost: 6, wantRawVisits: 3,
+		},
+		{
+			name: "other client events stay out of the scoped walk", resolver: flat,
+			events: otherClientEvents,
+			from:   from, to: now,
+			wantDelta: 0, wantErr: "ok", wantUnits: 2, wantCost: 4, wantRawVisits: 2,
+		},
+		{
+			// quotaKeyInScope skips a key whose owner field reads as a known
+			// different client before it looks at the hour, so damage in
+			// another client's space cannot fail this read.
+			name: "foreign client malformed hour key with known owner stays skipped", resolver: flat,
+			events: []usage.Event{
+				clientScopeStableEvent(now.Add(-20*time.Hour), "alice", 40, 1_000_000),
+				clientScopeStableEvent(now.Add(-19*time.Hour), "alice", 41, 1_000_000),
+			},
+			from: from, to: now,
+			damage: func(t *testing.T, _ *UsageStore, db *bolt.DB) {
+				if err := db.Update(func(tx *bolt.Tx) error {
+					return tx.Bucket([]byte(BucketQuotaUsageAggHourly)).Put([]byte("bad-hour|bob|anthropic|executor"), []byte(`{}`))
+				}); err != nil {
+					t.Fatalf("inject foreign malformed quota key: %v", err)
+				}
+			},
+			wantDelta: 0, wantErr: "ok", wantUnits: 2, wantCost: 4, wantRawVisits: 2,
+		},
+		{
+			// An unreadable owner cannot be proven foreign, so the malformed
+			// key is relevant to every client: the scoped read must still
+			// report the exhaustive failure.
+			name: "malformed quota key with unreadable owner still errors", resolver: flat,
+			events: []usage.Event{
+				clientScopeStableEvent(now.Add(-20*time.Hour), "alice", 42, 1_000_000),
+				clientScopeStableEvent(now.Add(-19*time.Hour), "alice", 43, 1_000_000),
+			},
+			from: from, to: now,
+			damage: func(t *testing.T, _ *UsageStore, db *bolt.DB) {
+				if err := db.Update(func(tx *bolt.Tx) error {
+					return tx.Bucket([]byte(BucketQuotaUsageAggHourly)).Put([]byte("bad-hour|\xff|anthropic|executor"), []byte(`{}`))
+				}); err != nil {
+					t.Fatalf("inject unreadable-owner quota key: %v", err)
+				}
+			},
+			wantDelta: 1, wantErr: "incomplete", wantUnits: -1, wantCost: -1, wantRawVisits: -1,
+		},
+		{
+			name: "missing classification falls back to the exhaustive scan", resolver: flat,
+			events: missingClassEvents,
+			from:   from, to: now,
+			skipClassification: true,
+			wantDelta:          0, wantErr: "ok", wantUnits: 2, wantCost: 4, wantRawVisits: -1, wantFullScan: true,
+		},
+		{
+			// A consistent raw row with no index entry is exactly what
+			// rawUnindexed marks; the probe must decline instead of attaching
+			// a scope that skips it. The exhaustive read fails closed on the
+			// row's missing quota projection, so the replayed read must too.
+			name: "window-exempt raw row without index entry declines", resolver: flat,
+			events: []usage.Event{clientScopeStableEvent(now.Add(-5*time.Hour), "alice", 50, 1_000_000)},
+			from:   from, to: now,
+			damage: func(t *testing.T, _ *UsageStore, db *bolt.DB) {
+				at := now.Add(-2 * time.Hour)
+				e := clientScopeStableEvent(at, "alice", 51, 1_000_000)
+				clientScopePutRaw(t, db, []byte(usageKey(e.Timestamp, e.RecordID)), e)
+			},
+			requireProbeDecline: true,
+			// The exhaustive verdict may still read the row as backfillable;
+			// what matters is that the probe declined and the replay produced
+			// that identical verdict.
+			wantDelta: 1, wantErr: "", wantUnits: -1, wantCost: -1, wantRawVisits: -1,
+		},
+		{
+			// A readable proof naming "unknown" is relevant to every client,
+			// so the probe must decline even though the proof's client prefix
+			// never matches alice's.
+			name: "foreign proof naming an unknown scope declines", resolver: flat,
+			events: []usage.Event{
+				clientScopeStableEvent(now.Add(-20*time.Hour), "alice", 60, 1_000_000),
+				clientScopeStableEvent(now.Add(-19*time.Hour), "alice", 61, 1_000_000),
+			},
+			from: from, to: now,
+			damage: func(t *testing.T, _ *UsageStore, db *bolt.DB) {
+				at := now.Add(-2 * time.Hour).Truncate(time.Hour).Add(15 * time.Minute)
+				rawKey := []byte(usageKey(at, "foreign-scope-stable-1"))
+				clientScopeWriteIndexedRow(t, db, rawKey, clientScopeSyntheticEvent(at, "unknown", "foreign-scope-stable-1"), true)
+				if err := db.Update(func(tx *bolt.Tx) error {
+					return tx.Bucket([]byte(BucketUsageEventsByClient)).Put(clientScopeIndexKey("bob", at, rawKey), rawKey)
+				}); err != nil {
+					t.Fatalf("duplicate foreign index entry: %v", err)
+				}
+			},
+			requireProbeDecline: true,
+			wantDelta:           1, wantErr: "ok", wantUnits: 2, wantCost: 4, wantRawVisits: -1,
+		},
+		{
+			// Receipts inside the window may be the only evidence of pruned
+			// rows, so the probe must decline and the replay must decide.
+			name: "receipt inside the window declines", resolver: flat,
+			events: receiptEvents,
+			from:   from, to: now,
+			damage: func(t *testing.T, store *UsageStore, _ *bolt.DB) {
+				if _, err := store.PruneEventsBefore(now.Add(-90*time.Minute), 1000); err != nil {
+					t.Fatalf("prune: %v", err)
+				}
+			},
+			requireProbeDecline: true,
+			wantDelta:           1, wantErr: "", wantUnits: -1, wantCost: -1, wantRawVisits: -1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, db := buildClientScopeStableStore(t, now, tc.events)
+			if tc.damage != nil {
+				tc.damage(t, store, db)
+			}
+			if !tc.skipClassification {
+				if err := RunClassificationOnce(context.Background(), db); err != nil {
+					t.Fatalf("classify: %v", err)
+				}
+			}
+			if tc.requireProbeDecline && !clientScopeProbeDeclines(t, db, "alice", tc.from, tc.to) {
+				t.Fatalf("read of alice attached a client scope; this shape must be declined by the probe")
+			}
+			filter := usage.Filter{ClientName: "alice", From: &tc.from, To: &tc.to}
+			before := clientScopeFallbacks(db)
+			visits, units, err := readClientScopeUnitsOpt(store, filter, tc.resolver, false, clientScopeReadOptions{})
+			delta := clientScopeFallbacks(db) - before
+			if delta != tc.wantDelta {
+				t.Fatalf("read counted %d client_scope fallbacks, want %d (verdict: %v)", delta, tc.wantDelta, err)
+			}
+			switch tc.wantErr {
+			case "ok":
+				if err != nil {
+					t.Fatalf("read failed: %v", err)
+				}
+			case "incomplete":
+				if !errors.Is(err, ErrUsageHistoryIncomplete) {
+					t.Fatalf("read returned %v, want ErrUsageHistoryIncomplete", err)
+				}
+			}
+			if tc.wantUnits >= 0 {
+				if err != nil {
+					t.Fatalf("read failed: %v", err)
+				}
+				if len(units) != tc.wantUnits {
+					t.Fatalf("read returned %d units, want %d", len(units), tc.wantUnits)
+				}
+			}
+			if tc.wantCost >= 0 && costUnitTotal(units) != tc.wantCost {
+				t.Fatalf("read cost %v, want %v", costUnitTotal(units), tc.wantCost)
+			}
+			if tc.wantRawVisits >= 0 && visits.raw != tc.wantRawVisits {
+				t.Fatalf("direct raw walk visited %d rows, want %d: the stable scope must reach only the client's own rows", visits.raw, tc.wantRawVisits)
+			}
+			if tc.wantFullScan {
+				if all := clientScopeRawRowCount(t, db); visits.raw != all {
+					t.Fatalf("direct raw walk visited %d of %d rows; a missing classification must keep the exhaustive walk", visits.raw, all)
+				}
+			}
+			if visits.evidence != 0 {
+				t.Fatalf("stable read visited %d rows for the exact-price evidence map", visits.evidence)
+			}
+			clientScopeAssertSameVerdict(t, tc.name, units, err, func() ([]CostUnit, error) {
+				return clientScopeFullReference(t, db, filter, tc.resolver, false)
+			})
 		})
 	}
 }

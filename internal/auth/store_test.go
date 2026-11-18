@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
@@ -111,6 +112,10 @@ func TestStoreLoadFromConfigRejectsDuplicateAccessKey(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected duplicate access_key validation error")
+	}
+	// 哨兵错误：调用方（admin 写路径）据此返回 409，不依赖错误文案。
+	if !errors.Is(err, ErrDuplicateAccessKey) {
+		t.Fatalf("expected ErrDuplicateAccessKey, got %v", err)
 	}
 }
 
@@ -254,4 +259,81 @@ func TestLoadFromConfigLegacySignatureIgnoresPools(t *testing.T) {
 	if principal.CanAccess("member-a") {
 		t.Fatal("legacy load has no pool member index; pools grant nothing")
 	}
+}
+
+func TestNewStoreFromConfigBuildsDetachedStore(t *testing.T) {
+	targets := []config.Target{{Name: "member-a", Pool: "pool-1"}}
+	next, err := NewStoreFromConfig([]config.Client{{
+		Name:         "pooled",
+		AccessKey:    "key-pooled",
+		AllowedPools: []string{"pool-1"},
+	}}, targets)
+	if err != nil {
+		t.Fatalf("NewStoreFromConfig: %v", err)
+	}
+	principal, ok := next.Authenticate("key-pooled")
+	if !ok {
+		t.Fatal("expected the detached store to authenticate the new key")
+	}
+	if principal.AllowAll() || !principal.CanAccess("member-a") {
+		t.Fatal("expected pool expansion on the detached store")
+	}
+
+	if _, err := NewStoreFromConfig([]config.Client{{Name: "no-key"}}, nil); err == nil {
+		t.Fatal("expected a missing access_key to fail the build")
+	}
+}
+
+func TestStoreSwapPublishesNextWithoutMutatingIt(t *testing.T) {
+	live := NewStore()
+	if err := live.LoadFromConfig([]config.Client{{Name: "alpha", AccessKey: "key-alpha"}}); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	before, ok := live.Authenticate("key-alpha")
+	if !ok {
+		t.Fatal("expected old key before swap")
+	}
+
+	next, err := NewStoreFromConfig([]config.Client{{Name: "alpha", AccessKey: "key-beta"}}, nil)
+	if err != nil {
+		t.Fatalf("build next: %v", err)
+	}
+	nextPrincipal, ok := next.Authenticate("key-beta")
+	if !ok {
+		t.Fatal("expected new key on next store")
+	}
+
+	live.Swap(next)
+
+	if _, ok := live.Authenticate("key-alpha"); ok {
+		t.Fatal("old key must stop authenticating after swap")
+	}
+	published, ok := live.Authenticate("key-beta")
+	if !ok {
+		t.Fatal("new key must authenticate after swap")
+	}
+	// Swap 原样发布 next 的不可变 Principal 表：不复制、不改写 next。
+	if published != nextPrincipal {
+		t.Fatal("expected Swap to publish next's immutable principals directly")
+	}
+	if again, ok := next.Authenticate("key-beta"); !ok || again != nextPrincipal {
+		t.Fatal("next store must keep working after Swap")
+	}
+	// 旧 Principal 对象本身不受 Swap 影响（整表替换，不原地修改）。
+	if before.Name != "alpha" || before.AccessKey != "key-alpha" {
+		t.Fatalf("old principal changed after swap: %+v", before)
+	}
+}
+
+func TestStoreSwapNilIsSafe(t *testing.T) {
+	live := NewStore()
+	if err := live.LoadFromConfig([]config.Client{{Name: "alpha", AccessKey: "key-alpha"}}); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	live.Swap(nil)
+	if _, ok := live.Authenticate("key-alpha"); !ok {
+		t.Fatal("nil next must leave the current map untouched")
+	}
+	var nilStore *Store
+	nilStore.Swap(nil) // 不得 panic
 }

@@ -12,6 +12,10 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 )
 
+// ErrDuplicateAccessKey 标记配置中两个客户端共用同一 access_key。admin 写路径
+// 用 errors.Is 判定它并返回 409，不依赖错误文案。
+var ErrDuplicateAccessKey = errors.New("duplicate access_key")
+
 // Principal represents an authenticated client.
 type Principal struct {
 	Name           string
@@ -124,6 +128,32 @@ func (s *Store) LoadFromConfigWithPools(clients []config.Client, targets []confi
 	return s.loadFromConfig(clients, buildPoolMemberIndex(targets))
 }
 
+// NewStoreFromConfig 在全新的 Store 上构建客户端表，不触碰任何现有运行时 Store。
+// 调用方可先构建、再在落库成功后用 Swap 一次性发布：构建失败不会影响正在服务的鉴权表。
+func NewStoreFromConfig(clients []config.Client, targets []config.Target) (*Store, error) {
+	next := NewStore()
+	if err := next.LoadFromConfigWithPools(clients, targets); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// Swap 把 next 的不可变 Principal 表原样替换到 s（锁内赋值），供“落库后原子发布”。
+// next 由 NewStoreFromConfig 构建且不并发使用，其 principals 构建后不再修改。
+// Swap 对 nil 安全（包括 nil next 与 nil s）：此时保持当前表不变。
+func (s *Store) Swap(next *Store) {
+	if s == nil || next == nil {
+		return
+	}
+	next.mu.RLock()
+	clients := next.clients
+	next.mu.RUnlock()
+
+	s.mu.Lock()
+	s.clients = clients
+	s.mu.Unlock()
+}
+
 // buildPoolMemberIndex 构建 pool 名（小写）→ 成员 target 名集合（小写）索引。
 func buildPoolMemberIndex(targets []config.Target) map[string]map[string]struct{} {
 	if len(targets) == 0 {
@@ -162,7 +192,7 @@ func (s *Store) loadFromConfig(clients []config.Client, poolMembers map[string]m
 			return errors.New("client name must not be empty")
 		}
 		if prevOwner, exists := owners[key]; exists {
-			return fmt.Errorf("duplicate access_key for clients %q and %q", prevOwner, name)
+			return fmt.Errorf("%w for clients %q and %q", ErrDuplicateAccessKey, prevOwner, name)
 		}
 		owners[key] = name
 		ipRules, err := clientip.Parse(client.IPAddress)
