@@ -161,34 +161,42 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	response.Requests.ClientCanceled = metrics.TotalClientCanceled
 
 	// Issue #212：按 target 名（大小写不敏感）索引的上游生成性能估计；
-	// 无样本的 target 不输出该字段。
+	// 无样本的 target 不输出 model_performance。模型表满且无可回收条目时
+	// 丢弃的新模型计数单独暴露，便于发现只出现少量模型的目标触顶。
 	performanceByTarget := make(map[string][]proxy.TargetModelPerf)
+	droppedPerformanceByTarget := make(map[string]int64)
 	for _, perf := range h.proxyService.TargetPerformanceSnapshot(now) {
+		key := strings.ToLower(perf.Target)
+		if perf.DroppedModels > 0 {
+			droppedPerformanceByTarget[key] = perf.DroppedModels
+		}
 		if len(perf.Models) == 0 {
 			continue
 		}
-		performanceByTarget[strings.ToLower(perf.Target)] = perf.Models
+		performanceByTarget[key] = perf.Models
 	}
 	response.ShadowRouting = h.proxyService.ShadowRoutingSnapshot()
 
 	// S5 调度可观测（议题 #18）：每节点运行态含派生调度相位与亲和/熔断计数。
 	for _, ts := range statuses {
+		targetKey := strings.ToLower(ts.Name)
 		response.TargetsRuntime = append(response.TargetsRuntime, metricsTargetRuntime{
-			Name:             ts.Name,
-			InFlight:         ts.InFlight,
-			MaxConcurrency:   ts.Capacity,
-			Utilization:      ts.Utilization,
-			Paused:           ts.Paused,
-			Phase:            ts.Phase,
-			AffinityHits:     ts.AffinityHits,
-			BreakerTrips:     ts.BreakerTrips,
-			Window15m:        ts.Window15m,
-			MutedUntil:       ts.MutedUntil,
-			MuteReason:       ts.MuteReason,
-			MuteCode:         ts.MuteCode,
-			MuteStatus:       ts.MuteStatus,
-			ModelCooldowns:   modelCooldownsOrEmpty(ts.ModelCooldowns),
-			ModelPerformance: performanceByTarget[strings.ToLower(ts.Name)],
+			Name:                     ts.Name,
+			InFlight:                 ts.InFlight,
+			MaxConcurrency:           ts.Capacity,
+			Utilization:              ts.Utilization,
+			Paused:                   ts.Paused,
+			Phase:                    ts.Phase,
+			AffinityHits:             ts.AffinityHits,
+			BreakerTrips:             ts.BreakerTrips,
+			Window15m:                ts.Window15m,
+			MutedUntil:               ts.MutedUntil,
+			MuteReason:               ts.MuteReason,
+			MuteCode:                 ts.MuteCode,
+			MuteStatus:               ts.MuteStatus,
+			ModelCooldowns:           modelCooldownsOrEmpty(ts.ModelCooldowns),
+			ModelPerformance:         performanceByTarget[targetKey],
+			DroppedPerformanceModels: droppedPerformanceByTarget[targetKey],
 		})
 	}
 
@@ -224,6 +232,9 @@ type metricsTargetRuntime struct {
 	// ModelPerformance 只读：该 target 按上游模型的上游生成性能估计
 	// （Issue #212），无样本时省略。
 	ModelPerformance []proxy.TargetModelPerf `json:"model_performance,omitempty"`
+	// DroppedPerformanceModels 只读：模型表满且没有已衰减为零的条目可回收时
+	// 丢弃的新上游模型数（Issue #212）；为 0 时省略。
+	DroppedPerformanceModels int64 `json:"dropped_performance_models,omitempty"`
 }
 
 func (h *Handler) handleMe(w http.ResponseWriter, r *http.Request) {

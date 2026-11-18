@@ -19,6 +19,9 @@ const pickerValues = (element, attr) =>
   element.children.filter(child => child.dataset[attr]).map(child => child.dataset[attr]);
 const pickerText = (element, attr) =>
   element.children.filter(child => child.dataset[attr]).map(child => child.textContent).join(" ");
+const toasts = h => h.ids.get("toastContainer").children.map(c => c.textContent);
+const lastToast = h => toasts(h).at(-1);
+const writeCount = (h, method) => h.requests.filter(r => r.options?.method === method).length;
 
 function routes(clients = [{name: "c1", access_key: "k1", allowed_targets: [], allowed_pools: []}]) {
   return {
@@ -306,6 +309,7 @@ test("identical client markup is not written to the table twice", async () => {
     get: () => html,
     set: value => { writes++; html = value; },
   });
+  app.state.clientListStatus = "ready";
   app.state.clients = [{name: "c1", access_key: "k1"}];
   app.state.clientUsageStatus = "ready";
   app.state.clientUsage = {};
@@ -317,4 +321,148 @@ test("identical client markup is not written to the table twice", async () => {
   app.modules.clients.renderClients();
   assert.equal(writes, 2, "the empty state goes through the same dedupe");
   assert.match(html, /暂无客户端/);
+});
+
+// Issue 220: a list GET that failed is a state of its own. It must never read as an empty
+// list, and the pagination must not invent a total.
+test("a failed client list GET shows a retry row instead of an empty list", async () => {
+  let listDown = true;
+  const {h, app} = await boot({
+    routes: routes([]),
+    harness: {
+      fetch: (url, options, fallback) => url === "/admin/data/clients" && !options?.method && listDown
+        ? Promise.resolve(failure(503, "list offline"))
+        : fallback(url, options),
+    },
+  });
+  await app.modules.clients.loadClients();
+  await tick();
+  const body = h.ids.get("clientsTableBody").innerHTML;
+  assert.match(body, /加载客户端失败，请重试/);
+  assert.doesNotMatch(body, /暂无客户端/);
+  assert.match(h.ids.get("clientsPageInfo").textContent, /未知/);
+  assert.equal(h.ids.get("clientsPageNum").textContent, "0 / 0");
+  assert.equal(h.ids.get("clientsPrevBtn").disabled, true);
+  assert.equal(h.ids.get("clientsNextBtn").disabled, true);
+
+  listDown = false;
+  await app.modules.clients.loadClients();
+  await tick();
+  assert.match(h.ids.get("clientsTableBody").innerHTML, /暂无客户端/,
+    "only a successful load may show the empty state");
+  assert.equal(h.ids.get("clientsPageNum").textContent, "1 / 1");
+});
+
+// Issue 220: a create whose target/pool roster is still loading must not send an empty ACL
+// (the server reads that as "allow every target").
+test("a create waits for the target and pool roster before saving", async () => {
+  let releaseTargets = null;
+  const {h, app} = await boot({
+    routes: routes([]),
+    harness: {
+      fetch: (url, options, fallback) => url === "/admin/data/targets"
+        ? new Promise(resolve => { releaseTargets = () => resolve(json({targets: [{name: "t1"}]})); })
+        : fallback(url, options),
+    },
+  });
+  const opening = app.modules.clients.openClientModal(null);
+  field(h, "clientName").value = "newc";
+  field(h, "clientAccessKey").value = "nk";
+  await field(h, "saveClientBtn").listeners.click[0]();
+  assert.equal(writeCount(h, "POST"), 0, "no create while the picker data is pending");
+  assert.equal(lastToast(h), "目标/部署池/职级数据加载中，请稍后再保存");
+  assert.equal(field(h, "clientModal").classList.contains("open"), true);
+
+  releaseTargets();
+  await opening;
+  await field(h, "saveClientBtn").listeners.click[0]();
+  assert.equal(writeCount(h, "POST"), 1, "the create goes through once the data has arrived");
+  assert.equal(field(h, "clientModal").classList.contains("open"), false);
+});
+
+test("a create is blocked when the dictionaries failed to load", async () => {
+  const {h, app} = await boot({
+    routes: routes([]),
+    harness: {
+      fetch: (url, options, fallback) => url === "/admin/data/job-levels"
+        ? Promise.resolve(failure(503, "dicts offline"))
+        : fallback(url, options),
+    },
+  });
+  await app.modules.clients.openClientModal(null);
+  field(h, "clientName").value = "newc";
+  field(h, "clientAccessKey").value = "nk";
+  await field(h, "saveClientBtn").listeners.click[0]();
+  assert.equal(writeCount(h, "POST"), 0);
+  assert.equal(lastToast(h), "目标/部署池/职级数据加载中，请稍后再保存");
+  assert.ok(toasts(h).some(t => /加载客户端编辑数据失败/.test(t)), "the failed load is reported");
+  assert.match(field(h, "clientJobLevel").innerHTML, /职级加载失败/);
+  assert.match(field(h, "clientProjectGroup").innerHTML, /项目组加载失败/);
+});
+
+// Issue 220: while the dictionaries reload, the editor shows the loading state instead of
+// cached options that the fresh list may already have removed.
+test("a dictionary reload hides stale options until the fresh list lands", async () => {
+  let releaseDicts = null;
+  const {h, app} = await boot({
+    routes: routes([]),
+    harness: {
+      fetch: (url, options, fallback) => url === "/admin/data/job-levels"
+        ? new Promise(resolve => { releaseDicts = () => resolve(json({job_levels: ["L9"]})); })
+        : fallback(url, options),
+    },
+  });
+  app.state.jobLevels = ["L1"];
+  app.state.projectGroups = ["g1"];
+  app.state.dictsLoaded = false;
+  const opening = app.modules.clients.openClientModal(null);
+  assert.match(field(h, "clientJobLevel").innerHTML, /加载中/);
+  assert.doesNotMatch(field(h, "clientJobLevel").innerHTML, /L1/);
+  releaseDicts();
+  await opening;
+  assert.match(field(h, "clientJobLevel").innerHTML, /L9/);
+  assert.doesNotMatch(field(h, "clientProjectGroup").innerHTML, /加载中/,
+    "the settled dictionary state replaces the loading label");
+  assert.doesNotMatch(field(h, "clientJobLevel").innerHTML, /加载中/);
+});
+
+// Issue 220: an edit never has to trust an empty picker: it falls back to the saved record, so a
+// failed background refresh cannot silently widen the ACL or clear the saved job level.
+test("editing keeps the saved ACL and job level when the background data fails", async () => {
+  const saved = {
+    name: "c1",
+    access_key: "k1",
+    job_level: "L2",
+    project_group: "g1",
+    allowed_targets: ["saved-t"],
+    allowed_pools: ["saved-p"],
+  };
+  let failEditorData = false;
+  const {h, app} = await boot({
+    routes: routes([saved]),
+    harness: {
+      fetch: (url, options, fallback) => {
+        if (failEditorData && (
+          url === "/admin/data/targets" ||
+          url === "/admin/data/job-levels" ||
+          url === "/admin/data/project-groups"
+        )) return Promise.resolve(failure(503, "offline"));
+        return fallback(url, options);
+      },
+    },
+  });
+  await app.modules.clients.loadClients();
+  await tick();
+  field(h, "clientTargetTags").querySelectorAll = () => [];
+  field(h, "clientPoolTags").querySelectorAll = () => [];
+  failEditorData = true;
+  await app.modules.clients.openClientModal(app.state.clients[0]);
+  await field(h, "saveClientBtn").listeners.click[0]();
+  const put = h.requests.find(r => r.options?.method === "PUT" && r.url === "/admin/data/clients/c1");
+  assert.ok(put, "an edit still saves with the saved record as its fallback");
+  const payload = JSON.parse(put.options.body);
+  assert.deepEqual(payload.allowed_targets, ["saved-t"]);
+  assert.deepEqual(payload.allowed_pools, ["saved-p"]);
+  assert.equal(payload.job_level, "L2");
+  assert.equal(payload.project_group, "g1");
 });

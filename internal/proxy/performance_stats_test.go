@@ -72,6 +72,17 @@ func TestUsageStreamContentEventRecognition(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "chat legacy function_call",
+			parser: usageParser{protocol: config.ProtocolOpenAIChat},
+			wire:   "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"lookup\",\"arguments\":\"{\\\"a\\\":1}\"}}}]}\n\ndata: [DONE]\n\n",
+			want:   true,
+		},
+		{
+			name:   "chat legacy empty function_call",
+			parser: usageParser{protocol: config.ProtocolOpenAIChat},
+			wire:   "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"\",\"arguments\":\"\"}}}]}\n\ndata: [DONE]\n\n",
+		},
+		{
 			name:   "chat empty delta",
 			parser: usageParser{protocol: config.ProtocolOpenAIChat},
 			wire:   "data: {\"choices\":[{\"delta\":{}}]}\n\ndata: [DONE]\n\n",
@@ -137,6 +148,24 @@ func TestUsageStreamContentEventRecognition(t *testing.T) {
 			wire: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\"}]}}]}\n\n",
 		},
 		{
+			name: "gemini functionCall",
+			wire: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"q\":\"x\"}}}]}}]}\n\n",
+			want: true,
+		},
+		{
+			name: "gemini empty functionCall",
+			wire: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"\",\"args\":{}}}]}}]}\n\n",
+		},
+		{
+			name: "gemini inlineData",
+			wire: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"aGVsbG8=\"}}]}}]}\n\n",
+			want: true,
+		},
+		{
+			name: "gemini empty inlineData",
+			wire: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"\"}}]}}]}\n\n",
+		},
+		{
 			name: "gemini usage-only chunk",
 			wire: "data: {\"usageMetadata\":{\"promptTokenCount\":1}}\n\n",
 		},
@@ -168,6 +197,48 @@ func TestUsageStreamContentTimestampsTrackFirstAndLast(t *testing.T) {
 	}
 	if u.lastContentAt.Before(u.firstContentAt) {
 		t.Fatalf("last content before first: %v < %v", u.lastContentAt, u.firstContentAt)
+	}
+}
+
+// Pure tool streams still carry generated content (legacy Chat function_call,
+// Gemini functionCall/inlineData): they must sample TTFT and must never be
+// settled as a content-less cancellation penalty.
+func TestToolOnlyStreamSamplesTTFT(t *testing.T) {
+	cases := []struct {
+		name   string
+		parser usageParser
+		wire   string
+	}{
+		{
+			name:   "chat legacy function_call",
+			parser: usageParser{protocol: config.ProtocolOpenAIChat},
+			wire:   "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"lookup\",\"arguments\":\"{\\\"a\\\":1}\"}}}]}\n\ndata: [DONE]\n\n",
+		},
+		{
+			name: "gemini functionCall",
+			wire: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"q\":\"x\"}}}]}}]}\n\n",
+		},
+		{
+			name: "gemini inlineData",
+			wire: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"aGVsbG8=\"}}]}}]}\n\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			startedAt := time.Now()
+			u := observeWire(t, "text/event-stream", tc.parser, tc.wire)
+			if !u.contentSeen {
+				t.Fatal("a tool-only stream must count as a content event")
+			}
+			sample, ok := performanceSampleFrom(perfObservation{
+				Streaming: true, Status: http.StatusOK,
+				StartedAt: startedAt, FinishedAt: time.Now().Add(time.Second),
+				ContentSeen: u.contentSeen, FirstContentAt: u.firstContentAt, LastContentAt: u.lastContentAt,
+			})
+			if !ok || !sample.ttft || sample.penalty || sample.fastCancel {
+				t.Fatalf("sample = %+v ok=%v, want a TTFT sample without a penalty", sample, ok)
+			}
+		})
 	}
 }
 
@@ -355,6 +426,74 @@ func TestPerformanceDecayAndInsufficient(t *testing.T) {
 	}
 	if got := predictedCompletionMS(gone); got != perfPriorTTFTMs+float64(perfReferenceOutputTokens)/perfPriorTPS*1000 {
 		t.Fatalf("predicted completion = %v, want the neutral prior", got)
+	}
+}
+
+// A long idle gap underflows the decay factor to exactly zero (~89.5 hours
+// with a five-minute half-life): the stale counts must be cleared instead of
+// being kept forever, and a later sample must start from an empty histogram.
+func TestPerformanceDecayUnderflowClearsSamples(t *testing.T) {
+	p := newTargetPerformance()
+	base := time.Unix(1700000000, 0)
+	for i := 0; i < 5; i++ {
+		p.observe(perfTestSample("m", 800, 100, base))
+	}
+	p.observe(performanceSample{model: "m", fastCancel: true, at: base})
+
+	idle := base.Add(90 * time.Hour)
+	est, ok := p.estimate("m", idle, "t")
+	if !ok {
+		t.Fatal("observed model missing")
+	}
+	if est.TTFT.Samples != 0 || est.TPS.Samples != 0 || !est.Insufficient {
+		t.Fatalf("estimate after the underflowing gap = %+v, want zero samples and insufficient", est)
+	}
+	if est.FastCancelSamples != 0 {
+		t.Fatalf("fast cancel count survived the gap: %d", est.FastCancelSamples)
+	}
+
+	// The new sample must be the only one: stale counts may not resurface.
+	p.observe(perfTestSample("m", 800, 100, idle))
+	est, _ = p.estimate("m", idle, "t")
+	if est.TTFT.Samples != 1 || est.TPS.Samples != 1 {
+		t.Fatalf("samples after one new observation = %d/%d, want 1/1", est.TTFT.Samples, est.TPS.Samples)
+	}
+}
+
+// A full model table reclaims entries whose samples have fully decayed instead
+// of permanently dropping every new upstream model.
+func TestPerformanceModelTableReclaimsDecayedModels(t *testing.T) {
+	p := newTargetPerformance()
+	base := time.Unix(1700000000, 0)
+	for i := 0; i < maxPerfModels; i++ {
+		p.observe(perfTestSample("model-"+itoa(i), 500, 50, base))
+	}
+	idle := base.Add(90 * time.Hour)
+	p.observe(perfTestSample("new-model", 700, 80, idle))
+	if got := p.droppedCount(); got != 0 {
+		t.Fatalf("dropped = %d, want 0 after reclaiming fully decayed entries", got)
+	}
+	if est, ok := p.estimate("new-model", idle, "t"); !ok || est.TTFT.Samples != 1 {
+		t.Fatalf("new-model estimate = %+v ok=%v, want one sample", est, ok)
+	}
+	if _, ok := p.estimate("model-0", idle, "t"); ok {
+		t.Fatal("a fully decayed entry kept its table slot")
+	}
+}
+
+// Reclaiming never evicts an entry that still has live samples.
+func TestPerformanceModelTableKeepsLiveEntries(t *testing.T) {
+	p := newTargetPerformance()
+	base := time.Unix(1700000000, 0)
+	for i := 0; i < maxPerfModels; i++ {
+		p.observe(perfTestSample("model-"+itoa(i), 500, 50, base))
+	}
+	p.observe(perfTestSample("overflow", 500, 50, base.Add(time.Minute)))
+	if got := p.droppedCount(); got != 1 {
+		t.Fatalf("dropped = %d, want 1 while every slot still has live samples", got)
+	}
+	if _, ok := p.estimate("model-0", base.Add(time.Minute), "t"); !ok {
+		t.Fatal("a live entry was pruned")
 	}
 }
 

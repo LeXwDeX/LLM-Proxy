@@ -891,6 +891,10 @@ func projectObjectBody(decoder *json.Decoder, wrappers bool, probe *contentProbe
 			err = scanContentValue(decoder, probe)
 		case "tool_calls":
 			err = scanToolCalls(decoder, probe)
+		case "function_call":
+			// Legacy Chat tool delta: function_call carries name/arguments
+			// directly instead of a tool_calls array.
+			err = scanToolFunction(decoder, probe)
 		case "response", "message":
 			if wrappers {
 				payload[key], err = projectUsageObject(decoder, false, probe)
@@ -1006,27 +1010,118 @@ func scanPart(decoder *json.Decoder, probe *contentProbe) error {
 		if err != nil {
 			return err
 		}
-		if key, _ := token.(string); key != "text" {
-			if err = skipUsageValue(decoder); err != nil {
+		switch key, _ := token.(string); key {
+		case "text":
+			token, err = decoder.Token()
+			if err != nil {
 				return err
 			}
-			continue
+			if value, ok := token.(string); ok && value != "" {
+				probe.nonEmpty = true
+			}
+			if delim, ok := token.(json.Delim); ok {
+				if err = skipUsageComposite(decoder, delim); err != nil {
+					return err
+				}
+			}
+		case "functionCall":
+			err = scanGeminiFunctionCall(decoder, probe)
+		case "inlineData":
+			err = scanInlineData(decoder, probe)
+		default:
+			err = skipUsageValue(decoder)
 		}
+		if err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+// scanGeminiFunctionCall inspects a Gemini parts[].functionCall object: a
+// non-empty name or non-empty args (an object with members, or a string) is a
+// content event. The call itself is never retained.
+func scanGeminiFunctionCall(decoder *json.Decoder, probe *contentProbe) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('{') {
+		return skipUsageComposite(decoder, token)
+	}
+	for decoder.More() {
 		token, err = decoder.Token()
 		if err != nil {
 			return err
 		}
-		if value, ok := token.(string); ok && value != "" {
-			probe.nonEmpty = true
-		}
-		if delim, ok := token.(json.Delim); ok {
-			if err = skipUsageComposite(decoder, delim); err != nil {
+		switch key, _ := token.(string); key {
+		case "name", "args":
+			if err = scanNonEmptyValue(decoder, probe); err != nil {
+				return err
+			}
+		default:
+			if err = skipUsageValue(decoder); err != nil {
 				return err
 			}
 		}
 	}
 	_, err = decoder.Token()
 	return err
+}
+
+// scanInlineData inspects a Gemini parts[].inlineData object: a non-empty data
+// string is a content event (generated image or other inline bytes).
+func scanInlineData(decoder *json.Decoder, probe *contentProbe) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('{') {
+		return skipUsageComposite(decoder, token)
+	}
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return err
+		}
+		if key, _ := token.(string); key != "data" {
+			if err = skipUsageValue(decoder); err != nil {
+				return err
+			}
+			continue
+		}
+		if err = scanNonEmptyValue(decoder, probe); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+// scanNonEmptyValue marks content for a non-empty string or a non-empty
+// object/array, consuming the value without materializing it.
+func scanNonEmptyValue(decoder *json.Decoder, probe *contentProbe) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	switch tok := token.(type) {
+	case string:
+		if tok != "" {
+			probe.nonEmpty = true
+		}
+		return nil
+	case json.Delim:
+		if tok != '{' && tok != '[' {
+			return nil
+		}
+		if decoder.More() {
+			probe.nonEmpty = true
+		}
+		return skipUsageDepth(decoder, 1)
+	}
+	return nil
 }
 
 // scanToolCalls inspects Chat tool_calls without materializing argument text: a

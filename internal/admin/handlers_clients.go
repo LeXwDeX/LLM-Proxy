@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
@@ -46,6 +47,41 @@ func (h *Handler) evaluateClientQuota(name string) {
 	}
 }
 
+// authReloadAttempts 限制客户端写路径的同步 auth 重载次数：记录已落库后，
+// 瞬时失败不能让运行时 auth 表停留在旧数据，同时重试必须快速有界（
+// 调用方持有 configMu）。authReloadBaseDelay 是第 n 次重试前的退避基数。
+const (
+	authReloadAttempts  = 3
+	authReloadBaseDelay = 10 * time.Millisecond
+)
+
+// reloadAuthAfterClientWrite 以短退避重试 reloadAuthFromClientStore。调用方
+// 与首次重载一样持有 configMu，因此重试窗口内不会插入其他配置提交。
+func (h *Handler) reloadAuthAfterClientWrite() error {
+	var err error
+	for attempt := 1; attempt <= authReloadAttempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(time.Duration(attempt-1) * authReloadBaseDelay)
+		}
+		if err = h.reloadAuthFromClientStore(); err == nil {
+			return nil
+		}
+		h.logger.Warn("client write: auth reload attempt failed", "attempt", attempt, "max_attempts", authReloadAttempts, "error", err)
+	}
+	return err
+}
+
+// writeAuthReloadPending 报告已提交但 auth 重载最终失败的客户端写：记录已持久化，
+// 运行时 auth 表仍是旧数据（删除的 key 可能仍可认证、更新的 ACL/密钥尚未生效），
+// 因此不能谎报 2xx。前端据 code=auth_reload_pending 提示待重载。
+func (h *Handler) writeAuthReloadPending(w http.ResponseWriter, err error) {
+	h.logger.Error("client write: auth reload pending", "error", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{
+		"error": "client saved but auth reload pending",
+		"code":  "auth_reload_pending",
+	})
+}
+
 func (h *Handler) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 	req, ok := h.createClientLocked(w, r)
 	if !ok {
@@ -82,8 +118,8 @@ func (h *Handler) createClientLocked(w http.ResponseWriter, r *http.Request) (co
 		return req, false
 	}
 
-	if err := h.reloadAuthFromClientStore(); err != nil {
-		h.writeInternalError(w, "failed to apply auth store", err)
+	if err := h.reloadAuthAfterClientWrite(); err != nil {
+		h.writeAuthReloadPending(w, err)
 		return req, false
 	}
 	return req, true
@@ -132,8 +168,8 @@ func (h *Handler) updateClientLocked(w http.ResponseWriter, r *http.Request) (st
 		return name, req, false
 	}
 
-	if err := h.reloadAuthFromClientStore(); err != nil {
-		h.writeInternalError(w, "failed to apply auth store", err)
+	if err := h.reloadAuthAfterClientWrite(); err != nil {
+		h.writeAuthReloadPending(w, err)
 		return name, req, false
 	}
 	return name, req, true
@@ -183,8 +219,8 @@ func (h *Handler) deleteClientLocked(w http.ResponseWriter, r *http.Request) (st
 		return name, false
 	}
 
-	if err := h.reloadAuthFromClientStore(); err != nil {
-		h.writeInternalError(w, "failed to apply auth store", err)
+	if err := h.reloadAuthAfterClientWrite(); err != nil {
+		h.writeAuthReloadPending(w, err)
 		return name, false
 	}
 	return name, true

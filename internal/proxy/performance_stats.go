@@ -12,8 +12,9 @@
 //     调用方回退到中性先验，等价于自然向先验回归，无需显式清理过期条目。
 //
 // 半衰期 5 分钟；衰减只在记录与读取时按经过时间惰性计算，不启动后台任务。
-// 状态按 target 隔离（每 target 一把锁，不用全局锁），模型表上限 maxPerfModels，
-// 溢出丢弃并计数；模型键与 modelLimits 同一拼写口径（本次尝试实际转发的上游
+// 状态按 target 隔离（每 target 一把锁，不用全局锁），模型表上限 maxPerfModels；
+// 满表时先回收已衰减为零的旧条目，仍无空位才丢弃新模型并计数。模型键与
+// modelLimits 同一拼写口径（本次尝试实际转发的上游
 // 模型名，见 resolveUpstreamModel/ensureModelAllowed）。
 package proxy
 
@@ -254,11 +255,14 @@ func (h *decayedHistogram) decay(now time.Time) {
 	}
 	factor := decayFactor(now.Sub(h.updatedAt))
 	h.updatedAt = now
-	if h.total == 0 || factor == 0 {
+	if h.total == 0 {
 		return
 	}
 	h.total *= factor
-	if h.total < belowDecayFloor {
+	// A zero factor (about 89.5 hours without samples overflows math.Exp2) or
+	// an under-floor total is numerical noise: clear the buckets together with
+	// the total, or stale counts would survive the emptied state.
+	if factor == 0 || h.total < belowDecayFloor {
 		h.total = 0
 		for i := range h.counts {
 			h.counts[i] = 0
@@ -411,6 +415,17 @@ func (m *modelPerfState) snapshot(now time.Time) TargetModelPerf {
 	return est
 }
 
+// empty reports whether every decayed counter of the model has fallen to
+// zero, so its table slot can be reclaimed. It decays as it reads, like
+// snapshot; callers hold targetPerformance.mu.
+func (m *modelPerfState) empty(now time.Time) bool {
+	m.ttft.decay(now)
+	m.tps.decay(now)
+	m.penalty.decay(now)
+	return m.ttft.total == 0 && m.tps.total == 0 && m.penalty.total == 0 &&
+		m.fastCancel.get(now) == 0 && m.nonStreamSamples.get(now) == 0
+}
+
 // targetPerformance is one target's performance state. Its own mutex keeps the
 // hot path off any global lock; the model table is bounded.
 type targetPerformance struct {
@@ -432,6 +447,15 @@ func (p *targetPerformance) observe(sample performanceSample) {
 	defer p.mu.Unlock()
 	model := p.models[sample.model]
 	if model == nil {
+		if len(p.models) >= maxPerfModels {
+			// Reclaim slots whose samples have fully decayed before refusing
+			// a new model: expired entries must not occupy the table forever.
+			for name, state := range p.models {
+				if state.empty(at) {
+					delete(p.models, name)
+				}
+			}
+		}
 		if len(p.models) >= maxPerfModels {
 			p.dropped++
 			return

@@ -216,5 +216,107 @@ func TestMetricsPerformanceAndShadowRouting(t *testing.T) {
 		if _, ok := est["non_stream"].(map[string]any); !ok {
 			t.Fatalf("%s non_stream = %v", name, est["non_stream"])
 		}
+		// No model was ever dropped: the counter stays omitted.
+		if _, ok := runtimeEntry(body, name)["dropped_performance_models"]; ok {
+			t.Fatalf("%s unexpectedly reports dropped_performance_models", name)
+		}
 	}
+}
+
+// A target whose model table is full of live entries reports how many new
+// upstream models it dropped in targets_runtime[].
+func TestMetricsDroppedPerformanceModels(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"b\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":40,\"total_tokens\":43}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	// 33 distinct upstream models on one target: the bounded table holds 32 and
+	// must count the last one as dropped while it is still fresh.
+	const models = 33
+	mappings := make([]config.ModelMapping, 0, models)
+	for i := 0; i < models; i++ {
+		mappings = append(mappings, config.ModelMapping{Upstream: fmt.Sprintf("perf-model-%02d", i)})
+	}
+	tempDir := t.TempDir()
+	cfg := testConfig(tempDir, 0, nil)
+	cfg.Targets = []config.Target{{
+		Name: "perf-drop", EndpointType: "openai", Endpoint: upstream.URL, APIKey: "up-key",
+		UsageAdapter: config.UsageAdapterStandard, ModelMappings: mappings,
+	}}
+	configPath := filepath.Join(tempDir, "config.json")
+	writeConfigFile(t, configPath, cfg)
+
+	stores := setupTestStores(t, tempDir)
+	clients := []config.Client{{Name: "client-1", AccessKey: "k1"}}
+	seedClients(t, stores.clientStore, clients)
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
+	sessionManager := NewSessionManager(config.AdminSessionConfig{
+		Secret: "metrics-dropped-secret", CookieName: "metrics-dropped-session", TTLSeconds: 3600,
+	}, logger)
+	clientAuth := auth.NewStore()
+	if err := clientAuth.LoadFromConfig(clients); err != nil {
+		t.Fatalf("client auth: %v", err)
+	}
+	service, err := proxy.NewService(cfg, logger)
+	if err != nil {
+		t.Fatalf("proxy service: %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+	h := NewHandler(config.NewManager(configPath), clientAuth, service, stores.auditStore, stores.userStore,
+		stores.clientStore, stores.targetStore, stores.modelCostStore, stores.usageStore, nil, nil, nil, sessionManager, logger)
+
+	router := chi.NewRouter()
+	router.Use(sessionManager.Middleware)
+	router.Mount("/", h)
+	_, readonlyCookie, err := sessionManager.CreateSession("auditor", RoleReadonly)
+	if err != nil {
+		t.Fatalf("readonly session: %v", err)
+	}
+
+	for i := 0; i < models; i++ {
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/chat/completions",
+			strings.NewReader(fmt.Sprintf(`{"model":"perf-model-%02d","stream":true,"messages":[{"role":"user","content":"hi"}]}`, i)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer k1")
+		rec := httptest.NewRecorder()
+		auth.Middleware(clientAuth, logger)(service).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("proxy request %d: HTTP %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/metrics", nil)
+	req.AddCookie(readonlyCookie)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("readonly GET /metrics: HTTP %d %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /metrics: %v", err)
+	}
+	entries, ok := body["targets_runtime"].([]any)
+	if !ok {
+		t.Fatalf("targets_runtime missing: %v", body["targets_runtime"])
+	}
+	for _, raw := range entries {
+		entry := raw.(map[string]any)
+		if entry["name"] != "perf-drop" {
+			continue
+		}
+		if got, _ := entry["dropped_performance_models"].(float64); got != 1 {
+			t.Fatalf("dropped_performance_models = %v, want 1", entry["dropped_performance_models"])
+		}
+		served, ok := entry["model_performance"].([]any)
+		if !ok || len(served) != models-1 {
+			t.Fatalf("model_performance entries = %d, want %d", len(served), models-1)
+		}
+		return
+	}
+	t.Fatal("target perf-drop missing from targets_runtime")
 }
