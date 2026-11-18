@@ -1025,9 +1025,15 @@ func (s *Service) writeResponse(
 	}
 	var usageReader *usageStream
 	observeUsage := responseObservesUsage(resp)
+	usageObservation := s.usageObservationEnabled()
 	billingObservation := s.currentUsageRecorder() != nil || s.traceStore != nil
-	// The same gate as the request's br removal (usageObservationEnabled).
-	if observeUsage && s.usageObservationEnabled() {
+	// The observation pipe feeds usage persistence, traces, request statistics
+	// and the per-(target, upstream model) performance estimates (#212). Keep
+	// parsing when only the estimate wants it: it must not disappear just
+	// because no recorder or trace store is configured. One parser serves all
+	// consumers; the request's br removal still uses usageObservationEnabled
+	// alone, so forwarded bytes do not change here.
+	if observeUsage && (usageObservation || s.performanceObservationEnabled()) {
 		parser := newTargetUsageParser(r, target, upstreamModel, requestBody, resp.Request)
 		if config.NormalizeUsageAdapter(parser.usageAdapter) == usageAdapterMinimax && (resp.StatusCode != http.StatusOK || requestSchemaForPath(r.URL.Path) != config.RequestSchemaOpenAIChat) {
 			// MiniMax only defines base_resp on HTTP 200 ChatCompletionResp.
@@ -1052,6 +1058,9 @@ func (s *Service) writeResponse(
 	if copyErr == nil && claudeGuard != nil {
 		copyErr = claudeGuard.flush()
 	}
+	// Response completion instant for the performance estimates (#212): the
+	// attempt start (startedAt) plus this instant bound the copy window.
+	copyFinishedAt := time.Now()
 	claudeOverlap := errors.Is(copyErr, errClaudeStreamOverlap)
 	// A slow or vanished client is not upstream health evidence.
 	clientWriteFailed := copyErr != nil && !claudeOverlap && (writer.downstreamWriteFailed() || (claudeGuard != nil && claudeGuard.downstreamFailure))
@@ -1141,6 +1150,7 @@ func (s *Service) writeResponse(
 	}
 
 	var tokens usageTokens
+	noUsageCause := ""
 	if usageReader != nil {
 		usageReader.Close()
 		tokens = usageReader.tokens
@@ -1158,8 +1168,9 @@ func (s *Service) writeResponse(
 		// Without official final usage (client left, upstream interrupted,
 		// observation failed, ...) settle through the shared rule. The
 		// upstream is already canceled or finished; nothing is replayed.
-		if cause := responseNoUsageCause(r, usageReader, copyErr, clientWriteFailed, claudeOverlap); cause != "" && !(wsBody != nil && wsBody.local) {
-			settle := noOfficialUsage{cause: cause, usage: usageReader, tokens: tokens, model: upstreamModel, transport: clientGoneTransportHTTP, phase: clientGonePhaseStreaming}
+		noUsageCause = responseNoUsageCause(r, usageReader, copyErr, clientWriteFailed, claudeOverlap)
+		if noUsageCause != "" && !(wsBody != nil && wsBody.local) {
+			settle := noOfficialUsage{cause: noUsageCause, usage: usageReader, tokens: tokens, model: upstreamModel, transport: clientGoneTransportHTTP, phase: clientGonePhaseStreaming}
 			if usageReader.streaming {
 				settle.transport = clientGoneTransportSSE
 			}
@@ -1173,6 +1184,25 @@ func (s *Service) writeResponse(
 		}
 		if billingObservation {
 			s.recordParsedUsage(r, target, resp.StatusCode, upstreamModel, tokens, responseModel, state, keyIndex)
+		}
+		// Performance estimates (#212): observe only the real upstream
+		// response. They reuse this observation pipe and never alter usage,
+		// lifecycle or routing.
+		if s.performanceObservationEnabled() {
+			state.recordPerformance(upstreamModel, perfObservation{
+				StartedAt:      startedAt,
+				FinishedAt:     copyFinishedAt,
+				Streaming:      usageReader.streaming,
+				ContentSeen:    usageReader.contentSeen,
+				FirstContentAt: usageReader.firstContentAt,
+				LastContentAt:  usageReader.lastContentAt,
+				FinalUsage:     usageReader.finalSeen,
+				OutputTokens:   tokens.OutputTokens,
+				CopyErr:        copyErr,
+				NoUsageCause:   noUsageCause,
+				Status:         resp.StatusCode,
+				LocalResponse:  wsBody != nil && wsBody.local,
+			})
 		}
 	}
 
@@ -1194,7 +1224,10 @@ func (s *Service) writeResponse(
 		s.recordTrace(r, target, resp, requestBody, capturedBody(), startedAt, keyIndex, upstreamModel, tokens)
 	}
 	lifecycleFailed := accountLevelFailure
-	if usageReader != nil {
+	// The usage lifecycle keeps its existing semantics. A performance-only
+	// observation pipe (no usage recorder/trace/request statistics) must not
+	// change delivery outcomes.
+	if usageReader != nil && usageObservation {
 		// Missing usage is deliberately not a request failure. SSE requires a
 		// terminal even when EOF is clean at an event boundary.
 		lifecycleFailed = lifecycleFailed || (usageReader.streaming && (!usageReader.terminal || usageReader.err != nil)) || usageReader.responseStatus == "failed" || usageReader.responseStatus == "incomplete" || usageReader.responseStatus == "blocked"
@@ -1213,7 +1246,7 @@ func (s *Service) writeResponse(
 	delivered = outcome == requeststats.Success
 	if !delivered && wsBody == nil && !websocketResponse {
 		var terminal bool
-		if usageReader != nil {
+		if usageReader != nil && usageObservation {
 			terminal = usageReader.streaming && usageReader.terminal && usageReader.err == nil
 		}
 		delivered = responseDeliveredInFull(resp.StatusCode, resp.ContentLength, copied, copyErr, clientWriteFailed, lifecycleFailed, terminal)

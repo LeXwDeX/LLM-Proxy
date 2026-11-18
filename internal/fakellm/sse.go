@@ -22,6 +22,18 @@ func (c *call) startSSE() *sseStream {
 	f, _ := c.w.(http.Flusher)
 	st := &sseStream{c: c, flusher: f}
 	st.flush()
+	// The header is on the wire: a first-content delay now models a long
+	// time-to-first-token on an already open stream (DelayMS happens before the
+	// header). Cancellation aborts exactly like a delayed chunk.
+	if ms := c.sc.FirstContentDelayMS; ms > 0 {
+		select {
+		case <-time.After(time.Duration(ms) * time.Millisecond):
+		case <-c.r.Context().Done():
+			c.rec.Status, c.rec.Outcome = 200, "canceled"
+			c.s.record(c.rec)
+			panic(http.ErrAbortHandler)
+		}
+	}
 	return st
 }
 

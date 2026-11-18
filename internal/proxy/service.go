@@ -69,8 +69,17 @@ type Service struct {
 
 	// costPools 是生效策略为成本优先（routing_strategy 为 cost 或空值）的池名集合；rateSource 提供计价解析器。
 	// 二者任一缺失时选路退回现行负载均衡（见 cost_routing.go）。
-	costPools  atomic.Pointer[map[string]struct{}]
+	costPools atomic.Pointer[map[string]struct{}]
+	// loadPools 是生效策略为性能优先（routing_strategy 为 load）的池名集合。
+	// 它不参与选路，只供影子模式（shadow_routing.go）判断哪些池需要计数；
+	// 与 costPools 并列发布，二者互不影响。
+	loadPools  atomic.Pointer[map[string]struct{}]
 	rateSource atomic.Pointer[func() (usage.RateResolver, error)]
+
+	// shadowMu 只保护影子模式计数器，绝不与 Service.mu 或选路路径嵌套获取；
+	// 计数器按池聚合，读取走 ShadowRoutingSnapshot 的只读拷贝。
+	shadowMu       sync.Mutex
+	shadowCounters map[string]*shadowPoolCounter
 
 	// Trace store for DEBUG mode (nil = disabled)
 	traceStore *tracestore.Store
@@ -89,6 +98,9 @@ type Service struct {
 	startTime time.Time
 	activity  *activityTracker
 	rrCounter atomic.Uint64
+	// perfObservationDisabled turns off the per-(target, upstream model)
+	// performance estimates (#212). The zero value keeps observation enabled.
+	perfObservationDisabled atomic.Bool
 	// inProxyWaiting counts requests currently waiting in the proxy for a
 	// blocked target to recover (global cap inProxyWaitSlots).
 	inProxyWaiting atomic.Int64
@@ -465,6 +477,11 @@ func (s *Service) replaceTargetsLocked(parsed map[string]*targetState, order []*
 			}
 			next.inFlight = old.inFlight
 			next.runtimeWindow = old.runtimeWindow
+			// Performance estimates belong to the upstream connection identity:
+			// a forked generation starts empty; only non-identity edits share.
+			if next.targetHealthState == old.targetHealthState {
+				next.perf.Store(old.perf.Load())
+			}
 		}
 	}
 	if manager := s.admissionManager.Load(); manager != nil {
@@ -518,6 +535,7 @@ type PreparedConfig struct {
 	order     []*targetState
 	timeout   time.Duration
 	costPools map[string]struct{}
+	loadPools map[string]struct{}
 }
 
 // PrepareConfig 校验并构建新配置的运行时状态（物化池暂停、解析目标、请求超时），
@@ -543,6 +561,7 @@ func (s *Service) PrepareConfig(cfg *config.Config) (*PreparedConfig, error) {
 		order:     order,
 		timeout:   time.Duration(cfg.Server.RequestTimeoutSeconds) * time.Second,
 		costPools: costPoolSet(cfg.Pools),
+		loadPools: loadPoolSet(cfg.Pools),
 	}, nil
 }
 
@@ -557,6 +576,7 @@ func (s *Service) CommitPrepared(p *PreparedConfig) {
 	logResets()
 
 	s.costPools.Store(&p.costPools)
+	s.loadPools.Store(&p.loadPools)
 	s.setRequestTimeout(p.timeout)
 }
 
@@ -576,6 +596,7 @@ func (s *Service) applyConfig(cfg *config.Config, revision uint64) error {
 	logResets()
 
 	s.costPools.Store(&prepared.costPools)
+	s.loadPools.Store(&prepared.loadPools)
 	s.setRequestTimeout(prepared.timeout)
 	return nil
 }

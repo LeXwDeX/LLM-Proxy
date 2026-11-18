@@ -95,6 +95,20 @@ func costPoolSet(pools []config.DeploymentPool) map[string]struct{} {
 	return set
 }
 
+// loadPoolSet mirrors costPoolSet for the performance-priority strategy (load).
+// The two sets are independent: a load pool never enters cost routing, and the
+// set itself never influences selection — only the shadow routing observation
+// (#212) reads it.
+func loadPoolSet(pools []config.DeploymentPool) map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, p := range pools {
+		if config.NormalizeDeploymentPool(p).EffectiveRoutingStrategy() == config.PoolRoutingLoad {
+			set[strings.ToLower(strings.TrimSpace(p.Name))] = struct{}{}
+		}
+	}
+	return set
+}
+
 // newCostRanker returns nil whenever cost routing must not influence selection.
 func (s *Service) newCostRanker(alias string, now time.Time) *costRanker {
 	pools := s.costPools.Load()

@@ -8,6 +8,7 @@ import (
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
 	"io"
 	"strings"
+	"time"
 )
 
 // The observation pipe applies backpressure but never changes forwarded bytes.
@@ -52,6 +53,13 @@ type usageStream struct {
 	// choicesFinalUsage: a chunk carrying usage arrived when every choice
 	// seen so far had finished (sticky).
 	choicesFinalUsage bool
+	// Performance observation (#212): the first and last non-empty content
+	// events of the stream, used for TTFT/TPS estimates. Written by the
+	// observer goroutine, read after Close. Only content events read the clock;
+	// role-only/empty/usage-only frames do not.
+	contentSeen    bool
+	firstContentAt time.Time
+	lastContentAt  time.Time
 }
 
 func newUsageStream(contentType, encoding string, parser usageParser) *usageStream {
@@ -266,6 +274,28 @@ func (u *usageStream) observeLifecycle(payload map[string]any, event string) {
 		}
 	}
 }
+
+// observeContent records the first and last non-empty content event of the
+// stream for the per-target performance estimates (#212). It is O(1) and reads
+// the clock only on content events. content comes from the projection, which
+// detects a non-empty content delta without retaining the generated text.
+func (u *usageStream) observeContent(content bool) {
+	if !content {
+		return
+	}
+	now := time.Now()
+	if !u.contentSeen {
+		u.contentSeen = true
+		u.firstContentAt = now
+	}
+	u.lastContentAt = now
+}
+
+// contentProbe records that a projected payload carried a non-empty content
+// event. Only a boolean survives projection; text, reasoning and tool
+// arguments are discarded by the projection as before.
+type contentProbe struct{ nonEmpty bool }
+
 func mergeUsageSnapshot(dst, src map[string]any) {
 	for key, value := range src {
 		if nested, ok := value.(map[string]any); ok {
@@ -323,7 +353,7 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 				u.captureFinalUsage(u.officialFinalUsage())
 			}
 		} else {
-			payload, err := readUsagePayload(data)
+			payload, content, err := readUsagePayloadContent(data)
 			_, _ = io.Copy(io.Discard, data)
 			if err != nil && len(prefix) > 0 {
 				u.err = err
@@ -348,6 +378,7 @@ func (u *usageStream) readSSE(buffer *bufio.Reader, source *observationErrors) {
 						u.parser.protocol = config.ProtocolAnthropicMessages
 					}
 				}
+				u.observeContent(content)
 				m, model := usageEnvelope(payload)
 				previousFinalUsage := u.finalUsage
 				frameFinal := u.frameFinalUsage(payload, usageEvent, m)
@@ -754,11 +785,21 @@ func (r *sseEventReader) Read(p []byte) (int, error) {
 // Only retain the fields understood by parseUsageFromPayload. Other response
 // content is consumed token by token, including large arrays of generated data.
 func readUsagePayload(reader io.Reader) (map[string]any, error) {
+	payload, _, err := readUsagePayloadContent(reader)
+	return payload, err
+}
+
+// readUsagePayloadContent is readUsagePayload plus the content-event flag used
+// by the performance estimates (#212): content is true when the payload
+// carried a non-empty content delta. The generated text itself is still
+// discarded by the projection.
+func readUsagePayloadContent(reader io.Reader) (map[string]any, bool, error) {
 	decoder := json.NewDecoder(reader)
 	decoder.UseNumber()
-	payload, err := projectUsageObject(decoder, true)
+	probe := &contentProbe{}
+	payload, err := projectUsageObject(decoder, true, probe)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// Only JSON whitespace may follow the value. The trailing bytes are
 	// checked directly instead of with a final decoder.Token(): with the
@@ -769,9 +810,9 @@ func readUsagePayload(reader io.Reader) (map[string]any, error) {
 		err = expectJSONWhitespace(reader)
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return payload, nil
+	return payload, probe.nonEmpty, nil
 }
 
 var errUsagePayloadTrailingData = fmt.Errorf("unexpected data after usage payload")
@@ -799,7 +840,7 @@ func expectJSONWhitespace(reader io.Reader) error {
 	}
 }
 
-func projectUsageObject(decoder *json.Decoder, wrappers bool) (map[string]any, error) {
+func projectUsageObject(decoder *json.Decoder, wrappers bool, probe *contentProbe) (map[string]any, error) {
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, err
@@ -816,6 +857,13 @@ func projectUsageObject(decoder *json.Decoder, wrappers bool) (map[string]any, e
 		}
 		return nil, nil
 	}
+	return projectObjectBody(decoder, wrappers, probe)
+}
+
+// projectObjectBody consumes the members of an already-opened object. Generated
+// content keys are inspected for content events (#212) and discarded; only
+// billing/lifecycle evidence is retained in the payload.
+func projectObjectBody(decoder *json.Decoder, wrappers bool, probe *contentProbe) (map[string]any, error) {
 	payload := make(map[string]any)
 	for decoder.More() {
 		token, err := decoder.Token()
@@ -832,12 +880,20 @@ func projectUsageObject(decoder *json.Decoder, wrappers bool) (map[string]any, e
 		case "stop_details":
 			payload[key], err = projectClaudeStopDetails(decoder)
 		case "choices", "candidates":
-			payload[key], err = projectUsageArray(decoder)
+			payload[key], err = projectUsageArray(decoder, probe)
+		case "parts":
+			// Gemini candidate parts: scan for content events without building
+			// maps; parts are never usage evidence.
+			err = scanParts(decoder, probe)
 		case "delta":
-			payload[key], err = projectUsageObject(decoder, false)
+			payload[key], err = projectDelta(decoder, probe)
+		case "content", "reasoning_content", "reasoning", "text", "thinking", "partial_json":
+			err = scanContentValue(decoder, probe)
+		case "tool_calls":
+			err = scanToolCalls(decoder, probe)
 		case "response", "message":
 			if wrappers {
-				payload[key], err = projectUsageObject(decoder, false)
+				payload[key], err = projectUsageObject(decoder, false, probe)
 			} else {
 				err = skipUsageValue(decoder)
 			}
@@ -848,12 +904,233 @@ func projectUsageObject(decoder *json.Decoder, wrappers bool) (map[string]any, e
 			return nil, err
 		}
 	}
-	_, err = decoder.Token()
+	_, err := decoder.Token()
 	return payload, err
 }
 
+// projectDelta handles a delta member: Responses delta events carry a string,
+// Anthropic content_block_delta carries an object. A non-empty string delta is
+// a content event; the text is never retained.
+func projectDelta(decoder *json.Decoder, probe *contentProbe) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	switch tok := token.(type) {
+	case string:
+		if tok != "" {
+			probe.nonEmpty = true
+		}
+		return nil, nil
+	case json.Delim:
+		if tok == json.Delim('{') {
+			return projectObjectBody(decoder, false, probe)
+		}
+		return nil, skipUsageComposite(decoder, tok)
+	}
+	return nil, nil
+}
+
+// scanContentValue consumes one content-typed value. A non-empty string is a
+// content event; an object (Gemini candidate content) is inspected for parts.
+// Arrays (Anthropic message content is history, not a delta) are skipped.
+func scanContentValue(decoder *json.Decoder, probe *contentProbe) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	switch tok := token.(type) {
+	case string:
+		if tok != "" {
+			probe.nonEmpty = true
+		}
+		return nil
+	case json.Delim:
+		if tok == json.Delim('{') {
+			return scanCandidateContent(decoder, probe)
+		}
+		return skipUsageComposite(decoder, tok)
+	}
+	return nil
+}
+
+// scanCandidateContent walks a Gemini candidate content object for parts[].text
+// without allocating projected maps.
+func scanCandidateContent(decoder *json.Decoder, probe *contentProbe) error {
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if key, _ := token.(string); key == "parts" {
+			if err = scanParts(decoder, probe); err != nil {
+				return err
+			}
+			continue
+		}
+		if err = skipUsageValue(decoder); err != nil {
+			return err
+		}
+	}
+	_, err := decoder.Token()
+	return err
+}
+
+func scanParts(decoder *json.Decoder, probe *contentProbe) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('[') {
+		return skipUsageComposite(decoder, token)
+	}
+	for decoder.More() {
+		if err = scanPart(decoder, probe); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+func scanPart(decoder *json.Decoder, probe *contentProbe) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('{') {
+		return skipUsageComposite(decoder, token)
+	}
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return err
+		}
+		if key, _ := token.(string); key != "text" {
+			if err = skipUsageValue(decoder); err != nil {
+				return err
+			}
+			continue
+		}
+		token, err = decoder.Token()
+		if err != nil {
+			return err
+		}
+		if value, ok := token.(string); ok && value != "" {
+			probe.nonEmpty = true
+		}
+		if delim, ok := token.(json.Delim); ok {
+			if err = skipUsageComposite(decoder, delim); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+// scanToolCalls inspects Chat tool_calls without materializing argument text: a
+// non-empty function name or arguments fragment is content.
+func scanToolCalls(decoder *json.Decoder, probe *contentProbe) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('[') {
+		return skipUsageComposite(decoder, token)
+	}
+	for decoder.More() {
+		if err = scanToolCall(decoder, probe); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+func scanToolCall(decoder *json.Decoder, probe *contentProbe) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('{') {
+		return skipUsageComposite(decoder, token)
+	}
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return err
+		}
+		if key, _ := token.(string); key != "function" {
+			if err = skipUsageValue(decoder); err != nil {
+				return err
+			}
+			continue
+		}
+		if err = scanToolFunction(decoder, probe); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+func scanToolFunction(decoder *json.Decoder, probe *contentProbe) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('{') {
+		return skipUsageComposite(decoder, token)
+	}
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, _ := token.(string)
+		if key != "name" && key != "arguments" {
+			if err = skipUsageValue(decoder); err != nil {
+				return err
+			}
+			continue
+		}
+		token, err = decoder.Token()
+		if err != nil {
+			return err
+		}
+		if value, ok := token.(string); ok && value != "" {
+			probe.nonEmpty = true
+		}
+		if delim, ok := token.(json.Delim); ok {
+			if err = skipUsageComposite(decoder, delim); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
 func skipUsageValue(decoder *json.Decoder) error {
-	depth := 0
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	return skipUsageComposite(decoder, token)
+}
+
+// skipUsageComposite consumes the remainder of a composite value whose opening
+// delimiter was already read. Scalars are complete already.
+func skipUsageComposite(decoder *json.Decoder, token json.Token) error {
+	open, ok := token.(json.Delim)
+	if !ok || (open != '{' && open != '[') {
+		return nil
+	}
+	return skipUsageDepth(decoder, 1)
+}
+
+func skipUsageDepth(decoder *json.Decoder, depth int) error {
 	for {
 		token, err := decoder.Token()
 		if err != nil {
@@ -873,7 +1150,7 @@ func skipUsageValue(decoder *json.Decoder) error {
 	}
 }
 
-func projectUsageArray(decoder *json.Decoder) ([]any, error) {
+func projectUsageArray(decoder *json.Decoder, probe *contentProbe) ([]any, error) {
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, err
@@ -886,7 +1163,7 @@ func projectUsageArray(decoder *json.Decoder) ([]any, error) {
 	}
 	var list []any
 	for decoder.More() {
-		item, err := projectUsageObject(decoder, false)
+		item, err := projectUsageObject(decoder, false, probe)
 		if err != nil {
 			return nil, err
 		}

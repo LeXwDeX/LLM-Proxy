@@ -53,6 +53,10 @@ type Scenario struct {
 	// Timing.
 	DelayMS      int `json:"delay_ms,omitempty"`       // before the response header
 	ChunkDelayMS int `json:"chunk_delay_ms,omitempty"` // between stream events
+	// FirstContentDelayMS pauses after the SSE response header is flushed and
+	// before the first event: the stream is open but time-to-first-token is
+	// long. Streaming replies only; a non-stream reply ignores it.
+	FirstContentDelayMS int `json:"first_content_delay_ms,omitempty"`
 	// Abort drops the TCP connection without any response (a transport error).
 	Abort bool `json:"abort,omitempty"`
 
@@ -153,6 +157,7 @@ func (s *Scenario) merge(o *Scenario) {
 	str(&s.RetryAfter, o.RetryAfter)
 	num(&s.DelayMS, o.DelayMS)
 	num(&s.ChunkDelayMS, o.ChunkDelayMS)
+	num(&s.FirstContentDelayMS, o.FirstContentDelayMS)
 	flag(&s.Abort, o.Abort)
 	num(&s.Chunks, o.Chunks)
 	num(&s.CutAfter, o.CutAfter)
@@ -276,6 +281,8 @@ func ParseDirective(text string) (*Scenario, error) {
 			setInt(&s.DelayMS)
 		case "chunk_delay_ms", "chunk_delay":
 			setInt(&s.ChunkDelayMS)
+		case "first_content_delay_ms", "first_content_delay":
+			setInt(&s.FirstContentDelayMS)
 		case "abort":
 			err = boolean(&s.Abort)
 		case "chunks":

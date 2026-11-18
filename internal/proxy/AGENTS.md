@@ -35,7 +35,18 @@
 | `usage_protocol_*.go` / `usage_patch_*.go` / `usage_adapter*.go` / `usage_context.go` / `usage_stream.go` | 各协议用量解析、流式累计合并与用量上下文适配族 |
 | `provider_error_*.go` | 各 provider 错误响应的归一化识别（ breaker / keypool 依据） |
 | `target.go` / `runtime_window.go` | 目标运行时（熔断、暂停、`max_concurrency` 占用）与时段窗口 |
+| `performance_stats.go` | 按（target，上游模型原始拼写）的上游生成性能估计（#212）：TTFT/TPS 衰减直方图、取消/超时惩罚样本、非流式单独统计与只读快照；仅用于展示与影子比较，不参与选路 |
+| `shadow_routing.go` | 性能优先（`load`）池的影子选路对比（#212）：加权选路完成后只读比较“预计完成时间最小成员”与实际成员，累计 agree/disagree 与成员 share；不改变选路、不消费轮询计数 |
 | `inproxy_wait.go` | 代理内有界等待（`inProxyWait`/`inProxyWaitPlan`）、粘连持有判定（`stickyVerdictPending`）与终态响应（`writeStickyRetry`、`writeServiceUnavailable`）；见红线 1 的“代理内有界等待”“粘连终态仲裁”与红线 3 |
+
+## 上游性能估计与影子选路（Issue 212）
+
+- **状态所有权**：每个 `targetState` 持有 `perf atomic.Pointer[targetPerformance]`（`performance_stats.go`），按（target，上游模型原始拼写）惰性建表；每 target 一把自己的锁，不用全局锁，模型表上限 `maxPerfModels`（32），溢出丢弃并计数。非身份配置编辑沿用同一对象（`service.go` 仅在 `targetHealthState` 未分叉时 `next.perf.Store(old.perf.Load())`）；连接身份变化或目标恢复产生的新代际从空状态开始。状态只在进程内，不持久化，重启清零。`Service.SetPerformanceObservationEnabled` 可关闭观察，默认开启（`perfObservationDisabled` 零值即观察），仅供测试与诊断使用。
+- **采样点与热路径开销**：只在 `writeResponse` 收尾把 `perfObservation` 交给 `state.recordPerformance`。解析复用 usage、trace 与请求统计同一条观察管线：`forward.go` 的 `observeUsage && (usageObservation || s.performanceObservationEnabled())` 保证没有 recorder/trace 时性能估计仍能独立驱动解析。`usage_stream.go` 的内容探测只保留布尔值，O(1)，只在内容事件读时钟；直方图观察与惰性衰减按桶数线性，持 target 自己的锁；快照按模型数排序。性能观察不改变转发字节：`br` 的移除仍只由 `usageObservationEnabled` 决定。不要在这个路径上引入每请求的重量级分配或新的全局锁。
+- **采集口径**：TTFT 从 attempt 起点（`forwardRequest` 的 `startedAt`，含排队、选 key、拨号）到首个非空内容事件，仅流式；内容含思考/推理与工具参数，空 role-only、空 delta、usage-only 不计（探测见 `usage_stream.go` 的 `contentProbe`）。TPS = 最终输出 token ÷（末个内容事件 − 首个内容事件），仅流式、取得官方最终用量且输出 token ≥ `perfMinTPSOutputTokens`（32）；无最终用量的流式只记 TTFT。非流式成功响应只记总耗时与输出 token（`NonStreamPerf`），不并入流式分位。未收到首内容且等待 ≥ `perfCancelPenaltyWait`（3 秒）的取消/超时记入独立惩罚直方图，不进入 TTFT 分位；更快的取消只计 `fast_cancel_samples`。衰减半衰期 `perfDecayHalfLife`（5 分钟），有效样本 < `perfMinSamples`（5）标 `insufficient`，中性先验为 `perfPriorTTFTMs`（1000ms）与 `perfPriorTPS`（50 tok/s）。单一排序指标 `predictedCompletionMS` = TTFT + `perfReferenceOutputTokens`（512）/ TPS。
+- **影子分母**：只统计 `selectTargetTraced` 中未命中粘连的普通加权选路：`findAvailableRankedDetail` 仅在 `hadAffinity=false`（无粘连绑定）时接收 `countShadow=true`，且实际选中 target 所属池当前为性能优先（`loadPools`）、该池在本次已准入候选中至少 2 个成员、请求带客户端模型名、至少一个成员 TTFT 与 TPS 样本均充足。比较对象是池内 `predictedCompletionMS` 最小的成员（并列按名称小写、再按原拼写升序），只累加 agree/disagree 与成员 `shadow_selections`/`share`（share 由后端按池内比较总数计算）。不消费 `rrCounter`，不修改候选、负载、粘连、熔断与租约，不重新准入。不计数：显式 `X-Proxy-Target`、粘连命中、粘连目标不可用后的 failover 轮（`hadAffinity=true`）、半开/模型探针等非加权路径，以及成本优先池与其他池；全部成员样本不足时也不计数，与 #199 的“系数全取 1、退回负载均衡”一致。
+- **展示与不做项**：`/admin/metrics` 输出 `targets_runtime[].model_performance`（无样本省略）与顶层 `shadow_routing`（无统计省略）；管理端只渲染后端字段，不重算分位或 share。指标只用于展示与影子统计，不进入计费、额度、准入、重试/failover/熔断判据，也不改变客户端粘连；不新增对上游的探测请求，不引入外部存储或中间件。观测点在客户端写出之后，慢客户端会高估 TTFT；分位数是桶代表值，精度受桶宽限制。仅经 fakellm/e2e 验证，未经真实上游验收；#199 的性能分流未实施，需先记录真实流量的影子数据。
+- **守护用例与测试基座**：`performance_stats_test.go`、`shadow_routing_test.go`、`internal/admin/metrics_performance_test.go`、`internal/admin/ui/upstream-performance-212.test.cjs`。e2e 通过 fakellm 场景控制首个内容前的延迟（`first_content_delay_ms`，仅流式，非流式忽略）。改动采样点、直方图边界、样本门槛或影子分母须同步这些用例。
 
 ## 🚨 红线约束（有回归测试守护，禁止破坏）
 

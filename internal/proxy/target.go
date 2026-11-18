@@ -26,6 +26,10 @@ type targetState struct {
 	// 不受 mu 保护；acquireSlot/releaseSlot 成对推进，maxConcurrency 为 0 时仅计数不限流。
 	runtimeWindow *targetRuntimeWindow
 	inFlight      *atomic.Int64 // 同名目标的配置代际共享计数，旧响应关闭时仍释放当前容量
+	// perf 是按（target，上游模型原始拼写）分的性能估计（#212）。非身份配置
+	// 编辑沿用同一对象（replaceTargetsLocked 显式 transfer）；身份变化或恢复
+	// 时新代际从空状态开始。惰性创建，记录与读取只取本 target 的锁。
+	perf atomic.Pointer[targetPerformance]
 
 	keyPool *keyPool
 }
@@ -1061,7 +1065,7 @@ func (s *Service) selectTargetTraced(
 		}
 	}
 
-	candidate, lease, unavailableFallback, why := s.findAvailableRankedDetail(ranker, allowed, attempted, model, path, now)
+	candidate, lease, unavailableFallback, why := s.findAvailableRankedDetail(ranker, allowed, attempted, model, path, now, !hadAffinity)
 	if candidate != nil {
 		// 如果之前有粘连记录但目标不可用，这是 failover；否则是首次轮询。
 		kind := selectionRoundRobin
@@ -1279,9 +1283,21 @@ type blockage struct {
 	modelProbe *modelProbe
 }
 
+// admittedCandidate is one target that passed model/path/ACL/capacity/breaker
+// admission in findAvailableRankedDetail, with the weights snapshotted at
+// selection time so later passes never re-read concurrent counters.
+type admittedCandidate struct {
+	state       *targetState
+	keyCount    int     // 配置 key 数（兜底权重）
+	activeCount int     // 当前存活 key 数（首选权重）
+	load        float64 // 本次选择的负载快照，后续遍历不得重读并发计数
+}
+
 // findAvailableRankedDetail is findAvailableTargetWithModelRanked plus the
-// blockage summary used when nothing is admissible.
-func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[string]struct{}, attempted map[string]struct{}, model string, path string, now time.Time) (candidate *targetState, lease *probeLease, fallback *targetState, why blockage) {
+// blockage summary used when nothing is admissible. countShadow enables the
+// read-only shadow routing comparison (shadow_routing.go) for the weighted
+// selection; it never affects the returned candidate.
+func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[string]struct{}, attempted map[string]struct{}, model string, path string, now time.Time, countShadow bool) (candidate *targetState, lease *probeLease, fallback *targetState, why blockage) {
 	var mutedCandidate *targetState
 	var capacityFallback *targetState
 	var recoveringCandidate *targetState
@@ -1311,13 +1327,7 @@ func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[stri
 	// 第一步：过滤出支持该模型的 targets，并统计 key 权重
 	// 权重语义沿用「当前存活 key 数」：冷却/耗尽的 key 不再吸引流量，
 	// 避免请求被分配到实际无可用 key 的 target 后再触发重试。
-	type targetWithKeys struct {
-		state       *targetState
-		keyCount    int     // 配置 key 数（兜底权重）
-		activeCount int     // 当前存活 key 数（首选权重）
-		load        float64 // 本次选择的负载快照，后续遍历不得重读并发计数
-	}
-	var candidates []targetWithKeys
+	var candidates []admittedCandidate
 
 	for _, state := range snapshot {
 		if state == nil || state.Target() == nil {
@@ -1417,7 +1427,7 @@ func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[stri
 			activeCount = state.keyPool.activeKeyCount()
 		}
 
-		candidates = append(candidates, targetWithKeys{state: state, keyCount: keyCount, activeCount: activeCount, load: state.normalizedLoad()})
+		candidates = append(candidates, admittedCandidate{state: state, keyCount: keyCount, activeCount: activeCount, load: state.normalizedLoad()})
 	}
 
 	if len(candidates) == 0 {
@@ -1447,7 +1457,7 @@ func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[stri
 
 	// 成本分层（仅 cost 池）：在已准入候选中收窄到最便宜层，不减少可用性。
 	admitted := candidates
-	candidates = cheapestTier(ranker, candidates, func(c targetWithKeys) *targetState { return c.state })
+	candidates = cheapestTier(ranker, candidates, func(c admittedCandidate) *targetState { return c.state })
 	// Debug 诊断：以客户端别名为主列出已准入候选及各自上游名与估算价。
 	// 仅在启用 Debug 时计算结果，避免正常请求重复取价；全部候选都在
 	// cost 池外时不输出，避免只在别处配置了 cost 池的普通请求被噪声刷屏。
@@ -1504,6 +1514,11 @@ func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[stri
 		}
 		cumulative += w
 		if keyIndex < cumulative {
+			// 影子模式（#212）：实际选路已经确定，这里只做一次只读比较，
+			// 不消费 rrCounter、不改候选/负载/粘连/熔断/租约、不重新准入。
+			if countShadow {
+				s.observeShadowSelection(c.state, admitted, model, now)
+			}
 			return c.state, nil, nil, blockage{}
 		}
 	}
@@ -1512,7 +1527,7 @@ func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[stri
 }
 
 func (s *Service) findAvailableTargetWithModelRanked(ranker *costRanker, allowed map[string]struct{}, attempted map[string]struct{}, model string, path string, now time.Time) (*targetState, *probeLease, *targetState) {
-	candidate, lease, fallback, why := s.findAvailableRankedDetail(ranker, allowed, attempted, model, path, now)
+	candidate, lease, fallback, why := s.findAvailableRankedDetail(ranker, allowed, attempted, model, path, now, false)
 	if candidate != nil {
 		candidate.releaseModelProbe(why.modelProbe) // this form does not carry the lease through a request
 	}
