@@ -5,9 +5,12 @@ const { assembleAdminHTML } = require('../../../scripts/testing/assemble_admin_h
 const { pageSource } = require("../../../scripts/testing/admin_ui_scripts.cjs");
 
 const source = pageSource('clients');
+const helperStart = source.indexOf('  function clientSearchText(');
 const start = source.indexOf('  function renderClients() {');
 const end = source.indexOf('\n  }\n', start) + 4;
+assert(helperStart >= 0 && helperStart < start, 'client search helpers should precede renderClients');
 assert(start >= 0 && end > start, 'renderClients source should be present');
+const renderBlock = source.slice(helperStart, start) + source.slice(start, end);
 const styles = assembleAdminHTML();
 for (const rule of ['.client-target-list', '.client-target-direct-tag', '.client-target-pool-tag']) {
   assert(styles.includes(rule), 'stylesheet defines ' + rule);
@@ -24,9 +27,9 @@ function render(clients) {
   const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   // renderClients orders rows through the shared table sorter; the default order is all this test needs.
   const clientSort = {apply: (rows, compare) => rows.slice().sort(compare)};
-  const fn = new Function('document', 'state', 'esc', 'maskKey', 'totalTok', 'fmtNum', 'fmtMoney', 'poolDisplayName', 'targetPoolsAvailable', 'clientSort', 'clientRenderCache',
-    source.slice(start, end) + '\nreturn renderClients;');
-  fn(document, state, esc, () => '***', () => 0, () => '0', () => '$0', name => name, () => true, clientSort, {html: null})();
+  const fn = new Function('document', 'state', 'esc', 'maskKey', 'totalTok', 'fmtNum', 'fmtMoney', 'poolDisplayName', 'targetPoolsAvailable', 'clientSort', 'clientRenderCache', 'clientSearchTerm', 'clientPage', 'clientPageSize',
+    renderBlock + '\nreturn renderClients;');
+  fn(document, state, esc, () => '***', () => 0, () => '0', () => '$0', name => name, () => true, clientSort, {html: null}, '', 1, 50)();
   return tbody.innerHTML;
 }
 

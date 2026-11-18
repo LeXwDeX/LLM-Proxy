@@ -4,6 +4,13 @@
             <div class="panel-header">
               <h3>客户端管理</h3>
               <div class="btn-group">
+                <input type="search" class="form-control" id="clientsSearch" placeholder="搜索名称、IP、Access Key、职级…" aria-label="搜索客户端（名称、IP、Access Key、职级）" style="width:240px;">
+                <select class="form-control" id="clientsPageSize" aria-label="每页条数" title="每页条数" style="width:110px;">
+                  <option value="20">20 条/页</option>
+                  <option value="50" selected>50 条/页</option>
+                  <option value="100">100 条/页</option>
+                  <option value="200">200 条/页</option>
+                </select>
                 <button class="btn" id="refreshClientsBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"></path></svg>刷新</button>
                 <button class="btn btn-primary readonly-hide" id="newClientBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新增客户端</button>
               </div>
@@ -31,6 +38,14 @@
                    <tr class="empty-row"><td colspan="8">加载中...</td></tr>
                  </tbody>
               </table>
+            </div>
+            <div class="table-pagination" id="clientsPagination">
+              <span class="page-info" id="clientsPageInfo"></span>
+              <div class="btn-group">
+                <button class="btn btn-sm" id="clientsPrevBtn">◀ 上一页</button>
+                <span class="page-num" id="clientsPageNum"></span>
+                <button class="btn btn-sm" id="clientsNextBtn">下一页 ▶</button>
+              </div>
             </div>
           </div>
         </div>
