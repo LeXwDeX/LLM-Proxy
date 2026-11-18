@@ -779,6 +779,9 @@
     .quota-tab-panel { display: none; }
     .quota-tab-panel.active { display: block; }
     .table-wrap { overflow-x: auto; }
+    .table-pagination { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; padding:10px 16px; border-top:1px solid var(--card-border); }
+    .table-pagination .page-info { font-size:12px; color:var(--text-muted); }
+    .table-pagination .page-num { padding:0 12px; font-size:13px; font-variant-numeric:tabular-nums; }
 
     /* ===== Quota Summary Table ===== */
     .quota-summary-toolbar { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; padding:12px 16px; }

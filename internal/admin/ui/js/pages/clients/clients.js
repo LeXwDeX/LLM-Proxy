@@ -36,6 +36,15 @@ AdminApp.register("clients", function (app) {
   var clientUsageAbort = null;
   var clientUsageSeq = 0;
   var clientRenderCache = { html: null };
+  // In-page search and paging (Issue 210). The server keeps returning the full list; these only decide
+  // what is rendered. The search covers the fields the table already shows, and the page size is one
+  // of a fixed set with a fixed default.
+  var CLIENT_PAGE_SIZES = [20, 50, 100, 200];
+  var CLIENT_PAGE_SIZE_DEFAULT = 50;
+  var clientSearchTerm = "";
+  var clientSearchTimer = null;
+  var clientPage = 1;
+  var clientPageSize = CLIENT_PAGE_SIZE_DEFAULT;
   // "pending" | "ready" | "error": the 30-day aggregate is fetched separately from the list, so
   // the usage columns (and their sort values) have a state of their own.
   if (!state.clientUsageStatus) state.clientUsageStatus = "pending";
@@ -63,7 +72,11 @@ AdminApp.register("clients", function (app) {
       cost: function (c) { return clientUsageReady() ? Number(clientUsageOf(c).estimated_cost || 0) : null; },
       quota: function (c) { return c.job_level || ""; },
     },
-    onChange: function () { renderClients(); },
+    // A new sort order always starts from the first page of its result.
+    onChange: function () {
+      clientPage = 1;
+      renderClients();
+    },
   });
   clientSort.bind(document.getElementById("clientsTableHead"));
   ["input", "change"].forEach(function (eventName) {
@@ -176,19 +189,53 @@ AdminApp.register("clients", function (app) {
     }
     renderClients();
   }
+  // Case-insensitive contains match over the displayed fields: name, IP, masked Access Key, job level
+  // and the granted target/pool names. The raw Access Key is never a search source, because readonly
+  // users only receive the masked value.
+  function clientSearchText(c) {
+    var fields = [c.name, c.ip_address, c.access_key ? maskKey(c.access_key) : "", c.job_level];
+    if (Array.isArray(c.allowed_targets)) fields = fields.concat(c.allowed_targets);
+    if (Array.isArray(c.allowed_pools)) fields = fields.concat(c.allowed_pools);
+    return fields
+      .map(function (value) {
+        return String(value == null ? "" : value);
+      })
+      .join(" ")
+      .toLowerCase();
+  }
+  // Fixed render order (Issue 210): filter every client, sort the whole match set, then page. The sort
+  // therefore never applies to only the visible page.
+  function clientMatchedRows() {
+    var clients = Array.isArray(state.clients) ? state.clients : [];
+    var matched = clientSearchTerm
+      ? clients.filter(function (c) {
+        return clientSearchText(c).indexOf(clientSearchTerm) >= 0;
+      })
+      : clients;
+    return clientSort.apply(matched, function (a, b) {
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
+  }
   function renderClients() {
     var tb = document.getElementById("clientsTableBody");
     var usageStatus = state.clientUsageStatus || "pending";
     var usagePlaceholder =
       usageStatus === "ready" ? null : usageStatus === "error" ? "加载失败" : "加载中…";
+    var rows = clientMatchedRows();
+    var total = rows.length;
+    var pages = Math.max(1, Math.ceil(total / clientPageSize));
+    if (clientPage < 1) clientPage = 1;
+    if (clientPage > pages) clientPage = pages;
+    var start = (clientPage - 1) * clientPageSize;
+    var pageRows = rows.slice(start, start + clientPageSize);
     var html;
-    if (!state.clients.length) {
-      html = "<tr class='empty-row'><td colspan='8'>暂无客户端</td></tr>";
+    if (!total) {
+      var hasClients = Array.isArray(state.clients) && state.clients.length > 0;
+      html = clientSearchTerm && hasClients
+        ? "<tr class='empty-row'><td colspan='8'>无匹配客户端</td></tr>"
+        : "<tr class='empty-row'><td colspan='8'>暂无客户端</td></tr>";
     } else {
-      html = clientSort
-        .apply(state.clients, function (a, b) {
-          return String(a.name || "").localeCompare(String(b.name || ""));
-        })
+      html = pageRows
         .map(function (c) {
           var hasTargets =
             Array.isArray(c.allowed_targets) && c.allowed_targets.length > 0;
@@ -266,6 +313,18 @@ AdminApp.register("clients", function (app) {
         })
         .join("");
     }
+    var info = document.getElementById("clientsPageInfo");
+    if (info) {
+      info.textContent = total
+        ? "共 " + total + " 个客户端，第 " + (start + 1) + "~" + (start + pageRows.length) + " 条"
+        : "共 0 个客户端";
+    }
+    var num = document.getElementById("clientsPageNum");
+    if (num) num.textContent = clientPage + " / " + pages;
+    var prev = document.getElementById("clientsPrevBtn");
+    if (prev) prev.disabled = clientPage <= 1;
+    var next = document.getElementById("clientsNextBtn");
+    if (next) next.disabled = clientPage >= pages;
     // A refresh that returns the same markup (tab switch, manual refresh, usage arriving before
     // the list changes) must not swap the DOM under the pointer and keyboard focus.
     if (clientRenderCache.html === html) return;
@@ -616,6 +675,42 @@ AdminApp.register("clients", function (app) {
     .getElementById("retryClientsUsageBtn")
     .addEventListener("click", function () {
       loadClientUsage();
+    });
+  // Typing re-renders the whole table, so wait for a short pause instead of every keystroke; a
+  // changed search always starts from the first page of the new result.
+  var clientsSearchInput = document.getElementById("clientsSearch");
+  clientsSearchInput.addEventListener("input", function () {
+    if (clientSearchTimer !== null) clearTimeout(clientSearchTimer);
+    var value = clientsSearchInput.value;
+    clientSearchTimer = setTimeout(function () {
+      clientSearchTimer = null;
+      clientSearchTerm = String(value || "").trim().toLowerCase();
+      clientPage = 1;
+      renderClients();
+    }, 200);
+  });
+  document
+    .getElementById("clientsPageSize")
+    .addEventListener("change", function () {
+      var size = Number(document.getElementById("clientsPageSize").value);
+      clientPageSize = CLIENT_PAGE_SIZES.indexOf(size) >= 0 ? size : CLIENT_PAGE_SIZE_DEFAULT;
+      clientPage = 1;
+      renderClients();
+    });
+  document
+    .getElementById("clientsPrevBtn")
+    .addEventListener("click", function () {
+      if (clientPage <= 1) return;
+      clientPage--;
+      renderClients();
+    });
+  document
+    .getElementById("clientsNextBtn")
+    .addEventListener("click", function () {
+      var pages = Math.max(1, Math.ceil(clientMatchedRows().length / clientPageSize));
+      if (clientPage >= pages) return;
+      clientPage++;
+      renderClients();
     });
   document
     .getElementById("saveClientBtn")
