@@ -334,6 +334,26 @@ type AggregateResult struct {
 	ByTargetModel     []TargetModelTotals     `json:"by_target_model,omitempty"`
 }
 
+// ClientUsageSummary is the clients page's read-only per-client aggregate.
+// Source reports how it was computed: ClientUsageSourceAggregate means only
+// hourly rollups were read, so the numbers are exact for hour-aligned prices;
+// ClientUsageSourceEvents means the full report path had to read event-level
+// history (sub-hour pricing or model-group filtering) and Exact is false.
+type ClientUsageSummary struct {
+	From    time.Time         `json:"from"`
+	To      time.Time         `json:"to"`
+	Clients []DimensionTotals `json:"clients"`
+	Exact   bool              `json:"exact"`
+	Source  string            `json:"source"`
+}
+
+const (
+	// ClientUsageSourceAggregate is the lightweight hourly-rollup-only read.
+	ClientUsageSourceAggregate = "aggregate"
+	// ClientUsageSourceEvents is the full read that may need event timestamps.
+	ClientUsageSourceEvents = "events"
+)
+
 type ModelGroupModelTotals struct {
 	ModelGroup  string `json:"model_group"`
 	Model       string `json:"model"`

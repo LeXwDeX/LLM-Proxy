@@ -31,6 +31,7 @@ func (h *Handler) routes() chi.Router {
 		r.Get("/usage/events", h.handleListUsageEvents)
 		r.Get("/usage/unresolved", h.handleListUsageUnresolved)
 		r.Get("/usage/aggregate", h.cachedReport(h.handleAggregateUsage))
+		r.Get("/usage/by-client", h.cachedReportTTL(clientUsageCacheTTL, h.handleUsageByClient))
 		r.Get("/usage/summary", h.handleUsageSummary)
 		r.Get("/usage/model-groups", h.handleUsageModelGroups)
 		r.Get("/audit", h.handleListAudit)

@@ -137,6 +137,7 @@ func TestUsageReadHandlersStopOnClientAbort(t *testing.T) {
 	for _, path := range []string{
 		"/data/usage/aggregate?group_by=hour&from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z",
 		"/data/usage/aggregate?group_by=hour&model_group=g&from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z",
+		"/data/usage/by-client?from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z",
 		"/data/usage/summary",
 		"/api/overview",
 	} {
