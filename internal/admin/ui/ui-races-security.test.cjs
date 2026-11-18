@@ -170,6 +170,69 @@ test("a malformed pool roster is unknown and cannot erase a saved grant", async 
   assert.equal(tags.children.find(e => e.dataset.pool === "saved").dataset.selected, "1");
 });
 
+// Issue 220: the two pickers keep separate "user clicked here" markers. Clicking one never
+// freezes the other, and the clicked picker keeps its selection when late data arrives.
+test("clicking a pool tag keeps that picker while late targets still fill", async () => {
+  let releaseTargets = null;
+  const h = createHarness({
+    routes: {
+      "/admin/data/targets": {targets: [{name: "t1"}]},
+      "/admin/data/pools": {pools: [{name: "p1"}, {name: "p2"}]},
+    },
+    fetch: (url, options, fallback) => url === "/admin/data/targets"
+      ? new Promise(resolve => { releaseTargets = resolve; })
+      : fallback(url, options),
+  });
+  const app = await h.run();
+  app.state.targets = [];
+  app.state.pools = [{name: "p1"}];
+  const opening = app.modules.clients.openClientModal(null);
+  const poolTag = h.ids.get("clientPoolTags").children.find(el => el.dataset.pool === "p1");
+  assert.ok(poolTag, "the cached pool roster is shown at open");
+  poolTag.listeners.click[0].call(poolTag);
+  h.ids.get("clientModal").listeners.click[0]({target: poolTag});
+  assert.equal(poolTag.dataset.selected, "1");
+
+  releaseTargets(response({targets: [{name: "t1"}]}));
+  await opening;
+  assert.deepEqual(h.ids.get("clientTargetTags").children.map(el => el.dataset.target), ["t1"],
+    "the untouched target picker still takes the roster that arrived");
+  const pools = h.ids.get("clientPoolTags").children.filter(el => el.dataset.pool);
+  const clicked = pools.find(el => el.dataset.pool === "p1");
+  assert.ok(clicked, "the clicked pool is still shown");
+  assert.equal(clicked.dataset.selected, "1",
+    "late pool data never overwrites the clicked pool selection");
+});
+
+test("clicking a target tag still lets the pool picker report its own failure", async () => {
+  let failTargets = false;
+  const h = createHarness({
+    routes: {"/admin/data/targets": {targets: [{name: "t1"}]}, "/admin/data/pools": {pools: []}},
+    fetch: (url, options, fallback) => url === "/admin/data/targets" && failTargets
+      ? Promise.resolve({ok: false, status: 503, text: async () => '{"error":"offline"}'})
+      : fallback(url, options),
+  });
+  const app = await h.run();
+  app.state.targets = [{name: "t1"}];
+  app.state.pools = [];
+  failTargets = true;
+  const opening = app.modules.clients.openClientModal(null);
+  const targetTag = h.ids.get("clientTargetTags").children.find(el => el.dataset.target === "t1");
+  assert.ok(targetTag, "the cached target roster is shown at open");
+  assert.match(h.ids.get("clientPoolTags").innerHTML, /加载中/);
+  targetTag.listeners.click[0].call(targetTag);
+  h.ids.get("clientModal").listeners.click[0]({target: targetTag});
+  assert.equal(targetTag.dataset.selected, "1");
+
+  await opening;
+  const targets = h.ids.get("clientTargetTags").children.filter(el => el.dataset.target);
+  assert.deepEqual(targets.map(el => el.dataset.target), ["t1"],
+    "late target data never rewrites the clicked target picker");
+  assert.equal(targets[0].dataset.selected, "1", "the clicked target stays selected");
+  assert.match(h.ids.get("clientPoolTags").innerHTML, /部署池加载失败/,
+    "the untouched pool picker still receives the failure state");
+});
+
 test("single key with a null runtime index remains saveable by its key ID", async () => {
   const saved = {name: "single", endpoint_type: "provider-new", endpoint: "https://fixture.invalid",
     usage_adapter: "standard", has_api_key: true, api_key: "long...1234", api_keys: [],

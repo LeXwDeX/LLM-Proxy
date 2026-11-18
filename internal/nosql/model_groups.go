@@ -158,6 +158,7 @@ func (s *ModelGroupStore) Create(group config.ModelGroup) error {
 		return err
 	}
 	group.Name = strings.TrimSpace(group.Name)
+	group.Bindings = normalizeQuotaGroupBindings(group.Bindings)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(BucketModelGroups))
 		key := []byte(strings.ToLower(group.Name))
@@ -183,6 +184,7 @@ func (s *ModelGroupStore) Update(name string, group config.ModelGroup) ([]string
 		return nil, err
 	}
 	group.Name = strings.TrimSpace(group.Name)
+	group.Bindings = normalizeQuotaGroupBindings(group.Bindings)
 	oldKey := []byte(strings.ToLower(strings.TrimSpace(name)))
 	key := []byte(strings.ToLower(group.Name))
 	var renamedClients []string
@@ -363,6 +365,23 @@ func ensureBindingsUnique(tx *bolt.Tx, selfName string, group config.ModelGroup)
 		}
 		return nil
 	})
+}
+
+// normalizeQuotaGroupBindings trims target/model on catalog bindings so newly
+// written rows never carry surrounding whitespace. Existing rows with
+// whitespace stay usable: quota matching trims binding fields at compare time.
+func normalizeQuotaGroupBindings(bindings []config.QuotaGroupBinding) []config.QuotaGroupBinding {
+	if bindings == nil {
+		return nil
+	}
+	out := make([]config.QuotaGroupBinding, len(bindings))
+	for i, binding := range bindings {
+		out[i] = config.QuotaGroupBinding{
+			Target: strings.TrimSpace(binding.Target),
+			Model:  strings.TrimSpace(binding.Model),
+		}
+	}
+	return out
 }
 
 func validateModelGroup(group config.ModelGroup) error {

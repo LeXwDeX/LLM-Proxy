@@ -67,6 +67,7 @@ type GroupStatus struct {
 	RankCoefficients map[string]float64    `json:"rank_coefficients,omitempty"` // 职级系数（daily/weekly/monthly）
 	BaseLimits       map[string]float64    `json:"base_limits,omitempty"`       // 组基数（额度策略里的日/周/月额度）
 	InPlan           bool                  `json:"in_plan,omitempty"`           // 是否客户端 plan 显式添加（company_general 兜底为 false）
+	Bound            bool                  `json:"bound"`                       // 该组是否至少绑定一个 (target, model)；false = 不匹配任何路由，请求会被拒绝
 	Quotas           map[string]QuotaUsage `json:"quotas"`
 	Exceeded         *ExceededInfo         `json:"exceeded,omitempty"`
 }

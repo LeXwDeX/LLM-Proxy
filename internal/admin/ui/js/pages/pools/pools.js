@@ -23,6 +23,10 @@ AdminApp.register("pools", function (app) {
   // guard drops responses that arrive after a refresh or another pool opened.
   var expandedCostPool = "";
   var costPreviewSequence = 0;
+  // Set while the last roster refresh failed. state.pools keeps the previous list
+  // (target editing still needs those names), so a redraw such as a header sort
+  // must not present it as current data; only a successful refresh clears this.
+  var poolListError = "";
   /* ===== Pools ===== */
   function poolRoutingStrategy(pool) {
     return (pool && pool.routing_strategy) || state.schema.defaults.pool_routing_strategy;
@@ -619,20 +623,31 @@ AdminApp.register("pools", function (app) {
     }
   }
   function renderPoolsLoadError(message) {
+    poolListError = message || "部署池数据不可用";
     document.getElementById("poolsTableBody").innerHTML =
       "<tr class='empty-row'><td colspan='5'>加载失败: " +
-      esc(message) +
+      esc(poolListError) +
       "。请点击「刷新」重试。</td></tr>";
   }
   function onSchedulingRefresh() {
     // Any roster refresh invalidates the open detail row and in-flight preview.
     expandedCostPool = "";
     costPreviewSequence++;
-    if (targetPoolsAvailable()) renderPools();
-    else renderPoolsLoadError("部署池数据不可用");
+    if (targetPoolsAvailable()) {
+      poolListError = "";
+      renderPools();
+    } else {
+      renderPoolsLoadError("部署池数据不可用");
+    }
   }
   function renderPools() {
     var tb = document.getElementById("poolsTableBody");
+    // Sorting and the cost-preview toggles redraw through here. When the roster
+    // is unavailable the cached state.pools must not reappear as current rows.
+    if (poolListError && !targetPoolsAvailable()) {
+      renderPoolsLoadError(poolListError);
+      return;
+    }
     if (!state.pools || !state.pools.length) {
       tb.innerHTML =
         "<tr class='empty-row'><td colspan='5'>暂无部署池</td></tr>";

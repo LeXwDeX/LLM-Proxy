@@ -1040,6 +1040,7 @@ func (m *Manager) Status(clientName string) QuotaStatus {
 				RankCoefficients: gc.rankCoefficients,
 				BaseLimits:       gc.baseLimits,
 				InPlan:           gc.inPlan,
+				Bound:            len(gc.bindings) > 0,
 				Quotas:           make(map[string]QuotaUsage),
 			}
 			for dim, dc := range gc.dims {
@@ -1201,17 +1202,22 @@ func quotaGroupForCounters(cc *clientCounters, target, model string) (string, fl
 	if cc == nil {
 		return "", 0, false
 	}
-	target, model = strings.ToLower(strings.TrimSpace(target)), strings.ToLower(strings.TrimSpace(model))
+	// Compare trimmed fields on both sides: catalog rows persisted before
+	// write-side normalization (or edited directly in the DB) may carry
+	// surrounding whitespace, and a whitespace-only Model must still count as a
+	// whole-target binding rather than an exact one.
+	target, model = strings.TrimSpace(target), strings.TrimSpace(model)
 	for name, group := range cc.groups {
 		for _, binding := range group.bindings {
-			if strings.EqualFold(binding.Target, target) && binding.Model != "" && strings.EqualFold(binding.Model, model) {
+			bTarget, bModel := strings.TrimSpace(binding.Target), strings.TrimSpace(binding.Model)
+			if strings.EqualFold(bTarget, target) && bModel != "" && strings.EqualFold(bModel, model) {
 				return name, group.coefficient, true
 			}
 		}
 	}
 	for name, group := range cc.groups {
 		for _, binding := range group.bindings {
-			if strings.EqualFold(binding.Target, target) && binding.Model == "" {
+			if strings.EqualFold(strings.TrimSpace(binding.Target), target) && strings.TrimSpace(binding.Model) == "" {
 				return name, group.coefficient, true
 			}
 		}

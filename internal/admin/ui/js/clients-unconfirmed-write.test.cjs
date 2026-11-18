@@ -233,6 +233,34 @@ test("an unconfirmed POST that the server applied is treated as created", async 
   assert.equal(aggregateCount(h), 0);
 });
 
+// Issue 220: the server may commit the client while its authorization reload is still pending.
+// The readback matches, but the write must not report a green "saved" confirmation yet.
+test("an unconfirmed save with auth_reload_pending warns instead of confirming", async () => {
+  const {h, app} = await boot({
+    fetch: (url, options, fallback) =>
+      url === "/admin/data/clients" && options?.method === "POST"
+        ? Promise.resolve({
+          ok: false,
+          status: 503,
+          text: async () => JSON.stringify({error: "auth reload pending", code: "auth_reload_pending"}),
+        })
+        : fallback(url, options),
+  });
+  await openEditor(h, app, null);
+  fillForm(h, {name: "newc", key: "nk", ip: "10.0.0.9"});
+  h.setRoute("/admin/data/clients", {
+    clients: [baseClient(), {name: "newc", access_key: "nk", ip_address: "10.0.0.9", allowed_targets: [], allowed_pools: []}],
+  });
+  await save(h);
+  assert.equal(lastToast(h).kind, "warn");
+  assert.equal(lastToast(h).msg, "数据已保存，但鉴权尚未生效；请稍后刷新或重试确认");
+  assert.ok(!toasts(h).some(t => t.msg === "已保存（已回读确认）"),
+    "a pending auth reload is never a green confirmation");
+  assert.deepEqual(Array.from(app.state.clients, c => c.name), ["c1", "newc"],
+    "the applied save is still adopted");
+  assert.equal(listGets(h).length, 1, "the readback is the only list GET");
+});
+
 test("an unconfirmed POST that never reached the server stays open for a retry", async () => {
   const {h, app} = await boot({
     fetch: (url, options, fallback) =>

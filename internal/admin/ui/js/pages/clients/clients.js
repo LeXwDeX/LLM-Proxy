@@ -33,7 +33,10 @@ AdminApp.register("clients", function (app) {
   var clientSavingName = "";
   var clientVersions = Object.create(null);
   var editingClientVersion = 0;
-  var clientPickerTouched = false;
+  // Issue 220: each picker keeps its own "the user already chose here" marker, so late data for
+  // one roster never rewrites a click while the other picker may still take a newer list.
+  var clientTargetsTouched = false;
+  var clientPoolsTouched = false;
   var clientUsageAbort = null;
   var clientUsageSeq = 0;
   var clientRenderCache = { html: null };
@@ -49,6 +52,13 @@ AdminApp.register("clients", function (app) {
   // "pending" | "ready" | "error": the 30-day usage summary is fetched separately from the list, so
   // the usage columns (and their sort values) have a state of their own.
   if (!state.clientUsageStatus) state.clientUsageStatus = "pending";
+  // "pending" | "ready" | "error": the client list itself. A failed or still-loading list must
+  // never read as an empty list.
+  if (!state.clientListStatus) state.clientListStatus = "pending";
+  // Issue 220: editor readiness. A create may only be saved once the target/pool roster and the
+  // job-level/project-group dictionaries have actually loaded; edits fall back to the saved record.
+  var clientEditorData = { version: 0, status: "idle" };
+  var AUTH_RELOAD_PENDING_MESSAGE = "数据已保存，但鉴权尚未生效；请稍后刷新或重试确认";
   function clientUsageReady() {
     return state.clientUsageStatus === "ready";
   }
@@ -84,9 +94,13 @@ AdminApp.register("clients", function (app) {
     document.getElementById("clientModal").addEventListener(eventName, function () { clientDraftRevision++; });
   });
   document.getElementById("clientModal").addEventListener("click", function (event) {
-    if (event.target.dataset.target || event.target.dataset.pool) {
+    if (event.target.dataset.target) {
       clientDraftRevision++;
-      clientPickerTouched = true;
+      clientTargetsTouched = true;
+    }
+    if (event.target.dataset.pool) {
+      clientDraftRevision++;
+      clientPoolsTouched = true;
     }
   });
   /* ===== Clients ===== */
@@ -96,6 +110,7 @@ AdminApp.register("clients", function (app) {
   async function loadClients() {
     var version = ++clientLoadVersion;
     var prefetch = null;
+    state.clientListStatus = "pending";
     // Targets feed the access pickers only. Prefetch when none are loaded, and never let that
     // side request fail the clients list itself.
     // Also retry when the pools roster is unavailable (an earlier fetch failed).
@@ -107,9 +122,12 @@ AdminApp.register("clients", function (app) {
       var r = await api("/admin/data/clients");
       if (version !== clientLoadVersion) return;
       state.clients = Array.isArray(r.clients) ? r.clients : [];
+      state.clientListStatus = "ready";
       renderClients();
     } catch (e) {
       if (version !== clientLoadVersion) return;
+      state.clientListStatus = "error";
+      renderClients();
       toast("加载客户端失败: " + e.message, "error");
     }
     if (prefetch) {
@@ -184,8 +202,10 @@ AdminApp.register("clients", function (app) {
       var r = await api("/admin/data/clients");
       if (version !== clientLoadVersion) return;
       state.clients = Array.isArray(r.clients) ? r.clients : [];
+      state.clientListStatus = "ready";
     } catch (e) {
       if (version !== clientLoadVersion) return;
+      state.clientListStatus = "error";
       toast("加载客户端失败: " + e.message, "error");
     }
     renderClients();
@@ -363,17 +383,25 @@ AdminApp.register("clients", function (app) {
   // been applied. Read the list back and decide by content: the server holds the request ->
   // saved, with the normal success follow-ups; a different or missing record -> keep the
   // draft and report the unconfirmed outcome; a failed readback -> keep the list and retry.
-  async function reconcileUnconfirmedSave(payload, saveVersion, saveRevision, wasEditing) {
+  // Issue 220: a server answer that says the auth reload is still pending means the data is
+  // there but new credentials are not enforced yet, so the confirmation stays a warning.
+  async function reconcileUnconfirmedSave(payload, saveVersion, saveRevision, wasEditing, error) {
     var clients = await readbackClients();
     if (!clients) {
       toast("保存结果未确认，可重试", "warn");
       return;
     }
     state.clients = clients;
+    state.clientListStatus = "ready";
     renderClients();
     var fresh = findClientByName(clients, payload.name);
     if (clientHoldsRequest(fresh, payload)) {
-      toast("已保存（已回读确认）", "success");
+      toast(
+        error && error.code === "auth_reload_pending"
+          ? AUTH_RELOAD_PENDING_MESSAGE
+          : "已保存（已回读确认）",
+        error && error.code === "auth_reload_pending" ? "warn" : "success",
+      );
       adoptSavedClient(payload, saveVersion, saveRevision, wasEditing);
       return;
     }
@@ -386,17 +414,23 @@ AdminApp.register("clients", function (app) {
   }
   // Issue 211: a DELETE whose outcome is unknown. An absent record means it was deleted
   // (the success path, applied locally); a record still there only refreshes the table.
-  async function reconcileUnconfirmedDelete(name) {
+  async function reconcileUnconfirmedDelete(name, error) {
     var clients = await readbackClients();
     if (!clients) {
       toast("删除结果未确认，可重试", "warn");
       return;
     }
     state.clients = clients;
+    state.clientListStatus = "ready";
     if (findClientByName(clients, name)) {
       toast("删除结果未确认，列表已刷新", "warn");
     } else {
-      toast("已删除客户端: " + name, "success");
+      toast(
+        error && error.code === "auth_reload_pending"
+          ? AUTH_RELOAD_PENDING_MESSAGE
+          : "已删除客户端: " + name,
+        error && error.code === "auth_reload_pending" ? "warn" : "success",
+      );
       if (state.clientUsage) delete state.clientUsage[name];
     }
     renderClients();
@@ -416,9 +450,18 @@ AdminApp.register("clients", function (app) {
     var html;
     if (!total) {
       var hasClients = Array.isArray(state.clients) && state.clients.length > 0;
-      html = clientSearchTerm && hasClients
-        ? "<tr class='empty-row'><td colspan='8'>无匹配客户端</td></tr>"
-        : "<tr class='empty-row'><td colspan='8'>暂无客户端</td></tr>";
+      var listStatus = state.clientListStatus || "pending";
+      // Issue 220: an empty table only means "no clients" after a list load actually succeeded;
+      // a pending or failed load says so instead of pretending the list is empty.
+      if (clientSearchTerm && hasClients) {
+        html = "<tr class='empty-row'><td colspan='8'>无匹配客户端</td></tr>";
+      } else if (listStatus === "error") {
+        html = "<tr class='empty-row'><td colspan='8'>加载客户端失败，请重试</td></tr>";
+      } else if (listStatus !== "ready") {
+        html = "<tr class='empty-row'><td colspan='8'>加载中...</td></tr>";
+      } else {
+        html = "<tr class='empty-row'><td colspan='8'>暂无客户端</td></tr>";
+      }
     } else {
       html = pageRows
         .map(function (c) {
@@ -499,17 +542,22 @@ AdminApp.register("clients", function (app) {
         .join("");
     }
     var info = document.getElementById("clientsPageInfo");
+    // An unknown list reports unknown totals and no page number instead of a made-up 0.
+    var listKnown = (state.clientListStatus || "pending") === "ready" || total > 0 ||
+      (Array.isArray(state.clients) && state.clients.length > 0);
     if (info) {
-      info.textContent = total
-        ? "共 " + total + " 个客户端，第 " + (start + 1) + "~" + (start + pageRows.length) + " 条"
-        : "共 0 个客户端";
+      info.textContent = !listKnown
+        ? "客户端数量未知"
+        : total
+          ? "共 " + total + " 个客户端，第 " + (start + 1) + "~" + (start + pageRows.length) + " 条"
+          : "共 0 个客户端";
     }
     var num = document.getElementById("clientsPageNum");
-    if (num) num.textContent = clientPage + " / " + pages;
+    if (num) num.textContent = listKnown ? clientPage + " / " + pages : "0 / 0";
     var prev = document.getElementById("clientsPrevBtn");
-    if (prev) prev.disabled = clientPage <= 1;
+    if (prev) prev.disabled = !listKnown || clientPage <= 1;
     var next = document.getElementById("clientsNextBtn");
-    if (next) next.disabled = clientPage >= pages;
+    if (next) next.disabled = !listKnown || clientPage >= pages;
     // A refresh that returns the same markup (tab switch, manual refresh, usage arriving before
     // the list changes) must not swap the DOM under the pointer and keyboard focus.
     if (clientRenderCache.html === html) return;
@@ -545,7 +593,7 @@ AdminApp.register("clients", function (app) {
               if (state.clientUsage) delete state.clientUsage[name];
               renderClients();
             } catch (e) {
-              if (isUnconfirmedOutcome(e)) await reconcileUnconfirmedDelete(name);
+              if (isUnconfirmedOutcome(e)) await reconcileUnconfirmedDelete(name, e);
               else toast("删除失败: " + e.message, "error");
             }
           },
@@ -563,44 +611,62 @@ AdminApp.register("clients", function (app) {
       "加载中…</span>";
   }
   function renderClientDictOptions(c) {
+    // While the dictionaries are (re)loading, cached entries are stale by definition: show the
+    // loading state, never options a fresh load may already have removed. The saved value stays
+    // selectable so an edit never loses it.
+    var levels = state.dictsLoaded ? state.jobLevels : [];
+    var groups = state.dictsLoaded ? state.projectGroups : [];
     document.getElementById("clientJobLevel").innerHTML = dictOptionsHTML(
-      state.jobLevels,
+      levels,
       c && c.job_level ? c.job_level : "",
       state.dictsLoaded ? dictEmptyLabel("job") : "加载中…",
     );
     document.getElementById("clientProjectGroup").innerHTML = dictOptionsHTML(
-      state.projectGroups,
+      groups,
       c && c.project_group ? c.project_group : "",
       state.dictsLoaded ? dictEmptyLabel("project") : "加载中…",
     );
   }
-  // Re-fill the dictionaries without discarding what the user selected meanwhile.
-  function fillClientDictOptions(c) {
+  // Re-fill the dictionaries without discarding what the user selected meanwhile. A failed load
+  // keeps the saved value selectable and says why the list is incomplete, so the placeholder never
+  // reads as "the server has no job levels".
+  function fillClientDictOptions(c, dictsFailed) {
     var levelEl = document.getElementById("clientJobLevel");
     var groupEl = document.getElementById("clientProjectGroup");
     var level = levelEl.value || (c && c.job_level ? c.job_level : "");
     var group = groupEl.value || (c && c.project_group ? c.project_group : "");
-    levelEl.innerHTML = dictOptionsHTML(state.jobLevels, level, dictEmptyLabel("job"));
-    groupEl.innerHTML = dictOptionsHTML(state.projectGroups, group, dictEmptyLabel("project"));
+    var levelEmpty = state.dictsLoaded
+      ? dictEmptyLabel("job")
+      : dictsFailed ? "职级加载失败，请关闭后重新打开重试" : "加载中…";
+    var groupEmpty = state.dictsLoaded
+      ? dictEmptyLabel("project")
+      : dictsFailed ? "项目组加载失败，请关闭后重新打开重试" : "加载中…";
+    // Cached dictionaries are stale while a fresh load is pending/failed; only the
+    // successfully loaded lists may back the options. The saved value stays selectable.
+    var levels = state.dictsLoaded ? state.jobLevels : [];
+    var groups = state.dictsLoaded ? state.projectGroups : [];
+    levelEl.innerHTML = dictOptionsHTML(levels, level, levelEmpty);
+    groupEl.innerHTML = dictOptionsHTML(groups, group, groupEmpty);
   }
-  // Fills the pickers with the data the background refresh landed. The caller skips this when
-  // the user already clicked a tag, so late data never rewrites a choice; a failed refresh
-  // explains itself instead of leaving the loading placeholder forever.
-  function fillClientPickerTags(c, targetsFailed) {
+  // Fills the pickers with the data the background refresh landed. Each picker has its own
+  // marker (Issue 220): late data never rewrites a choice the user already clicked there, while
+  // the other picker still takes the roster that arrived. A failed refresh explains itself
+  // instead of leaving the loading placeholder forever.
+  function fillClientPickerTags(c, targetsFailed, fillTargets, fillPools) {
     var targetBox = document.getElementById("clientTargetTags");
-    if (targetBox) {
+    if (targetBox && fillTargets !== false) {
       if (targetsFailed && !(state.targets && state.targets.length)) {
         targetBox.innerHTML =
-          "<span role='status' style='color:var(--text-muted);font-size:12px;'>目标加载失败，请刷新后重试。</span>";
+          "<span role='status' style='color:var(--text-muted);font-size:12px;'>目标加载失败，请关闭后重新打开重试。</span>";
       } else {
         renderClientTargetTags(c && c.allowed_targets ? c.allowed_targets : []);
       }
     }
     var poolBox = document.getElementById("clientPoolTags");
-    if (poolBox) {
+    if (poolBox && fillPools !== false) {
       if (targetsFailed && !targetPoolsAvailable() && !(state.pools && state.pools.length)) {
         poolBox.innerHTML =
-          "<span role='status' style='color:var(--text-muted);font-size:12px;'>部署池加载失败，请刷新后重试。</span>";
+          "<span role='status' style='color:var(--text-muted);font-size:12px;'>部署池加载失败，请关闭后重新打开重试。</span>";
       } else {
         renderClientPoolTags(c && c.allowed_pools ? c.allowed_pools : []);
       }
@@ -608,6 +674,7 @@ AdminApp.register("clients", function (app) {
   }
   async function loadClientEditorDataInBackground(c, clientVersion, version) {
     var targetsFailed = false;
+    var dictsFailed = false;
     var failure = null;
     var targetsRefresh = loadTargets(true).catch(function (e) {
       targetsFailed = true;
@@ -617,11 +684,20 @@ AdminApp.register("clients", function (app) {
     var dicts = state.dictsLoaded
       ? Promise.resolve()
       : loadDictOptions().catch(function (e) {
+        dictsFailed = true;
         failure = failure || e;
         return null;
       });
-    await Promise.all([targetsRefresh, dicts]);
+    var results = await Promise.all([targetsRefresh, dicts]);
     if (version !== clientOpenVersion) return;
+    if (clientEditorData.version === version) {
+      // Targets and pools come from one refresh: without a valid pool roster the pool picker
+      // cannot describe or preserve a grant, so the editor is only ready with both.
+      var targetsOk = !targetsFailed && Array.isArray(results[0]) && targetPoolsAvailable();
+      var dictsOk = !dictsFailed && !!state.dictsLoaded;
+      clientEditorData.status = targetsOk && dictsOk ? "ready" : "error";
+      if (!targetsOk && !failure) failure = new Error("目标或部署池数据不可用");
+    }
     if (!document.getElementById("clientModal").classList.contains("open")) return;
     if (c) {
       var currentVersion = clientVersions[c.name] || 0;
@@ -634,9 +710,9 @@ AdminApp.register("clients", function (app) {
         return;
       }
     }
-    fillClientDictOptions(c);
-    if (!clientPickerTouched) fillClientPickerTags(c, targetsFailed);
-    if (failure) toast("加载客户端编辑数据失败: " + failure.message, "error");
+    fillClientDictOptions(c, dictsFailed);
+    fillClientPickerTags(c, targetsFailed, !clientTargetsTouched, !clientPoolsTouched);
+    if (failure) toast("加载客户端编辑数据失败: " + failure.message + "。请关闭后重新打开重试。", "error");
   }
   function openClientModal(c) {
     if (document.body.classList.contains("readonly-mode")) {
@@ -649,7 +725,9 @@ AdminApp.register("clients", function (app) {
     }
     var clientVersion = c ? (clientVersions[c.name] || 0) : 0;
     var version = ++clientOpenVersion;
-    clientPickerTouched = false;
+    clientTargetsTouched = false;
+    clientPoolsTouched = false;
+    clientEditorData = { version: version, status: "pending" };
     clientCreatedDraftNeedsReopen = false;
     editingClientVersion = clientVersion;
     state.editingClient = c || null;
@@ -689,6 +767,7 @@ AdminApp.register("clients", function (app) {
       await loadTargets(true);
       var targetTags = document.getElementById("clientTargetTags");
       if (
+        !clientTargetsTouched &&
         !targetTags.querySelector("span[data-target]") &&
         state.targets &&
         state.targets.length
@@ -910,6 +989,13 @@ AdminApp.register("clients", function (app) {
         toast("客户端已创建。请先复制未保存的修改，再重新打开客户端编辑。", "error");
         return;
       }
+      // Issue 220: an unloaded picker would be submitted as an empty ACL, which the server
+      // reads as "allow every target". A create therefore waits for the editor's data; edits
+      // keep using the saved record as their fallback.
+      if (!state.editingClient && clientEditorData.status !== "ready") {
+        toast("目标/部署池/职级数据加载中，请稍后再保存", "error");
+        return;
+      }
       var name = document.getElementById("clientName").value.trim();
       if (state.editingClient && editingClientVersion !== (clientVersions[state.editingClient.name] || 0)) {
         toast("客户端已更新，请保留草稿并重新打开以确认最新授权。", "error");
@@ -967,7 +1053,7 @@ AdminApp.register("clients", function (app) {
         await refreshClientsLight();
       } catch (e) {
         if (isUnconfirmedOutcome(e)) {
-          await reconcileUnconfirmedSave(payload, saveVersion, saveRevision, wasEditing);
+          await reconcileUnconfirmedSave(payload, saveVersion, saveRevision, wasEditing, e);
         } else {
           toast("保存失败: " + e.message, "error");
         }

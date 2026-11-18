@@ -121,6 +121,64 @@ test("a later pool load failure replaces the stale table with retry guidance", a
   assert.doesNotMatch(body, /无成员/, "stale membership is not rendered");
 });
 
+test("sorting a failed roster keeps the failure prompt instead of stale rows", async () => {
+  const harness = createHarness({
+    routes: {
+      "/admin/data/targets": { targets: [target("member", "pool-a")] },
+      "/admin/data/pools": { pools: [{ name: "pool-a" }, { name: "pool-b" }] },
+    },
+  });
+  const app = await harness.run();
+  const clickHeader = (key) => {
+    const th = { getAttribute: (name) => (name === "data-sort" ? key : null) };
+    const event = {
+      target: {
+        dataset: {},
+        closest: (selector) => (selector === "th[data-sort]" ? th : null),
+      },
+    };
+    for (const listener of harness.ids.get("poolsTableHead").listeners.click || []) {
+      listener(event);
+    }
+  };
+  await app.modules.pools.loadPools();
+  clickHeader("name");
+  assert.match(
+    harness.ids.get("poolsTableBody").innerHTML,
+    /data-edit-pool='pool-a'/,
+    "sorting works while the roster is current",
+  );
+  harness.setRouteFailure("/admin/data/pools", true);
+  await app.modules.pools.loadPools();
+  assert.match(
+    harness.ids.get("poolsTableBody").innerHTML,
+    /加载失败: route failed/,
+    "the failed refresh replaces the rows",
+  );
+  // A header click redraws the table; the cached roster must not come back as current data.
+  clickHeader("members");
+  clickHeader("members");
+  clickHeader("members");
+  let body = harness.ids.get("poolsTableBody").innerHTML;
+  assert.match(body, /加载失败: route failed/, "sorting keeps the failure prompt");
+  assert.doesNotMatch(body, /data-(edit|pause|resume|del)-pool/, "stale row actions stay unavailable");
+  assert.doesNotMatch(body, /pool-member-name/, "stale membership is not rendered");
+  // Other redraw entries (the exported renderer, the cost-preview toggle path) take the same guard.
+  app.modules.pools.renderPools();
+  body = harness.ids.get("poolsTableBody").innerHTML;
+  assert.match(body, /加载失败: route failed/, "a direct redraw keeps the failure prompt");
+  assert.doesNotMatch(body, /data-edit-pool/, "cached pools are still not shown");
+  // A successful reload restores the normal table and its sorting.
+  harness.setRouteFailure("/admin/data/pools", false);
+  harness.setRoute("/admin/data/pools", { pools: [{ name: "pool-b" }] });
+  await app.modules.pools.loadPools();
+  assert.doesNotMatch(harness.ids.get("poolsTableBody").innerHTML, /加载失败/);
+  clickHeader("name");
+  body = harness.ids.get("poolsTableBody").innerHTML;
+  assert.match(body, /data-edit-pool='pool-b'/, "sorting resumes after a successful reload");
+  assert.doesNotMatch(body, /data-edit-pool='pool-a'/, "the refreshed roster replaces old pools");
+});
+
 test("failed pool option fetch keeps saved membership when editing", async () => {
   const harness = createHarness({
     routes: { "/admin/data/targets": { targets: [editableTarget("member", "pool-a", 1)] } },
