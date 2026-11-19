@@ -8,6 +8,12 @@
 // derived from the request bytes, so identical requests yield identical
 // responses and billing assertions can be exact.
 //
+// Operations are matched by path suffix, but a path no real provider would
+// serve is answered with a plain 404 instead: an operation path followed by a
+// version segment or another operation (/v2/chat/completions/v1/chat/completions),
+// or two adjacent version segments (/v2/v2/...). This keeps proxy path-assembly
+// bugs from hiding behind a 200. See path_strict.go; LegacyMock stays lenient.
+//
 // Behaviour is steered, in order of precedence, by
 //
 //  1. a directive embedded anywhere in the request body or the X-Fake-Scenario

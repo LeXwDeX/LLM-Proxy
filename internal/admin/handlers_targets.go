@@ -321,7 +321,7 @@ func (h *Handler) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	txn.audit("create_target", name, "success", "")
-	writeJSON(w, http.StatusCreated, withWarning(map[string]any{"ok": true, "name": name, "etag": h.targetETag(name)}, warning))
+	writeJSON(w, http.StatusCreated, withEffectiveEndpoint(withWarning(map[string]any{"ok": true, "name": name, "etag": h.targetETag(name)}, warning), newTarget))
 }
 
 func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
@@ -601,7 +601,7 @@ func (h *Handler) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	txn.audit("update_target", name, "success", "")
-	writeJSON(w, http.StatusOK, withWarning(map[string]any{"ok": true, "name": name, "etag": h.targetETag(name)}, warning))
+	writeJSON(w, http.StatusOK, withEffectiveEndpoint(withWarning(map[string]any{"ok": true, "name": name, "etag": h.targetETag(name)}, warning), updatedTarget))
 }
 
 const existingTargetKeyRefPrefix = "__existing_key_index__:"

@@ -443,6 +443,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": map[string]any{"message": "read body: " + err.Error()}}, nil)
 		return
 	}
+	if s.rejectsMalformedPaths() && malformedUpstreamPath(path) != "" {
+		s.rejectMalformedPath(w, r, len(raw))
+		return
+	}
 	scheme, key := authOf(r)
 	c := &call{s: s, w: w, r: r, raw: raw, req: parseBody(r, raw)}
 	c.model, _ = c.req["model"].(string)

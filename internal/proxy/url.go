@@ -74,7 +74,14 @@ func (s *Service) buildURL(target *Target, original *url.URL) (*url.URL, error) 
 			// 改写客户端路径。当 endpoint 已声明版本段（/v4, /v1 等）且客户端路径
 			// 也带版本前缀（/v1/...）时，剥除客户端的版本前缀，避免版本段叠加
 			// 导致路径污染（如 GLM: /v4/ + /v1/chat/completions → /v4/v1/chat/completions）。
-			clientPath := stripRedundantClientVersion(forward.Path, original.Path)
+			clientPath := original.Path
+			if target.endpointOperationBase {
+				// endpoint 原为完整接口地址：接口就在 base 之下，客户端版本段
+				// 一律替换，不要求 base 末段是版本段。
+				clientPath = stripClientVersion(clientPath)
+			} else {
+				clientPath = stripRedundantClientVersion(forward.Path, clientPath)
+			}
 			path = pathMapper.RewritePath(clientPath, "")
 		}
 	} else {
@@ -190,6 +197,12 @@ func stripRedundantClientVersion(endpointPath, clientPath string) string {
 	if !endpointTrailingVersionRe.MatchString(endpointPath) {
 		return clientPath
 	}
+	return stripClientVersion(clientPath)
+}
+
+// stripClientVersion 剥除客户端路径开头的版本段（/v1, /v1beta 等）；没有版本段时
+// 原样返回。
+func stripClientVersion(clientPath string) string {
 	// 客户端路径开头必须是版本段
 	loc := clientLeadingVersionRe.FindStringIndex(clientPath)
 	if loc == nil {

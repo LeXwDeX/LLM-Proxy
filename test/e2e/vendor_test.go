@@ -99,6 +99,22 @@ func vendorCases() []vendorCase {
 			upstream: "gemini-x", path: "/v1/chat/completions", body: chatBody, upPath: "/gemini/v1/chat/completions", auth: "bearer",
 			usage: "[[fake usage.in=8 usage.out=25 usage.reasoning=24]]", want: billed{in: 8, out: 25, reasoning: 24}, clean: true},
 
+		// endpoint 填成完整接口地址（Issue #232）：接口后缀之前是 base，客户端
+		// 版本段被替换；同一目标的其他接口落在同一 base 下。普通 base 的对照
+		// 见上面的 openai-chat / claude-messages。
+		{name: "full-url-chat", target: map[string]any{"endpoint_type": "openai", "endpoint": "{A}/fullurl/v2/chat/completions"},
+			upstream: "full-url-x", path: "/v1/chat/completions", body: chatBody, upPath: "/fullurl/v2/chat/completions", auth: "bearer",
+			usage: stdUsage, want: billed{in: 40, out: 30, cached: 40, creation: 20, reasoning: 6}},
+		{name: "full-url-responses", target: map[string]any{"endpoint_type": "openai", "endpoint": "{A}/fullurl/v2/chat/completions", "supports_responses": true},
+			upstream: "full-url-x", path: "/v1/responses", body: responsesBody, upPath: "/fullurl/v2/responses", auth: "bearer",
+			usage: stdUsage, want: billed{in: 40, out: 30, cached: 40, creation: 20, reasoning: 6}},
+		{name: "full-url-plain-base", target: map[string]any{"endpoint_type": "openai", "endpoint": "{A}/fullgw/chat/completions"},
+			upstream: "full-url-x", path: "/v1/chat/completions", body: chatBody, upPath: "/fullgw/chat/completions", auth: "bearer",
+			usage: stdUsage, want: billed{in: 40, out: 30, cached: 40, creation: 20, reasoning: 6}},
+		{name: "full-url-messages", target: map[string]any{"endpoint_type": "claude", "endpoint": "{A}/fullurl/anthropic/v1/messages"},
+			upstream: "claude-x", path: "/v1/messages", body: messagesBody, upPath: "/fullurl/anthropic/v1/messages", auth: "x-api-key",
+			usage: "[[fake usage.in=1000 usage.out=50 usage.cached=600 usage.cw5m=100 usage.cw1h=50]]", want: billed{in: 250, out: 50, cached: 600, creation: 150, cw5m: 100, cw1h: 50}},
+
 		// ---- Patch：国产厂商 ----
 		// Targets are configured as an operator does in the admin UI, which
 		// only offers canonical endpoint types (dual_protocol + prefixes).
