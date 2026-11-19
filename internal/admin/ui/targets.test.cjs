@@ -899,6 +899,25 @@ test("revision: a failure arriving after the editor moved on is still reported",
   assert.equal(f.app.state.editingTarget?.name, "other", "the new editor is untouched");
 });
 
+test("save: an endpoint carrying an API operation path reports the effective base", async () => {
+  const f = await setup(target(), (url, opts, fallback) => isTargetPut(url, opts)
+    ? Promise.resolve(response({ ok: true, etag: "t1-6", effective_endpoint: "https://host.example/v2", endpoint_operation: "/chat/completions" }))
+    : fallback(url, opts));
+  await f.edit();
+  await f.save();
+  assert.ok(f.messages.some((m) => /https:\/\/host\.example\/v2/.test(m.msg) && /\/chat\/completions/.test(m.msg) && m.kind === "warn"), JSON.stringify(f.messages));
+  assert.ok(f.messages.some((m) => /目标已更新/.test(m.msg) && m.kind === "success"), "the save itself is still reported as a success");
+  assert.ok(!messageTexts(f).some((m) => /保存失败/.test(m)));
+});
+
+test("save: a plain base endpoint shows no effective-base hint", async () => {
+  const f = await setup(target(), (url, opts, fallback) => isTargetPut(url, opts)
+    ? Promise.resolve(response({ ok: true, etag: "t1-6" })) : fallback(url, opts));
+  await f.edit();
+  await f.save();
+  assert.ok(!f.messages.some((m) => m.kind === "warn"), JSON.stringify(f.messages));
+});
+
 test("revision: a saved target with a pending auth reload shows a warning, not a failure", async () => {
   const f = await setup(target(), (url, opts, fallback) => isTargetPut(url, opts)
     ? Promise.resolve(response({ ok: true, etag: "t1-6", warning: "auth reload pending" })) : fallback(url, opts));

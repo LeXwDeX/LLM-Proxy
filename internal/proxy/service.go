@@ -148,6 +148,9 @@ type Target struct {
 	CustomHeaders     map[string]string // 自定义 HTTP 请求头
 	CustomBody        map[string]any    // 自定义请求体 JSON 顶层字段
 	allowedModelIdx   map[string]string // lowercase(upstream OR fallback) → upstream (original case)
+	// endpointOperationBase 为 true 表示配置的 endpoint 是完整接口地址，Endpoint 已是
+	// 去掉接口后缀的 base；此时客户端路径的版本段一律替换。属于连接身份。
+	endpointOperationBase bool
 
 	RequestStreamUsageIfMissing bool // Opt-in for actual OpenAI Chat stream requests.
 }

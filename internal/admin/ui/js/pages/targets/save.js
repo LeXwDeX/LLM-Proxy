@@ -176,6 +176,10 @@ AdminApp.register("targetsSave", function (app) {
         failure = e;
       }
       var warning = result && typeof result.warning === "string" ? result.warning : "";
+      // The endpoint was saved as typed, but it ends in an API operation path
+      // (…/chat/completions): the proxy forwards to the base before it.
+      var endpointHint = result && typeof result.effective_endpoint === "string" && result.effective_endpoint
+        ? "endpoint 含接口路径 " + (result.endpoint_operation || "") + "，实际按 base " + result.effective_endpoint + " 转发" : "";
       if (saveSession !== ts.editingKeySession) {
         // Another editor owns the modal now; the outcome is still reported, and
         // only the list needs to catch up.
@@ -190,6 +194,7 @@ AdminApp.register("targetsSave", function (app) {
         } else if (warning) {
           toast("目标「" + name + "」已保存，但认证配置刷新待处理，请稍后核对", "warn");
         }
+        if (!failure && endpointHint) toast("目标「" + name + "」" + endpointHint, "warn");
         if (!failure) await loadTargets();
         return;
       }
@@ -219,6 +224,7 @@ AdminApp.register("targetsSave", function (app) {
       } else {
         toast((wasEditing ? "目标已更新" : "目标已创建") + (result && result.quota_refresh === "pending" ? "，额度将在后台刷新" : ""), "success");
       }
+      if (endpointHint) toast(endpointHint, "warn");
       state.editingTarget = null;
       ts.editingKeySession++;
       closeModal("targetModal");

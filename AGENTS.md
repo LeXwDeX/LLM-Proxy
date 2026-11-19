@@ -33,6 +33,7 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 - 实现位于 `internal/fakellm/`，独立入口为 `cmd/fakellm/`，镜像为 `Dockerfile.fakellm`。它在任意路径前缀下应答代理能转发的全部协议（OpenAI Chat/Responses/Images、Azure、Anthropic、Gemini 等），回复和 token 用量由请求字节确定性推导，计费断言可以精确比较。
 - 用途：`make e2e` 在进程内启动 fakellm 并运行真实代理二进制；`make ui-sim` 用它作为管理页面模拟的上游；`cmd/fakellm -legacy-mock` 提供兼容旧 mock 合同的模式。
 - 行为通过请求内指令、按 key 规则或全局场景（`/_control`）控制。flavor 模拟厂商的线格式；preset 是按官方文档建模的厂商错误快照（如 `glm_1302`、`kimi_quota`、`openrouter_403_budget`、`minimax_1008`），包含用于反例的形态。
+- 路径形态与真实上游一致：fakellm 按路径后缀匹配接口，但对形态错误的路径返回 404（纯文本 `404 page not found`），不应答。判据只看路径形态：接口路径之后又接版本段或另一个接口路径（如 `/v2/chat/completions/v1/chat/completions`），或两个版本段相邻（如 `/v2/v2/…`、`/v4/v1/…`）。这类请求照常记入 `/_requests`，但不消耗场景。代理拼错上游路径时，e2e 与 `make ui-sim` 会直接失败；`-legacy-mock` 模式保持旧的宽松合同。实现与用例见 `internal/fakellm/path_strict.go`、`path_strict_test.go` 及 e2e `TestMisassembledUpstreamPathFailsE2E`。它不校验版本号是否与某家厂商一致，这仍靠各用例对上游路径的精确断言。
 - fakellm 是 Patch 规则的测试基座：每条 Patch 判据都应有对应 preset。preset 只代表文档合同，不能替代真实厂商验收，也不能作为扩大测试授权的理由。
 - MiniMax 仅实现官方有据的形态：错误 Patch 只读非流式 Chat Completions HTTP 200 JSON 的 `base_resp`；流式、非 2xx、Anthropic Messages 与 Responses 走原厂规则。fakellm 的 MiniMax 流式 chunk 无 `base_resp`，`include_usage` 默认 false，此时所有 chunk 均为 `usage: null`；显式请求用量时沿用 OpenAI 原厂末尾空 choices 用量块，位置为原厂形态推定，MiniMax 官方未示例。Anthropic 错误复用标准协议 preset。来源为 [Chat OpenAPI](https://platform.minimaxi.com/docs/api-reference/text-chat-openai)、[Anthropic 协议](https://platform.minimaxi.com/docs/api-reference/text-chat-anthropic) 与 [错误码页](https://platform.minimaxi.com/docs/api-reference/errorcode)。
 

@@ -123,6 +123,9 @@ type DualProtocolPath struct {
 	AnthropicPrefix   string
 	EndpointPath      string // 运行时从 target.Endpoint.Path 绑定，不进入配置/JSON
 	SupportsResponses bool   // 兼容旧构造字段；Responses 能力开关由 Target.SupportsPath 校验
+	// EndpointOperationBase 表示 endpoint 原为完整接口地址（EndpointPath 已是去掉
+	// 接口后缀的 base）。前缀为空时客户端版本段一律替换。
+	EndpointOperationBase bool
 }
 
 func (m *DualProtocolPath) RewritePath(clientPath, resourcePathPrefix string) string {
@@ -138,7 +141,11 @@ func (m *DualProtocolPath) RewritePath(clientPath, resourcePathPrefix string) st
 	if base == "" {
 		base = normalizePrefix(m.EndpointPath)
 	}
-	path = stripRedundantClientVersion(base, path)
+	if prefix == "" && m.EndpointOperationBase {
+		path = stripClientVersion(path)
+	} else {
+		path = stripRedundantClientVersion(base, path)
+	}
 	return prefix + ensureLeadingSlash(path)
 }
 
@@ -414,6 +421,8 @@ func (m *DualProtocolPath) ForTarget(target *Target) PathMapper {
 		AnthropicPrefix:   target.AnthropicPrefix,
 		EndpointPath:      endpointPath,
 		SupportsResponses: target.SupportsResponses,
+
+		EndpointOperationBase: target.endpointOperationBase,
 	}
 }
 

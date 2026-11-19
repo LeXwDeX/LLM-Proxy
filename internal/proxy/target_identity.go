@@ -47,7 +47,7 @@ func targetIdentityChanges(old, next *Target) []string {
 	if old.EndpointType != next.EndpointType {
 		changed = append(changed, "endpoint_type")
 	}
-	if endpointString(old) != endpointString(next) {
+	if endpointString(old) != endpointString(next) || old.endpointOperationBase != next.endpointOperationBase {
 		changed = append(changed, "endpoint")
 	}
 	if old.AuthMode != next.AuthMode {

@@ -287,6 +287,17 @@ func withWarning(body map[string]any, warning string) map[string]any {
 	return body
 }
 
+// withEffectiveEndpoint 在 endpoint 填成完整接口地址时，附上运行时实际使用的 base
+// 与被识别的接口后缀，供页面提示。保存不被拦截，落库值保持原样。
+func withEffectiveEndpoint(body map[string]any, target config.Target) map[string]any {
+	effective, operation := config.EffectiveEndpoint(config.NormalizeEndpointType(target.EndpointType), target.Endpoint)
+	if operation != "" {
+		body["effective_endpoint"] = effective
+		body["endpoint_operation"] = operation
+	}
+	return body
+}
+
 func (h *Handler) handleBlockTargetKeyByID(w http.ResponseWriter, r *http.Request) {
 	h.handleSetTargetKeyBlockedByID(w, r, true)
 }

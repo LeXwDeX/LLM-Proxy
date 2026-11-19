@@ -1613,6 +1613,22 @@ func buildTargetStates(targets []config.Target, logger ...*slog.Logger) (map[str
 			return nil, nil, fmt.Errorf("proxy: invalid endpoint for target %q: missing scheme or host", t.Name)
 		}
 
+		// endpoint 填成完整接口地址（…/v2/chat/completions）时，接口后缀之前才是
+		// base。运行态 endpoint 即为 base，转发、探测与模型测试共用；已存配置不改。
+		endpointType := config.NormalizeEndpointType(t.EndpointType)
+		endpointOperationBase := false
+		if config.EndpointTypeAcceptsOperationURL(endpointType) {
+			if base, operation := config.SplitEndpointOperationPath(endpoint.Path); operation != "" {
+				endpoint.Path = base
+				endpoint.RawPath = ""
+				endpointOperationBase = true
+				if l != nil {
+					l.Info("endpoint carries an API operation path; using the part before it as base / endpoint 含接口路径，按其之前的部分作为 base",
+						"target", t.Name, "operation", operation, "base_path", base)
+				}
+			}
+		}
+
 		modelIndex := buildModelIndex(t.ModelMappings)
 
 		// 合并 api_key + api_keys 为有序池（去重，api_key 排第一）
@@ -1624,7 +1640,7 @@ func buildTargetStates(targets []config.Target, logger ...*slog.Logger) (map[str
 
 		info := &Target{
 			Name:                        strings.TrimSpace(t.Name),
-			EndpointType:                config.NormalizeEndpointType(t.EndpointType),
+			EndpointType:                endpointType,
 			UsageAdapter:                config.NormalizeUsageAdapter(t.UsageAdapter),
 			Endpoint:                    endpoint,
 			APIKey:                      primaryKey,
@@ -1646,6 +1662,7 @@ func buildTargetStates(targets []config.Target, logger ...*slog.Logger) (map[str
 			CustomHeaders:               t.CustomHeaders,
 			CustomBody:                  t.CustomBody,
 			allowedModelIdx:             modelIndex,
+			endpointOperationBase:       endpointOperationBase,
 		}
 		if info.Name == "" {
 			return nil, nil, fmt.Errorf("proxy: target name at index %d must not be empty", idx)
