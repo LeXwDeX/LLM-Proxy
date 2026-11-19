@@ -329,7 +329,8 @@ test("a readonly user on #users keeps the overview and the hash is corrected", a
   await clock.advance(100);
   assert.equal(app.state.currentPage, "overview");
   assert.equal(location.hash, "#overview");
-  (harness.windowListeners.hashchange || []).forEach((fn) => { location.hash = "#users"; fn({}); });
+  location.hash = "#users";
+  (harness.windowListeners.hashchange || []).forEach((fn) => fn({}));
   assert.equal(app.state.currentPage, "overview", "admin-only pages are not reachable through the hash");
   assert.equal(location.hash, "#overview");
 });

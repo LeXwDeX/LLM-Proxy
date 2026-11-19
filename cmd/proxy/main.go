@@ -480,6 +480,12 @@ func run(args []string) int {
 		WriteTimeout: 0,
 		IdleTimeout:  90 * time.Second,
 	}
+	// Shutdown does not cancel handlers, so a 10-minute SSE connection would
+	// otherwise hold the drain for the whole grace. Close every /admin/events
+	// subscriber as soon as shutdown starts (the callback runs before Shutdown
+	// waits); this does not cancel BaseContext, keeping in-flight LLM streams
+	// on their normal drain path.
+	server.RegisterOnShutdown(adminHandler.StopEvents)
 
 	// 优雅关闭：SIGINT/SIGTERM 时先停止接收新连接并排空在途请求，再由 main 的
 	// defer 链依次关闭 quota/tracestore/bbolt/日志，避免部署时强杀在途流式请求

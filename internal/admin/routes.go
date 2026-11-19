@@ -17,6 +17,8 @@ func (h *Handler) routes() chi.Router {
 	r.Get("/ui/js/*", h.handleUIJS)
 	r.Get("/healthz", h.handleHealthz)
 	r.Get("/metrics", h.handleMetrics)
+	// SSE 运行态全量快照（Issue #225）：GET、只读角色可用、不写审计。
+	r.Get("/events", h.handleEvents)
 	r.Get("/api/me", h.handleMe)
 	r.Get("/api/overview", h.cachedReport(h.handleOverview))
 	r.Get("/api/activity", h.cachedReportTTL(activityCacheTTL, h.handleActivity))

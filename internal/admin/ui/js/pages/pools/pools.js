@@ -21,6 +21,9 @@ AdminApp.register("pools", function (app) {
   var performanceHintHtml = app.bind("targets", "performanceHintHtml");
   var bindTargetHints = app.bind("targets", "bindTargetHints");
   var hideHint = app.bind("targets", "hideHint");
+  var performanceSummary = app.bind("targets", "performanceSummary");
+  // Issue 225: the pools sub-tab uses the same foreground runtime stream as targets.
+  var subscribeRuntimeStream = app.bind("targets", "subscribeRuntimeStream");
   // Cost-preview state: at most one pool detail row is open. The sequence
   // guard drops responses that arrive after a refresh or another pool opened.
   var expandedCostPool = "";
@@ -619,6 +622,7 @@ AdminApp.register("pools", function (app) {
     if (el && typeof el.focus === "function") el.focus();
   }
   async function loadPools() {
+    subscribeRuntimeStream(true);
     // A roster refresh invalidates any open detail row and in-flight preview.
     expandedCostPool = "";
     costPreviewSequence++;
@@ -650,6 +654,9 @@ AdminApp.register("pools", function (app) {
       "<tr class='empty-row'><td colspan='5'>加载失败: " +
       esc(poolListError) +
       "。请点击「刷新」重试。</td></tr>";
+    // The direct write above is not debounced; the next successful render must not
+    // believe the table already shows it.
+    renderedPoolsHtml = null;
   }
   function onSchedulingRefresh() {
     // Any roster refresh invalidates the open detail row and in-flight preview.
@@ -662,6 +669,24 @@ AdminApp.register("pools", function (app) {
       renderPoolsLoadError("部署池数据不可用");
     }
   }
+  // Issue 225: runtime frames repaint the pool table without touching the roster.
+  // Rows are replaced only when their markup changed, so a tick that repeats the
+  // same snapshot cannot drop hover, focus or the expanded cost-preview row.
+  var renderedPoolsHtml = null;
+  function writePoolsTable(tb, html) {
+    if (renderedPoolsHtml === html) return;
+    tb.innerHTML = html;
+    renderedPoolsHtml = html;
+  }
+  // Applies one runtime snapshot to the visible pools table. False means the
+  // table was intentionally left alone (open cost preview or no roster yet) and
+  // the frame stays pending.
+  function renderRuntimeSnapshot() {
+    if (expandedCostPool) return false;
+    if (!targetPoolsAvailable()) return false;
+    renderPools();
+    return true;
+  }
   function renderPools() {
     var tb = document.getElementById("poolsTableBody");
     hideHint();
@@ -672,12 +697,11 @@ AdminApp.register("pools", function (app) {
       return;
     }
     if (!state.pools || !state.pools.length) {
-      tb.innerHTML =
-        "<tr class='empty-row'><td colspan='5'>暂无部署池</td></tr>";
+      writePoolsTable(tb, "<tr class='empty-row'><td colspan='5'>暂无部署池</td></tr>");
       return;
     }
     var memberCount = poolMemberCounter();
-    tb.innerHTML = poolSort
+    writePoolsTable(tb, poolSort
       .apply(
         state.pools.map(function (pool) {
           return { pool: pool, members: memberCount(pool.name) };
@@ -755,7 +779,7 @@ AdminApp.register("pools", function (app) {
           detailRow
         );
       })
-      .join("");
+      .join(""));
   }
   document
     .getElementById("poolsTableBody")
@@ -941,6 +965,7 @@ AdminApp.register("pools", function (app) {
     poolMemberChips: poolMemberChips,
     loadPools: loadPools,
     renderPools: renderPools,
+    renderRuntimeSnapshot: renderRuntimeSnapshot,
     onSchedulingRefresh: onSchedulingRefresh,
     openPoolModal: openPoolModal,
   };
