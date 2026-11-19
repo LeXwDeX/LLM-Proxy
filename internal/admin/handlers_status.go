@@ -160,9 +160,25 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	response.Requests.ClientCanceled = metrics.TotalClientCanceled
 
-	// Issue #212：按 target 名（大小写不敏感）索引的上游生成性能估计；
-	// 无样本的 target 不输出 model_performance。模型表满且无可回收条目时
-	// 丢弃的新模型计数单独暴露，便于发现只出现少量模型的目标触顶。
+	response.ShadowRouting = h.proxyService.ShadowRoutingSnapshot()
+	response.TargetsRuntime = h.buildTargetsRuntime(now, statuses)
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+// buildTargetsRuntime assembles the targets_runtime block shared by
+// /admin/metrics and /admin/events (SSE). One implementation keeps the polled
+// and the streamed view identical, with no field drift. statuses come from
+// Service.TargetStatuses so the caller decides the snapshot instant.
+//
+// The result is nil when there are no targets, preserving /admin/metrics'
+// existing `"targets_runtime": null` serialization; /admin/events serializes
+// the same function's output and therefore matches.
+//
+// Issue #212：按 target 名（大小写不敏感）索引的上游生成性能估计；
+// 无样本的 target 不输出 model_performance。模型表满且无可回收条目时
+// 丢弃的新模型计数单独暴露，便于发现只出现少量模型的目标触顶。
+func (h *Handler) buildTargetsRuntime(now time.Time, statuses []proxy.TargetStatus) []metricsTargetRuntime {
 	performanceByTarget := make(map[string][]proxy.TargetModelPerf)
 	droppedPerformanceByTarget := make(map[string]int64)
 	for _, perf := range h.proxyService.TargetPerformanceSnapshot(now) {
@@ -175,12 +191,12 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		performanceByTarget[key] = perf.Models
 	}
-	response.ShadowRouting = h.proxyService.ShadowRoutingSnapshot()
 
 	// S5 调度可观测（议题 #18）：每节点运行态含派生调度相位与亲和/熔断计数。
+	var runtime []metricsTargetRuntime
 	for _, ts := range statuses {
 		targetKey := strings.ToLower(ts.Name)
-		response.TargetsRuntime = append(response.TargetsRuntime, metricsTargetRuntime{
+		runtime = append(runtime, metricsTargetRuntime{
 			Name:                     ts.Name,
 			InFlight:                 ts.InFlight,
 			MaxConcurrency:           ts.Capacity,
@@ -199,8 +215,7 @@ func (h *Handler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			DroppedPerformanceModels: droppedPerformanceByTarget[targetKey],
 		})
 	}
-
-	writeJSON(w, http.StatusOK, response)
+	return runtime
 }
 
 func modelCooldownsOrEmpty(list []proxy.ModelCooldown) []proxy.ModelCooldown {

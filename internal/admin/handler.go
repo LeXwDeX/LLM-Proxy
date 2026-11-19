@@ -45,6 +45,9 @@ type Handler struct {
 	// reportCache 是展示用的短 TTL 报表缓存（仅总览与用量聚合），见 report_cache.go。
 	reportCache *reportCache
 
+	// events 是 /admin/events 的 SSE 广播 hub（懒启动，见 events_hub.go）。
+	events *eventsHub
+
 	// router 承载全部 /admin/* 子路由（NewHandler 返回 *Handler 以暴露
 	// SetRateFunc/SetOnBillingWrite 注入点，同时满足 http.Handler）。
 	router chi.Router
@@ -230,6 +233,7 @@ func NewHandler(
 		logger.Error("unable to initialize target key snapshots")
 	}
 
+	h.events = newEventsHub(h.buildEventsSnapshot, logger)
 	h.router = h.routes()
 	return h
 }

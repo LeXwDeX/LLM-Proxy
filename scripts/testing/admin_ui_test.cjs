@@ -103,6 +103,9 @@ class Element {
   removeAttribute(name) {
     delete this.attrs[name];
   }
+  contains(node) {
+    return node === this || this.childrenDeep().includes(node);
+  }
   // Elements created through appendChild / innerHTML, recursively.
   childrenDeep() {
     return this.children.flatMap((child) => [child, ...child.childrenDeep()]);
@@ -303,6 +306,9 @@ function createHarness({
       ]),
     );
     const element = new Element(match[1], attrs);
+    // Boolean attributes such as `hidden` carry no value; the tag scan above
+    // only records key="value" pairs.
+    if (/\shidden(?=[\s>])/.test(match[0])) element.hidden = true;
     elements.push(element);
     if (element.id) ids.set(element.id, element);
   }
@@ -354,8 +360,12 @@ function createHarness({
     }
   };
   for (const element of elements) element.registerChildren = registerChildren;
+  // Page lifecycle listeners (visibilitychange, click capture, ...) are recorded
+  // so tests can dispatch them; document.hidden models tab visibility.
+  const documentListeners = {};
   const document = {
     body,
+    hidden: false,
     getElementById: (id) => ids.get(id) || null,
     querySelectorAll,
     querySelector: (selector) => querySelectorAll(selector)[0] || null,
@@ -364,7 +374,9 @@ function createHarness({
       element.registerChildren = registerChildren;
       return element;
     },
-    addEventListener() {},
+    addEventListener(type, fn) {
+      (documentListeners[type] = documentListeners[type] || []).push(fn);
+    },
   };
   const sandbox = {
     document,
@@ -447,6 +459,7 @@ function createHarness({
   return {
     context,
     document,
+    documentListeners,
     windowListeners,
     ids,
     requests,
@@ -545,6 +558,7 @@ async function main() {
     "overviewHealth",
     "overviewActivity",
     "overview",
+    "targetsRuntimeStream",
     "targets",
     "targetsHealth",
     "targetsDetail",

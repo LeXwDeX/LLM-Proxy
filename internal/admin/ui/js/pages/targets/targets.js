@@ -2,7 +2,7 @@
 // Targets owns the shared page state, the scheduling refresh and the public exports.
 // Part of the targets page; shared mutable state lives in the object owned by the "targets" module.
 AdminApp.register("targets", function (app) {
-  app.requires(["targetsSave"]);
+  app.requires(["targetsSave", "targetsRuntimeStream"]);
   var state = app.state;
   var esc = app.bind("core", "esc");
   var fmtTime = app.bind("core", "fmtTime");
@@ -12,6 +12,9 @@ AdminApp.register("targets", function (app) {
   var renderTargets = app.bind("targetsList", "renderTargets");
   var syncEditingWithRefresh = app.bind("targetsKeyList", "syncEditingWithRefresh");
   var updateTargetPoolAvailability = app.bind("targetsModal", "updateTargetPoolAvailability");
+  // Issue 225: entering the targets page (either sub-tab) also subscribes the
+  // foreground-only runtime stream. The call is idempotent.
+  var subscribeRuntimeStream = app.bind("targetsRuntimeStream", "subscribe");
   // Shared mutable page state. Only this object crosses file boundaries; sibling
   // modules reach it through `shared` and never keep their own copies.
   var ts = {
@@ -410,6 +413,74 @@ AdminApp.register("targets", function (app) {
   window.addEventListener("scroll", hideHint, true);
   document.addEventListener("scroll", hideHint, true);
   window.addEventListener("resize", hideHint);
+  // ---- Issue 225: live runtime snapshots (/admin/events, /admin/metrics fallback) ----
+  // The snapshot replaces state.runtime/shadowRouting only; targets and pools are
+  // never re-fetched for a frame. Rendering is skipped when the frame repeats the
+  // last one and deferred while an editor/drawer/preview is open, so a 5s tick
+  // cannot rebuild a form under the pointer.
+  var lastRuntimeKey = null;
+  var pendingRuntimeRender = false;
+  function stableSerialize(value) {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return "[" + value.map(stableSerialize).join(",") + "]";
+    return "{" + Object.keys(value).sort().map(function (key) {
+      return JSON.stringify(key) + ":" + stableSerialize(value[key]);
+    }).join(",") + "}";
+  }
+  function runtimeOverlayOpen() {
+    var selectors = [".modal-overlay", ".quota-drawer-overlay"];
+    for (var i = 0; i < selectors.length; i++) {
+      var nodes = document.querySelectorAll(selectors[i]);
+      for (var j = 0; j < nodes.length; j++) {
+        if (nodes[j] && nodes[j].classList && nodes[j].classList.contains("open")) return true;
+      }
+    }
+    return false;
+  }
+  // Returns true when the visible panel was actually repainted; false keeps the
+  // frame pending until the page, tab or editor state allows a render.
+  function renderRuntimeSnapshot() {
+    if (state.currentPage !== "targets" || document.hidden || runtimeOverlayOpen()) return false;
+    var poolsPanel = document.getElementById("targetsPoolsPanel");
+    if (poolsPanel && !poolsPanel.hidden) {
+      return !!(app.modules.pools && app.modules.pools.renderRuntimeSnapshot() === true);
+    }
+    if (!ts.targetsLoaded) return false;
+    renderTargets();
+    return true;
+  }
+  function applyRuntimeSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    // The server serializes an empty roster as null (same as /admin/metrics);
+    // accept it as an empty map instead of keeping stale runtime.
+    var runtimeList = snapshot.targets_runtime;
+    if (runtimeList !== undefined && runtimeList !== null && !Array.isArray(runtimeList)) return false;
+    var map = {};
+    (Array.isArray(runtimeList) ? runtimeList : []).forEach(function (rt) {
+      if (!rt || typeof rt !== "object") return;
+      var name = String(rt.name || "").toLowerCase();
+      if (name) map[name] = rt;
+    });
+    var shadow = Array.isArray(snapshot.shadow_routing)
+      ? snapshot.shadow_routing.filter(function (s) { return s && typeof s === "object"; })
+      : null;
+    var key = stableSerialize([map, shadow]);
+    var changed = key !== lastRuntimeKey;
+    if (changed) {
+      lastRuntimeKey = key;
+      state.runtime = map;
+      state.shadowRouting = shadow;
+      ts.runtimeEpoch++;
+    }
+    // A repeated frame only redraws when an earlier one was deferred.
+    if (!changed && !pendingRuntimeRender) return false;
+    if (!renderRuntimeSnapshot()) {
+      pendingRuntimeRender = true;
+      return changed;
+    }
+    pendingRuntimeRender = false;
+    return changed;
+  }
   function publishSchedulingRefresh(sequence, targets, runtime, pools) {
     if (!schedulingRefreshCurrent(sequence)) return null;
     // The refresh settles with success only when every step below ran. A throw
@@ -455,6 +526,7 @@ AdminApp.register("targets", function (app) {
     return true;
   }
   async function loadTargets(propagateError) {
+    subscribeRuntimeStream(true);
     var sequence = beginSchedulingRefresh();
     try {
       // Pool pause lives on the roster, and another admin session may resume it
@@ -524,6 +596,9 @@ AdminApp.register("targets", function (app) {
     publishSchedulingRefresh: publishSchedulingRefresh,
     failSchedulingRefresh: failSchedulingRefresh,
     fetchSchedulingRuntime: fetchSchedulingRuntime,
+    applyRuntimeSnapshot: applyRuntimeSnapshot,
+    subscribeRuntimeStream: subscribeRuntimeStream,
+    runtimeStreamStatus: app.bind("targetsRuntimeStream", "status"),
     performanceSummary: performanceSummary,
     performanceHintHtml: performanceHintHtml,
     performanceDetailHtml: performanceDetailHtml,
