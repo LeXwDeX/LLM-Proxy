@@ -147,21 +147,16 @@ AdminApp.register("targets", function (app) {
     if (m.insufficient) parts.push("样本不足");
     return parts.join(" · ");
   }
-  // Compact list/pool summary of the representative model. title carries every model.
+  // Issue 224: performance metrics live only in the status badge tooltip. The
+  // summary exposes the full per-model title plus whether the representative
+  // model has any samples, so callers can omit the performance segment entirely.
   function performanceSummary(rt) {
     var models = perfModels(rt);
     if (!models.length) return null;
     var best = representativePerfModel(models);
-    var ttft = best.ttft || {};
-    var tps = best.tps || {};
-    var text =
-      "TTFT " + (perfNumber(ttft.samples) > 0 ? formatPerfTTFT(ttft.p50) : "—") +
-      " · " + (perfNumber(tps.samples) > 0 ? formatPerfTPS(tps.p50) : "—") +
-      " · " + perfSampleScore(best) + " 样本";
     return {
-      text: text,
       title: perfModelsByName(models).map(perfModelTitle).join("\n"),
-      insufficient: !!best.insufficient,
+      hasSamples: perfSampleScore(best) > 0,
     };
   }
   // Per-model table for the target detail overview. All columns are informational

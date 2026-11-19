@@ -339,6 +339,10 @@ AdminApp.register("targetsList", function (app) {
         var rt = state.runtime
           ? state.runtime[String(t.name || "").toLowerCase()]
           : null;
+        // Issue 224: performance metrics ride along in the status badge tooltip.
+        // Targets without samples keep their badge and tooltip unchanged.
+        var perf = performanceSummary(rt);
+        var perfDetail = perf && perf.hasSamples ? perf.title : "";
         if (!rt || !targetPhaseKnown(rt.phase)) {
           phaseCell =
             "<span style='background:var(--muted-soft);color:var(--ink-3);padding:2px 8px;border-radius:4px;font-size:12px;'>运行态不可用</span> ";
@@ -359,7 +363,7 @@ AdminApp.register("targetsList", function (app) {
             // Account-level upstream rejection: louder than the plain phase tag, with a way out.
             phaseCell =
               "<span class='target-mute-tag' style='background:var(--bad-soft);color:var(--bad);padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;' title='" +
-              esc(mute.title) +
+              esc(mute.title + (perfDetail ? "｜性能：" + perfDetail : "")) +
               "'>" +
               esc(mute.text) +
               "</span> <button type='button' class='btn btn-sm readonly-hide' data-unmute-tgt='" +
@@ -371,7 +375,11 @@ AdminApp.register("targetsList", function (app) {
               ph.bg +
               ";color:" +
               ph.fg +
-              ";padding:2px 8px;border-radius:4px;font-size:12px;'>" +
+              ";padding:2px 8px;border-radius:4px;font-size:12px;" +
+              (perfDetail ? "cursor:help;" : "") +
+              "'" +
+              (perfDetail ? " title='" + esc(perfDetail) + "'" : "") +
+              ">" +
               esc(ph.label) +
               "</span> ";
           }
@@ -400,17 +408,8 @@ AdminApp.register("targetsList", function (app) {
               esc(modelCooling.text) +
               "</span>";
           }
-          // Issue 212: one compact upstream-performance line (no extra column).
-          var perf = performanceSummary(rt);
-          if (perf) {
-            schedCell +=
-              "<div class='target-perf-summary'" +
-              (perf.title ? " title='" + esc(perf.title) + "'" : "") +
-              ">" +
-              esc(perf.text) +
-              (perf.insufficient ? " <span class='quota-badge warn'>样本不足</span>" : "") +
-              "</div>";
-          }
+          // Issue 224: performance lives in the phase badge tooltip; the scheduling
+          // cell keeps only in-flight/affinity/breaker/cooldown text.
         }
         // The switch edits only the saved target pause flag. Effective pause can
         // also come from the pool or runtime; showing that as this switch would
