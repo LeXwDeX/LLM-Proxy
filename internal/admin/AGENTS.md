@@ -7,6 +7,7 @@
 | 文件 | 职责 |
 |---|---|
 | `handler.go` / `routes.go` | 依赖组装 / 全部 `/admin/*` REST 路由和读写守卫 |
+| `events_hub.go` / `handlers_events.go` | `/admin/events` 的 SSE 广播 hub 与 handler：hub 懒启动、单 tick 只构建/序列化一次、每订阅者 cap=1 latest-wins、全局上限 32，`StopEvents` 供 Shutdown 关闭全部流；handler 输出鉴权后的只读流（`retry: 3000`、首帧、15s 心跳、10min 连接上限） |
 | `handlers_{resource}.go` | 按资源拆分的 CRUD 与查询；目标、部署池、客户端、计价、额度、字典、用户、用量、审计、Trace 各归对应文件 |
 | `handlers_config.go` / `http_helpers.go` | 配置与运行时更新协调 / HTTP 输出和内部错误处理 |
 | `schema.go` | 从领域定义组装只读管理 Schema，无凭据、动态配置与数据库数据 |
@@ -63,6 +64,7 @@
   - **写响应与回读**：已登记后台刷新的写响应附 `"quota_refresh":"pending"`（目标删除、模型组增改删、职级更新、计价/定价模板写入；目标/部署池的创建与更新不改变额度解析结果，不带该字段）。进度回读复用 `GET /admin/metrics` 的 `quota_refresh`：`config_generation`（已提交的额度相关变更数）、`completed_batches`、`pending`（有刷新排期或运行中）。前端在对应保存成功提示后附“额度将在后台刷新”（计价页保存/删除、目标列表行操作与目标保存，仅当响应带 `quota_refresh`；计价模板删除为 204 无响应体，提示固定附带）。
 - **configTxn（锁外审计与计价缓存预热）**：目标/部署池的写 handler 用 `txn := h.lockConfig(r); defer txn.Unlock()`，请求体在取锁前读取、解码（上限 16 MiB，`limitConfigBody`）并完成与配置无关的校验；锁内只做校验与落库，`txn.audit(...)` 与 `txn.refresh(...)` 推迟到释放 `configMu` 之后执行。审计时间戳在 `txn.audit`（持锁）内分配且严格递增，写入推迟到释放锁之后，因此审计顺序等于提交顺序，与锁外写入快慢无关。审计仍是同步、可靠的写入（响应结束前已落库），没有合并进目标写事务（目标写入口众多，合并需改所有 store 的签名；审计失败本就不影响业务结果）。例外：旧的按序号密钥封禁/解封 handler（`handleSetTargetKeyBlocked`）的审计保留在锁内；按 ID 的封禁/解封与配置 reload 已走 `configTxn`，审计在锁外——它在审计之后计算条件快照的后继令牌，必须与运行时变更互斥（`TestIssue68Successor…` 钉住）。`handleListTargets` 的 ETag 读库在取 `configMu` 之前完成（先读 ETag 再取配置快照：并发写入只会产生「旧 ETag + 新配置」→ 保存时冲突，不会丢更新），锁内只取配置快照与运行时 key 快照。
 - **报表短 TTL 缓存**（`report_cache.go`）：总览 `GET /admin/api/overview` 与 `GET /admin/data/usage/aggregate` 经 `cachedReport` 包装（`/api/activity` 经 `cachedReportTTL` 使用 2 秒 TTL），响应在 `Handler.reportCache` 中缓存 5 秒（`defaultReportCacheTTL`）并用 singleflight 合并并发的相同请求，使多浏览器轮询只产生一次 bbolt 读事务。语义：仅用于展示，数据最多滞后一个 TTL（`generated_at` 与实时计数同样滞后）；key = 路径 + 规范化后的完整查询参数（重复参数保序）+ 会话角色，因为只读与管理员看到的字段可能不同（如目标 endpoint 脱敏）；仅缓存 200 响应，错误不缓存；用量写入、配置变更不主动失效，只靠 TTL 过期；共享计算仍使用首个调用方自己的请求上下文，客户端断开照旧中止扫描且不写响应；此时同批等待者自动重新加入新一轮 singleflight（每个调用方最多 3 轮，一次突发的底层扫描数不超过 3，与等待者数量无关）；3 轮用尽后返回 `503` + `Retry-After: 1`，不会各自绕过缓存直跑全量扫描，也不会收到中止结果；容量同时受条目数（256）与总字节数（32MiB）限制，每次写入顺带清理过期条目，超限时淘汰存活条目；单个响应超过 4MiB 时只返回、不缓存。禁止把该缓存用于计费、额度准入、导出、审计或任何写路径，新增轮询类报表如需缓存沿用同一包装。
+- **管理端 SSE 运行态推送（Issue #225）**：`GET /admin/events` 与 `/admin/metrics` 同级放入读路由组，所有已登录角色可访问、不经过写守卫、不写审计；响应 `text/event-stream` + `X-Accel-Buffering: no`，首帧 `retry: 3000`，此后每帧 `event: snapshot`，JSON 含 `generated_at`、`targets_runtime`、`shadow_routing`（无统计时省略，与 `/admin/metrics` 一致）。只有一个端点、一条流推全量快照：`targets_runtime` 必须复用 `/admin/metrics` 的 `buildTargetsRuntime`（含全部 provider/目标），不得另写组装逻辑，`/admin/metrics` 的字段与行为保持不变。hub 懒启动，默认每 5s 只构建/序列化一次；每 15s 发 `: ping`；单连接最长 10min；全局最多 32 个订阅，超出在写响应头前返回 503（`Retry-After: 5`）。每订阅者通道容量 1，publish 先 drain 旧帧再非阻塞发送（latest-wins），单次写 10s 截止，慢客户端不得阻塞 hub；新订阅首帧优先用缓存快照，无缓存时同步构建。服务 Shutdown 经 `server.RegisterOnShutdown(adminHandler.StopEvents)` 主动关闭全部流，不得让长连接拖满优雅退出。前端每页只建一条 EventSource，仅页面可见时连接，`hidden`/`pagehide`/切页关闭，`CONNECTING` 不重复建连；`CLOSED` 时探测 `/admin/api/me`，401 停止重连，否则按 5s→60s 指数退避；不可用时回退为仅可见页每 30s 请求 `background: true` 的 `/admin/metrics`，并带最后帧看门狗。快照按内容 key 去重应用，编辑弹层打开时挂起重绘、不得重绘表单，重绘前关闭 hint，部署池重绘去抖。不新增持久化，不改采集、选路、影子、计费、额度与客户端协议；部署侧 nginx 需 `proxy_buffering off`（现有 vhost 已配置），不新增端口。守护用例：`events_test.go`、`ui/targets-runtime-stream-225.test.cjs`。
 - 接口行为变化须同步处理器及其回归测试；本仓库当前不维护 `docs/api-contract.md`，不要创建指向该文件的引用。
 - **`/admin/metrics` 请求指标字段契约**：`requests` 对象新增四个整数计数（JSON number，不带 alias/target 标签）：`dequeued_total`（可出队 4xx 的出队次数）、`dequeue_exhausted_total`（队列耗尽次数，在回放缓存 4xx 或返回粘连重试提示时计数）、`cached_error_replayed_total`（缓存 4xx 被回放的次数）、`dequeue_4xx_total`（按 4xx 分类的可出队次数）。另有代理内有界等待与粘连重试的整数计数：`in_proxy_wait_total`（等待过的请求数）、`in_proxy_wait_success_total`（等待后最终成功）、`in_proxy_wait_rejected_total`（全局等待名额耗尽）、`in_proxy_waiting`（当前等待者，量规）、`sticky_retry_hinted_total`（粘连请求被返回 503 + `Retry-After` 提示重试，不计入 `cached_error_replayed_total`）；`/admin/api/overview` 的 `requests` 同步给出 `in_proxy_wait_total`、`in_proxy_wait_success_total`、`in_proxy_wait_rejected_total`、`sticky_retry_hinted_total`。`target_retries` 包含每次 4xx 出队，保持 `retries` = `key_retries` + `target_retries`；`failures` 只计最终客户端结果，一次请求至多一次，4xx 出队本身不增加 `failures`。新增字段须同步 `ServiceMetrics`、`handlers_status.go` 的 `/admin/metrics` 输出及回归测试。
 
@@ -107,10 +109,11 @@ index.html 内全部弹层（`.modal-overlay` 标准弹窗、`.quota-drawer-over
 
 ## 全局 Tooltip 交互规范
 
-- 信息提示统一使用 `role="tooltip"`，由全局 CSS 设置 `pointer-events:none`，不得拦截鼠标或遮挡下层控件的命中。
-- 鼠标移到哪个触发元素就更新为该元素的提示；不得因鼠标处于提示框的显示区域而保持旧内容。
-- Tooltip 仅展示信息，不放置可点击、可聚焦或需鼠标滚动的控件；需要交互的内容使用现有弹窗或抽屉。
-- 验证必须用真实鼠标坐标从上排移向被提示覆盖的下排，确认下层元素命中、提示切换和点击正常。
+- 全站唯一 `#targetHint`：body 直连挂载，`role="tooltip"`，由全局 CSS 设置 `pointer-events:none`，不得拦截鼠标或遮挡下层控件的命中；深色气泡 + 向下箭头，默认显示在触发器上方，水平方向 clamp 在视口内，仅上方空间不足时落下方（箭头转向上）。
+- hover/focus 同步显示（0 延迟），仅渐入延迟到下一帧，`transition` 固定 150ms；leave/focusout/Escape/scroll/resize/外部点击/切页/重绘时关闭。
+- 四类触发点统一使用该组件，并移除原生 `title`：目标列表模型 chip、目标详情模型 chip、目标列表状态/性能标签、部署池成员 chip。性能内容为结构化表格：模型 / 首字 p50·p90 / 吞吐 p50·p90 / 样本 / 状态；最多展示 3 个模型，其余提示“还有 N 个模型”，底部保留惩罚样本、非流式次数与均值、更新时间。不得新增常驻性能摘要或成员 chip 常驻性能文本。
+- 鼠标移到哪个触发元素就更新为该元素的提示；不得因鼠标处于提示框的显示区域而保持旧内容。Tooltip 仅展示信息，不放置可点击、可聚焦或需鼠标滚动的控件；需要交互的内容使用现有弹窗或抽屉。
+- 验证必须用真实鼠标坐标从上排移向被提示覆盖的下排，确认下层元素命中、提示切换和点击正常。守护用例：`ui/upstream-performance-212.test.cjs`（唯一 `#targetHint`、0 延迟、150ms 渐入、上方优先、无原生 `title`、结构化性能表）。
 
 ## 表格排序规范（强制）
 
