@@ -340,9 +340,9 @@ AdminApp.register("targetsList", function (app) {
           ? state.runtime[String(t.name || "").toLowerCase()]
           : null;
         // Issue 224: performance metrics ride along in the status badge tooltip.
-        // Targets without samples keep their badge and tooltip unchanged.
+        // Targets without model_performance keep their badge and tooltip unchanged.
         var perf = performanceSummary(rt);
-        var perfDetail = perf && perf.hasSamples ? perf.title : "";
+        var perfDetail = perf ? perf.title : "";
         if (!rt || !targetPhaseKnown(rt.phase)) {
           phaseCell =
             "<span style='background:var(--muted-soft);color:var(--ink-3);padding:2px 8px;border-radius:4px;font-size:12px;'>运行态不可用</span> ";

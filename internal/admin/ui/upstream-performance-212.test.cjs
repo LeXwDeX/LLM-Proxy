@@ -88,8 +88,12 @@ test("target list puts the full performance details in the ready badge title", a
   assert.doesNotMatch(alpha.replace(/<[^>]+>/g, ""), /TTFT|首字|样本/, "the visible row keeps no performance numbers");
 
   const beta = rowFor(html, "beta");
-  assert.doesNotMatch(beta, /cursor:help|title='[^']*TTFT/, "no samples means no performance segment");
-  assert.doesNotMatch(beta.replace(/<[^>]+>/g, ""), /TTFT|样本/, "no visible performance fallback");
+  assert.match(
+    beta,
+    /<span style='[^']*cursor:help;' title='[^']*cold-model[^']*TTFT p50 0ms[^']*样本不足'[^>]*>Schema正常<\/span>/,
+    "a sampleless model still gets the full title with the warning",
+  );
+  assert.doesNotMatch(beta.replace(/<[^>]+>/g, ""), /TTFT|样本/, "the visible row keeps no performance numbers");
 
   assert.doesNotMatch(rowFor(html, "plain"), /cursor:help|target-perf-summary|target-perf-chip/, "a target without samples keeps the old layout");
 });
@@ -103,10 +107,22 @@ test("the representative model is the one with most samples, ties by upstream na
       perfModel("tiny", { ttft: { p50: 500, p90: 600, samples: 3, insufficient: true }, tps: { p50: 90, p90: 99, samples: 3, insufficient: true } }),
     ],
   });
-  assert.equal(summary.hasSamples, true);
+  assert.equal(summary.insufficient, false);
   assert.match(summary.title, /^aardvark[\s\S]*\ntiny[\s\S]*\nzeta/, "the title is ordered by upstream model");
   assert.match(summary.title, /aardvark · TTFT p50 800ms \/ p90 900ms/);
   assert.match(summary.title, /tiny[\s\S]*样本不足/, "insufficient models stay marked in the title");
+
+  const cold = app.modules.targets.performanceSummary({
+    model_performance: [
+      perfModel("cold", {
+        ttft: { p50: 0, p90: 0, samples: 0, insufficient: true },
+        tps: { p50: 0, p90: 0, samples: 0, insufficient: true },
+        insufficient: true,
+      }),
+    ],
+  });
+  assert.equal(cold.insufficient, true);
+  assert.match(cold.title, /样本不足$/, "the representative warning ends the title");
 });
 
 test("target detail shows the per-model performance table and a note without samples", async () => {
@@ -212,8 +228,8 @@ test("missing, empty or malformed performance fields degrade to the old layout",
   app.modules.targets.renderTargets();
   const rows = h.ids.get("targetsTableBody").innerHTML;
   assert.doesNotMatch(rows, /target-perf-summary|target-perf-chip/, "a sampleless model adds no performance row");
-  assert.doesNotMatch(rows.replace(/<[^>]+>/g, ""), /TTFT|样本不足/, "the badge stays unchanged without samples");
-  assert.doesNotMatch(rows, /title='[^']*TTFT/, "no performance segment without samples");
+  assert.match(rows, /title='[^']*TTFT p50 0ms[^']*样本不足/, "the badge title still carries the full breakdown");
+  assert.doesNotMatch(rows.replace(/<[^>]+>/g, ""), /TTFT|样本不足/, "no performance text is visible");
 });
 
 test("metrics without model_performance render no summary or detail rows", async () => {

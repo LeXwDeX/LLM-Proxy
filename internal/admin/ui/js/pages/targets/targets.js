@@ -148,16 +148,16 @@ AdminApp.register("targets", function (app) {
     return parts.join(" · ");
   }
   // Issue 224: performance metrics live only in the status badge tooltip. The
-  // summary exposes the full per-model title plus whether the representative
-  // model has any samples, so callers can omit the performance segment entirely.
+  // summary carries every model's detail and flags an insufficient representative
+  // model, whose warning is appended at the end of the title.
   function performanceSummary(rt) {
     var models = perfModels(rt);
     if (!models.length) return null;
     var best = representativePerfModel(models);
-    return {
-      title: perfModelsByName(models).map(perfModelTitle).join("\n"),
-      hasSamples: perfSampleScore(best) > 0,
-    };
+    var title = perfModelsByName(models).map(perfModelTitle).join("\n");
+    var insufficient = !!best.insufficient;
+    if (insufficient && !/样本不足$/.test(title)) title += " · 样本不足";
+    return { title: title, insufficient: insufficient };
   }
   // Per-model table for the target detail overview. All columns are informational
   // (no sorting); the table still declares data-sort-none for the header gate.
