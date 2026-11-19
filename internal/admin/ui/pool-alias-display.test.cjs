@@ -29,38 +29,55 @@ const targets = [
   { name: "unmapped", pool: "ds" },
 ];
 
-async function render(strategy) {
+async function renderApp(strategy) {
   const harness = createHarness();
   const app = await harness.run();
   app.state.pools = [{ name: "ds", routing_strategy: strategy }];
   app.state.targets = targets;
   app.modules.pools.renderPools();
+  return { harness, app };
+}
+async function render(strategy) {
+  const { harness } = await renderApp(strategy);
   return harness.ids.get("poolsTableBody").innerHTML;
+}
+// Issue 227: pool member details moved from the chip title into #targetHint.
+function hoverMember(harness, name) {
+  const body = harness.ids.get("poolsTableBody");
+  const chip = body.children.find((el) => el.getAttribute("data-pool-target") === name);
+  assert.ok(chip, "member chip for " + name);
+  assert.equal(chip.getAttribute("title"), null, "pool chips carry no native title");
+  for (const listener of body.listeners.mouseover || []) listener({ target: chip });
+  return harness.document.body.children.find((el) => el.id === "targetHint");
 }
 
 // Issue #179: a cost pool's runtime view names the client alias first and the
 // member's upstream model second, so operators can see which members compete
 // for the same client-facing model. Comma-separated fallbacks are split.
 test("cost pool member tooltips show aliases before upstream models", async () => {
-  const rows = await render("cost");
-  assert.match(rows, /ds-v4-flash（上游 DeepSeek-V4\.1-Flash）/);
+  const { harness } = await renderApp("cost");
+  let hint = hoverMember(harness, "official");
+  assert.match(hint.innerHTML, /ds-v4-flash（上游 DeepSeek-V4\.1-Flash）/);
   assert.match(
-    rows,
+    hint.innerHTML,
     /alpha-1（上游 Official-Second-Model）、beta-2（上游 Official-Second-Model）/,
     "comma-separated aliases are split into independent labels",
   );
-  assert.match(rows, /ds-v4-flash（上游 deepseek-chat）/);
-  assert.match(
-    rows,
-    /已暂停 legacy-alias（上游 Legacy-Model）/,
-    "a paused mapping is still labelled and marked",
-  );
-  assert.match(rows, /模型 不限/, "an unrestricted member is explicit");
   assert.doesNotMatch(
-    rows,
+    hint.innerHTML,
     /DeepSeek-V4\.1-Flash（上游 ds-v4-flash）/,
     "the upstream model must not be rendered as the primary label",
   );
+  hint = hoverMember(harness, "agg");
+  assert.match(hint.innerHTML, /ds-v4-flash（上游 deepseek-chat）/);
+  hint = hoverMember(harness, "legacy");
+  assert.match(
+    hint.innerHTML,
+    /已暂停 legacy-alias（上游 Legacy-Model）/,
+    "a paused mapping is still labelled and marked",
+  );
+  hint = hoverMember(harness, "unmapped");
+  assert.match(hint.innerHTML, /模型 不限/, "an unrestricted member is explicit");
 });
 
 // The grouping itself is visible without hovering: fallback alias groups come
@@ -169,10 +186,11 @@ test("paused targets and paused pools do not look active", async () => {
   ];
   app.modules.pools.renderPools();
   let rows = harness.ids.get("poolsTableBody").innerHTML;
+  const hint = hoverMember(harness, "paused-target");
   assert.match(
-    rows,
+    hint.innerHTML,
     /模型 目标已暂停 paused-alias（上游 Paused-Upstream）/,
-    "a paused target is labelled in its member tooltip",
+    "a paused target is labelled in its member hint",
   );
   assert.match(rows, />active-alias · active</);
   assert.doesNotMatch(

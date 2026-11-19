@@ -346,8 +346,11 @@ async function main() {
         document.activeElement?.blur();
         document.querySelectorAll(".content, .table-wrap").forEach(el => { el.scrollTop = 0; el.scrollLeft = 0; });
       }, theme);
-      const hint = await page.evaluate(() => document.getElementById("targetModelHint"));
-      assert.equal(hint, null, "no tooltip can remain in the usage fixture");
+      const hint = await page.evaluate(() => {
+        const el = document.getElementById("targetHint");
+        return el ? el.hidden : null;
+      });
+      assert.ok(hint === null || hint === true, "no tooltip can remain open in the usage fixture");
       const contentSize = await page.evaluate(() => {
         const content = document.querySelector(".content");
         return { width: content.clientWidth, scrollWidth: content.scrollWidth, height: content.scrollHeight, top: content.getBoundingClientRect().top };

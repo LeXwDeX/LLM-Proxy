@@ -32,6 +32,9 @@ AdminApp.register("targetsList", function (app) {
   var targetMuteReasonActive = app.bind("targetsHealth", "targetMuteReasonActive");
   var targetRuntimeFor = app.bind("targetsHealth", "targetRuntimeFor");
   var performanceSummary = app.bind("targets", "performanceSummary");
+  var performanceHintHtml = app.bind("targets", "performanceHintHtml");
+  var bindTargetHints = app.bind("targets", "bindTargetHints");
+  var hideHint = app.bind("targets", "hideHint");
   var etagHeaders = app.bind("targetsHealth", "etagHeaders");
   var createTableSort = app.bind("core", "createTableSort");
   var targetHealthRank = { attention: 0, healthy: 1, paused: 2 };
@@ -98,6 +101,7 @@ AdminApp.register("targetsList", function (app) {
     var pools = name === "pools";
     document.getElementById("targetsMainPanel").hidden = pools;
     document.getElementById("targetsPoolsPanel").hidden = !pools;
+    hideHint();
     [
       ["targetsMainTab", !pools],
       ["targetsPoolsTab", pools],
@@ -118,7 +122,7 @@ AdminApp.register("targetsList", function (app) {
   var renderedTableHtml = null;
   function writeTargetsTable(tb, html) {
     if (renderedTableHtml === html) return;
-    if (modelHint) hideModelHint();
+    hideHint();
     tb.innerHTML = html;
     renderedTableHtml = html;
   }
@@ -194,7 +198,9 @@ AdminApp.register("targetsList", function (app) {
             modelNames
               .map(function (name) {
                 return (
-                  "<button type='button' class='target-model-badge'>" +
+                  "<button type='button' class='target-model-badge' data-model-label='" +
+                  esc(name) +
+                  "'>" +
                   esc(name) +
                   "</button>"
                 );
@@ -339,10 +345,13 @@ AdminApp.register("targetsList", function (app) {
         var rt = state.runtime
           ? state.runtime[String(t.name || "").toLowerCase()]
           : null;
-        // Issue 224: performance metrics ride along in the status badge tooltip.
-        // Targets without model_performance keep their badge and tooltip unchanged.
+        // Issue 227: performance details live in a structured Hint.css-style
+        // overlay opened from the status badge instead of the native title.
+        // Targets without model_performance keep their badge unchanged.
         var perf = performanceSummary(rt);
-        var perfDetail = perf ? perf.title : "";
+        var perfAttrs = perf
+          ? " data-perf-target='" + esc(t.name) + "' tabindex='0'"
+          : "";
         if (!rt || !targetPhaseKnown(rt.phase)) {
           phaseCell =
             "<span style='background:var(--muted-soft);color:var(--ink-3);padding:2px 8px;border-radius:4px;font-size:12px;'>运行态不可用</span> ";
@@ -362,9 +371,11 @@ AdminApp.register("targetsList", function (app) {
           if (mute) {
             // Account-level upstream rejection: louder than the plain phase tag, with a way out.
             phaseCell =
-              "<span class='target-mute-tag' style='background:var(--bad-soft);color:var(--bad);padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;' title='" +
-              esc(mute.title + (perfDetail ? "｜性能：" + perfDetail : "")) +
-              "'>" +
+              "<span class='target-mute-tag' style='background:var(--bad-soft);color:var(--bad);padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;" +
+              (perf ? "cursor:help;" : "") +
+              "'" +
+              (perf ? perfAttrs : " title='" + esc(mute.title) + "'") +
+              ">" +
               esc(mute.text) +
               "</span> <button type='button' class='btn btn-sm readonly-hide' data-unmute-tgt='" +
               esc(t.name) +
@@ -376,9 +387,9 @@ AdminApp.register("targetsList", function (app) {
               ";color:" +
               ph.fg +
               ";padding:2px 8px;border-radius:4px;font-size:12px;" +
-              (perfDetail ? "cursor:help;" : "") +
+              (perf ? "cursor:help;" : "") +
               "'" +
-              (perfDetail ? " title='" + esc(perfDetail) + "'" : "") +
+              perfAttrs +
               ">" +
               esc(ph.label) +
               "</span> ";
@@ -488,62 +499,18 @@ AdminApp.register("targetsList", function (app) {
       .join(""));
     refreshOpenTargetDetail();
   }
-  // Mount outside the scrolling cell so the full name is never clipped by the table.
-  var modelHint = document.createElement("div");
-  modelHint.id = "targetModelHint";
-  modelHint.className = "target-model-hint";
-  modelHint.setAttribute("role", "tooltip");
-  modelHint.hidden = true;
-  document.body.appendChild(modelHint);
-  var modelHintAnchor = null;
-  function hideModelHint() {
-    if (modelHintAnchor) modelHintAnchor.removeAttribute("aria-describedby");
-    modelHintAnchor = null;
-    modelHint.hidden = true;
-  }
-  function showModelHint(badge) {
-    hideModelHint();
-    modelHintAnchor = badge;
-    modelHint.textContent = badge.textContent;
-    badge.setAttribute("aria-describedby", modelHint.id);
-    modelHint.hidden = false;
-    var rect = badge.getBoundingClientRect();
-    var box = modelHint.getBoundingClientRect();
-    modelHint.style.left =
-      Math.max(8, Math.min(rect.left, innerWidth - box.width - 8)) + "px";
-    modelHint.style.top =
-      Math.max(
-        8,
-        rect.bottom + box.height + 8 <= innerHeight
-          ? rect.bottom + 4
-          : rect.top - box.height - 4,
-      ) + "px";
-  }
-  var modelHintTable = document.getElementById("targetsTableBody");
-  ["mouseover", "focusin", "click"].forEach(function (eventName) {
-    modelHintTable.addEventListener(eventName, function (event) {
-      var badge = event.target.closest(".target-model-badge");
-      if (badge) showModelHint(badge);
-    });
+  // Issue 227: model chips and status badges share the single #targetHint
+  // component owned by targets.js. Events stay delegated on the table body so
+  // row redraws need no rebinding.
+  var targetHintTable = document.getElementById("targetsTableBody");
+  bindTargetHints(targetHintTable, ".target-model-badge", function (badge) {
+    var text = String(badge.getAttribute("data-model-label") || badge.textContent || "").trim();
+    return text ? "<div class='target-hint-text'>" + esc(text) + "</div>" : "";
   });
-  modelHintTable.addEventListener("mouseout", function (event) {
-    if (
-      !modelHintAnchor ||
-      modelHintAnchor.contains(event.relatedTarget) ||
-      document.activeElement === modelHintAnchor
-    )
-      return;
-    hideModelHint();
+  bindTargetHints(targetHintTable, "[data-perf-target]", function (badge) {
+    var name = String(badge.getAttribute("data-perf-target") || "").toLowerCase();
+    return performanceHintHtml(state.runtime && name ? state.runtime[name] : null);
   });
-  modelHintTable.addEventListener("focusout", hideModelHint);
-  document.addEventListener("click", function (event) {
-    if (!event.target.closest(".target-model-badge")) hideModelHint();
-  });
-  document.addEventListener("keydown", function (event) {
-    if (event.key === "Escape") hideModelHint();
-  });
-  window.addEventListener("resize", hideModelHint);
-  document.addEventListener("scroll", hideModelHint, true);
 
   // Row actions that must not run twice at once (double click, repeated confirm).
   var WAKEUP_TIMEOUT_MS = 10 * 60 * 1000;
@@ -802,7 +769,5 @@ AdminApp.register("targetsList", function (app) {
     switchTargetPageTab: switchTargetPageTab,
     renderTargets: renderTargets,
     setTargetSort: function (key) { ts.targetSort.toggle(key); },
-    hideModelHint: hideModelHint,
-    showModelHint: showModelHint,
   };
 });

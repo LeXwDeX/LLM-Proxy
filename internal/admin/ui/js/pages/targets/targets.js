@@ -159,6 +159,64 @@ AdminApp.register("targets", function (app) {
     if (insufficient && !/样本不足$/.test(title)) title += " · 样本不足";
     return { title: title, insufficient: insufficient };
   }
+  // Issue 227: structured Hint.css-style overlay for the status badge. Only the
+  // first three models (sorted by upstream name) fit; the rest are counted and
+  // deferred to the detail view. Every dynamic value is escaped.
+  var PERF_HINT_MODELS = 3;
+  function performanceHintHtml(rt) {
+    var models = perfModelsByName(perfModels(rt));
+    if (!models.length) return "";
+    var rows = models
+      .slice(0, PERF_HINT_MODELS)
+      .map(function (m) {
+        var ttft = m.ttft || {};
+        var tps = m.tps || {};
+        var ttftText = perfNumber(ttft.samples) > 0
+          ? formatPerfTTFT(ttft.p50) + " · " + formatPerfTTFT(ttft.p90)
+          : "—";
+        var tpsText = perfNumber(tps.samples) > 0
+          ? formatPerfTPS(tps.p50) + " · " + formatPerfTPS(tps.p90)
+          : "—";
+        var samplesText = perfNumber(ttft.samples) + " / " + perfNumber(tps.samples);
+        return (
+          "<tr><td class='target-hint-model'>" + esc(m.upstream_model) + "</td>" +
+          "<td class='target-hint-num'>" + ttftText + "</td>" +
+          "<td class='target-hint-num'>" + tpsText + "</td>" +
+          "<td class='target-hint-num'>" + samplesText + "</td>" +
+          "<td class='target-hint-num'>" +
+          (m.insufficient ? "<span class='target-hint-warn'>样本不足</span>" : "—") +
+          "</td></tr>"
+        );
+      })
+      .join("");
+    var more = models.length > PERF_HINT_MODELS
+      ? "<div class='target-hint-more'>还有 " + (models.length - PERF_HINT_MODELS) + " 个模型，可在目标详情查看</div>"
+      : "";
+    // The representative model supplies the footer facts: penalty samples,
+    // non-stream attempts with their average and the snapshot time.
+    var best = representativePerfModel(models);
+    var nonStream = best.non_stream || {};
+    var foot =
+      "<span>惩罚样本 " + perfNumber(best.penalty_samples) + "</span>" +
+      (perfNumber(nonStream.samples) > 0
+        ? "<span>非流式 " + perfNumber(nonStream.samples) + " 次 · 均值 " +
+          formatPerfTTFT(nonStream.avg_ms) + " / " +
+          Math.round(perfNumber(nonStream.avg_output_tokens)) + " tokens</span>"
+        : "<span>非流式 —</span>") +
+      "<span>更新 " + (best.updated_at ? esc(fmtTime(best.updated_at)) : "—") + "</span>";
+    return (
+      "<div class='target-hint-head'><span class='target-hint-title'>上游性能估计</span>" +
+      "<span class='target-hint-sub'>近 5 分钟 · 真实流量</span></div>" +
+      "<table class='target-hint-table'><thead><tr>" +
+      "<th data-sort-none>模型</th><th class='target-hint-num' data-sort-none>首字 p50·p90</th>" +
+      "<th class='target-hint-num' data-sort-none>吞吐 p50·p90</th>" +
+      "<th class='target-hint-num' data-sort-none>样本 TTFT/TPS</th>" +
+      "<th class='target-hint-num' data-sort-none>状态</th>" +
+      "</tr></thead><tbody>" + rows + "</tbody></table>" +
+      more +
+      "<div class='target-hint-foot'>" + foot + "</div>"
+    );
+  }
   // Per-model table for the target detail overview. All columns are informational
   // (no sorting); the table still declares data-sort-none for the header gate.
   function performanceDetailHtml(rt) {
@@ -200,6 +258,158 @@ AdminApp.register("targets", function (app) {
       "</tr></thead><tbody>" + rows + "</tbody></table></div>"
     );
   }
+  // ---- Issue 227: the one body-level Hint.css tooltip for target hints ----
+  // Model chips, status/performance badges and pool member chips all mount the
+  // same #targetHint. Page modules register their own event roots and content
+  // through bindTargetHints; showing is synchronous with the triggering event
+  // (no timer/debounce) and only the 150ms fade is deferred to the frame.
+  var targetHint = document.createElement("div");
+  targetHint.id = "targetHint";
+  targetHint.setAttribute("class", "target-hint");
+  targetHint.setAttribute("role", "tooltip");
+  targetHint.hidden = true;
+  document.body.appendChild(targetHint);
+  var targetHintAnchor = null;
+  var TARGET_HINT_GAP = 10;
+  var targetHintHashBound = false;
+  function targetHintRect(node) {
+    if (!node || typeof node.getBoundingClientRect !== "function")
+      return { left: 0, top: 0, width: 0, height: 0, bottom: 0 };
+    var box = node.getBoundingClientRect();
+    var left = Number(box.left) || 0;
+    var top = Number(box.top) || 0;
+    var width = Number(box.width) || 0;
+    var height = Number(box.height) || 0;
+    return { left: left, top: top, width: width, height: height, bottom: top + height };
+  }
+  function targetHintWithin(node, root) {
+    while (node) {
+      if (node === root) return true;
+      node = node.parentNode;
+    }
+    return false;
+  }
+  function coarsePointer() {
+    return !!(window.matchMedia && window.matchMedia("(hover: none)").matches);
+  }
+  function bindTargetHintHashHide() {
+    if (targetHintHashBound || typeof window.addEventListener !== "function") return;
+    targetHintHashBound = true;
+    window.addEventListener("hashchange", hideHint);
+  }
+  function hideHint() {
+    if (!targetHint) return;
+    if (targetHintAnchor) targetHintAnchor.removeAttribute("aria-describedby");
+    targetHintAnchor = null;
+    targetHint.hidden = true;
+    targetHint.classList.remove("is-visible");
+    if (targetHintHashBound && typeof window.removeEventListener === "function") {
+      targetHintHashBound = false;
+      window.removeEventListener("hashchange", hideHint);
+    }
+  }
+  // Always above the trigger with the arrow pointing down; only when the top
+  // has no room does it drop below (then the arrow points up).
+  function placeTargetHint(trigger) {
+    var rect = targetHintRect(trigger);
+    var box = targetHintRect(targetHint);
+    var vw = Number(window.innerWidth) || 0;
+    var vh = Number(window.innerHeight) || 0;
+    var aboveFits = rect.top - box.height - TARGET_HINT_GAP >= 8;
+    var placement = aboveFits ? "top" : "bottom";
+    var top = aboveFits ? rect.top - box.height - TARGET_HINT_GAP : rect.bottom + TARGET_HINT_GAP;
+    var left = vw
+      ? Math.max(8, Math.min(rect.left + rect.width / 2 - box.width / 2, vw - box.width - 8))
+      : rect.left;
+    if (vh) top = Math.max(8, Math.min(top, vh - box.height - 8));
+    targetHint.setAttribute("data-placement", placement);
+    targetHint.style.left = Math.max(0, left) + "px";
+    targetHint.style.top = Math.max(0, top) + "px";
+    var arrow = targetHint.querySelector(".target-hint-arrow");
+    if (arrow) {
+      var centered = rect.left + rect.width / 2 - left - 6;
+      arrow.style.left = Math.max(8, Math.min(centered, Math.max(8, box.width - 20))) + "px";
+    }
+  }
+  // showHint(trigger, html): the caller supplies already-escaped card markup
+// (plain text is wrapped by the caller in .target-hint-text).
+  function showHint(trigger, html) {
+    if (!html) return hideHint();
+    if (targetHintAnchor !== trigger) hideHint();
+    targetHintAnchor = trigger;
+    bindTargetHintHashHide();
+    targetHint.innerHTML =
+      "<div class='target-hint-arrow' aria-hidden='true'></div>" + html;
+    trigger.setAttribute("aria-describedby", targetHint.id);
+    targetHint.hidden = false;
+    // Layout exists now; the fade class lands on the next frame so the
+    // transition still runs from the initial opacity.
+    placeTargetHint(trigger);
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        if (!targetHint.hidden) targetHint.classList.add("is-visible");
+      });
+    });
+  }
+  // The event target may be the trigger itself or a descendant; the harness
+  // stub returns null from closest(), so simple selectors match the node too.
+  function targetHintTrigger(node, selector) {
+    if (!node) return null;
+    if (node.closest) {
+      var found = node.closest(selector);
+      if (found) return found;
+    }
+    if (selector.charAt(0) === "." && node.classList)
+      return node.classList.contains(selector.slice(1)) ? node : null;
+    var attr = /^\[([\w-]+)\]$/.exec(selector);
+    if (attr && node.getAttribute && node.getAttribute(attr[1]) !== null) return node;
+    return null;
+  }
+  function bindTargetHints(root, selector, contentFor) {
+    if (!root || typeof contentFor !== "function") return;
+    function showFrom(trigger) {
+      var html = contentFor(trigger);
+      if (html) showHint(trigger, html);
+      else hideHint();
+    }
+    root.addEventListener("mouseover", function (event) {
+      if (coarsePointer()) return;
+      var trigger = targetHintTrigger(event.target, selector);
+      if (trigger) showFrom(trigger);
+    });
+    root.addEventListener("focusin", function (event) {
+      if (coarsePointer()) return;
+      var trigger = targetHintTrigger(event.target, selector);
+      if (trigger) showFrom(trigger);
+    });
+    root.addEventListener("mouseout", function (event) {
+      if (!targetHintAnchor || targetHintWithin(event.relatedTarget, targetHintAnchor)) return;
+      if (document.activeElement === targetHintAnchor) return;
+      hideHint();
+    });
+    root.addEventListener("focusout", hideHint);
+    root.addEventListener("click", function (event) {
+      var trigger = targetHintTrigger(event.target, selector);
+      if (!trigger) return;
+      var touch = event.pointerType === "touch" ||
+        !!(event.sourceCapabilities && event.sourceCapabilities.firesTouchEvents) ||
+        coarsePointer();
+      if (!touch) return;
+      if (targetHintAnchor === trigger && !targetHint.hidden) hideHint();
+      else showFrom(trigger);
+    });
+  }
+  document.addEventListener("click", function (event) {
+    if (!targetHintAnchor || targetHintWithin(event.target, targetHintAnchor)) return;
+    hideHint();
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") hideHint();
+  });
+  // Scroll never bubbles, but capture at window level still sees it.
+  window.addEventListener("scroll", hideHint, true);
+  document.addEventListener("scroll", hideHint, true);
+  window.addEventListener("resize", hideHint);
   function publishSchedulingRefresh(sequence, targets, runtime, pools) {
     if (!schedulingRefreshCurrent(sequence)) return null;
     // The refresh settles with success only when every step below ran. A throw
@@ -315,7 +525,11 @@ AdminApp.register("targets", function (app) {
     failSchedulingRefresh: failSchedulingRefresh,
     fetchSchedulingRuntime: fetchSchedulingRuntime,
     performanceSummary: performanceSummary,
+    performanceHintHtml: performanceHintHtml,
     performanceDetailHtml: performanceDetailHtml,
+    showHint: showHint,
+    hideHint: hideHint,
+    bindTargetHints: bindTargetHints,
     formatPerfTTFT: formatPerfTTFT,
     formatPerfTPS: formatPerfTPS,
     targetHealth: app.bind("targetsHealth", "targetHealth"),
@@ -334,8 +548,6 @@ AdminApp.register("targets", function (app) {
     addKeyToList: app.bind("targetsKeyList", "addKeyToList"),
     removeKeyFromList: app.bind("targetsKeyList", "removeKeyFromList"),
     renderTargets: app.bind("targetsList", "renderTargets"),
-    hideModelHint: app.bind("targetsList", "hideModelHint"),
-    showModelHint: app.bind("targetsList", "showModelHint"),
     updateTargetFormVisibility: app.bind("targetsModal", "updateTargetFormVisibility"),
     applyEndpointPlaceholder: app.bind("targetsModal", "applyEndpointPlaceholder"),
     renderTgtModelSuggestions: app.bind("targetsMappings", "renderTgtModelSuggestions"),

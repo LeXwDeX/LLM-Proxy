@@ -18,7 +18,9 @@ AdminApp.register("pools", function (app) {
   var failSchedulingRefresh = app.bind("targets", "failSchedulingRefresh");
   var validPoolRoster = app.bind("targets", "validPoolRoster");
   var targetPoolsAvailable = app.bind("targets", "targetPoolsAvailable");
-  var performanceSummary = app.bind("targets", "performanceSummary");
+  var performanceHintHtml = app.bind("targets", "performanceHintHtml");
+  var bindTargetHints = app.bind("targets", "bindTargetHints");
+  var hideHint = app.bind("targets", "hideHint");
   // Cost-preview state: at most one pool detail row is open. The sequence
   // guard drops responses that arrive after a refresh or another pool opened.
   var expandedCostPool = "";
@@ -299,7 +301,6 @@ AdminApp.register("pools", function (app) {
   // shadow_selections/share。运行时快照缺失时显示名称与模型映射。
   function poolMemberChips(poolName, showModels, showShadow) {
     var key = String(poolName || "").toLowerCase();
-    var shadowStats = showShadow ? poolShadowStats(poolName) : null;
     var members = (state.targets || []).filter(function (t) {
       return t.pool && String(t.pool).toLowerCase() === key;
     });
@@ -316,53 +317,18 @@ AdminApp.register("pools", function (app) {
           "half-open": "var(--out)",
           offline: "var(--ink-3)",
         };
-        var dot = "var(--ink-3)";
-        var tip = esc(t.name);
-        if (rt) {
-          dot = dotColors[rt.phase] || dot;
-          tip +=
-            "｜状态 " +
-            esc(schemaLabel("target_phases", rt.phase)) +
-            "｜在途 " +
-            rt.in_flight +
-            (rt.max_concurrency > 0
-              ? "/" +
-                rt.max_concurrency +
-                "（并发上限，" +
-                Math.round((rt.utilization || 0) * 100) +
-                "%）"
-              : "") +
-            "｜亲和命中 " +
-            rt.affinity_hits +
-            "｜熔断 " +
-            rt.breaker_trips;
-        } else {
-          tip += "｜运行态未知";
-        }
-        if (showModels)
-          tip += "｜模型 " + (t.paused ? "目标已暂停 " : "") + poolMemberModelTip(t);
-        // Issue 224: the upstream performance summary lives only in the chip
-        // tooltip; the chip itself keeps its original visuals.
-        var perf = performanceSummary(rt);
-        if (perf) tip += "｜性能 " + esc(perf.title);
-        var shadowMember = showShadow ? shadowMemberFor(shadowStats, t.name) : null;
-        if (shadowMember) {
-          tip +=
-            "｜影子选中 " +
-            Number(shadowMember.shadow_selections || 0) +
-            "（" +
-            formatShadowShare(shadowMember.share) +
-            "）";
-        }
+        var dot = rt ? dotColors[rt.phase] || "var(--ink-3)" : "var(--ink-3)";
         var inFlightTxt = rt
           ? " <span class='pool-member-load'>" +
             rt.in_flight +
             (rt.max_concurrency > 0 ? "/" + rt.max_concurrency : "") +
             "</span>"
           : "";
+        // Issue 227: hover details live in the shared #targetHint; the chip
+        // keeps only its dot, name and in-flight count.
         return (
-          "<span class='pool-member-chip' title='" +
-          tip +
+          "<span class='pool-member-chip' data-pool-target='" +
+          esc(t.name) +
           "'>" +
           "<span class='pool-member-dot' style='background:" +
           dot +
@@ -375,6 +341,67 @@ AdminApp.register("pools", function (app) {
         );
       })
       .join(" ");
+  }
+  // Issue 227: structured hover card for one pool member: runtime status,
+  // the performance table (at most three models) and the shadow share for
+  // performance-priority pools. Cost pools keep the model mapping line.
+  function poolMemberHintHtml(chip) {
+    var name = String((chip && chip.getAttribute && chip.getAttribute("data-pool-target")) || "");
+    if (!name) return "";
+    var t = (state.targets || []).find(function (candidate) {
+      return candidate.name === name;
+    });
+    if (!t) return "";
+    var rt = state.runtime ? state.runtime[String(name).toLowerCase()] : null;
+    var poolName = String(t.pool || "");
+    var pool = (state.pools || []).find(function (candidate) {
+      return String(candidate.name || "").toLowerCase() === poolName.toLowerCase();
+    });
+    var isCost = poolRoutingStrategy(pool) === "cost";
+    var status = [];
+    if (rt) {
+      status.push("<span>状态 " + esc(schemaLabel("target_phases", rt.phase)) + "</span>");
+      status.push(
+        "<span>在途 " + rt.in_flight +
+          (rt.max_concurrency > 0
+            ? "/" + rt.max_concurrency + "（" + Math.round((rt.utilization || 0) * 100) + "%）"
+            : "") +
+          "</span>",
+      );
+      status.push("<span>亲和命中 " + rt.affinity_hits + "</span>");
+      status.push("<span>熔断 " + rt.breaker_trips + "</span>");
+    } else {
+      status.push("<span>运行态未知</span>");
+    }
+    var html =
+      "<div class='target-hint-head'><span class='target-hint-title'>" +
+      esc(name) +
+      "</span><span class='target-hint-sub'>" +
+      esc(schemaLabel("pool_routing_strategies", poolRoutingStrategy(pool))) +
+      "</span></div>" +
+      "<div class='target-hint-status'>" + status.join("") + "</div>";
+    if (isCost) {
+      // poolMemberModelTip already escapes each name; do not escape twice.
+      html +=
+        "<div class='target-hint-note'>模型 " +
+        (t.paused ? "目标已暂停 " : "") +
+        poolMemberModelTip(t) +
+        "</div>";
+    }
+    var perfHtml = performanceHintHtml(rt);
+    if (perfHtml) html += perfHtml;
+    if (!isCost) {
+      var shadowMember = shadowMemberFor(poolShadowStats(poolName), name);
+      if (shadowMember) {
+        html +=
+          "<div class='target-hint-note'>影子选中 " +
+          Number(shadowMember.shadow_selections || 0) +
+          "（" +
+          formatShadowShare(shadowMember.share) +
+          "）</div>";
+      }
+    }
+    return html;
   }
   // poolCostModelNames：预览下拉/提示的客户端请求名。与可见分组不同，这里
   // 同时包含已暂停 target/映射声明的名字，否则操作者无法通过预览看到它们
@@ -618,6 +645,7 @@ AdminApp.register("pools", function (app) {
   }
   function renderPoolsLoadError(message) {
     poolListError = message || "部署池数据不可用";
+    hideHint();
     document.getElementById("poolsTableBody").innerHTML =
       "<tr class='empty-row'><td colspan='5'>加载失败: " +
       esc(poolListError) +
@@ -636,6 +664,7 @@ AdminApp.register("pools", function (app) {
   }
   function renderPools() {
     var tb = document.getElementById("poolsTableBody");
+    hideHint();
     // Sorting and the cost-preview toggles redraw through here. When the roster
     // is unavailable the cached state.pools must not reappear as current rows.
     if (poolListError && !targetPoolsAvailable()) {
@@ -901,6 +930,10 @@ AdminApp.register("pools", function (app) {
   /* ===== Consumer Groups ===== */
 
   costSort.bind(document.getElementById("poolsTableBody"));
+  // Issue 227: pool member chips share the single target hint.
+  bindTargetHints(document.getElementById("poolsTableBody"), ".pool-member-chip", function (chip) {
+    return poolMemberHintHtml(chip);
+  });
   return {
     poolDisplayName: poolDisplayName,
     poolMemberCount: poolMemberCount,
