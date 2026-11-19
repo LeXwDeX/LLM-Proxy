@@ -308,7 +308,7 @@ async function main() {
       // tooltip open. Clear focus, then require the tooltip to be hidden.
       await page.evaluate(() => document.activeElement?.blur());
       await page.waitForFunction(
-        () => document.getElementById("targetModelHint")?.hidden === true,
+        () => document.getElementById("targetHint")?.hidden === true,
       );
       await page.evaluate(() => {
         document
@@ -318,7 +318,7 @@ async function main() {
           });
       });
       const captureState = await page.evaluate(() => {
-        const hint = document.getElementById("targetModelHint");
+        const hint = document.getElementById("targetHint");
         const main = document.getElementById("targetsMainPanel");
         const wraps = [
           ...document.querySelectorAll(
@@ -531,27 +531,27 @@ async function main() {
       first.y + first.height / 2,
     );
     await page
-      .locator("#targetModelHint")
+      .locator("#targetHint")
       .waitFor({ state: "visible", timeout: 2000 });
     assert.match(
-      await page.locator("#targetModelHint").textContent(),
+      await page.locator("#targetHint").textContent(),
       /Qwen-MixedCase/,
     );
     assert.equal(
       await page
-        .locator("#targetModelHint")
+        .locator("#targetHint")
         .evaluate((element) => getComputedStyle(element).pointerEvents),
       "none",
     );
     await page.mouse.move(second.x + 12, second.y + second.height / 2);
     assert.match(
-      await page.locator("#targetModelHint").textContent(),
+      await page.locator("#targetHint").textContent(),
       /Second-MixedCase/,
     );
     await page.mouse.click(second.x + 12, second.y + second.height / 2);
     assert.equal(
       await page
-        .locator("#targetModelHint")
+        .locator("#targetHint")
         .evaluate((element) => element.hidden),
       false,
     );

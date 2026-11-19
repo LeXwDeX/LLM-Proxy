@@ -23,6 +23,7 @@ AdminApp.register("targetsDetail", function (app) {
   var targetMuteSummary = app.bind("targetsHealth", "targetMuteSummary");
   var targetModelCooldownSummary = app.bind("targetsHealth", "targetModelCooldownSummary");
   var performanceDetailHtml = app.bind("targets", "performanceDetailHtml");
+  var bindTargetHints = app.bind("targets", "bindTargetHints");
   function detailRow(label, value) {
     return (
       "<div class='target-detail-row'><dt>" +
@@ -194,7 +195,7 @@ AdminApp.register("targetsDetail", function (app) {
             : m.upstream;
           if (m.paused) label = "已暂停 · " + label;
           return (
-            "<span class='target-model-badge' title='" +
+            "<span class='target-model-badge' data-model-label='" +
             esc(label) +
             "'>" +
             esc(label) +
@@ -362,6 +363,15 @@ AdminApp.register("targetsDetail", function (app) {
       closeTargetDetail();
       openTargetModal(target);
     });
+  // Issue 227: detail model chips share the single target hint; no native title.
+  bindTargetHints(
+    document.getElementById("targetDetailModels"),
+    ".target-model-badge",
+    function (badge) {
+      var text = String(badge.getAttribute("data-model-label") || badge.textContent || "").trim();
+      return text ? "<div class='target-hint-text'>" + esc(text) + "</div>" : "";
+    },
+  );
   return {
     openTargetDetail: openTargetDetail,
     closeTargetDetail: closeTargetDetail,

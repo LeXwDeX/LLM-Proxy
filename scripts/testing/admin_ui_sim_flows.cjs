@@ -707,6 +707,28 @@ const list = [
         { what: "GLM row shows a limited key", timeoutMs: 10000 });
       const clipped = await page.eval(`[...document.querySelectorAll("#targetsTableBody tr td:nth-child(6) .target-cell-content")].filter(cell => cell.scrollWidth > cell.clientWidth + 1).map(cell => cell.innerText)`);
       assert.deepEqual(clipped, [], "scheduling cells fit without a horizontal scrollbar");
+      // Issue 227: a real hover on a model chip opens the shared #targetHint.
+      const badgeBox = await page.eval(`(() => {
+        const el = document.querySelector("#targetsTableBody .target-model-badge");
+        if (!el) return null;
+        el.scrollIntoView({ block: "center", inline: "center" });
+        const r = el.getBoundingClientRect();
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        return { x, y, reachable: !!(hit && hit.closest && hit.closest(".target-model-badge") === el) };
+      })()`);
+      assert.ok(badgeBox, "the target table shows a model chip");
+      assert.ok(badgeBox.reachable, "the model chip is visible and hit-testable");
+      // Enter the page first: the direct jump can race a row redraw.
+      await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
+      await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: badgeBox.x, y: badgeBox.y });
+      await page.waitFor(`!document.getElementById("targetHint").hidden`, { what: "shared target hint on hover" });
+      assert.ok(
+        (await page.eval(`document.getElementById("targetHint").innerText`)).trim().length > 0,
+        "the hover hint carries the chip label",
+      );
+      await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
+      await page.waitFor(`document.getElementById("targetHint").hidden`, { what: "hint closes on mouseout" });
     },
   },
   {

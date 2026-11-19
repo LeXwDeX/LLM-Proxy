@@ -1388,7 +1388,31 @@
     .target-type-badge { display:inline-block; white-space:nowrap; }
     /* Informational tooltips never intercept input intended for the content below. */
     [role="tooltip"] { pointer-events:none; }
-    .target-model-hint { position:fixed; z-index:2000; max-width:min(420px, calc(100vw - 16px)); box-sizing:border-box; padding:8px 12px; border-radius:6px; background:var(--side); color:var(--side-ink); box-shadow:0 4px 12px #0003; font-size:13px; line-height:20px; overflow-wrap:anywhere; max-height:calc(100vh - 16px); overflow:auto; }
+    /* Issue 227: the single Hint.css-style tooltip for target hints (model
+       chips, status badges, pool members). Dark in both themes and fixed to
+       the viewport; hover/focus shows it synchronously, only the 150ms fade
+       and slight rise are animated. */
+    .target-hint { position:fixed; z-index:2000; box-sizing:border-box; max-width:min(560px, calc(100vw - 16px)); padding:10px 12px; border-radius:8px; background:#333; color:#fff; box-shadow:0 6px 20px #00000059; font-size:12px; line-height:1.5; overflow-wrap:anywhere; opacity:0; transform:translateY(-2px); transition:opacity 150ms ease, transform 150ms ease; pointer-events:none; }
+    .target-hint.is-visible { opacity:1; transform:translateY(0); }
+    @media (prefers-reduced-motion: reduce) { .target-hint { transition:none; } }
+    .target-hint-arrow { position:absolute; width:0; height:0; border-left:6px solid transparent; border-right:6px solid transparent; }
+    .target-hint[data-placement="top"] .target-hint-arrow { bottom:-6px; border-top:6px solid #333; }
+    .target-hint[data-placement="bottom"] .target-hint-arrow { top:-6px; border-bottom:6px solid #333; }
+    .target-hint-text { font-size:13px; white-space:pre-wrap; }
+    .target-hint-head { display:flex; align-items:baseline; flex-wrap:wrap; gap:0 8px; margin-bottom:6px; }
+    .target-hint-title { font-size:13px; font-weight:600; }
+    .target-hint-sub { color:#c9ced6; font-size:11px; }
+    .target-hint-status { display:flex; flex-wrap:wrap; gap:2px 12px; margin:0 0 6px; color:#d7dbe2; font-variant-numeric:tabular-nums; }
+    .target-hint-note { margin:4px 0 0; color:#c9ced6; font-size:11px; }
+    .target-hint-table { width:100%; border-collapse:collapse; table-layout:fixed; font-variant-numeric:tabular-nums; }
+    .target-hint-table th, .target-hint-table td { padding:3px 8px; text-align:left; white-space:nowrap; border-top:1px solid #ffffff26; }
+    .target-hint-table th { color:#c9ced6; font-size:11px; font-weight:600; }
+    .target-hint-table th:first-child, .target-hint-table td:first-child { width:34%; }
+    .target-hint-model { overflow:hidden; text-overflow:ellipsis; }
+    .target-hint-table th.target-hint-num, .target-hint-table td.target-hint-num { text-align:right; }
+    .target-hint-warn { color:#ffcf70; font-weight:600; }
+    .target-hint-more { margin-top:6px; color:#c9ced6; font-size:11px; }
+    .target-hint-foot { display:flex; flex-wrap:wrap; gap:2px 12px; margin-top:6px; padding-top:6px; border-top:1px solid #ffffff26; color:#d7dbe2; font-size:11px; font-variant-numeric:tabular-nums; }
     .target-model-badge:focus-visible { outline:2px solid var(--focus-ring); outline-offset:2px; }
     .target-model-badge { display:block; border:0; font-family:inherit; text-align:left; cursor:pointer; min-width:0; max-width:100%; box-sizing:border-box; padding:2px 8px; border-radius:6px; background:var(--primary-light); color:var(--primary); font-size:12px; line-height:18px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .targets-table .btn-group { flex-wrap:nowrap; }
