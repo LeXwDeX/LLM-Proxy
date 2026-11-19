@@ -147,22 +147,17 @@ AdminApp.register("targets", function (app) {
     if (m.insufficient) parts.push("样本不足");
     return parts.join(" · ");
   }
-  // Compact list/pool summary of the representative model. title carries every model.
+  // Issue 224: performance metrics live only in the status badge tooltip. The
+  // summary carries every model's detail and flags an insufficient representative
+  // model, whose warning is appended at the end of the title.
   function performanceSummary(rt) {
     var models = perfModels(rt);
     if (!models.length) return null;
     var best = representativePerfModel(models);
-    var ttft = best.ttft || {};
-    var tps = best.tps || {};
-    var text =
-      "TTFT " + (perfNumber(ttft.samples) > 0 ? formatPerfTTFT(ttft.p50) : "—") +
-      " · " + (perfNumber(tps.samples) > 0 ? formatPerfTPS(tps.p50) : "—") +
-      " · " + perfSampleScore(best) + " 样本";
-    return {
-      text: text,
-      title: perfModelsByName(models).map(perfModelTitle).join("\n"),
-      insufficient: !!best.insufficient,
-    };
+    var title = perfModelsByName(models).map(perfModelTitle).join("\n");
+    var insufficient = !!best.insufficient;
+    if (insufficient && !/样本不足$/.test(title)) title += " · 样本不足";
+    return { title: title, insufficient: insufficient };
   }
   // Per-model table for the target detail overview. All columns are informational
   // (no sorting); the table still declares data-sort-none for the header gate.

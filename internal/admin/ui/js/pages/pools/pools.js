@@ -341,9 +341,10 @@ AdminApp.register("pools", function (app) {
         }
         if (showModels)
           tip += "｜模型 " + (t.paused ? "目标已暂停 " : "") + poolMemberModelTip(t);
-        // Issue 212: upstream generation performance (representative model).
+        // Issue 224: the upstream performance summary lives only in the chip
+        // tooltip; the chip itself keeps its original visuals.
         var perf = performanceSummary(rt);
-        if (perf) tip += "｜性能 " + esc(perf.text);
+        if (perf) tip += "｜性能 " + esc(perf.title);
         var shadowMember = showShadow ? shadowMemberFor(shadowStats, t.name) : null;
         if (shadowMember) {
           tip +=
@@ -359,12 +360,6 @@ AdminApp.register("pools", function (app) {
             (rt.max_concurrency > 0 ? "/" + rt.max_concurrency : "") +
             "</span>"
           : "";
-        var perfChip = perf
-          ? "<span class='pool-member-perf'>" +
-            esc(perf.text) +
-            "</span>" +
-            (perf.insufficient ? "<span class='quota-badge warn'>样本不足</span>" : "")
-          : "";
         return (
           "<span class='pool-member-chip' title='" +
           tip +
@@ -376,7 +371,6 @@ AdminApp.register("pools", function (app) {
           esc(t.name) +
           "</span>" +
           inFlightTxt +
-          perfChip +
           "</span>"
         );
       })

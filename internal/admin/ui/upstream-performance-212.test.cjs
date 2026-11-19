@@ -42,7 +42,7 @@ function rowFor(html, name) {
   return html.split("<tr ").find((row) => row.includes(">" + name + "<"));
 }
 
-test("target list adds the representative model's compact performance line and title", async () => {
+test("target list puts the full performance details in the ready badge title", async () => {
   const { h, app } = await setup({
     targets: [tgt("alpha"), tgt("beta"), tgt("plain")],
     runtimeList: [
@@ -72,20 +72,30 @@ test("target list adds the representative model's compact performance line and t
   await app.modules.targets.loadTargets();
   const html = h.ids.get("targetsTableBody").innerHTML;
   const alpha = rowFor(html, "alpha");
-  assert.match(alpha, /<div class='target-perf-summary'[^>]*>TTFT 1\.2s · 45 tok\/s · 32 样本<\/div>/);
-  assert.match(alpha, /title='[^']*model-big[^']*model-small/, "the title lists every model");
+  assert.match(
+    alpha,
+    /<span style='[^']*cursor:help;' title='[^']*model-big[^']*model-small[^']*'>Schema正常<\/span>/,
+    "the ready badge carries the full performance title",
+  );
   assert.match(alpha, /TTFT p50 1\.2s \/ p90 2\.5s/);
   assert.match(alpha, /TPS p50 45 tok\/s \/ p90 70 tok\/s/);
+  assert.match(alpha, /样本 TTFT 32 \/ TPS 32/);
   assert.match(alpha, /惩罚样本 2/);
   assert.match(alpha, /非流式 3 次，均值 2\.0s \/ 100 tokens/);
   assert.match(alpha, /更新 /);
-  assert.doesNotMatch(alpha, /样本不足<\/span>/, "the representative model has enough samples");
+  assert.match(alpha, /样本不足/, "an insufficient sibling model is named in the title");
+  assert.doesNotMatch(alpha, /target-perf-summary|target-perf-chip|pool-member-perf/, "no separate performance row or chip");
+  assert.doesNotMatch(alpha.replace(/<[^>]+>/g, ""), /TTFT|首字|样本/, "the visible row keeps no performance numbers");
 
   const beta = rowFor(html, "beta");
-  assert.match(beta, /TTFT — · — · 0 样本/);
-  assert.match(beta, /样本不足<\/span>/);
+  assert.match(
+    beta,
+    /<span style='[^']*cursor:help;' title='[^']*cold-model[^']*TTFT p50 0ms[^']*样本不足'[^>]*>Schema正常<\/span>/,
+    "a sampleless model still gets the full title with the warning",
+  );
+  assert.doesNotMatch(beta.replace(/<[^>]+>/g, ""), /TTFT|样本/, "the visible row keeps no performance numbers");
 
-  assert.doesNotMatch(rowFor(html, "plain"), /target-perf-summary/, "a target without samples keeps the old layout");
+  assert.doesNotMatch(rowFor(html, "plain"), /cursor:help|target-perf-summary|target-perf-chip/, "a target without samples keeps the old layout");
 });
 
 test("the representative model is the one with most samples, ties by upstream name", async () => {
@@ -97,9 +107,22 @@ test("the representative model is the one with most samples, ties by upstream na
       perfModel("tiny", { ttft: { p50: 500, p90: 600, samples: 3, insufficient: true }, tps: { p50: 90, p90: 99, samples: 3, insufficient: true } }),
     ],
   });
-  assert.match(summary.text, /^TTFT 800ms · 50 tok\/s · 32 样本$/);
-  assert.doesNotMatch(summary.text, /tiny/);
-  assert.match(summary.title, /aardvark[\s\S]*tiny[\s\S]*zeta/, "the title is ordered by upstream model");
+  assert.equal(summary.insufficient, false);
+  assert.match(summary.title, /^aardvark[\s\S]*\ntiny[\s\S]*\nzeta/, "the title is ordered by upstream model");
+  assert.match(summary.title, /aardvark · TTFT p50 800ms \/ p90 900ms/);
+  assert.match(summary.title, /tiny[\s\S]*样本不足/, "insufficient models stay marked in the title");
+
+  const cold = app.modules.targets.performanceSummary({
+    model_performance: [
+      perfModel("cold", {
+        ttft: { p50: 0, p90: 0, samples: 0, insufficient: true },
+        tps: { p50: 0, p90: 0, samples: 0, insufficient: true },
+        insufficient: true,
+      }),
+    ],
+  });
+  assert.equal(cold.insufficient, true);
+  assert.match(cold.title, /样本不足$/, "the representative warning ends the title");
 });
 
 test("target detail shows the per-model performance table and a note without samples", async () => {
@@ -161,8 +184,9 @@ test("a load pool shows the shadow summary and per-member shadow selections", as
   assert.match(html, /pool-shadow-summary[^>]*>影子一致 7 \/ 不一致 3</);
   assert.match(html, /影子选中 7（70%）/);
   assert.match(html, /影子选中 3（30%）/);
-  assert.match(html, /pool-member-perf/);
-  assert.match(html, /TTFT 1\.2s · 45 tok\/s · 32 样本/);
+  assert.doesNotMatch(html, /pool-member-perf/, "performance text is no longer resident on the chip");
+  assert.doesNotMatch(html.replace(/<[^>]+>/g, ""), /TTFT/, "the visible chip text carries no performance numbers");
+  assert.match(html, /title='[^']*性能 [^']*TTFT p50 1\.2s \/ p90 2\.5s/, "the tooltip keeps the full breakdown");
 });
 
 test("a cost pool keeps chips-only model info and never shows shadow statistics", async () => {
@@ -178,7 +202,8 @@ test("a cost pool keeps chips-only model info and never shows shadow statistics"
   const html = h.ids.get("poolsTableBody").innerHTML;
   assert.doesNotMatch(html, /pool-shadow-summary/);
   assert.doesNotMatch(html, /影子选中/);
-  assert.match(html, /pool-member-perf/, "member performance still shows");
+  assert.doesNotMatch(html, /pool-member-perf/);
+  assert.match(html, /title='[^']*性能 [^']*TTFT p50 1\.2s/, "member performance stays in the tooltip");
 });
 
 test("missing, empty or malformed performance fields degrade to the old layout", async () => {
@@ -197,12 +222,14 @@ test("missing, empty or malformed performance fields degrade to the old layout",
   assert.equal(app.state.shadowRouting, null, "a server without shadow_routing publishes nothing");
   const html = h.ids.get("poolsTableBody").innerHTML;
   assert.doesNotMatch(html, /pool-shadow-summary/);
-  assert.match(html, /TTFT — · — · 0 样本/, "malformed entries still render safely");
-  assert.match(html, /样本不足/);
+  assert.match(html, /title='[^']*TTFT p50 0ms[^']*样本不足/, "malformed entries still render safely in the tooltip");
+  assert.doesNotMatch(html.replace(/<[^>]+>/g, ""), /TTFT|样本不足/, "the visible chip text stays performance-free");
 
   app.modules.targets.renderTargets();
   const rows = h.ids.get("targetsTableBody").innerHTML;
-  assert.match(rows, /TTFT — · — · 0 样本/);
+  assert.doesNotMatch(rows, /target-perf-summary|target-perf-chip/, "a sampleless model adds no performance row");
+  assert.match(rows, /title='[^']*TTFT p50 0ms[^']*样本不足/, "the badge title still carries the full breakdown");
+  assert.doesNotMatch(rows.replace(/<[^>]+>/g, ""), /TTFT|样本不足/, "no performance text is visible");
 });
 
 test("metrics without model_performance render no summary or detail rows", async () => {
@@ -211,7 +238,7 @@ test("metrics without model_performance render no summary or detail rows", async
     runtimeList: [runtime("alpha")],
   });
   await app.modules.targets.loadTargets();
-  assert.doesNotMatch(h.ids.get("targetsTableBody").innerHTML, /target-perf-summary/);
+  assert.doesNotMatch(h.ids.get("targetsTableBody").innerHTML, /target-perf-summary|target-perf-chip|cursor:help/);
   assert.equal(app.modules.targetsDetail.openTargetDetail("alpha"), true);
   assert.match(h.ids.get("targetDetailOverview").innerHTML, /暂无性能样本/);
 });
