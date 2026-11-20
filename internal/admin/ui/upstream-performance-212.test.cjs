@@ -244,6 +244,28 @@ test("the performance table wraps cells instead of letting wide values overlap",
   assert.match(hint.innerHTML, /1\.2s · 2\.5s/, "TTFT keeps its own unit");
 });
 
+test("the hint table keeps its own dark palette instead of the page table theme", () => {
+  const css = fs.readFileSync(path.join(__dirname, "css", "admin.css"), "utf8");
+  // The bubble is dark in both themes, but the page table rules leak in:
+  // `thead th` paints var(--surface-2) (near-white in the light theme, behind
+  // #c9ced6 header text) and uppercases the header; `tbody td` sets a 13px
+  // size and a var(--line-2) row border.
+  const cellRule = /\.target-hint-table\s+th\s*,\s*\.target-hint-table\s+td\s*\{([^}]*)\}/.exec(css);
+  assert.ok(cellRule, "the shared cell rule exists");
+  assert.match(cellRule[1], /background:\s*(none|transparent)/, "cells drop the page table background");
+  assert.match(cellRule[1], /border-bottom:\s*(0|none)/, "the page row border stops at the bubble edge");
+  assert.match(cellRule[1], /font-size:\s*\d+px/, "cells size themselves instead of inheriting the 13px body cell");
+  assert.doesNotMatch(cellRule[1], /(?:^|;)\s*color:/, "the shared rule leaves cell colors to the bubble");
+
+  const headerRule = /\.target-hint-table\s+th\s*\{([^}]*)\}/.exec(css);
+  assert.ok(headerRule, "the header rule exists");
+  assert.match(headerRule[1], /text-transform:\s*none/, "the page header's uppercase does not leak");
+  assert.match(headerRule[1], /letter-spacing:\s*normal/, "the page header's tracking does not leak");
+
+  // The other half of the fix: darken nothing on the page side.
+  assert.match(css, /thead th \{[^}]*background:\s*var\(--surface-2\)/, "the page table keeps its themed header plate");
+});
+
 test("model chips in the list and detail use the same hint and keep no native title", async () => {
   const { h, app } = await setup({
     targets: [tgt("alpha", {

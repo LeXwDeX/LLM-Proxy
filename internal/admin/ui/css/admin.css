@@ -1410,11 +1410,15 @@
     .target-hint-status { display:flex; flex-wrap:wrap; gap:2px 12px; margin:0 0 6px; color:#d7dbe2; font-variant-numeric:tabular-nums; }
     .target-hint-note { margin:4px 0 0; color:#c9ced6; font-size:11px; }
     .target-hint-table { width:100%; border-collapse:collapse; table-layout:fixed; font-variant-numeric:tabular-nums; }
-    .target-hint-table th, .target-hint-table td { padding:3px 6px; text-align:left; vertical-align:top; white-space:normal; border-top:1px solid #ffffff26; }
-    .target-hint-table th { color:#c9ced6; font-size:11px; font-weight:600; }
+    .target-hint-table th, .target-hint-table td { padding:3px 6px; text-align:left; vertical-align:top; white-space:normal; font-size:12px; background:none; border-top:1px solid #ffffff26; border-bottom:0; }
+    .target-hint-table th { color:#c9ced6; font-size:11px; font-weight:600; text-transform:none; letter-spacing:normal; }
     .target-hint-table th:first-child, .target-hint-table td:first-child { width:34%; }
     /* Issue 234: a table cell ignores overflow, so the ellipsis lives on a block
-       child and the cells wrap instead of painting over the next column. */
+       child and the cells wrap instead of painting over the next column. The cell
+       rules above also reset the page table theme — `thead th` paints
+       var(--surface-2) and uppercases the header, `tbody td` sets 13px and a
+       var(--line-2) row border — because the bubble is dark in both themes and a
+       near-white plate left the #c9ced6 header text at ~1.4:1. */
     .target-hint-model-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .target-hint-table th.target-hint-num, .target-hint-table td.target-hint-num { text-align:right; }
     .target-hint-warn { color:#ffcf70; font-weight:600; }
