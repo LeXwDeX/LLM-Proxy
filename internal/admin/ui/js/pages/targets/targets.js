@@ -178,11 +178,11 @@ AdminApp.register("targets", function (app) {
           ? formatPerfTTFT(ttft.p50) + " · " + formatPerfTTFT(ttft.p90)
           : "—";
         var tpsText = perfNumber(tps.samples) > 0
-          ? formatPerfTPS(tps.p50) + " · " + formatPerfTPS(tps.p90)
+          ? Math.round(perfNumber(tps.p50)) + " · " + Math.round(perfNumber(tps.p90))
           : "—";
         var samplesText = perfNumber(ttft.samples) + " / " + perfNumber(tps.samples);
         return (
-          "<tr><td class='target-hint-model'>" + esc(m.upstream_model) + "</td>" +
+          "<tr><td class='target-hint-model'><span class='target-hint-model-name'>" + esc(m.upstream_model) + "</span></td>" +
           "<td class='target-hint-num'>" + ttftText + "</td>" +
           "<td class='target-hint-num'>" + tpsText + "</td>" +
           "<td class='target-hint-num'>" + samplesText + "</td>" +
@@ -212,7 +212,7 @@ AdminApp.register("targets", function (app) {
       "<span class='target-hint-sub'>近 5 分钟 · 真实流量</span></div>" +
       "<table class='target-hint-table'><thead><tr>" +
       "<th data-sort-none>模型</th><th class='target-hint-num' data-sort-none>首字 p50·p90</th>" +
-      "<th class='target-hint-num' data-sort-none>吞吐 p50·p90</th>" +
+      "<th class='target-hint-num' data-sort-none>吞吐 p50·p90 (tok/s)</th>" +
       "<th class='target-hint-num' data-sort-none>样本 TTFT/TPS</th>" +
       "<th class='target-hint-num' data-sort-none>状态</th>" +
       "</tr></thead><tbody>" + rows + "</tbody></table>" +

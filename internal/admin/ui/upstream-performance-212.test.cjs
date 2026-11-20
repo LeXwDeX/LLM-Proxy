@@ -158,7 +158,7 @@ test("one #targetHint serves perf badges: same-tick hover, top placement, struct
   assert.doesNotMatch(hint.innerHTML, /model-d/, "only three model rows fit");
   assert.match(hint.innerHTML, /还有 1 个模型，可在目标详情查看/);
   assert.match(hint.innerHTML, /1\.2s · 2\.5s/, "TTFT p50 · p90");
-  assert.match(hint.innerHTML, /45 tok\/s · 70 tok\/s/, "TPS p50 · p90");
+  assert.match(hint.innerHTML, /45 · 70/, "TPS p50 · p90");
   assert.match(hint.innerHTML, /32 \/ 32/, "TTFT/TPS samples");
   assert.match(hint.innerHTML, /样本不足/);
   assert.match(hint.innerHTML, /惩罚样本 2/);
@@ -205,6 +205,43 @@ test("the shared hint fades in over 150ms", () => {
     "the show transition is exactly 150ms",
   );
   assert.match(css, /\.target-hint\[data-placement="top"\] \.target-hint-arrow[^}]*border-top:6px solid #333/, "arrow points down when above");
+});
+
+test("the performance table wraps cells instead of letting wide values overlap", async () => {
+  const { h, app } = await setup({
+    targets: [tgt("alpha")],
+    runtimeList: [
+      runtime("alpha", {
+        model_performance: [
+          perfModel("model-a", { ttft: { p50: 1200, p90: 2500, samples: 643 }, tps: { p50: 300, p90: 400, samples: 636 } }),
+        ],
+      }),
+    ],
+  });
+  await app.modules.targets.loadTargets();
+  const tbody = h.ids.get("targetsTableBody");
+  fire(tbody, "mouseover", { target: nodeWith(tbody, "data-perf-target", "alpha") });
+  const hint = targetHint(h);
+
+  const css = fs.readFileSync(path.join(__dirname, "css", "admin.css"), "utf8");
+  // A table cell ignores overflow/text-overflow, so clipping the cell itself
+  // still paints past the fixed column: the name needs a block child.
+  const cellRule = /\.target-hint-table th, \.target-hint-table td \{([^}]*)\}/.exec(css);
+  assert.ok(cellRule, "the shared cell rule exists");
+  assert.doesNotMatch(cellRule[1], /white-space:\s*nowrap/, "cells wrap rather than overflow their column");
+  const clipRule = /\.target-hint-model-name \{([^}]*)\}/.exec(css);
+  assert.ok(clipRule, "the model name is clipped by its own block element");
+  assert.match(clipRule[1], /overflow:\s*hidden/);
+  assert.match(clipRule[1], /text-overflow:\s*ellipsis/);
+
+  assert.match(
+    hint.innerHTML,
+    /<td class='target-hint-model'><span class='target-hint-model-name'>model-a<\/span><\/td>/,
+    "the long model name renders inside the ellipsized block",
+  );
+  assert.match(hint.innerHTML, /300 · 400/, "TPS p50 · p90 without the repeated unit");
+  assert.match(hint.innerHTML, /吞吐 p50·p90 \(tok\/s\)/, "the throughput unit is stated once in the header");
+  assert.match(hint.innerHTML, /1\.2s · 2\.5s/, "TTFT keeps its own unit");
 });
 
 test("model chips in the list and detail use the same hint and keep no native title", async () => {
