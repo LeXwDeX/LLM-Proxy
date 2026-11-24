@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -34,6 +35,18 @@ func websocketCompletingUpstream(t *testing.T, requests *atomic.Int32) *httptest
 	return upstream
 }
 
+// readLargeWebsocketEvent is readWebsocketEvent with a deadline that survives
+// multi-MiB messages on a slow -race runner (the shared helper allows 3s).
+func readLargeWebsocketEvent(t *testing.T, conn *websocket.Conn) map[string]any {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(45 * time.Second))
+	var event map[string]any
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
 // A native client message above the former 8 MiB read limit but below the
 // upstream's own limit must reach the upstream (#238).
 func TestResponsesWebsocketAcceptsMessageAboveFormerEightMiBLimit(t *testing.T) {
@@ -45,7 +58,7 @@ func TestResponsesWebsocketAcceptsMessageAboveFormerEightMiBLimit(t *testing.T) 
 	if err := conn.WriteJSON(payload); err != nil {
 		t.Fatal(err)
 	}
-	event := readWebsocketEvent(t, conn)
+	event := readLargeWebsocketEvent(t, conn)
 	if event["type"] != "response.completed" {
 		t.Fatalf("9 MiB message was not forwarded: %v", event)
 	}
@@ -86,7 +99,7 @@ func TestResponsesWebsocketOversizedMessageReturns413AndKeepsSession(t *testing.
 	if err := conn.WriteJSON(oversized); err != nil {
 		t.Fatal(err)
 	}
-	event := readWebsocketEvent(t, conn)
+	event := readLargeWebsocketEvent(t, conn)
 	errObj, _ := event["error"].(map[string]any)
 	if event["type"] != "error" || event["status"] != float64(413) || errObj["code"] != "request_too_large" {
 		t.Fatalf("oversized message must get a 413 request_too_large event, got %v", event)
@@ -100,7 +113,7 @@ func TestResponsesWebsocketOversizedMessageReturns413AndKeepsSession(t *testing.
 	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "codex-fast", "input": "hi"}); err != nil {
 		t.Fatal(err)
 	}
-	if next := readWebsocketEvent(t, conn); next["type"] != "response.completed" {
+	if next := readLargeWebsocketEvent(t, conn); next["type"] != "response.completed" {
 		t.Fatalf("session did not survive the rejected message: %v", next)
 	}
 	if requests.Load() != 1 || service.metrics.totalRequests.Load() != 1 || service.metrics.totalFailures.Load() != 0 {
@@ -119,6 +132,7 @@ func TestResponsesWebsocketMessageBeyondDrainCapCloses1009(t *testing.T) {
 	conn := dialWebsocketTest(t, server)
 	_ = conn.WriteJSON(map[string]any{"type": "response.create", "model": "codex-fast", "input": strings.Repeat("a", 4<<20)})
 	var event map[string]any
+	conn.SetReadDeadline(time.Now().Add(45 * time.Second))
 	err := conn.ReadJSON(&event)
 	if !websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
 		t.Fatalf("err=%v event=%v, want close 1009", err, event)
