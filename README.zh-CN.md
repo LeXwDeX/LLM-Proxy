@@ -279,6 +279,8 @@ WS 与 HTTP 只是不同的传输方式，共用同一套重试、failover、key
 
 原生下游连接两轮之间空闲 15 分钟后以 1000 关闭，服务端每 30 秒发送 ping；同一客户端凭据最多 64 个并发原生会话，超出返回 `429`。有进行中的轮次时，客户端在 max(4 × ping 间隔, 2 分钟) 内既无 pong 也无任何帧即视为半开连接：服务端发送 1001 关闭帧（"client unresponsive"）并结束会话，释放会话名额。两轮之间不做此检查，因为许多 WebSocket 客户端库只在应用读取时才应答 ping；此时安静的客户端只受 15 分钟空闲规则约束。不设固定读超时。空闲（1000）与停机（1001）关闭时，服务端发送关闭帧后最多等待 1 秒客户端的关闭帧，再关闭 TCP。服务关闭时先在关闭宽限期内让进行中的生成完成并落账，再以 1001 关闭会话；超出宽限期的生成被取消并记为不完整用量。原生客户端需处理断线并显式决定如何重连与续接。
 
+原生会话默认把单条客户端消息限制在 29 MiB，略低于 OpenAI 为其 WebSocket 模式给出的 30MB 单消息上限（该数值来自 OpenAI 的口头说明，不在公开文档中，也未经真实上游验证）。设置 `LLMS_WS_MAX_MESSAGE_MB`（单位 MiB，启动时读取一次）可调整：空、`0` 或负数用默认值，非法值记录告警并用默认值，超过 100 MiB 请求体上限的值按该上限截断。超限的消息收到正常的 `{"type":"error","status":413,"error":{"code":"request_too_large",...}}` 事件：不发往上游，不惩罚任何目标或 key，会话可继续下一轮。服务端丢弃超限字节而不缓冲；超过 100 MiB 请求体上限的消息仍以 1009 关闭连接，防止滥用流量让代理无限读取。同一上限也约束 HTTP 回退中的单个上游事件或错误体（`upstream_event_too_large`，502，仍属网关侧故障）。该上限不作用于 HTTP 请求体，后者沿用请求体上限。
+
 ## Codex Ultrafast WebSocket 示例
 
 Codex 可以经 LLMs Proxy → CLIProxyAPI → Codex OAuth 上游使用 Responses WebSocket。此配置要求 CLIProxyAPI 已配置可用的 Codex OAuth 账户，且该账户的 auth metadata/attributes 中 `websockets=true`。三层凭据用途不同：Codex 的 `env_key` 使用分配给 Codex 客户端的 LLMs Proxy key；LLMs Proxy 目标的 `APIKey` 使用 CLIProxyAPI 自身的 API key；CLIProxyAPI 持有 Codex OAuth 登录凭据和对应账户资格。

@@ -53,6 +53,44 @@ func configureObservationBudgetFromEnvironment(logger *slog.Logger) {
 	logger.Info("response observation decode budget", "budget_mb", budget>>20)
 }
 
+// websocketMaxMessageEnv sets the single-message limit (MiB) of native
+// Responses WebSocket sessions; empty, 0 or negative = default.
+const websocketMaxMessageEnv = "LLMS_WS_MAX_MESSAGE_MB"
+
+// websocketMaxMessageBytes parses LLMS_WS_MAX_MESSAGE_MB and returns the limit
+// in bytes, plus a warning when the value was invalid or had to be clamped to
+// the request body cap.
+func websocketMaxMessageBytes(raw string) (int, string) {
+	def := proxy.DefaultWebsocketMaxMessageBytes
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def, ""
+	}
+	mb, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return def, "invalid " + websocketMaxMessageEnv + ", using default"
+	}
+	if mb <= 0 {
+		return def, ""
+	}
+	if mb > int64(proxy.MaxWebsocketMessageBytes)>>20 {
+		return proxy.MaxWebsocketMessageBytes, websocketMaxMessageEnv + " exceeds the request body cap, clamped"
+	}
+	return int(mb) << 20, ""
+}
+
+// configureWebsocketMaxMessageFromEnvironment installs the native WebSocket
+// message limit before the proxy serves any request.
+func configureWebsocketMaxMessageFromEnvironment(service *proxy.Service, logger *slog.Logger) {
+	raw := os.Getenv(websocketMaxMessageEnv)
+	limit, warning := websocketMaxMessageBytes(raw)
+	if warning != "" {
+		logger.Warn(warning, "value", raw)
+	}
+	limit = service.SetWebsocketMaxMessage(limit)
+	logger.Info("responses websocket message limit", "limit_mb", limit>>20)
+}
+
 func configureTraceFromEnvironment(trace config.TraceStoreConfig, logger *slog.Logger) config.TraceStoreConfig {
 	// Trace store: 仅通过环境变量控制，不从 config.json 读取
 	if envTrace := strings.TrimSpace(os.Getenv("TRACE_STORE_ENABLED")); envTrace == "true" {
