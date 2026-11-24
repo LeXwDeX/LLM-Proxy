@@ -233,7 +233,14 @@ func (s *Server) serveResponsesWS(c *call) {
 		return
 	}
 	defer conn.Close()
-	conn.SetReadLimit(2 << 20)
+	// The legacy mock keeps its original 2 MiB boundary (recorded by the
+	// compatibility tests); otherwise accept anything the proxy's native
+	// message limit lets through (#238).
+	if s.opts.LegacyMock {
+		conn.SetReadLimit(2 << 20)
+	} else {
+		conn.SetReadLimit(64 << 20)
+	}
 	_, key := authOf(c.r)
 	c.rec.WebSocket, c.rec.Status, c.rec.Outcome = true, 101, "upgraded"
 	s.record(c.rec)

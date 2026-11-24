@@ -136,3 +136,44 @@ func TestPooledWebSocketHandshakeFallback(t *testing.T) {
 		t.Fatalf("expected HTTP fallback, last upstream record %+v", rec)
 	}
 }
+
+// TestNativeResponsesWebSocketMessageLimit (#238): a client message above the
+// former 8 MiB limit reaches the upstream; one above the 29 MiB limit is
+// refused with a normal 413 error event, never reaches the upstream, and the
+// same connection keeps serving turns.
+func TestNativeResponsesWebSocketMessageLimit(t *testing.T) {
+	_, _, key := wsTarget(t, nil)
+	wsURL := "ws" + strings.TrimPrefix(w.base, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, http.Header{"Authorization": {"Bearer " + key}})
+	if err != nil {
+		t.Fatalf("dial: %v %v", err, resp)
+	}
+	defer conn.Close()
+	const directive = "[[fake usage.in=50 usage.out=10]]"
+	before := w.fakeA.LastSeq()
+
+	big := wsTurn(t, conn, map[string]any{"type": "response.create", "model": "e2e-ws", "input": wsInput(directive + strings.Repeat("a", 9<<20))})
+	if last := big[len(big)-1]; last["type"] != "response.completed" {
+		t.Fatalf("9 MiB message must be forwarded and completed: %v", last)
+	}
+
+	huge := wsTurn(t, conn, map[string]any{"type": "response.create", "model": "e2e-ws", "input": wsInput(directive + strings.Repeat("a", 30<<20))})
+	last := huge[len(huge)-1]
+	if last["type"] != "error" || last["status"] != float64(413) || dig(last, "error/code") != "request_too_large" {
+		t.Fatalf("30 MiB message must get a 413 request_too_large event: %v", last)
+	}
+
+	after := wsTurn(t, conn, map[string]any{"type": "response.create", "model": "e2e-ws", "input": wsInput(directive)})
+	if last := after[len(after)-1]; last["type"] != "response.completed" {
+		t.Fatalf("connection must keep serving after the rejection: %v", last)
+	}
+	turns := 0
+	for _, r := range w.fakeA.RequestsSince(before) {
+		if r.WebSocket && r.Status != 101 {
+			turns++
+		}
+	}
+	if turns != 2 {
+		t.Fatalf("upstream saw %d turns, want 2 (the rejected message must not reach it)", turns)
+	}
+}

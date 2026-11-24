@@ -47,9 +47,75 @@ var (
 )
 
 const (
-	responsesWebsocketMaxMessage       = 8 << 20
+	// responsesWebsocketMaxMessage is the default single-message limit of a
+	// native session. It sits just under the upstream's own 30MB limit so an
+	// oversized request is refused here with a readable 413 event instead of
+	// being sent upstream to die with close 1009 (#238). The effective value
+	// is Service.websocketMessageLimit (LLMS_WS_MAX_MESSAGE_MB).
+	responsesWebsocketMaxMessage       = 29 << 20
 	responsesWebsocketHandshakeMaxBody = 64 << 10
 )
+
+const (
+	// DefaultWebsocketMaxMessageBytes is the default single-message limit of
+	// native Responses WebSocket sessions.
+	DefaultWebsocketMaxMessageBytes = responsesWebsocketMaxMessage
+	// MaxWebsocketMessageBytes is the largest configurable limit (the request
+	// body cap).
+	MaxWebsocketMessageBytes = maxRequestBodyBytes
+)
+
+// websocketInbound is one client message handed from the reader to the turn
+// loop. An oversized message carries no payload: its bytes were drained, and
+// the turn loop (the only data writer) answers with a 413 error event.
+type websocketInbound struct {
+	payload   []byte
+	oversized bool
+}
+
+func websocketLimitText(limit int) string {
+	if limit%(1<<20) == 0 {
+		return strconv.Itoa(limit>>20) + " MiB"
+	}
+	return strconv.Itoa(limit) + " bytes"
+}
+
+// SetWebsocketMaxMessage sets the single-message limit of native Responses
+// WebSocket sessions and returns the effective value: non-positive means the
+// default, anything above the request body cap is clamped to it. Call before
+// serving traffic; sessions read the value when they start.
+func (s *Service) SetWebsocketMaxMessage(limit int) int {
+	if limit <= 0 {
+		limit = responsesWebsocketMaxMessage
+	}
+	if limit > maxRequestBodyBytes {
+		limit = maxRequestBodyBytes
+	}
+	s.websocketMaxMessage.Store(int64(limit))
+	return limit
+}
+
+func (s *Service) websocketMessageLimit() int {
+	if limit := int(s.websocketMaxMessage.Load()); limit > 0 {
+		return limit
+	}
+	return responsesWebsocketMaxMessage
+}
+
+// websocketDrainLimit is the largest client message the socket will read at
+// all (gorilla's read limit). Messages between the soft limit and this cap are
+// discarded without buffering and answered with 413; beyond it the socket is
+// closed with 1009 so abusive traffic cannot make the proxy read without end.
+func (s *Service) websocketDrainLimit() int {
+	limit := int(s.websocketDrainCap.Load())
+	if limit <= 0 {
+		limit = maxRequestBodyBytes
+	}
+	if soft := s.websocketMessageLimit(); limit < soft {
+		limit = soft
+	}
+	return limit
+}
 
 type responsesWebsocketContextKey struct{}
 
@@ -250,7 +316,8 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 	if ctx.Err() != nil {
 		return
 	}
-	conn.SetReadLimit(responsesWebsocketMaxMessage)
+	messageLimit := s.websocketMessageLimit()
+	conn.SetReadLimit(int64(s.websocketDrainLimit()))
 	session := &responsesWebsocketSession{}
 	defer func() {
 		if session.conn != nil {
@@ -311,13 +378,13 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 		case <-wait.C:
 		}
 	}
-	messages := make(chan []byte, 1)
+	messages := make(chan websocketInbound, 1)
 	var fields []jsonMember // reused across turns; payload owns the bytes
 	// Read independently so a disconnected client cancels an active inference.
 	go func() {
 		defer cancel()
 		for {
-			kind, payload, err := conn.ReadMessage()
+			kind, reader, err := conn.NextReader()
 			if err != nil {
 				return
 			}
@@ -326,8 +393,24 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseUnsupportedData, "expected JSON text events"), time.Now().Add(time.Second))
 				return
 			}
+			payload, err := io.ReadAll(io.LimitReader(reader, int64(messageLimit)+1))
+			if err != nil {
+				return
+			}
+			inbound := websocketInbound{payload: payload}
+			if len(payload) > messageLimit {
+				// Over the limit: discard the rest of the message without
+				// buffering it, keep the session, and let the turn loop (the only
+				// data writer) answer 413. Past the drain cap gorilla fails this
+				// read and closes the socket with 1009.
+				if _, err := io.Copy(io.Discard, reader); err != nil {
+					return
+				}
+				lastHeard.Store(time.Now().UnixNano())
+				inbound = websocketInbound{oversized: true}
+			}
 			select {
-			case messages <- payload:
+			case messages <- inbound:
 			case <-ctx.Done():
 				return
 			default:
@@ -356,7 +439,7 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 		case <-idle.C:
 			gracefulClose(websocket.CloseNormalClosure, "idle timeout")
 			return
-		case payload := <-messages:
+		case inbound := <-messages:
 			// The liveness window starts with the turn, not with older silence.
 			lastHeard.Store(time.Now().UnixNano())
 			inTurn.Store(true)
@@ -367,6 +450,15 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 				return
 			default:
 			}
+			if inbound.oversized {
+				// A normal client error, not a gateway fault: nothing reaches the
+				// upstream, no target is penalized, and the session stays usable.
+				if writeResponsesWebsocketError(conn, http.StatusRequestEntityTooLarge, "request_too_large", "WebSocket message exceeds the "+websocketLimitText(messageLimit)+" limit; send a smaller request") != nil {
+					return
+				}
+				continue
+			}
+			payload := inbound.payload
 			// One validating scan; the forwarded body keeps every other
 			// member's original bytes, order and escaping.
 			// Protected members are normalized before any decision, so the
@@ -438,7 +530,7 @@ func (s *Service) serveResponsesWebsocket(w http.ResponseWriter, r *http.Request
 			session.turnStatus = 0
 			session.turnErrorBody = nil
 			session.turnHandshake = false
-			writer := &responsesWebsocketWriter{conn: conn, session: session, header: make(http.Header), startedAt: time.Now(), model: extractModel(request, body)}
+			writer := &responsesWebsocketWriter{conn: conn, session: session, header: make(http.Header), startedAt: time.Now(), model: extractModel(request, body), maxMessage: messageLimit}
 			appmiddleware.RequestID()(http.HandlerFunc(s.ServeHTTP)).ServeHTTP(writer, request)
 			if ctx.Err() != nil || writer.clientErr {
 				return
@@ -595,6 +687,15 @@ type responsesWebsocketWriter struct {
 	// rejectCode names the upstream content the adapter rejected (an event or
 	// error body over the native message limit, or invalid event JSON).
 	rejectCode string
+	// maxMessage is the single-event limit (0 = default responsesWebsocketMaxMessage).
+	maxMessage int
+}
+
+func (w *responsesWebsocketWriter) messageLimit() int {
+	if w.maxMessage > 0 {
+		return w.maxMessage
+	}
+	return responsesWebsocketMaxMessage
 }
 
 func (w *responsesWebsocketWriter) Header() http.Header { return w.header }
@@ -613,7 +714,7 @@ func (w *responsesWebsocketWriter) Write(data []byte) (int, error) {
 		w.status = 200
 	}
 	if w.status >= 400 {
-		if len(data) > responsesWebsocketMaxMessage-w.buffer.Len() {
+		if len(data) > w.messageLimit()-w.buffer.Len() {
 			w.err = errors.New("upstream error exceeds native WebSocket message limit")
 			w.rejectCode = "upstream_event_too_large"
 			return 0, w.err
@@ -631,7 +732,7 @@ func (w *responsesWebsocketWriter) Write(data []byte) (int, error) {
 			}
 		}
 		w.eventLen++
-		if w.eventLen > responsesWebsocketMaxMessage {
+		if w.eventLen > w.messageLimit() {
 			w.err = errors.New("SSE event exceeds native WebSocket message limit")
 			w.rejectCode = "upstream_event_too_large"
 			return 0, w.err
@@ -961,7 +1062,7 @@ func (session *responsesWebsocketSession) do(req *http.Request, target *Target, 
 			}
 			return nil, err
 		}
-		conn.SetReadLimit(responsesWebsocketMaxMessage)
+		conn.SetReadLimit(int64(s.websocketMessageLimit()))
 		session.conn = newResponsesWebsocketUpstream(conn, s.responsesWS)
 		session.conn.beginTurn()
 		turn = session.conn

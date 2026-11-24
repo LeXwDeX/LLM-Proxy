@@ -385,6 +385,7 @@ func run(args []string) int {
 		appLogger.Error("failed to initialize proxy service", "error", err)
 		return 1
 	}
+	configureWebsocketMaxMessageFromEnvironment(proxyService, appLogger)
 
 	// Usage is synced to the recovery journal before the response ends and
 	// committed to bbolt in the background; completion statistics are queued.

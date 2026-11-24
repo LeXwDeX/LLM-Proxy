@@ -118,6 +118,11 @@ type Service struct {
 	websocketIdleTimeout  time.Duration
 	websocketPingInterval time.Duration
 	websocketPerClient    int
+	// websocketMaxMessage is the soft single-message limit (bytes, 0 = default
+	// responsesWebsocketMaxMessage); websocketDrainCap is the hard read cap
+	// (0 = maxRequestBodyBytes). Atomic: set by SetWebsocketMaxMessage/tests.
+	websocketMaxMessage atomic.Int64
+	websocketDrainCap   atomic.Int64
 	// websocketPongTimeoutFloor is the minimum silence (no pong, no frame)
 	// after which a native session is treated as half-open (#153 B11).
 	websocketPongTimeoutFloor time.Duration
