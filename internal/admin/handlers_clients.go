@@ -9,6 +9,7 @@ import (
 
 	"github.com/LeXwDeX/LLM-Proxy/internal/auth"
 	"github.com/LeXwDeX/LLM-Proxy/internal/config"
+	"github.com/LeXwDeX/LLM-Proxy/internal/quota"
 )
 
 func (h *Handler) handleListClients(w http.ResponseWriter, r *http.Request) {
@@ -204,35 +205,61 @@ func (h *Handler) createClientLocked(w http.ResponseWriter, r *http.Request) (co
 }
 
 func (h *Handler) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
-	name, req, ok := h.updateClientLocked(w, r)
+	name, req, quotaDirty, ok := h.updateClientLocked(w, r)
 	if !ok {
 		return
 	}
-	h.evaluateClientQuota(name)
+	// 客户端更新不在响应路径上同步 Evaluate（Issue #240）：Evaluate 要扫描该客户端约 31 天的
+	// 用量窗口，对有额度组的客户端是秒级，而 PUT 载荷里能改变额度判定的字段只有 job_level
+	// 与改名。其余字段（IP、ACL、access_key、项目组等）不触发任何额度工作；job_level 变化
+	// 与改名交给后台去抖刷新，窗口内准入沿用已校准的旧计数器（与职级、模型组写入同一口径）。
+	body := map[string]any{"status": "ok"}
+	if quotaDirty && h.quotaManager != nil {
+		names := []string{name}
+		if req.Name != name {
+			names = append(names, req.Name) // 改名：旧名清理内存状态，新名重新校准
+		}
+		h.quotaManager.ScheduleRefresh(quota.RefreshScope{Clients: names})
+		body = h.withQuotaRefresh(body)
+	}
 	h.recordAudit(r, "client_update", name, "success", auth.MaskClientKey(req.AccessKey))
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, body)
 }
 
-func (h *Handler) updateClientLocked(w http.ResponseWriter, r *http.Request) (string, config.Client, bool) {
+// clientQuotaInputsChanged 判断一次客户端更新是否改变了额度判定的输入：职级（额度上限的
+// 系数来源与「未绑职级即拒绝」的客户端级门槛）或名称（计数器、额度计划按名称寻址）。
+// 额度计划、模型组、职级系数都存放在各自的 store，不随客户端 PUT 变化。
+func clientQuotaInputsChanged(before *config.Client, after config.Client) bool {
+	if before == nil {
+		return true // 读不到改前记录时无法证明没变化，按需要刷新处理
+	}
+	if strings.TrimSpace(before.JobLevel) != strings.TrimSpace(after.JobLevel) {
+		return true
+	}
+	return strings.ToLower(strings.TrimSpace(before.Name)) != strings.ToLower(strings.TrimSpace(after.Name))
+}
+
+// updateClientLocked 返回的 quotaDirty 表示本次更新改变了额度判定输入，调用方须在释放
+// configMu 之后登记后台额度刷新。
+func (h *Handler) updateClientLocked(w http.ResponseWriter, r *http.Request) (name string, req config.Client, quotaDirty bool, ok bool) {
 	limitConfigBody(w, r)
-	var req config.Client
-	name := pathParam(r, "name")
+	name = pathParam(r, "name")
 	if strings.TrimSpace(name) == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse("missing client name"))
-		return name, req, false
+		return name, req, false, false
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse("invalid json body"))
-		return name, req, false
+		return name, req, false, false
 	}
 	h.configMu.Lock()
 	defer h.configMu.Unlock()
 
 	if err := h.validateClientPoolQuotas(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
-		return name, req, false
+		return name, req, false, false
 	}
 
 	next, err := h.buildNextAuthStore(func(clients []config.Client) []config.Client {
@@ -240,8 +267,11 @@ func (h *Handler) updateClientLocked(w http.ResponseWriter, r *http.Request) (st
 	})
 	if err != nil {
 		h.writeClientChangeError(w, err)
-		return name, req, false
+		return name, req, false, false
 	}
+
+	// 改前记录（单键读）：读取失败不阻止保存，只让本次保守地登记刷新。
+	before, _ := h.clientStore.Get(name)
 
 	if err := h.clientStore.Update(name, req); err != nil {
 		status := http.StatusBadRequest
@@ -251,12 +281,12 @@ func (h *Handler) updateClientLocked(w http.ResponseWriter, r *http.Request) (st
 			status = http.StatusConflict
 		}
 		writeJSON(w, status, errorResponse(err.Error()))
-		return name, req, false
+		return name, req, false, false
 	}
 
 	// 落库成功：发布已构建的表（不可失败），新 key/ACL 在响应返回前生效。
 	h.authStore.Swap(next)
-	return name, req, true
+	return name, req, clientQuotaInputsChanged(before, req), true
 }
 
 func (h *Handler) handleDeleteClient(w http.ResponseWriter, r *http.Request) {

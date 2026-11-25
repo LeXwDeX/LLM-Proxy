@@ -29,6 +29,15 @@ AdminApp.register("clients", function (app) {
   var clientOpenVersion = 0;
   var clientDraftRevision = 0;
   var clientSaveInFlight = false;
+
+  // Issue #240: a slow save must not look like a frozen dialog. The button is disabled and
+  // relabelled for the duration of the request and always restored (success, failure, unconfirmed).
+  function setClientSaveBusy(busy) {
+    var btn = document.getElementById("saveClientBtn");
+    if (!btn) return;
+    btn.disabled = busy;
+    btn.textContent = busy ? "保存中…" : "保存";
+  }
   var clientCreatedDraftNeedsReopen = false;
   var clientSavingName = "";
   var clientVersions = Object.create(null);
@@ -1029,6 +1038,7 @@ AdminApp.register("clients", function (app) {
       var wasEditing = !!state.editingClient;
       clientSaveInFlight = true;
       clientSavingName = name;
+      setClientSaveBusy(true);
       // B3 按渠道分层限额：收集非空行（池名必填）
       try {
         if (state.editingClient) {
@@ -1060,6 +1070,7 @@ AdminApp.register("clients", function (app) {
       } finally {
         clientSaveInFlight = false;
         clientSavingName = "";
+        setClientSaveBusy(false);
       }
     });
 
