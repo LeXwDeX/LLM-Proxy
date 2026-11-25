@@ -281,7 +281,7 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 		h.writeInternalError(w, "failed to list model costs", err)
 		return
 	}
-	summary, err := h.usageStore.SummaryContext(r.Context(), now, h.getResolver())
+	summary, err := h.usageStore.SummaryDisplayContext(r.Context(), now, h.getResolver())
 	if err != nil {
 		if clientAborted(r, err) {
 			return

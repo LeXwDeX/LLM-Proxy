@@ -262,6 +262,11 @@ func (h *Handler) handleUpdatePricingTemplate(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
 		return
 	}
+	// A body without timezone must not reset a stored +00:00 rule to the
+	// default +08:00: that would move every period boundary by 8 hours.
+	if strings.TrimSpace(t.Timezone) == "" {
+		t.Timezone = existing.Timezone
+	}
 	pricing.NormalizeTemplate(&t)
 	if !t.SameBindings(*existing) {
 		writeJSON(w, http.StatusBadRequest, errorResponse("target/model bindings cannot be changed on update; create a new rule with a separate effective interval instead"))

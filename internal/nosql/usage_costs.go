@@ -47,6 +47,9 @@ type costReadHooks struct {
 	// windowKeys 标记额度校准路径：直接完整性检查里对窗口外事件/键的累积与遍历
 	// 被裁剪。键格式的全量校验（validateQuotaKeys）在两条路径上都执行。
 	windowKeys bool
+	// display 标记仅供管理端展示的报表读取：对不需要事件时间戳的定价只读小时
+	// 汇总，不做 raw 事件完整性游走。计费、额度、导出、审计从不设置它。
+	display bool
 }
 
 type costReadResult struct {
@@ -387,6 +390,16 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 	}
 	filter.From, filter.To = &from, &to
 	start, end := from.Truncate(time.Hour), to.Truncate(time.Hour).Add(time.Hour)
+	if hooks.display && !needsExact && !precise {
+		// 仅展示：小时对齐的定价只需要小时汇总，不对窗口内全部 raw 事件做完整性
+		// 游走。任何一个 (target, model) 需要事件时间戳时 ok=false，整体回退到
+		// 下面的严格读取。
+		if display, ok, err := s.readDisplayCostUnits(ctx, filter, resolver, from, to, rawFrom, allow, hooks); err != nil {
+			return costReadResult{}, err
+		} else if ok {
+			return display, nil
+		}
+	}
 	result := costReadResult{}
 	// scopedApplied records that this attempt attached a client scope. Any
 	// error then replays the read without it (Issue #125 P2): the scoped walks
@@ -670,9 +683,18 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 		return costReadResult{}, err
 	}
 	// Pricing is deliberately outside every database transaction.
+	if err := priceCostUnits(ctx, &result, resolver); err != nil {
+		return costReadResult{}, err
+	}
+	return result, nil
+}
+
+// priceCostUnits prices each unit with the shared resolver after the read
+// transaction has ended.
+func priceCostUnits(ctx context.Context, result *costReadResult, resolver usage.RateResolver) error {
 	for i := range result.units {
 		if err := ctx.Err(); err != nil {
-			return costReadResult{}, err
+			return err
 		}
 		u := &result.units[i]
 		if u.Event != nil {
@@ -687,10 +709,7 @@ func (s *UsageStore) readCostUnitsInScope(ctx context.Context, filter usage.Filt
 			u.IncompleteCostCount += missingPrice
 		}
 	}
-	if err := ctx.Err(); err != nil {
-		return costReadResult{}, err
-	}
-	return result, nil
+	return ctx.Err()
 }
 
 func (s *UsageStore) SumTargetModelCostsRange(filter usage.Filter, resolver usage.RateResolver) ([]TargetModelCost, error) {

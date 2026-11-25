@@ -47,9 +47,9 @@ func (h *Handler) handleAggregateUsage(w http.ResponseWriter, r *http.Request) {
 
 	var result usage.AggregateResult
 	if len(filter.ModelGroups) > 0 {
-		result, err = h.usageStore.AggregateByModelGroupsContext(r.Context(), filter, r.URL.Query().Get("group_by"), h.getResolver(), h.targetStore, h.modelGroupStore)
+		result, err = h.usageStore.AggregateByModelGroupsDisplayContext(r.Context(), filter, r.URL.Query().Get("group_by"), h.getResolver(), h.targetStore, h.modelGroupStore)
 	} else {
-		result, err = h.usageStore.AggregateByModelGroupsAllRequestsContext(r.Context(), filter, r.URL.Query().Get("group_by"), h.getResolver(), h.targetStore, h.modelGroupStore)
+		result, err = h.usageStore.AggregateByModelGroupsAllRequestsDisplayContext(r.Context(), filter, r.URL.Query().Get("group_by"), h.getResolver(), h.targetStore, h.modelGroupStore)
 	}
 	if err != nil {
 		if clientAborted(r, err) {
@@ -89,7 +89,7 @@ func (h *Handler) handleUsageModelGroups(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, errorResponse(err.Error()))
 		return
 	}
-	result, err := h.usageStore.AggregateModelGroupsContext(r.Context(), filter, h.getResolver(), h.targetStore, h.modelGroupStore)
+	result, err := h.usageStore.AggregateModelGroupsDisplayContext(r.Context(), filter, h.getResolver(), h.targetStore, h.modelGroupStore)
 	if err != nil {
 		if clientAborted(r, err) {
 			return
@@ -101,7 +101,7 @@ func (h *Handler) handleUsageModelGroups(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) handleUsageSummary(w http.ResponseWriter, r *http.Request) {
-	result, err := h.usageStore.SummaryContext(r.Context(), time.Now().UTC(), h.getResolver())
+	result, err := h.usageStore.SummaryDisplayContext(r.Context(), time.Now().UTC(), h.getResolver())
 	if err != nil {
 		if clientAborted(r, err) {
 			return

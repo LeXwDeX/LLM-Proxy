@@ -507,12 +507,12 @@ func (s *UsageStore) Count(from, to time.Time) (total, success int64, err error)
 		return 0, 0, err
 	}
 	if skipped > 0 {
-		s.warnCountSkipped(skipped, firstKey)
+		s.warnCountSkipped(BucketUsageAggHourly, skipped, firstKey)
 	}
 	return total, success, nil
 }
 
-func (s *UsageStore) warnCountSkipped(skipped int, firstKey string) {
+func (s *UsageStore) warnCountSkipped(bucket string, skipped int, firstKey string) {
 	now := time.Now
 	if s.now != nil {
 		now = s.now
@@ -528,7 +528,7 @@ func (s *UsageStore) warnCountSkipped(skipped int, firstKey string) {
 	s.countWarnAt, s.countWarnSuppressed = at, 0
 	s.countWarnMu.Unlock()
 	slog.Warn("usage count skipped malformed hourly aggregate cells; totals exclude them",
-		"bucket", BucketUsageAggHourly, "skipped", skipped, "first_key", firstKey,
+		"bucket", bucket, "skipped", skipped, "first_key", firstKey,
 		"suppressed_warnings", suppressed)
 }
 
@@ -667,6 +667,14 @@ func (s *UsageStore) Summary(now time.Time, costs usage.RateResolver) (usage.Sum
 // SummaryContext is Summary bounded by ctx: a canceled request context stops the scan.
 func (s *UsageStore) SummaryContext(ctx context.Context, now time.Time, costs usage.RateResolver) (usage.SummaryResult, error) {
 	return s.summaryReadContext(ctx, now, costs, costReadHooks{})
+}
+
+// SummaryDisplayContext is SummaryContext for the admin display endpoints: with
+// hour-aligned pricing it reads hourly rollups (plus the last hour's raw rows)
+// instead of walking every raw event in the 30-day window. Billing, quota and
+// export keep the strict readers.
+func (s *UsageStore) SummaryDisplayContext(ctx context.Context, now time.Time, costs usage.RateResolver) (usage.SummaryResult, error) {
+	return s.summaryReadContext(ctx, now, costs, costReadHooks{display: true})
 }
 
 func (s *UsageStore) summaryRead(now time.Time, costs usage.RateResolver, hooks costReadHooks) (usage.SummaryResult, error) {
