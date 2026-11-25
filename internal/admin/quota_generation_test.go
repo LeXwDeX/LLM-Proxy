@@ -77,7 +77,8 @@ func TestClientWritesAdvanceGeneration(t *testing.T) {
 		name, method, path, body string
 	}{
 		{"create", http.MethodPost, "/data/clients", `{"name":"gen-c","access_key":"sk-gen-client-key-123"}`},
-		{"update", http.MethodPut, "/data/clients/gen-c", `{"name":"gen-c","access_key":"sk-gen-client-key-456"}`},
+		// Issue #240：只有改变额度判定输入（job_level / 改名）的更新才推进代次并排期刷新。
+		{"update job_level", http.MethodPut, "/data/clients/gen-c", `{"name":"gen-c","access_key":"sk-gen-client-key-456","job_level":"L9"}`},
 		{"update quota", http.MethodPut, "/data/quota/gen-c", `{}`},
 		{"delete", http.MethodDelete, "/data/clients/gen-c", ""},
 	}
@@ -90,5 +91,24 @@ func TestClientWritesAdvanceGeneration(t *testing.T) {
 		if genOf(m) <= before {
 			t.Errorf("%s did not advance the quota config generation", s.name)
 		}
+	}
+}
+
+// 与额度判定无关的客户端更新（access_key、ACL、IP、项目组）不推进额度配置代次：
+// 否则在途校准会白白丢弃结果重算（Issue #240）。
+func TestUnrelatedClientUpdateDoesNotAdvanceGeneration(t *testing.T) {
+	e := newIssue94Env(t)
+	m := newGenManager(t)
+	e.h.quotaManager = m
+	if rec := e.do(t, RoleAdmin, "operator", http.MethodPost, "/data/clients", `{"name":"gen-u","access_key":"sk-gen-client-key-789","job_level":"L1"}`); rec.Code >= 300 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	before := genOf(m)
+	rec := e.do(t, RoleAdmin, "operator", http.MethodPut, "/data/clients/gen-u", `{"name":"gen-u","access_key":"sk-gen-client-key-790","job_level":"L1","project_group":"pg"}`)
+	if rec.Code >= 300 {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := genOf(m); got != before {
+		t.Fatalf("unrelated client update advanced the quota config generation: %d -> %d", before, got)
 	}
 }
