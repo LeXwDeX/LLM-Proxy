@@ -1480,6 +1480,8 @@ func TestProofOddIndexWritersAreEnumerated(t *testing.T) {
 		// Added by concurrent branches: both only read these buckets (#146
 		// retention stats; #125 P2 client-scoped quota reads).
 		"usage_retention_stats.go": true, "usage_integrity_clientscope.go": true,
+		// #242: display-only report reader; opens a read transaction only.
+		"usage_display_read.go": true,
 	}
 	writers := map[string][]string{
 		"usage_receipts.go":     {"proofOddNoteRaw", "proofOddNoteReceipt"},

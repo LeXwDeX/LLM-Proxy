@@ -844,13 +844,10 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 			// per restart).
 			env.assertAggregate("alice", int64(1+restart), int64(1000000*(1+restart)), 2*float64(1+restart))
 			env.waitQuotaHealthy("alice", 1+restart)
-			// The window that contains the unknown row must fail closed rather
-			// than report a complete total of zero. Bind the 500 to the admin
-			// handler's own error log so a different internal failure cannot
-			// satisfy this assertion.
-			logOffset := len(env.errorLogText())
-			env.aggregate("alice", &futureHour, &futureEnd, 500)
-			env.waitErrorLogContains(logOffset, "failed to aggregate usage", "usage history is incomplete for exact pricing")
+			// #242: the display aggregate for the window holding the unknown row
+			// answers from the hourly rollups (200) instead of failing; quota
+			// calibration and admission below stay fail-closed.
+			env.aggregate("alice", &futureHour, &futureEnd, 200)
 			env.assertWindowEmpty("bob", futureHour, futureEnd)
 			env.assertAggregate("bob", int64(1+restart), int64(1000000*(1+restart)), 2*float64(1+restart))
 			env.waitQuotaHealthy("bob", 1+restart)
@@ -864,12 +861,10 @@ func runIssue72UnknownHourScenario(t *testing.T, future bool) {
 			}
 		} else {
 			// The row is inside the default aggregate and quota calibration
-			// windows: every read and admission must fail closed instead of
-			// returning the attested total as if the row were zero. The 500
-			// must be the incomplete-history error, not any other internal fault.
-			logOffset := len(env.errorLogText())
-			env.aggregate("alice", nil, nil, 500)
-			env.waitErrorLogContains(logOffset, "failed to aggregate usage", "usage history is incomplete for exact pricing")
+			// windows. #242: the display aggregate answers from the hourly
+			// rollups (200); quota calibration and admission must still fail
+			// closed instead of returning the attested total as if the row were zero.
+			env.aggregate("alice", nil, nil, 200)
 			env.waitQuotaCalibrationError("alice")
 			env.assertAggregate("bob", int64(1+restart), int64(1000000*(1+restart)), 2*float64(1+restart))
 			env.waitQuotaHealthy("bob", 1+restart)

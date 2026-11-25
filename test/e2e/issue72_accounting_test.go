@@ -195,7 +195,9 @@ func TestIssue72SidecarAccountingRestart(t *testing.T) {
 		if got := readEvents("alice"); len(got) != 1 || got[0].RecordID == event.RecordID {
 			t.Fatalf("sidecar entered primary ledger: %+v", got)
 		}
-		admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=alice", nil, 500)
+		// #242: the admin aggregate page is display-only and discards damaged history
+		// blocks instead of failing; quota calibration and admission stay fail-closed.
+		admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=alice", nil, 200)
 		var other usage.AggregateResult
 		if err := json.Unmarshal(admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=bob", nil, 200), &other); err != nil {
 			t.Fatal(err)
@@ -292,7 +294,7 @@ func TestIssue72SidecarAccountingRestart(t *testing.T) {
 	if len(evidence.Entries) != 2 || selected.ID == "" {
 		t.Fatalf("positive fixture missing: %+v", evidence)
 	}
-	admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=bob", nil, 500)
+	admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=bob", nil, 200)
 	request := map[string]any{"evidence_id": selected.ID, "version": selected.Version, "operation_id": "cccccccc-cccc-4ccc-8ccc-cccccccccc72"}
 	result := decode(t, admin("POST", "/admin/data/usage/recheck", request, 200))
 	if result["accounting_verified"] != true || result["accounting_restored"] != true {
@@ -305,7 +307,7 @@ func TestIssue72SidecarAccountingRestart(t *testing.T) {
 	if bob.Totals.Requests != 3 || math.Abs(bob.Totals.EstimatedCost-6) > 1e-9 {
 		t.Fatalf("recheck changed accounting: %+v", bob.Totals)
 	}
-	admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=alice", nil, 500)
+	admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=alice", nil, 200)
 	admin("PUT", "/admin/data/quota/bob", map[string]any{"job_level": "level", "quota_groups": []any{map[string]any{"name": "models"}}}, 200)
 	status := decode(t, admin("GET", "/admin/data/quota/bob", nil, 200))
 	if dig(status, "calibration_error") != nil || dig(status, "groups/models/quotas/daily/used") != float64(6) {
@@ -317,7 +319,7 @@ func TestIssue72SidecarAccountingRestart(t *testing.T) {
 	if retry["accounting_verified"] != true || retry["accounting_restored"] != true {
 		t.Fatalf("restart retry: %+v", retry)
 	}
-	admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=alice", nil, 500)
+	admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=alice", nil, 200)
 	stop()
 
 	// Keep the earlier unresolved evidence while testing independent quota-cell
@@ -384,7 +386,7 @@ func TestIssue72SidecarAccountingRestart(t *testing.T) {
 		if got := readEvents(tc.name); len(got) != 1 || got[0].RecordID != event.RecordID || got[0].InputTokens != 1000000 {
 			t.Fatalf("%s damaged cell changed primary ledger: %+v", tc.damage, got)
 		}
-		admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name="+tc.name, nil, 500)
+		admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name="+tc.name, nil, 200)
 		status := decode(t, admin("GET", "/admin/data/quota/"+tc.name, nil, 200))
 		if dig(status, "calibration_error") == nil || dig(status, "calibration_error") == "" {
 			t.Fatalf("%s missing quota integrity error: %+v", tc.damage, status)
@@ -410,7 +412,7 @@ func TestIssue72SidecarAccountingRestart(t *testing.T) {
 		if code, raw := callClient("dave"); code != 200 || fake.LastSeq() == seq {
 			t.Fatalf("%s unrelated admission: %d %s", tc.damage, code, raw)
 		}
-		admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=alice", nil, 500)
+		admin("GET", "/admin/data/usage/aggregate?group_by=hour&client_name=alice", nil, 200)
 		stop()
 		db, err = bolt.Open(dbPath, 0o600, &bolt.Options{ReadOnly: true, Timeout: time.Second})
 		if err != nil {

@@ -4,13 +4,12 @@ package e2e
 
 // Issue #125 acceptance requires a test-instance readback of the fast-path and
 // retention metrics. This uses the shared real-proxy world, waits for the
-// startup classification and retention snapshot, forces one aggregate read,
+// startup classification and retention snapshot, forces one strict quota read,
 // and asserts the observable counters instead of treating the unit tests as
 // instance evidence.
 
 import (
 	"encoding/json"
-	"net/url"
 	"testing"
 	"time"
 )
@@ -33,20 +32,27 @@ func TestUsageIntegrityMetricsReadback(t *testing.T) {
 
 	before := fastReads(t)
 	var after float64
+	// The display aggregate no longer walks the integrity classification (#242).
+	// A client with recorded usage whose plan is re-saved gets a strict quota
+	// evaluation, which must use the fast path.
+	_, up, _, _ := compressionUpstream(t)
+	alias := uniq("e2e-metrics")
+	tg := target(t, map[string]any{"endpoint_type": "openai", "endpoint": up.URL + "/v1", "api_key": uniq("sk-fake-metrics"), "model_mappings": []any{
+		map[string]any{"upstream": "Unfamiliar-Upstream", "fallback": alias},
+	}})
+	name, key := client(t, []string{tg}, nil)
+	if response, raw := call(t, key, "POST", "/v1/chat/completions", expand(chatBody("[[fake usage.in=7 usage.out=2]]", false), alias), nil); response.StatusCode != 200 {
+		t.Fatalf("seed request HTTP %d: %s", response.StatusCode, raw)
+	}
+	compressionEvents(t, name, 1)
 	for attempt := 0; attempt < 10; attempt++ {
-		now := time.Now().UTC()
-		q := url.Values{
-			"group_by": {"hour"},
-			"from":     {now.Add(-time.Hour + time.Duration(attempt)*time.Second).Format(time.RFC3339)},
-			"to":       {now.Format(time.RFC3339)},
-		}
-		if code, body := w.adminDo("GET", "/admin/data/usage/aggregate?"+q.Encode(), nil); code != 200 {
-			t.Fatalf("aggregate readback: %d %s", code, body)
-		}
+		grantQuota(t, name, []string{tg}, nil)
+		waitQuotaRefresh(t)
 		after = fastReads(t)
 		if after > before {
 			break
 		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	if after <= before {
 		t.Fatalf("usage_integrity.fast_reads did not increase: before=%v after=%v", before, after)

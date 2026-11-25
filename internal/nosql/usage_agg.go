@@ -1079,6 +1079,32 @@ func (s *UsageStore) AggregateByModelGroupsContext(ctx context.Context, filter u
 	return s.aggregateTargetModelCellsReadContext(ctx, filter, groupBy, costs, targets, true, costReadHooks{}, globalGroups...)
 }
 
+// AggregateByModelGroupsDisplayContext is AggregateByModelGroupsContext for the
+// admin display endpoints (see SummaryDisplayContext).
+func (s *UsageStore) AggregateByModelGroupsDisplayContext(ctx context.Context, filter usage.Filter, groupBy string, costs usage.RateResolver, targets *TargetStore, globalGroups ...*ModelGroupStore) (usage.AggregateResult, error) {
+	return s.aggregateTargetModelCellsReadContext(ctx, filter, groupBy, costs, targets, true, costReadHooks{display: true}, globalGroups...)
+}
+
+// AggregateByModelGroupsAllRequestsDisplayContext is the display-only variant of
+// AggregateByModelGroupsAllRequestsContext (see SummaryDisplayContext).
+func (s *UsageStore) AggregateByModelGroupsAllRequestsDisplayContext(ctx context.Context, filter usage.Filter, groupBy string, costs usage.RateResolver, targets *TargetStore, globalGroups ...*ModelGroupStore) (usage.AggregateResult, error) {
+	return s.aggregateTargetModelCellsReadContext(ctx, filter, groupBy, costs, targets, false, costReadHooks{display: true}, globalGroups...)
+}
+
+// AggregateModelGroupsDisplayContext is the display-only variant of
+// AggregateModelGroupsContext (see SummaryDisplayContext).
+func (s *UsageStore) AggregateModelGroupsDisplayContext(ctx context.Context, filter usage.Filter, costs usage.RateResolver, targets *TargetStore, globalGroups ...*ModelGroupStore) (usage.ModelGroupUsageResult, error) {
+	ownership, err := loadUsageOwnership(targets, globalGroups...)
+	if err != nil {
+		return usage.ModelGroupUsageResult{}, err
+	}
+	data, err := s.readCostUnitsInScope(ctx, filter, costs, false, nil, costReadHooks{display: true}, ownership.pairFilter(filter.ModelGroups))
+	if err != nil {
+		return usage.ModelGroupUsageResult{}, err
+	}
+	return s.aggregateModelGroupCostUnits(filter, data.units, ownership)
+}
+
 // AggregateByModelGroupsAllRequests is like AggregateByModelGroups but counts the
 // legacy `requests` field as total requests (not success events), preserving the
 // no-filter consumption page's historical request-count semantics while still

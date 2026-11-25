@@ -77,8 +77,10 @@ func TestIssue72HistoryEvidenceLoss(t *testing.T) {
 
 	for restart := 0; restart < 2; restart++ {
 		e.start()
+		// #242: the admin aggregate page is display-only and discards damaged history
+		// blocks instead of failing; quota calibration and admission stay fail-closed.
 		e.admin("GET", "/admin/data/usage/aggregate?"+
-			"group_by=hour&client_name=alice", nil, 500)
+			"group_by=hour&client_name=alice", nil, 200)
 		e.waitQuotaCalibrationError("alice")
 
 		seq := e.fake.LastSeq()
