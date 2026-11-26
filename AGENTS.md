@@ -106,7 +106,7 @@ GitHub 侧的触发条件、job 划分和 Runner 选择以 [`.github/workflows/`
 | job | 命令 |
 |---|---|
 | `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...`、`make test-fast-integrity`、`make coverage-check` |
-| `race` | `go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...` |
+| `race` | `go test -race -count=1 -timeout 25m ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...` |
 | `e2e` | `make e2e` |
 | `integration` | `make integration` |
 | `admin-ui` | `node scripts/testing/admin_ui_test.cjs`、`(cd internal/admin/ui && node --test)` |
@@ -121,7 +121,7 @@ make coverage-check       # internal 覆盖率门禁（串行跑包；总覆盖�
 go vet ./...
 go vet -tags=e2e ./test/e2e/
 go build ./...            # 与 CI 一致的编译检查
-go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
+go test -race -count=1 -timeout 25m ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
 make build                # 先尝试联网更新模型目录，再构建 bin/llms-proxy
 make integration          # go test -tags=integration ./test/...
 make e2e                  # 真实代理二进制 + 进程内虚假上游 internal/fakellm，不调用真实模型

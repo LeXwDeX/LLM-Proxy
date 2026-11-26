@@ -316,7 +316,7 @@ make test
 go vet ./...
 go vet -tags=e2e ./test/e2e/
 go build ./...
-go test -race -count=1 ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
+go test -race -count=1 -timeout 25m ./internal/proxy/... ./internal/nosql/... ./internal/usage/... ./internal/quota/... ./internal/admin/... ./cmd/proxy/...
 make integration
 node scripts/testing/admin_ui_test.cjs
 (cd internal/admin/ui && node --test)
@@ -344,7 +344,7 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在推送到 `dev`
 | Job | 命令 |
 |---|---|
 | `test` | `make check-docs`、`go vet ./...`、`go vet -tags=e2e ./test/e2e/`、`go build ./...`、`go test ./...`、`make test-fast-integrity`、`make coverage-check` |
-| `race` | 对 `internal/proxy`、`internal/nosql`、`internal/usage`、`internal/quota`、`internal/admin` 与 `cmd/proxy` 执行 `go test -race -count=1` |
+| `race` | 对 `internal/proxy`、`internal/nosql`、`internal/usage`、`internal/quota`、`internal/admin` 与 `cmd/proxy` 执行 `go test -race -count=1 -timeout 25m` |
 | `e2e` | `make e2e` |
 | `integration` | `make integration` |
 | `admin-ui` | `node scripts/testing/admin_ui_test.cjs`、`(cd internal/admin/ui && node --test)` |
