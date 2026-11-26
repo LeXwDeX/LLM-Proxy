@@ -158,12 +158,17 @@ func usageIntegrityIntervalFromEnvironment(logger *slog.Logger) time.Duration {
 	return interval
 }
 
+// maxUsageIntegrityStartupWait caps USAGE_INTEGRITY_STARTUP_WAIT_SECONDS. Deployments
+// whose health-check or rollback window is shorter than the configured wait (plus the
+// quota preload, at most 10s) must widen it or lower the wait.
+const maxUsageIntegrityStartupWait = 300 * time.Second
+
 // Issue #252：启动时等待完整性分类就绪的上限，默认 20 秒，可用
 // USAGE_INTEGRITY_STARTUP_WAIT_SECONDS 覆盖（0 = 不等待；上限 300 秒，超出按上限）。
-// 它只决定额度预加载与监听最多被分类构建推迟多久：超时不取消构建，构建在后台继续，
+// 它是启动在额度预加载之前为完整性工作花费的总预算（先等维护写：索引迁移、首轮保留期清理，余下的给分类构建），也就是监听最多被推迟的时间（另加至多 10s 预加载）：部署的健康检查/回滚窗口必须大于它。超时不取消构建，构建在后台继续，
 // 其间校准读退回穷举扫描（冷客户端仍 fail-closed）。库越大构建越久，部署可按启动宽限调大。
 func usageIntegrityStartupWaitFromEnvironment(logger *slog.Logger) time.Duration {
-	const defaultWait, maxWait = 20 * time.Second, 300 * time.Second
+	const defaultWait, maxWait = 20 * time.Second, maxUsageIntegrityStartupWait
 	env := strings.TrimSpace(os.Getenv("USAGE_INTEGRITY_STARTUP_WAIT_SECONDS"))
 	if env == "" {
 		return defaultWait
@@ -173,8 +178,8 @@ func usageIntegrityStartupWaitFromEnvironment(logger *slog.Logger) time.Duration
 		logger.Warn("invalid USAGE_INTEGRITY_STARTUP_WAIT_SECONDS, using default", "value", env)
 		return defaultWait
 	}
-	if d := time.Duration(v) * time.Second; d <= maxWait {
-		return d
+	if v <= int(maxWait/time.Second) {
+		return time.Duration(v) * time.Second
 	}
 	logger.Warn("USAGE_INTEGRITY_STARTUP_WAIT_SECONDS above the maximum, using the maximum", "value", env, "max_seconds", int(maxWait/time.Second))
 	return maxWait

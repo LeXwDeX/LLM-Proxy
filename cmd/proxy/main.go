@@ -462,7 +462,7 @@ func run(args []string) int {
 	startUsageIntegrity := func() {
 		stopUsageIntegrity = nosql.StartUsageIntegrityClassificationWith(stopCtx, db, nosql.ClassificationLoopOptions{Interval: usageIntegrityInterval, EarlyRebuild: true}, appLogger)
 	}
-	prepareUsageFastPath(stopCtx, db, joinDone(usageIndexDone, usageRetentionFirstRound), appLogger, usageFastPathBoundsFor(usageIntegrityStartupWaitFromEnvironment(appLogger)), startUsageIntegrity, nosql.WaitUsageIntegrityReady)
+	prepareUsageFastPath(stopCtx, db, joinDone(usageIndexDone, usageRetentionFirstRound), appLogger, usageIntegrityStartupWaitFromEnvironment(appLogger), startUsageIntegrity, nosql.WaitUsageIntegrityReady)
 	if quotaMgr != nil {
 		quotaCtx, quotaCancel := context.WithCancel(stopCtx)
 		defer quotaCancel()

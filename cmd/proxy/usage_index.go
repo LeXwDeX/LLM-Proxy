@@ -58,23 +58,6 @@ func startUsageClientIndexMigrationWithDone(parent context.Context, db *bolt.DB,
 	}, done
 }
 
-// usageFastPathBounds bound how long startup may delay the HTTP listener and the
-// quota preload to install the integrity classification. Past a bound startup
-// continues degraded: calibration reads stay exhaustive until the classification
-// loop completes a build, exactly as before this step existed.
-type usageFastPathBounds struct {
-	MaintenanceWait time.Duration // wait for the startup maintenance writes (index migration, first retention round)
-	ClassifyWait    time.Duration // observe the classification build; 0 = do not wait
-}
-
-const defaultMaintenanceWait = 5 * time.Second
-
-// usageFastPathBoundsFor builds the startup bounds; the classification wait comes
-// from USAGE_INTEGRITY_STARTUP_WAIT_SECONDS.
-func usageFastPathBoundsFor(classifyWait time.Duration) usageFastPathBounds {
-	return usageFastPathBounds{MaintenanceWait: defaultMaintenanceWait, ClassifyWait: classifyWait}
-}
-
 // joinDone returns a channel that closes once every input channel is closed.
 func joinDone(chans ...<-chan struct{}) <-chan struct{} {
 	out := make(chan struct{})
@@ -91,36 +74,43 @@ func joinDone(chans ...<-chan struct{}) <-chan struct{} {
 // classification every client calibration rescans the whole history, which made
 // the first requests after a restart hit the 15s calibration timeout (503).
 //
-// Order matters: the startup maintenance writes (index migration, first
-// retention round) and the classification invalidate each other when they
-// overlap, so wait for them first (bounded). Then start the classification loop
-// and only observe it (bounded): the build is never canceled by the startup wait,
-// so a build that outlasts it keeps its progress and completes in the background
-// (Issue #252; an earlier synchronous build was discarded on timeout and rebuilt
-// from scratch). If the maintenance writes did not finish in time the loop is
-// still started (its early rebuild builds right after they ended) but nothing
-// waits for it. It reports whether the classification is installed.
-func prepareUsageFastPath(ctx context.Context, db *bolt.DB, maintenanceDone <-chan struct{}, logger *slog.Logger, bounds usageFastPathBounds, start func(), waitReady func(context.Context, *bolt.DB, time.Duration) bool) bool {
+// wait is ONE budget (USAGE_INTEGRITY_STARTUP_WAIT_SECONDS) for everything
+// startup may spend on integrity work before the preload: first the startup
+// maintenance writes (index migration, first retention round), which invalidate
+// the classification when they overlap its build, then the classification build,
+// which gets whatever is left. A slow first retention round therefore consumes
+// the budget instead of adding to it, and listening is never delayed by more
+// than wait. The classification loop is started after the maintenance writes
+// (or when the budget ran out) and is only observed: the wait never cancels the
+// build, so a build that outlasts it keeps its progress and completes in the
+// background (Issue #252; an earlier synchronous build was discarded on timeout
+// and rebuilt from scratch). If the maintenance writes did not finish in time
+// the loop is still started (its early rebuild builds right after they ended)
+// but nothing waits for readiness. It reports whether the classification is
+// installed.
+func prepareUsageFastPath(ctx context.Context, db *bolt.DB, maintenanceDone <-chan struct{}, logger *slog.Logger, wait time.Duration, start func(), waitReady func(context.Context, *bolt.DB, time.Duration) bool) bool {
 	began := time.Now()
-	wait := time.NewTimer(bounds.MaintenanceWait)
+	logger.Info("usage integrity startup wait budget", "wait", wait.String(), "max", maxUsageIntegrityStartupWait.String())
+	timer := time.NewTimer(wait)
 	maintenanceFinished := true
 	select {
 	case <-maintenanceDone:
-	case <-wait.C:
+	case <-timer.C:
 		maintenanceFinished = false
-		logger.Warn("usage maintenance writes still running; classification starts without being awaited", "waited", bounds.MaintenanceWait.String())
+		logger.Warn("usage maintenance writes still running when the startup wait ended; classification starts without being awaited", "waited", wait.String())
 	case <-ctx.Done():
-		wait.Stop()
+		timer.Stop()
 		return false
 	}
-	wait.Stop()
+	timer.Stop()
 	start()
-	if !maintenanceFinished || bounds.ClassifyWait <= 0 {
+	remaining := wait - time.Since(began)
+	if !maintenanceFinished || remaining <= 0 {
 		return false
 	}
-	if !waitReady(ctx, db, bounds.ClassifyWait) {
+	if !waitReady(ctx, db, remaining) {
 		if ctx.Err() == nil {
-			logger.Warn("usage integrity classification not ready before quota preload; calibration reads stay exhaustive and the build continues in the background", "waited", time.Since(began).String(), "classify_wait", bounds.ClassifyWait.String())
+			logger.Warn("usage integrity classification not ready before quota preload; calibration reads stay exhaustive and the build continues in the background", "waited", time.Since(began).String(), "wait", wait.String())
 		}
 		return false
 	}

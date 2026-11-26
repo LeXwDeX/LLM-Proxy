@@ -43,12 +43,13 @@ func TestPrepareUsageFastPathStartsClassificationAfterMaintenance(t *testing.T) 
 	}
 	go func() { time.Sleep(60 * time.Millisecond); close(maintenanceDone) }()
 
-	ready := prepareUsageFastPath(context.Background(), db, maintenanceDone, logger, usageFastPathBounds{MaintenanceWait: 5 * time.Second, ClassifyWait: 7 * time.Second}, start, waitReady)
+	ready := prepareUsageFastPath(context.Background(), db, maintenanceDone, logger, 7*time.Second, start, waitReady)
 	if startedBeforeDone.Load() {
 		t.Fatal("classification started while a maintenance write was still running")
 	}
-	if !ready || time.Duration(waited.Load()) != 7*time.Second {
-		t.Fatalf("ready=%v waited=%v; want the classification wait bound to be observed", ready, time.Duration(waited.Load()))
+	// One budget: the classification gets what the maintenance wait left over.
+	if got := time.Duration(waited.Load()); !ready || got <= 0 || got > 7*time.Second-50*time.Millisecond {
+		t.Fatalf("ready=%v waited=%v; want the remainder of the 7s budget after the ~60ms maintenance wait", ready, got)
 	}
 }
 
@@ -59,7 +60,7 @@ func TestPrepareUsageFastPathDegradesWhenMaintenanceStalls(t *testing.T) {
 	db := fastPathDB(t)
 	var started, waited atomic.Bool
 	begin := time.Now()
-	ready := prepareUsageFastPath(context.Background(), db, make(chan struct{}), logger, usageFastPathBounds{MaintenanceWait: 80 * time.Millisecond, ClassifyWait: time.Minute},
+	ready := prepareUsageFastPath(context.Background(), db, make(chan struct{}), logger, 80*time.Millisecond,
 		func() { started.Store(true) },
 		func(context.Context, *bolt.DB, time.Duration) bool { waited.Store(true); return true })
 	if d := time.Since(begin); d > 3*time.Second {
@@ -73,14 +74,43 @@ func TestPrepareUsageFastPathDegradesWhenMaintenanceStalls(t *testing.T) {
 	}
 }
 
-// ClassifyWait=0：只启动循环，不等待。
+// 首轮保留期清理很慢（长时间停机后过期明细积压）：它吃掉的是同一份预算，不是额外时间；
+// 预算耗尽前清理结束则分类只拿到剩余时间，耗尽仍未结束则降级且不再等待就绪（Issue #252 评审第 1 条）。
+func TestPrepareUsageFastPathSlowRetentionConsumesTheSharedBudget(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db := fastPathDB(t)
+	slow := make(chan struct{})
+	var waited atomic.Int64
+	go func() { time.Sleep(300 * time.Millisecond); close(slow) }()
+	begin := time.Now()
+	prepareUsageFastPath(context.Background(), db, slow, logger, time.Second, func() {},
+		func(_ context.Context, _ *bolt.DB, d time.Duration) bool { waited.Store(int64(d)); return false })
+	if d := time.Since(begin); d > 2*time.Second {
+		t.Fatalf("startup took %v with a 1s budget", d)
+	}
+	if got := time.Duration(waited.Load()); got <= 0 || got > 750*time.Millisecond {
+		t.Fatalf("classification wait = %v, want the ~700ms left after a 300ms retention round", got)
+	}
+
+	// Retention outlasts the budget: degrade, loop started, nothing awaited.
+	var started, waitedAgain atomic.Bool
+	begin = time.Now()
+	ready := prepareUsageFastPath(context.Background(), db, make(chan struct{}), logger, 100*time.Millisecond,
+		func() { started.Store(true) },
+		func(context.Context, *bolt.DB, time.Duration) bool { waitedAgain.Store(true); return true })
+	if d := time.Since(begin); d > time.Second || ready || !started.Load() || waitedAgain.Load() {
+		t.Fatalf("overrun: took %v ready=%v started=%v waited=%v", d, ready, started.Load(), waitedAgain.Load())
+	}
+}
+
+// wait=0：只启动循环，不等待（即使维护写未结束）。
 func TestPrepareUsageFastPathZeroWaitDoesNotWait(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	db := fastPathDB(t)
 	done := make(chan struct{})
 	close(done)
 	var started, waited atomic.Bool
-	ready := prepareUsageFastPath(context.Background(), db, done, logger, usageFastPathBounds{MaintenanceWait: time.Second},
+	ready := prepareUsageFastPath(context.Background(), db, done, logger, 0,
 		func() { started.Store(true) },
 		func(context.Context, *bolt.DB, time.Duration) bool { waited.Store(true); return true })
 	if !started.Load() || waited.Load() || ready {
@@ -96,7 +126,7 @@ func TestPrepareUsageFastPathStopsOnCancel(t *testing.T) {
 	cancel()
 	var started atomic.Bool
 	begin := time.Now()
-	prepareUsageFastPath(ctx, db, make(chan struct{}), logger, usageFastPathBounds{MaintenanceWait: time.Minute, ClassifyWait: time.Minute},
+	prepareUsageFastPath(ctx, db, make(chan struct{}), logger, time.Minute,
 		func() { started.Store(true) },
 		func(context.Context, *bolt.DB, time.Duration) bool { return false })
 	if d := time.Since(begin); d > time.Second {
@@ -119,7 +149,7 @@ func TestPrepareUsageFastPathTimeoutKeepsBuilding(t *testing.T) {
 	start := func() {
 		stop = nosql.StartUsageIntegrityClassificationWith(ctx, db, nosql.ClassificationLoopOptions{Interval: time.Hour}, logger)
 	}
-	prepareUsageFastPath(ctx, db, done, logger, usageFastPathBounds{MaintenanceWait: time.Second, ClassifyWait: time.Nanosecond}, start, nosql.WaitUsageIntegrityReady)
+	prepareUsageFastPath(ctx, db, done, logger, time.Nanosecond, start, nosql.WaitUsageIntegrityReady)
 	defer stop()
 	if !nosql.WaitUsageIntegrityReady(ctx, db, 10*time.Second) {
 		t.Fatal("the build was abandoned after the startup wait elapsed")
@@ -137,6 +167,7 @@ func TestUsageIntegrityStartupWaitFromEnvironment(t *testing.T) {
 		{"45", 45 * time.Second},
 		{" 90 ", 90 * time.Second},
 		{"301", 300 * time.Second},
+		{"10000000000", 300 * time.Second},
 		{"-1", 20 * time.Second},
 		{"abc", 20 * time.Second},
 	} {
