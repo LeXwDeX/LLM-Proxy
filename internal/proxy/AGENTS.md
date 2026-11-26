@@ -20,7 +20,8 @@
 | `responses_websocket.go` | 原生下游 WebSocket 会话（`GET /v1/responses` 升级）：逐轮鉴权与准入、上游 WS/HTTP 回退、空闲超时与关闭排空 |
 | `glm_ratelimit.go` | 智谱 GLM 5 小时限流识别（HTTP 200 + SSE 内嵌 error，非标准 429） |
 | `sanitize.go` | Azure v1 字段白名单净化（**仅 azure_openai 生效**，其他类型透传原始请求体） |
-| `models.go` / `test_model.go` | 模型名提取与校验 / 本地 `/v1/models` 拦截 |
+| `models.go` | 模型名提取与校验 / 本地 `/v1/models` 拦截 |
+| `test_model.go` | 管理端“模型测试”：用目标的上游凭证按 provider 模式逐个发最小请求并分别汇总。openai/azure 测 chat 与 responses；dual_protocol 测 chat 与 anthropic，开启 `supports_responses` 才加 responses（与 `SupportsPath` 一致）；claude、gemini、openai_image 各测自己的一个模式。不再“失败才回退”：任一模式失败，`success` 即为 false。结果含逐模式 `modes`、逐请求 `attempts`（含多 key 轮换）与可直接展示的逐行 `summary`（如 `2、响应模式：失败（HTTP 404 Not Found · /path）`），失败项附上游 `error.code`/`message`（`parseUpstreamErrorBody`，仅展示用的最佳努力解析）；路径不含主机、查询串与凭据。多 key 时每个模式从上次成功的 key 起轮换，纯只读，不推进 keypool。守护用例：`test_model_test.go` |
 | `multipart_convert.go` | multipart/form-data → JSON 自动转换 |
 | `usage.go` | 用量采集（OpenAI / Claude / Gemini 三种响应格式） |
 | `response_observation.go` | HTTP 响应观察副本的 identity/gzip/deflate/zstd/br 解码；用量与 trace 共用，保持原始转发字节 |

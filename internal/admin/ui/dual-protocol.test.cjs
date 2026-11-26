@@ -103,6 +103,47 @@ test("HTTP model test explains its scope and limits its success claim", async ()
   assert.match(el("toastContainer").children.at(-1).textContent, /HTTP 检测通过/);
   assert.doesNotMatch(el("toastContainer").children.at(-1).textContent, /测试成功/);
 });
+async function runModelTest(payload, model = "glm-5.4") {
+  const { app, harness, el } = await setup();
+  await app.modules.targets.openTargetModal({ name: "saved", endpoint_type: "provider-new", endpoint: "https://fixture.invalid", model_mappings: [{ upstream: model }] });
+  const row = el("model-mappings-container").children[0];
+  const button = row.children.find(child => child.className?.includes("test-model-btn"));
+  harness.context.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(payload) });
+  app.modules.targets.testModelForRow(button, model);
+  await new Promise(resolve => setImmediate(resolve));
+  return el("toastContainer").children.at(-1);
+}
+const MODE_LINES = {
+  chat: "1、CHAT模式：成功（12ms）",
+  responses: "2、响应模式：失败（HTTP 404 Not Found · /api/coding/paas/v4/responses）",
+  anthropic: "3、CLAUDE模式：成功（9ms）",
+};
+test("HTTP model test shows one result line per tested mode, warn when only some pass", async () => {
+  const toast = await runModelTest({
+    success: false,
+    status_code: 404,
+    modes: [{ mode: "chat", success: true }, { mode: "responses", success: false }, { mode: "anthropic", success: true }],
+    summary: [MODE_LINES.chat, MODE_LINES.responses, MODE_LINES.anthropic].join("\n"),
+  });
+  assert.match(toast.className, /\bwarn\b/);
+  assert.match(toast.className, /\btoast-detail\b/);
+  for (const line of Object.values(MODE_LINES)) assert.ok(toast.textContent.includes(line), line);
+  assert.match(toast.textContent, /glm-5\.4/);
+});
+test("HTTP model test colors the toast by how many modes passed", async () => {
+  const pass = await runModelTest({ success: true, modes: [{ success: true }, { success: true }], summary: "1、CHAT模式：成功（1ms）\n2、CLAUDE模式：成功（1ms）" });
+  assert.match(pass.className, /\bsuccess\b/);
+  const fail = await runModelTest({ success: false, modes: [{ success: false }, { success: false }], summary: "1、CHAT模式：失败（HTTP 403 [1220] 您无权访问glm-5.4。）\n2、CLAUDE模式：失败（HTTP 403 [1220] 您无权访问glm-5.4。）" });
+  assert.match(fail.className, /\berror\b/);
+  assert.match(fail.textContent, /\[1220\] 您无权访问glm-5\.4。/);
+});
+test("HTTP model test failure from an older backend keeps its readable flat error", async () => {
+  const toast = await runModelTest({ success: false, status_code: 404, error: "upstream returned HTTP 404 (tried 2 attempts across 1 keys)" });
+  assert.match(toast.className, /\berror\b/);
+  assert.match(toast.className, /\btoast-detail\b/);
+  assert.match(toast.textContent, /upstream returned HTTP 404/);
+  assert.doesNotMatch(toast.textContent, /\(HTTP 404\)\s*$/);
+});
 test("missing dual defaults prevents initialization and editing", async () => {
   for (const field of ["openai_prefix", "anthropic_prefix", "supports_responses"]) {
     const schema = fixture();

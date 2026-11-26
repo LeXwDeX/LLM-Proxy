@@ -181,14 +181,21 @@ AdminApp.register("core", function (app) {
 
   /* ===== Toast ===== */
   var toastContainer = document.getElementById("toastContainer");
-  function toast(msg, type) {
+  // opts.detail renders a multi-line diagnostic (one line per row, wider box);
+  // opts.durationMs keeps it on screen long enough to read. Plain toasts are
+  // unchanged: single line, 3 seconds.
+  function toast(msg, type, opts) {
+    var detail = !!(opts && opts.detail);
     var el = document.createElement("div");
-    el.className = "toast " + (type || "info");
+    el.className = "toast " + (type || "info") + (detail ? " toast-detail" : "");
     el.textContent = msg;
     toastContainer.appendChild(el);
-    setTimeout(function () {
-      el.remove();
-    }, 3000);
+    setTimeout(
+      function () {
+        el.remove();
+      },
+      (opts && opts.durationMs) || 3000,
+    );
   }
 
   /* ===== API ===== */
