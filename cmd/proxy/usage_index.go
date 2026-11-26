@@ -80,7 +80,10 @@ func joinDone(chans ...<-chan struct{}) <-chan struct{} {
 // the classification when they overlap its build, then the classification build,
 // which gets whatever is left. A slow first retention round therefore consumes
 // the budget instead of adding to it, and listening is never delayed by more
-// than wait. The classification loop is started after the maintenance writes
+// than wait. The maintenance wait is capped at half of wait: the index migration
+// retries forever with backoff when it keeps failing, so without the cap a
+// stuck migration would hold every start for the whole budget (Issue #254).
+// The classification loop is started after the maintenance writes
 // (or when the budget ran out) and is only observed: the wait never cancels the
 // build, so a build that outlasts it keeps its progress and completes in the
 // background (Issue #252; an earlier synchronous build was discarded on timeout
@@ -91,13 +94,17 @@ func joinDone(chans ...<-chan struct{}) <-chan struct{} {
 func prepareUsageFastPath(ctx context.Context, db *bolt.DB, maintenanceDone <-chan struct{}, logger *slog.Logger, wait time.Duration, start func(), waitReady func(context.Context, *bolt.DB, time.Duration) bool) bool {
 	began := time.Now()
 	logger.Info("usage integrity startup wait budget", "wait", wait.String(), "max", maxUsageIntegrityStartupWait.String())
-	timer := time.NewTimer(wait)
+	timer := time.NewTimer(wait / 2)
 	maintenanceFinished := true
 	select {
 	case <-maintenanceDone:
 	case <-timer.C:
 		maintenanceFinished = false
-		logger.Warn("usage maintenance writes still running when the startup wait ended; classification starts without being awaited", "waited", wait.String())
+		// wait <= 0 is the configured "do not wait": the loop starts at once and
+		// nothing is stalled, so there is nothing to warn about.
+		if wait > 0 {
+			logger.Warn("usage maintenance writes still running when the maintenance wait ended (half of the startup budget); classification starts without being awaited", "waited", (wait / 2).String(), "budget", wait.String())
+		}
 	case <-ctx.Done():
 		timer.Stop()
 		return false
