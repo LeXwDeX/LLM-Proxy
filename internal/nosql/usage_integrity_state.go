@@ -312,6 +312,13 @@ const UsageIntegrityClassificationInterval = 5 * time.Minute
 // StartUsageIntegrityClassification rebuilds the classification now and then
 // every interval until ctx ends. The returned function stops it and waits.
 func StartUsageIntegrityClassification(ctx context.Context, db *bolt.DB, interval time.Duration, logger *slog.Logger) func() {
+	return StartUsageIntegrityClassificationAfter(ctx, db, interval, 0, logger)
+}
+
+// StartUsageIntegrityClassificationAfter is StartUsageIntegrityClassification
+// whose first build waits initialDelay. Startup builds one classification
+// synchronously before the quota preload; the loop then only needs to refresh it.
+func StartUsageIntegrityClassificationAfter(ctx context.Context, db *bolt.DB, interval, initialDelay time.Duration, logger *slog.Logger) func() {
 	if interval <= 0 {
 		interval = UsageIntegrityClassificationInterval
 	}
@@ -320,6 +327,15 @@ func StartUsageIntegrityClassification(ctx context.Context, db *bolt.DB, interva
 	go func() {
 		defer close(done)
 		defer ForgetUsageIntegrityClassification(db)
+		if initialDelay > 0 {
+			timer := time.NewTimer(initialDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
 		for {
 			attempt := runClassificationAttempt(ctx, db)
 			discarded := recordClassificationAttempt(ctx, db, &attempt)
@@ -342,6 +358,33 @@ func StartUsageIntegrityClassification(ctx context.Context, db *bolt.DB, interva
 	return func() {
 		cancel()
 		<-done
+	}
+}
+
+// WaitUsageIntegrityReady blocks until a complete classification is installed for
+// db, the timeout elapses, or ctx ends, and reports whether it is ready. It only
+// observes state and never writes. Startup uses it so quota preload runs on the
+// windowed fast path instead of the exhaustive scan; a false result leaves reads
+// on the exhaustive path, exactly as before the first build completes.
+func WaitUsageIntegrityReady(ctx context.Context, db *bolt.DB, timeout time.Duration) bool {
+	if UsageIntegrityStats(db).Complete {
+		return true
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return UsageIntegrityStats(db).Complete
+		case <-tick.C:
+			if UsageIntegrityStats(db).Complete {
+				return true
+			}
+		}
 	}
 }
 

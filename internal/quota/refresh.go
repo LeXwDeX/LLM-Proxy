@@ -33,6 +33,9 @@ const (
 // 否则退回全量扫描，可达数秒；上限太小会把「慢」变成「拒绝」。
 var calibrationRequestTimeout = 15 * time.Second
 
+// preloadTimeout 是 Start 同步预加载的上限（变量以便测试缩短）。
+var preloadTimeout = 10 * time.Second
+
 var errCalibrationTimeout = errors.New("calibration timed out on request path; retrying in background")
 
 // RefreshScope 描述一次写操作可能影响的客户端范围，各字段取并集。
