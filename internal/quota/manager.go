@@ -20,6 +20,10 @@
 // The first admission of a client without counters waits for calibration at most
 // calibrationRequestTimeout; on timeout it is treated as a calibration failure
 // (rejected with the accounting-unavailable marker, retried with back-off).
+// Start preloads every client before the listener opens (at most preloadTimeout);
+// clients not reached in time keep calibrating in the background instead of
+// waiting for their first request. Admission stays fail-closed until each client
+// is calibrated: an uncalibrated client has used=0 and must never be admitted.
 //
 // No 5-second ticker. No full-recompute polling.
 package quota
@@ -185,7 +189,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	// Preload clients with limits or quota groups so their status counters exist.
-	preloadCtx, preloadCancel := context.WithTimeout(ctx, 10*time.Second)
+	preloadCtx, preloadCancel := context.WithTimeout(ctx, preloadTimeout)
 	defer preloadCancel()
 
 	names, err := m.quotaClientNames()
@@ -205,13 +209,48 @@ func (m *Manager) Start(ctx context.Context) error {
 	// 有界并发预加载；超时后未评估的客户端由首个请求按校准失败/超时语义处理。
 	m.evaluateMany(names, preloadConcurrency, preloadCtx.Done(), false)
 	if preloadCtx.Err() != nil {
-		m.logger.Warn("quota.Manager: preload timeout")
+		if ctx.Err() != nil {
+			m.logger.Warn("quota.Manager: preload canceled")
+		} else {
+			m.logger.Warn("quota.Manager: preload timeout; continuing remaining clients in the background", "timeout", preloadTimeout)
+			m.continuePreloadInBackground(names)
+		}
 	}
 
 	// Launch hourly calibration aligned to natural hours.
 	m.scheduleCalibration()
 
 	return nil
+}
+
+// continuePreloadInBackground 让超出预加载上限的客户端继续校准，而不是丢弃后留给首个
+// 请求去触发。准入语义不变：这些客户端校准完成前仍是冷客户端，请求路径照旧 fail-closed
+// （拒绝，不放行），后台校准只是提前把冷客户端变成已校准。retry=true 使已被请求路径
+// 校准完成的客户端被跳过，不重复评估；goroutine 纳入 calWG，由 Stop 等待退出。
+func (m *Manager) continuePreloadInBackground(names []string) {
+	m.mu.Lock()
+	if m.calStopped {
+		m.mu.Unlock()
+		return
+	}
+	remaining := make([]string, 0, len(names))
+	for _, name := range names {
+		if m.counters[name] == nil {
+			remaining = append(remaining, name)
+		}
+	}
+	if len(remaining) == 0 {
+		m.mu.Unlock()
+		return
+	}
+	m.calWG.Add(1) // 与 calStopped 检查同在 m.mu 内，Stop 的 Wait 不会漏掉它
+	m.mu.Unlock()
+	stop := m.stopChan()
+	go func() {
+		defer m.calWG.Done()
+		m.evaluateMany(remaining, preloadConcurrency, stop, true)
+		m.logger.Info("quota.Manager: background preload finished", "clients", len(remaining))
+	}()
 }
 
 // scheduleCalibration schedules the next calibration at the next natural hour boundary.

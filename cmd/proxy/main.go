@@ -440,8 +440,28 @@ func run(args []string) int {
 		appLogger.Warn("failed to initialize quota manager, quota checks disabled", "error", quotaMgrErr)
 		quotaMgr = nil
 	}
+	// stopCtx 在额度预加载之前创建：预加载依赖的完整性分类要先于它建好，且预加载期间
+	// 收到停止信号时应能及时中止，而不是等预加载跑完。
+	stopCtx, stopCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopCancel()
+	stopUsageIndexMigration, usageIndexDone := startUsageClientIndexMigrationWithDone(stopCtx, db, appLogger, nosql.MigrateUsageClientIndex)
+	defer stopUsageIndexMigration()
+	// Issue #125: the windowed integrity reads need an anomalous-object
+	// classification; until a build completes, and whenever a maintenance write
+	// invalidates it, integrity reads stay exhaustive. Build it BEFORE the quota
+	// preload (after the startup migrations, WarmUsageProofScanCache and the
+	// journal replay), otherwise each client's calibration rescans the whole
+	// history and the first requests after a restart time out with 503. The
+	// periodic loop then only refreshes it, so its first build waits one interval.
+	usageIntegrityInterval := usageIntegrityIntervalFromEnvironment(appLogger)
+	usageIntegrityDelay := time.Duration(0)
+	if prepareUsageFastPath(stopCtx, db, usageIndexDone, appLogger, defaultUsageFastPathBounds, nosql.RunClassificationOnce) {
+		usageIntegrityDelay = usageIntegrityInterval
+	}
+	stopUsageIntegrity := nosql.StartUsageIntegrityClassificationAfter(stopCtx, db, usageIntegrityInterval, usageIntegrityDelay, appLogger)
+	defer stopUsageIntegrity()
 	if quotaMgr != nil {
-		quotaCtx, quotaCancel := context.WithCancel(context.Background())
+		quotaCtx, quotaCancel := context.WithCancel(stopCtx)
 		defer quotaCancel()
 		if err := quotaMgr.Start(quotaCtx); err != nil {
 			appLogger.Warn("quota manager start failed, quota checks disabled", "error", err)
@@ -494,17 +514,6 @@ func run(args []string) int {
 	// 宽限期默认 30s，可用 SHUTDOWN_GRACE_SECONDS 覆盖（需同步调大容器 stop 超时）。
 	shutdownGrace := shutdownGraceFromEnvironment(appLogger)
 
-	stopCtx, stopCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stopCancel()
-	stopUsageIndexMigration := startUsageClientIndexMigration(stopCtx, db, appLogger, nosql.MigrateUsageClientIndex)
-	defer stopUsageIndexMigration()
-	// Issue #125: the windowed integrity reads need an anomalous-object
-	// classification. It starts only now, after the startup migrations,
-	// WarmUsageProofScanCache and the journal replay; until the first build
-	// completes, and whenever a maintenance write invalidates it, integrity
-	// reads stay exhaustive.
-	stopUsageIntegrity := nosql.StartUsageIntegrityClassification(stopCtx, db, usageIntegrityIntervalFromEnvironment(appLogger), appLogger)
-	defer stopUsageIntegrity()
 	usageJournal.Start(stopCtx, func(clientNames []string) {
 		if quotaMgr == nil {
 			return
