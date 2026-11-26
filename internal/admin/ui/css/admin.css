@@ -567,6 +567,7 @@
       animation: toastIn 0.3s ease;
       max-width: 380px;
     }
+    .toast.toast-detail { white-space: pre-line; max-width: 560px; overflow-wrap: anywhere; }
     .toast.success { background: var(--ok); }
     .toast.error { background: var(--danger); }
     .toast.info { background: var(--primary); }

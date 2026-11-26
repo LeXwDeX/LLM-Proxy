@@ -141,7 +141,20 @@ AdminApp.register("targetsMappings", function (app) {
       },
     )
       .then(function (res) {
-        if (res && res.success) {
+        var modes = res && Array.isArray(res.modes) ? res.modes : [];
+        if (modes.length > 0 && res.summary) {
+          // One line per tested mode (CHAT / 响应 / CLAUDE ...), each with its own
+          // result and, on failure, what the endpoint answered.
+          var passed = modes.filter(function (m) {
+            return m && m.success;
+          }).length;
+          var tone =
+            passed === modes.length ? "success" : passed === 0 ? "error" : "warn";
+          toast("模型 " + model + " 测试结果：\n" + res.summary, tone, {
+            detail: true,
+            durationMs: tone === "success" ? 8000 : 15000,
+          });
+        } else if (res && res.success) {
           toast(
             "HTTP 检测通过（HTTP " +
               res.status_code +
@@ -152,9 +165,16 @@ AdminApp.register("targetsMappings", function (app) {
           );
         } else {
           var errMsg = res && res.error ? res.error : "未知错误";
+          // Older backends return one flat error; only append the status when
+          // the message does not carry one.
           var status =
-            res && res.status_code ? " (HTTP " + res.status_code + ")" : "";
-          toast("测试失败: " + errMsg + status, "error");
+            res && res.status_code && errMsg.indexOf("HTTP") < 0
+              ? " (HTTP " + res.status_code + ")"
+              : "";
+          toast("测试失败: " + errMsg + status, "error", {
+            detail: true,
+            durationMs: 15000,
+          });
         }
       })
       .catch(function (e) {

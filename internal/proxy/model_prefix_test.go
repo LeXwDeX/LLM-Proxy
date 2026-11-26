@@ -179,8 +179,10 @@ func TestModelPrefixFailoverAndProbe(t *testing.T) {
 				t.Fatalf("probe: %+v %v", result, err)
 			}
 			// Gemini models live in the path rather than the body.
+			// OpenAI 目标的测试按 chat、responses 两个模式各发一次，
+			// 加上前面的 failover 请求共 3 次，都必须带上目标前缀。
 			if epType == "openai" {
-				if len(models) != 2 || models[0] != "Second/Fable5" || models[1] != "Second/Fable5" {
+				if len(models) != 3 || models[0] != "Second/Fable5" || models[1] != "Second/Fable5" || models[2] != "Second/Fable5" {
 					t.Fatalf("models=%v", models)
 				}
 			}
