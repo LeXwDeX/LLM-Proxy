@@ -158,27 +158,57 @@ func usageIntegrityIntervalFromEnvironment(logger *slog.Logger) time.Duration {
 	return interval
 }
 
+// Issue #252：启动时等待完整性分类就绪的上限，默认 20 秒，可用
+// USAGE_INTEGRITY_STARTUP_WAIT_SECONDS 覆盖（0 = 不等待；上限 300 秒，超出按上限）。
+// 它只决定额度预加载与监听最多被分类构建推迟多久：超时不取消构建，构建在后台继续，
+// 其间校准读退回穷举扫描（冷客户端仍 fail-closed）。库越大构建越久，部署可按启动宽限调大。
+func usageIntegrityStartupWaitFromEnvironment(logger *slog.Logger) time.Duration {
+	const defaultWait, maxWait = 20 * time.Second, 300 * time.Second
+	env := strings.TrimSpace(os.Getenv("USAGE_INTEGRITY_STARTUP_WAIT_SECONDS"))
+	if env == "" {
+		return defaultWait
+	}
+	v, err := strconv.Atoi(env)
+	if err != nil || v < 0 {
+		logger.Warn("invalid USAGE_INTEGRITY_STARTUP_WAIT_SECONDS, using default", "value", env)
+		return defaultWait
+	}
+	if d := time.Duration(v) * time.Second; d <= maxWait {
+		return d
+	}
+	logger.Warn("USAGE_INTEGRITY_STARTUP_WAIT_SECONDS above the maximum, using the maximum", "value", env, "max_seconds", int(maxWait/time.Second))
+	return maxWait
+}
+
 // P9：usage_events 保留期自动清理 —— 明细每请求一条且 bbolt 文件不缩容，
 // 无清理则 DB 单调膨胀。默认保留 90 天，USAGE_RETENTION_DAYS 覆盖（0 = 关闭，
 // 低于月度额度窗口时提升到最低值）。小时聚合格保留（体积小，供长期统计）。
-// 启动后先跑一次，此后每 12h 一次。
-func startUsageRetention(ctx context.Context, usageStore *nosql.UsageStore, logger *slog.Logger) {
+// 启动后先跑一次，此后每 12h 一次。返回的通道在首轮清理结束（或保留期关闭）后关闭：
+// 清理是维护写，会使完整性分类失效，启动需先让首轮结束再建分类（Issue #252）。
+func startUsageRetention(ctx context.Context, usageStore *nosql.UsageStore, logger *slog.Logger) <-chan struct{} {
+	firstRound := make(chan struct{})
 	retentionDays, retentionWarning := usageRetentionDays(os.Getenv("USAGE_RETENTION_DAYS"))
 	if retentionWarning != "" {
 		logger.Warn(retentionWarning, "value", os.Getenv("USAGE_RETENTION_DAYS"), "retention_days", retentionDays)
 	}
 	if retentionDays <= 0 {
-		return
+		close(firstRound)
+		return firstRound
 	}
 	go func() {
 		ticker := time.NewTicker(12 * time.Hour)
 		defer ticker.Stop()
+		first := true
 		for {
 			cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
 			if n, err := usageStore.PruneEventsBefore(cutoff, 5000); err != nil {
 				logger.Warn("usage retention prune failed", "error", err)
 			} else if n > 0 {
 				logger.Info("usage retention prune done", "deleted", n, "cutoff", cutoff.Format(time.RFC3339))
+			}
+			if first {
+				first = false
+				close(firstRound)
 			}
 			select {
 			case <-ticker.C:
@@ -187,6 +217,7 @@ func startUsageRetention(ctx context.Context, usageStore *nosql.UsageStore, logg
 			}
 		}
 	}()
+	return firstRound
 }
 
 // Independent operational counters are retained even when usage retention is disabled.

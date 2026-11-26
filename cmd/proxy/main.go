@@ -448,18 +448,21 @@ func run(args []string) int {
 	defer stopUsageIndexMigration()
 	// Issue #125: the windowed integrity reads need an anomalous-object
 	// classification; until a build completes, and whenever a maintenance write
-	// invalidates it, integrity reads stay exhaustive. Build it BEFORE the quota
-	// preload (after the startup migrations, WarmUsageProofScanCache and the
-	// journal replay), otherwise each client's calibration rescans the whole
-	// history and the first requests after a restart time out with 503. The
-	// periodic loop then only refreshes it, so its first build waits one interval.
+	// invalidates it, integrity reads stay exhaustive. Without it each client's
+	// calibration rescans the whole history and the first requests after a
+	// restart time out with 503. Issue #252: the startup maintenance writes (index
+	// migration, first retention round) run first and are awaited (bounded), then
+	// the classification loop starts and startup only observes it (bounded); the
+	// build is never canceled by that wait. Later maintenance writes trigger an
+	// early rebuild instead of waiting for the next periodic round.
 	usageIntegrityInterval := usageIntegrityIntervalFromEnvironment(appLogger)
-	usageIntegrityDelay := time.Duration(0)
-	if prepareUsageFastPath(stopCtx, db, usageIndexDone, appLogger, defaultUsageFastPathBounds, nosql.RunClassificationOnce) {
-		usageIntegrityDelay = usageIntegrityInterval
+	usageRetentionFirstRound := startUsageRetention(stopCtx, usageStore, appLogger)
+	stopUsageIntegrity := func() {}
+	defer func() { stopUsageIntegrity() }()
+	startUsageIntegrity := func() {
+		stopUsageIntegrity = nosql.StartUsageIntegrityClassificationWith(stopCtx, db, nosql.ClassificationLoopOptions{Interval: usageIntegrityInterval, EarlyRebuild: true}, appLogger)
 	}
-	stopUsageIntegrity := nosql.StartUsageIntegrityClassificationAfter(stopCtx, db, usageIntegrityInterval, usageIntegrityDelay, appLogger)
-	defer stopUsageIntegrity()
+	prepareUsageFastPath(stopCtx, db, joinDone(usageIndexDone, usageRetentionFirstRound), appLogger, usageFastPathBoundsFor(usageIntegrityStartupWaitFromEnvironment(appLogger)), startUsageIntegrity, nosql.WaitUsageIntegrityReady)
 	if quotaMgr != nil {
 		quotaCtx, quotaCancel := context.WithCancel(stopCtx)
 		defer quotaCancel()
@@ -523,7 +526,6 @@ func run(args []string) int {
 		}
 	})
 
-	startUsageRetention(stopCtx, usageStore, appLogger)
 	startRequestStatsRetention(stopCtx, requestStatsStore, appLogger)
 	startMmapHeadroomMonitor(stopCtx, db, appLogger)
 

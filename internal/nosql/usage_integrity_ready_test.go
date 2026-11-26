@@ -44,20 +44,3 @@ func TestWaitUsageIntegrityReady(t *testing.T) {
 		t.Fatal("canceled context must not report ready")
 	}
 }
-
-// 启动已同步建好分类时，周期循环的首轮应延后一个间隔，不在监听后立刻再全量构建一遍。
-func TestStartUsageIntegrityClassificationAfterDelaysFirstBuild(t *testing.T) {
-	productionIntegrityMode(t)
-	db, _, _ := integrityFixture(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	stop := StartUsageIntegrityClassificationAfter(ctx, db, time.Hour, 300*time.Millisecond, nil)
-	defer stop()
-	time.Sleep(100 * time.Millisecond)
-	if UsageIntegrityStats(db).Complete {
-		t.Fatal("first build ran before the initial delay")
-	}
-	if !WaitUsageIntegrityReady(ctx, db, 5*time.Second) {
-		t.Fatal("first build did not run after the initial delay")
-	}
-}

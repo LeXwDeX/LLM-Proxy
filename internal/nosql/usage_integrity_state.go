@@ -121,10 +121,14 @@ func integrityClassFor(tx *bolt.Tx) *integrityClassification {
 }
 
 type classificationAttempt struct {
-	installed     bool
-	reason        string
-	class         *integrityClassification
-	epoch         uint64
+	installed bool
+	reason    string
+	class     *integrityClassification
+	epoch     uint64
+	// sawEpoch is the maintenance epoch the attempt last observed (under the
+	// writer lock when it got that far). The loop compares it with the current
+	// epoch to tell that a maintenance write ended after this attempt.
+	sawEpoch      uint64
 	err           error
 	duration      time.Duration
 	segmentMax    time.Duration
@@ -146,6 +150,7 @@ func (a *classificationAttempt) observeWriterLock(d time.Duration) {
 
 func runClassificationAttempt(ctx context.Context, db *bolt.DB) (attempt classificationAttempt) {
 	var started time.Time
+	attempt.sawEpoch = integrityEpoch.Load()
 	defer func() {
 		if attempt.measured {
 			attempt.duration = time.Since(started)
@@ -164,6 +169,7 @@ func runClassificationAttempt(ctx context.Context, db *bolt.DB) (attempt classif
 		lockStarted := time.Now()
 		// The in-flight count is incremented before the maintenance epoch.
 		epoch := integrityEpoch.Load()
+		attempt.sawEpoch = epoch
 		inflight := integrityInflight.Load()
 		if inflight != 0 || (build != nil && epoch != build.epoch) {
 			attempt.observeWriterLock(time.Since(lockStarted))
@@ -309,33 +315,68 @@ func ForgetUsageIntegrityClassification(db *bolt.DB) {
 // UsageIntegrityClassificationInterval is the default rebuild interval.
 const UsageIntegrityClassificationInterval = 5 * time.Minute
 
+// Defaults of the early-rebuild policy (Issue #252).
+const (
+	// integrityEarlyQuiet is how long the maintenance epoch must stay unchanged
+	// before an early rebuild starts, so a burst of maintenance writes costs one
+	// build.
+	integrityEarlyQuiet = 2 * time.Second
+	// integrityEarlyPoll is how often the waiting loop looks at the epoch.
+	integrityEarlyPoll = time.Second
+	// integrityEarlyBudget bounds early rebuilds between two periodic rounds, so
+	// a steady stream of invalidations (for example a failing maintenance task
+	// retrying with backoff) cannot keep a core busy rebuilding.
+	integrityEarlyBudget = 2
+)
+
+// ClassificationLoopOptions configures the background classification loop.
+type ClassificationLoopOptions struct {
+	// Interval is the periodic rebuild interval; <= 0 selects the default.
+	Interval time.Duration
+	// EarlyRebuild rebuilds shortly after a maintenance write ended (or after the
+	// first build met one still running) instead of waiting for the next period.
+	// The trigger is the epoch itself, never a message, so a stale wake-up cannot
+	// cause a rebuild. It never shortens the retry ladder after a consistency
+	// discard, never runs while a maintenance write is in flight, and is capped
+	// by EarlyBudget between periodic rounds.
+	EarlyRebuild bool
+	// EarlyQuiet, EarlyPoll and EarlyBudget override the defaults when > 0.
+	EarlyQuiet  time.Duration
+	EarlyPoll   time.Duration
+	EarlyBudget int
+}
+
 // StartUsageIntegrityClassification rebuilds the classification now and then
 // every interval until ctx ends. The returned function stops it and waits.
 func StartUsageIntegrityClassification(ctx context.Context, db *bolt.DB, interval time.Duration, logger *slog.Logger) func() {
-	return StartUsageIntegrityClassificationAfter(ctx, db, interval, 0, logger)
+	return StartUsageIntegrityClassificationWith(ctx, db, ClassificationLoopOptions{Interval: interval}, logger)
 }
 
-// StartUsageIntegrityClassificationAfter is StartUsageIntegrityClassification
-// whose first build waits initialDelay. Startup builds one classification
-// synchronously before the quota preload; the loop then only needs to refresh it.
-func StartUsageIntegrityClassificationAfter(ctx context.Context, db *bolt.DB, interval, initialDelay time.Duration, logger *slog.Logger) func() {
+// StartUsageIntegrityClassificationWith is StartUsageIntegrityClassification
+// with the early-rebuild policy of opts. Startup starts it once and only
+// observes readiness (WaitUsageIntegrityReady): a build that outlasts the
+// startup wait keeps running instead of being canceled and restarted.
+func StartUsageIntegrityClassificationWith(ctx context.Context, db *bolt.DB, opts ClassificationLoopOptions, logger *slog.Logger) func() {
+	interval := opts.Interval
 	if interval <= 0 {
 		interval = UsageIntegrityClassificationInterval
+	}
+	quiet, poll, budget := opts.EarlyQuiet, opts.EarlyPoll, opts.EarlyBudget
+	if quiet <= 0 {
+		quiet = integrityEarlyQuiet
+	}
+	if poll <= 0 {
+		poll = integrityEarlyPoll
+	}
+	if budget <= 0 {
+		budget = integrityEarlyBudget
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer ForgetUsageIntegrityClassification(db)
-		if initialDelay > 0 {
-			timer := time.NewTimer(initialDelay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-		}
+		earlyStreak := 0
 		for {
 			attempt := runClassificationAttempt(ctx, db)
 			discarded := recordClassificationAttempt(ctx, db, &attempt)
@@ -346,18 +387,56 @@ func StartUsageIntegrityClassificationAfter(ctx context.Context, db *bolt.DB, in
 			if attempt.err == nil && !attempt.installed && consistencyDiscardReason(attempt.reason) {
 				delay = classificationDiscardDelay(discarded, interval)
 			}
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if !waitNextClassification(ctx, delay, delay == interval && opts.EarlyRebuild, attempt.sawEpoch, quiet, poll, budget, &earlyStreak) {
 				return
-			case <-timer.C:
 			}
 		}
 	}()
 	return func() {
 		cancel()
 		<-done
+	}
+}
+
+// waitNextClassification waits until the next build is due and reports false
+// when ctx ended. With early set, it also returns once the maintenance epoch
+// differs from sawEpoch, has been unchanged for quiet, and no maintenance write
+// is in flight, at most budget times in a row (earlyStreak counts them and is
+// reset when a periodic deadline fires).
+func waitNextClassification(ctx context.Context, delay time.Duration, early bool, sawEpoch uint64, quiet, poll time.Duration, budget int, earlyStreak *int) bool {
+	deadline := time.NewTimer(delay)
+	defer deadline.Stop()
+	if !early || *earlyStreak >= budget {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			*earlyStreak = 0
+			return true
+		}
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	last := integrityEpoch.Load()
+	stableSince := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			*earlyStreak = 0
+			return true
+		case <-ticker.C:
+			epoch := integrityEpoch.Load()
+			if epoch != last {
+				last, stableSince = epoch, time.Now()
+				continue
+			}
+			if epoch != sawEpoch && integrityInflight.Load() == 0 && time.Since(stableSince) >= quiet {
+				*earlyStreak++
+				return true
+			}
+		}
 	}
 }
 
