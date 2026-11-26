@@ -1,7 +1,11 @@
 package nosql
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,15 +30,16 @@ func assertStaysIncomplete(t *testing.T, db *bolt.DB, window time.Duration) {
 	}
 }
 
-// countEarlyPolls counts the loop's epoch polls. A negative assertion about an
-// early rebuild waits for enough polls (each at least EarlyPoll long) that the
-// quiet period has provably elapsed, instead of sleeping for a guessed time.
-func countEarlyPolls(t *testing.T) *atomic.Int64 {
-	t.Helper()
+// earlyOptionsCountingPolls returns earlyOptions whose loop reports every epoch
+// poll to the returned counter. A negative assertion about an early rebuild waits
+// for enough polls (each at least EarlyPoll long) that the quiet period has
+// provably elapsed, instead of sleeping for a guessed time. The hook is part of
+// the loop's options, not a package variable, so tests cannot interfere.
+func earlyOptionsCountingPolls() (ClassificationLoopOptions, *atomic.Int64) {
 	var polls atomic.Int64
-	integrityEarlyPollHook = func() { polls.Add(1) }
-	t.Cleanup(func() { integrityEarlyPollHook = nil })
-	return &polls
+	opts := earlyOptions()
+	opts.EarlyPollHook = func() { polls.Add(1) }
+	return opts, &polls
 }
 
 func waitForPolls(t *testing.T, polls *atomic.Int64, n int64) {
@@ -91,11 +96,10 @@ func TestNoEarlyRebuildWithoutOption(t *testing.T) {
 func TestEarlyRebuildWaitsForInflightWriters(t *testing.T) {
 	productionIntegrityMode(t)
 	db, _, _ := integrityFixture(t)
-	// Installed before the loop starts: the hook variable is read by its goroutine.
-	polls := countEarlyPolls(t)
+	opts, polls := earlyOptionsCountingPolls()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop := StartUsageIntegrityClassificationWith(ctx, db, earlyOptions(), nil)
+	stop := StartUsageIntegrityClassificationWith(ctx, db, opts, nil)
 	defer stop()
 	if !WaitUsageIntegrityReady(ctx, db, 5*time.Second) {
 		t.Fatal("first build did not complete")
@@ -211,10 +215,10 @@ func TestEarlyRebuildLoopStopsWhileWaiting(t *testing.T) {
 func TestEarlyRebuildBudgetResetsOnlyOnPeriodicDeadline(t *testing.T) {
 	ctx := context.Background()
 	streak := 2
-	if !waitNextClassification(ctx, 5*time.Millisecond, false, false, 0, time.Second, time.Millisecond, 2, &streak) || streak != 2 {
+	if !waitNextClassification(ctx, 5*time.Millisecond, false, false, 0, time.Second, time.Millisecond, 2, &streak, nil) || streak != 2 {
 		t.Fatalf("a ladder wait refilled the early-rebuild budget (streak=%d)", streak)
 	}
-	if !waitNextClassification(ctx, 5*time.Millisecond, true, false, 0, time.Second, time.Millisecond, 2, &streak) || streak != 0 {
+	if !waitNextClassification(ctx, 5*time.Millisecond, true, false, 0, time.Second, time.Millisecond, 2, &streak, nil) || streak != 0 {
 		t.Fatalf("a periodic deadline must refill the budget (streak=%d)", streak)
 	}
 }
@@ -238,5 +242,53 @@ func TestEarlyRebuildNotAllowedAfterConsistencyDiscard(t *testing.T) {
 		if got := earlyRebuildAllowed(&tc.attempt); got != tc.want {
 			t.Errorf("%s: earlyRebuildAllowed = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+type logBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// Issue #254: an early rebuild leaves a trace (reason, streak, budget), so
+// "why was this window rebuilt several times" can be answered from the log.
+func TestEarlyRebuildIsLogged(t *testing.T) {
+	productionIntegrityMode(t)
+	db, _, _ := integrityFixture(t)
+	var logs logBuf
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := StartUsageIntegrityClassificationWith(ctx, db, earlyOptions(), logger)
+	defer stop()
+	if !WaitUsageIntegrityReady(ctx, db, 5*time.Second) {
+		t.Fatal("first build did not complete")
+	}
+	if strings.Contains(logs.String(), "early rebuild") {
+		t.Fatalf("the first (startup) build is not an early rebuild:\n%s", logs.String())
+	}
+	integrityMutationBegin()()
+	if !WaitUsageIntegrityReady(ctx, db, 5*time.Second) {
+		t.Fatal("classification was not rebuilt after the maintenance write ended")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logs.String(), "early rebuild") && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "early rebuild") || !strings.Contains(out, "early_streak=1") || !strings.Contains(out, "early_budget=2") {
+		t.Fatalf("early rebuild left no usable trace:\n%s", out)
 	}
 }

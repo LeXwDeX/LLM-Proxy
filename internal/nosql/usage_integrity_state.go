@@ -344,6 +344,9 @@ type ClassificationLoopOptions struct {
 	EarlyQuiet  time.Duration
 	EarlyPoll   time.Duration
 	EarlyBudget int
+	// EarlyPollHook, when set, is called after every epoch poll of the waiting
+	// loop. Tests use it to wait for a number of polls instead of sleeping.
+	EarlyPollHook func()
 }
 
 // StartUsageIntegrityClassification rebuilds the classification now and then
@@ -387,8 +390,12 @@ func StartUsageIntegrityClassificationWith(ctx context.Context, db *bolt.DB, opt
 			if attempt.err == nil && !attempt.installed && consistencyDiscardReason(attempt.reason) {
 				delay = classificationDiscardDelay(discarded, interval)
 			}
-			if !waitNextClassification(ctx, delay, delay == interval, opts.EarlyRebuild && earlyRebuildAllowed(&attempt), attempt.sawEpoch, quiet, poll, budget, &earlyStreak) {
+			streakBefore := earlyStreak
+			if !waitNextClassification(ctx, delay, delay == interval, opts.EarlyRebuild && earlyRebuildAllowed(&attempt), attempt.sawEpoch, quiet, poll, budget, &earlyStreak, opts.EarlyPollHook) {
 				return
+			}
+			if earlyStreak > streakBefore && logger != nil {
+				logger.Info("usage integrity classification early rebuild after a maintenance write", "early_streak", earlyStreak, "early_budget", budget)
 			}
 		}
 	}()
@@ -397,10 +404,6 @@ func StartUsageIntegrityClassificationWith(ctx context.Context, db *bolt.DB, opt
 		<-done
 	}
 }
-
-// integrityEarlyPollHook is called after every epoch poll of the waiting loop,
-// in tests only.
-var integrityEarlyPollHook func()
 
 // earlyRebuildAllowed reports whether the wait after attempt may end early. It
 // is not allowed after a consistency discard: the epoch or index progress moved
@@ -417,7 +420,7 @@ func earlyRebuildAllowed(attempt *classificationAttempt) bool {
 // is in flight, at most budget times in a row (earlyStreak counts them and is
 // reset only when a periodic deadline fires; waiting out a shorter discard-ladder
 // delay leaves it alone, so the cap bounds rebuilds per periodic window).
-func waitNextClassification(ctx context.Context, delay time.Duration, periodic, early bool, sawEpoch uint64, quiet, poll time.Duration, budget int, earlyStreak *int) bool {
+func waitNextClassification(ctx context.Context, delay time.Duration, periodic, early bool, sawEpoch uint64, quiet, poll time.Duration, budget int, earlyStreak *int, pollHook func()) bool {
 	deadline := time.NewTimer(delay)
 	defer deadline.Stop()
 	if !early || !periodic || *earlyStreak >= budget {
@@ -443,8 +446,8 @@ func waitNextClassification(ctx context.Context, delay time.Duration, periodic, 
 			*earlyStreak = 0
 			return true
 		case <-ticker.C:
-			if integrityEarlyPollHook != nil {
-				integrityEarlyPollHook()
+			if pollHook != nil {
+				pollHook()
 			}
 			epoch := integrityEpoch.Load()
 			if epoch != last {

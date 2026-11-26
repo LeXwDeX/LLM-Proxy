@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -168,6 +171,8 @@ func TestUsageIntegrityStartupWaitFromEnvironment(t *testing.T) {
 		{" 90 ", 90 * time.Second},
 		{"301", 300 * time.Second},
 		{"10000000000", 300 * time.Second},
+		{"99999999999999999999", 300 * time.Second}, // 超出 int64：按上限，不是回退默认
+		{"-99999999999999999999", 20 * time.Second},
 		{"-1", 20 * time.Second},
 		{"abc", 20 * time.Second},
 	} {
@@ -193,5 +198,62 @@ func TestStartUsageRetentionSignalsFirstRound(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("USAGE_RETENTION_DAYS=%s: first round never signaled", days)
 		}
+	}
+}
+
+// syncBuf 是可被日志 goroutine 并发写入的缓冲区。
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// Issue #254：维护写（迁移持续失败会无限退避重试）的等待单独封顶为预算的一半，
+// 不能每次启动都吃满整份预算。
+func TestPrepareUsageFastPathStalledMaintenanceIsCappedAtHalfTheBudget(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db := fastPathDB(t)
+	var started, waited atomic.Bool
+	begin := time.Now()
+	ready := prepareUsageFastPath(context.Background(), db, make(chan struct{}), logger, 4*time.Second,
+		func() { started.Store(true) },
+		func(context.Context, *bolt.DB, time.Duration) bool { waited.Store(true); return true })
+	d := time.Since(begin)
+	if d >= 3*time.Second {
+		t.Fatalf("stalled maintenance held startup for %v of a 4s budget; the cap is half of it", d)
+	}
+	if d < 1800*time.Millisecond {
+		t.Fatalf("returned after %v, before the half-budget cap of 2s", d)
+	}
+	if !started.Load() || waited.Load() || ready {
+		t.Fatalf("started=%v waited=%v ready=%v", started.Load(), waited.Load(), ready)
+	}
+}
+
+// Issue #254：wait=0 是配置的“不等待”，不应报“维护写仍在运行”告警，但仍立即启动循环。
+func TestPrepareUsageFastPathZeroWaitDoesNotWarn(t *testing.T) {
+	var logs syncBuf
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	db := fastPathDB(t)
+	var started atomic.Bool
+	prepareUsageFastPath(context.Background(), db, make(chan struct{}), logger, 0,
+		func() { started.Store(true) },
+		func(context.Context, *bolt.DB, time.Duration) bool { return true })
+	if !started.Load() {
+		t.Fatal("the classification loop must start immediately even with wait=0")
+	}
+	if strings.Contains(logs.String(), "maintenance writes still running") {
+		t.Fatalf("wait=0 means do not wait; no stalled-maintenance warning expected:\n%s", logs.String())
 	}
 }
