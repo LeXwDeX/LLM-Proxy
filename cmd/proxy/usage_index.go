@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/LeXwDeX/LLM-Proxy/internal/nosql"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -59,44 +58,62 @@ func startUsageClientIndexMigrationWithDone(parent context.Context, db *bolt.DB,
 	}, done
 }
 
-// usageFastPathBounds bound how long startup may delay the HTTP listener and the
-// quota preload to install the integrity classification. Past a bound startup
-// continues degraded: calibration reads stay exhaustive until the background
-// classification loop completes a build, exactly as before this step existed.
-type usageFastPathBounds struct {
-	IndexWait    time.Duration // wait for the client-index migration to end
-	ClassifyWait time.Duration // synchronous classification build
+// joinDone returns a channel that closes once every input channel is closed.
+func joinDone(chans ...<-chan struct{}) <-chan struct{} {
+	out := make(chan struct{})
+	go func() {
+		defer close(out)
+		for _, c := range chans {
+			<-c
+		}
+	}()
+	return out
 }
-
-var defaultUsageFastPathBounds = usageFastPathBounds{IndexWait: 5 * time.Second, ClassifyWait: 20 * time.Second}
 
 // prepareUsageFastPath runs before the quota preload. Without an installed
 // classification every client calibration rescans the whole history, which made
 // the first requests after a restart hit the 15s calibration timeout (503).
-// Order matters: the index migration and the classification invalidate each
-// other when they overlap, so wait for the migration first (bounded), then build
-// the classification synchronously (bounded). It reports whether the
-// classification is installed.
-func prepareUsageFastPath(ctx context.Context, db *bolt.DB, indexDone <-chan struct{}, logger *slog.Logger, bounds usageFastPathBounds, classify func(context.Context, *bolt.DB) error) bool {
-	started := time.Now()
-	wait := time.NewTimer(bounds.IndexWait)
+//
+// wait is ONE budget (USAGE_INTEGRITY_STARTUP_WAIT_SECONDS) for everything
+// startup may spend on integrity work before the preload: first the startup
+// maintenance writes (index migration, first retention round), which invalidate
+// the classification when they overlap its build, then the classification build,
+// which gets whatever is left. A slow first retention round therefore consumes
+// the budget instead of adding to it, and listening is never delayed by more
+// than wait. The classification loop is started after the maintenance writes
+// (or when the budget ran out) and is only observed: the wait never cancels the
+// build, so a build that outlasts it keeps its progress and completes in the
+// background (Issue #252; an earlier synchronous build was discarded on timeout
+// and rebuilt from scratch). If the maintenance writes did not finish in time
+// the loop is still started (its early rebuild builds right after they ended)
+// but nothing waits for readiness. It reports whether the classification is
+// installed.
+func prepareUsageFastPath(ctx context.Context, db *bolt.DB, maintenanceDone <-chan struct{}, logger *slog.Logger, wait time.Duration, start func(), waitReady func(context.Context, *bolt.DB, time.Duration) bool) bool {
+	began := time.Now()
+	logger.Info("usage integrity startup wait budget", "wait", wait.String(), "max", maxUsageIntegrityStartupWait.String())
+	timer := time.NewTimer(wait)
+	maintenanceFinished := true
 	select {
-	case <-indexDone:
-	case <-wait.C:
-		logger.Warn("usage client index migration still running; building the integrity classification anyway", "waited", bounds.IndexWait.String())
+	case <-maintenanceDone:
+	case <-timer.C:
+		maintenanceFinished = false
+		logger.Warn("usage maintenance writes still running when the startup wait ended; classification starts without being awaited", "waited", wait.String())
 	case <-ctx.Done():
-		wait.Stop()
+		timer.Stop()
 		return false
 	}
-	wait.Stop()
-	buildCtx, cancel := context.WithTimeout(ctx, bounds.ClassifyWait)
-	defer cancel()
-	if err := classify(buildCtx, db); err != nil && ctx.Err() == nil {
-		logger.Warn("usage integrity classification not built before quota preload; calibration reads stay exhaustive until the background build completes", "error", err, "waited", time.Since(started).String())
+	timer.Stop()
+	start()
+	remaining := wait - time.Since(began)
+	if !maintenanceFinished || remaining <= 0 {
+		return false
 	}
-	installed := nosql.UsageIntegrityStats(db).Complete
-	if installed {
-		logger.Info("usage integrity classification installed before quota preload", "elapsed", time.Since(started).String())
+	if !waitReady(ctx, db, remaining) {
+		if ctx.Err() == nil {
+			logger.Warn("usage integrity classification not ready before quota preload; calibration reads stay exhaustive and the build continues in the background", "waited", time.Since(began).String(), "wait", wait.String())
+		}
+		return false
 	}
-	return installed
+	logger.Info("usage integrity classification installed before quota preload", "elapsed", time.Since(began).String())
+	return true
 }
