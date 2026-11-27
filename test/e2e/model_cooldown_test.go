@@ -135,8 +135,8 @@ func TestModelRateLimitKeepsOtherModelSessionOnTargetE2E(t *testing.T) {
 	start := time.Now()
 	resp, _ = iw.send(t, iw.clientKey, iw.aliasX, "", "hi")
 	ra, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
-	if resp.StatusCode != http.StatusServiceUnavailable || ra < 100 || time.Since(start) > 5*time.Second {
-		t.Fatalf("X during its cooldown: %d Retry-After=%q after %v, want an immediate 503 with ~120s", resp.StatusCode, resp.Header.Get("Retry-After"), time.Since(start))
+	if resp.StatusCode != http.StatusTooManyRequests || ra < 100 || time.Since(start) > 5*time.Second {
+		t.Fatalf("X during its cooldown: %d Retry-After=%q after %v, want an immediate 429 (every candidate cools after a 429) with ~120s", resp.StatusCode, resp.Header.Get("Retry-After"), time.Since(start))
 	}
 }
 
@@ -190,13 +190,13 @@ func TestStickyRequestGetsRetryHintThenReturnsToTargetE2E(t *testing.T) {
 	// Too long to wait for: the client is asked to retry, never shown T2's 400.
 	resp, body := iw.send(t, iw.clientKey, iw.aliasY, session, "next")
 	ra, err := strconv.Atoi(resp.Header.Get("Retry-After"))
-	if resp.StatusCode != http.StatusServiceUnavailable || err != nil || ra < 100 || ra > 121 {
-		t.Fatalf("hint: %d Retry-After=%q %s, want 503 with ~120s", resp.StatusCode, resp.Header.Get("Retry-After"), body)
+	if resp.StatusCode != http.StatusTooManyRequests || err != nil || ra < 100 || ra > 121 {
+		t.Fatalf("hint: %d Retry-After=%q %s, want 429 with ~120s (the bound target cools after a 429)", resp.StatusCode, resp.Header.Get("Retry-After"), body)
 	}
 	if resp.Header.Get("X-Upstream-Status") != "400" || resp.Header.Get("X-Proxy-Target") != "" {
 		t.Fatalf("hint headers: X-Upstream-Status=%q X-Proxy-Target=%q body=%s", resp.Header.Get("X-Upstream-Status"), resp.Header.Get("X-Proxy-Target"), body)
 	}
-	if strings.Contains(string(body), "official-400") || dig(decode(t, body), "error/type") != "upstream_temporarily_unavailable" {
+	if strings.Contains(string(body), "official-400") || dig(decode(t, body), "error/type") != "upstream_rate_limited" {
 		t.Fatalf("hint body = %s, want the proxy's own error", body)
 	}
 	if got := metricInt(t, "requests/sticky_retry_hinted_total"); got != beforeHint+1 {

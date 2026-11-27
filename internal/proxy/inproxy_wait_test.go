@@ -61,8 +61,8 @@ func TestInProxyWaitSkippedWhenRecoveryBeyondBound(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("a recovery beyond %v must not be waited for (took %v)", inProxyWaitMax, time.Since(start))
 	}
-	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") == "" {
-		t.Fatalf("status=%d Retry-After=%q, want the sticky retry hint", rr.Code, rr.Header().Get("Retry-After"))
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" {
+		t.Fatalf("status=%d Retry-After=%q, want the sticky retry hint (429: the bound target cools after a 429)", rr.Code, rr.Header().Get("Retry-After"))
 	}
 	if m := env.svc.MetricsSnapshot(); m.TotalInProxyWait != 0 {
 		t.Fatalf("in-proxy waits = %d, want 0", m.TotalInProxyWait)
@@ -116,11 +116,11 @@ func TestInProxyWaitSlotsExhaustedFailFast(t *testing.T) {
 	env.svc.inProxyWaiting.Store(inProxyWaitSlots)
 	start := time.Now()
 	rr := env.do("qwen-max", "")
-	if rr.Code != http.StatusServiceUnavailable || time.Since(start) > time.Second {
-		t.Fatalf("status=%d after %v, want an immediate 503", rr.Code, time.Since(start))
+	if rr.Code != http.StatusTooManyRequests || time.Since(start) > time.Second {
+		t.Fatalf("status=%d after %v, want an immediate 429 (the model cools after a 429)", rr.Code, time.Since(start))
 	}
 	if rr.Header().Get("Retry-After") == "" {
-		t.Fatal("503 lacks Retry-After")
+		t.Fatal("429 lacks Retry-After")
 	}
 	m := env.svc.MetricsSnapshot()
 	if m.TotalInProxyWaitRejected != 1 || m.TotalInProxyWait != 0 {
@@ -146,8 +146,8 @@ func TestInProxyWaitAtMostOncePerRequest(t *testing.T) {
 	}()
 	start := time.Now()
 	rr := env.do("qwen-max", "")
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503 after the single wait", rr.Code)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 after the single wait", rr.Code)
 	}
 	if time.Since(start) > 3*time.Second {
 		t.Fatalf("took %v: the request waited more than once", time.Since(start))

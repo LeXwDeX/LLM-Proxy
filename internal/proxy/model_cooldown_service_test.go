@@ -62,8 +62,8 @@ func TestModelCooldownBlocksOnlyThatModelsRequests(t *testing.T) {
 	}
 	before := env.bailian.hitsFor(incidentQwenUpstream)
 	rr := env.do("qwen-max", "")
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("limited model status = %d, want 503 while the model cools", rr.Code)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("limited model status = %d, want 429 while the model cools", rr.Code)
 	}
 	if got := env.bailian.hitsFor(incidentQwenUpstream); got != before {
 		t.Fatalf("a cooling model reached the upstream (%d -> %d)", before, got)
@@ -223,8 +223,8 @@ func TestMultiKeyTarget429LimitsOnlyTheKeyModelPair(t *testing.T) {
 	// And qwen is refused locally, with Retry-After, while it cools.
 	before := hits["qwen-up"]
 	rr := send("qwen")
-	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") == "" {
-		t.Fatalf("qwen while cooling: %d Retry-After=%q, want 503 with Retry-After", rr.Code, rr.Header().Get("Retry-After"))
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" {
+		t.Fatalf("qwen while cooling: %d Retry-After=%q, want 429 with Retry-After", rr.Code, rr.Header().Get("Retry-After"))
 	}
 	mu.Lock()
 	after := hits["qwen-up"]

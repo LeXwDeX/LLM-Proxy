@@ -1109,6 +1109,7 @@ func (s *Service) selectTargetTraced(
 				Transient:        transient,
 				EarliestRecovery: why.earliestRecovery,
 				ProbeInFlight:    why.busyState != nil,
+				RateLimited:      why.rateLimited,
 			}
 			if stats := unavailableFallback.Stats(); why.accountOnly && upstreamRejectionMutesTarget(stats.MuteStatus) {
 				selErr.MuteStatus, selErr.MuteCode, selErr.MutedUntil = stats.MuteStatus, stats.MuteCode, stats.MutedUntil
@@ -1276,6 +1277,11 @@ type blockage struct {
 	// recovery time and are not part of it.
 	earliestRecovery time.Time
 	hasAccount       bool
+	// rateLimited is set when every blocker is cooling after an upstream 429
+	// (target-level muteStatus 429 or a model-level 429 cooldown): nothing is
+	// full, recovering or cooling for another reason (5xx, network, account
+	// rejection). The caller then answers 429 instead of 503.
+	rateLimited bool
 	// busyState is a candidate blocked only by an in-flight probe (target or
 	// model level); modelProbe is the model lease taken for the returned
 	// candidate (the caller owns it).
@@ -1305,6 +1311,10 @@ func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[stri
 	// after an account rejection (401/402/403). Only then may the caller
 	// answer with the upstream rejection instead of the ordinary 503.
 	onlyAccountMuted := true
+	// onlyRateLimited stays true while every cooling candidate cools after an
+	// upstream 429. A model-level cooldown is always a 429 (markModelLimited
+	// is only reached for class 429).
+	onlyRateLimited := true
 	var probeCandidate *targetState
 	// Cooling candidates, target- or model-level, tracked by their own end.
 	var mutedUntil, transientUntil time.Time
@@ -1363,10 +1373,17 @@ func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[stri
 		switch gate {
 		case modelCooling:
 			onlyAccountMuted = false
+			// The model cooldown hides the target-level cooldown from the
+			// admission below: a target also muted by something other than a
+			// 429 (5xx, network, account rejection) is not merely rate limited.
+			if stats := state.Stats(); stats.MutedUntil.After(now) && stats.MuteStatus != http.StatusTooManyRequests {
+				onlyRateLimited = false
+			}
 			noteCooling(state, gateUntil, false)
 			continue
 		case modelProbeBusy:
 			onlyAccountMuted = false
+			onlyRateLimited = false
 			if recoveringCandidate == nil {
 				recoveringCandidate = state
 			}
@@ -1393,6 +1410,9 @@ func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[stri
 			account := upstreamRejectionMutesTarget(stats.MuteStatus)
 			if !account {
 				onlyAccountMuted = false
+			}
+			if stats.MuteStatus != http.StatusTooManyRequests {
+				onlyRateLimited = false
 			}
 			if earlyProbeEligible(stats) && (probeCandidate == nil || state.NextRetry().Before(probeCandidate.NextRetry())) {
 				probeCandidate = state
@@ -1444,6 +1464,7 @@ func (s *Service) findAvailableRankedDetail(ranker *costRanker, allowed map[stri
 			// in an ordinary cooldown) is a temporary 503, not an account
 			// rejection: report a non-account fallback in that case.
 			why.accountOnly = onlyAccountMuted && !busy
+			why.rateLimited = onlyRateLimited && !busy
 			if !busy {
 				why.probe = probeCandidate
 			}
@@ -1555,6 +1576,10 @@ type selectionError struct {
 	MuteCode   string
 	MutedUntil time.Time
 	MuteTarget string
+	// RateLimited is set when every blocker is cooling after an upstream 429
+	// (target- or model-level) and nothing is full, recovering or cooling for
+	// another reason. The response is then a 429 with Retry-After.
+	RateLimited bool
 }
 
 func (e *selectionError) Error() string {

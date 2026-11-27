@@ -802,6 +802,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// lastForwardStatus 追踪最后一次 forwardRequest 的状态码，用于 failover 耗尽后
 	// selectTarget 失败时传播正确的 HTTP 状态码（如全池限流耗尽 → 429 而非 503）。
 	lastForwardStatus := 0
+	// sawServerFailure marks that a forward of this request failed with a 5xx or
+	// a transport error: the pool is then not merely rate limited, so a later
+	// selection failure keeps its 503 even when the remaining candidates cool
+	// after a 429.
+	sawServerFailure := false
 	// cachedFailoverError keeps the first dequeued 4xx so an exhausted queue can
 	// still deliver the real upstream error instead of a synthesized 503.
 	var cachedFailoverError *cachedUpstreamError
@@ -911,6 +916,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var selErr *selectionError
 			if errors.As(err, &selErr) {
 				now := time.Now()
+				if sawServerFailure {
+					selErr.RateLimited = false
+				}
 				// A sticky request whose bound target is only unavailable for now
 				// (cooling, probing, full) is owed that target's verdict, not a
 				// substitute's 4xx: it waits for the target (bounded, once) or is
@@ -984,7 +992,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					if !selErr.RetryAt.IsZero() && selErr.RetryAt.After(now) && selErr.RetryAt.Before(retryAt) {
 						retryAt = selErr.RetryAt
 					}
-					writeStickyRetry(w, substStatus, substCode, retryAt, now)
+					if selErr.RateLimited {
+						s.logLocalRateLimited(r, retryAt, now, true)
+					}
+					writeStickyRetry(w, substStatus, substCode, retryAt, now, selErr.RateLimited)
 				} else if lastForwardStatus == http.StatusTooManyRequests {
 					// 使用上一轮 forward 记录的 quota 信息（selectTarget 失败时已脱离 keypool 上下文）
 					writeUpstreamLimitedResponse(w, lastQuotaInfo.isQuota, lastQuotaInfo.resetAt)
@@ -1006,6 +1017,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					// bare 503, so operators see why (e.g. 402 billing).
 					writeUpstreamRejectionCooldown(w, selErr, time.Now())
 				} else {
+					if selErr.RateLimited && selErr.Status == http.StatusServiceUnavailable {
+						s.logLocalRateLimited(r, selErr.RetryAt, now, false)
+					}
 					writeServiceUnavailable(w, selErr, now)
 				}
 				s.metrics.totalFailures.Add(1)
@@ -1598,6 +1612,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				pendingNoUsage = fe.noUsage
 			}
 			lastForwardStatus = status // 追踪状态码，failover 耗尽后 selectTarget 失败时传播
+			if status >= http.StatusInternalServerError {
+				sawServerFailure = true
+			}
 			if ok && !fe.modelLimitedUntil.IsZero() {
 				// Every key is rate limited for this model: the target cools for
 				// that model alone, until the earliest key recovers.
@@ -2034,6 +2051,18 @@ func writeQuotaExceededResponse(w http.ResponseWriter, info quota.ExceededInfo) 
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(body)
+}
+
+// logLocalRateLimited marks a 429 the proxy answers itself because every
+// candidate of the model cools after an upstream 429: nothing was sent
+// upstream, so it must not be mistaken for a forwarded upstream 429 in the
+// access log (which records only the status).
+func (s *Service) logLocalRateLimited(r *http.Request, retryAt, now time.Time, sticky bool) {
+	s.logger.Info("all targets rate limited, answered 429 locally without an upstream request",
+		"request_id", appmiddleware.RequestIDFromContext(r.Context()),
+		"retry_after", retryAfterSeconds(retryAt, now),
+		"sticky", sticky,
+	)
 }
 
 // writeUpstreamLimitedResponse 渲染上游限流/限额 429 响应（OpenAI 兼容 JSON）。

@@ -63,8 +63,8 @@ func TestModelKeyTargetWithoutMappingsUsesTheLowercaseRequestName(t *testing.T) 
 		t.Fatalf("cooldowns = %+v, want the lowercase request name gpt-4o-mini (no model_mappings)", cds)
 	}
 	// The same model in any spelling is cooling; another model is not.
-	if rr := send("gpt-4O-MINI"); rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("same model, other spelling: status = %d, want 503 while cooling", rr.Code)
+	if rr := send("gpt-4O-MINI"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("same model, other spelling: status = %d, want 429 while cooling", rr.Code)
 	}
 }
 
