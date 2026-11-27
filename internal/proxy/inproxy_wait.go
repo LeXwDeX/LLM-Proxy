@@ -236,11 +236,37 @@ func retryAfterSeconds(until, now time.Time) int {
 
 // writeServiceUnavailable answers a failed selection. A 503 caused by a
 // cooldown, full capacity or a recovering target carries Retry-After.
+//
+// When every candidate cools after an upstream 429 (selectionError.RateLimited)
+// the client is rate limited, not facing an outage: the answer is a 429 with
+// Retry-After and a proxy-generated upstream_rate_limited error.
 func writeServiceUnavailable(w http.ResponseWriter, selErr *selectionError, now time.Time) {
+	if selErr.RateLimited && selErr.Status == http.StatusServiceUnavailable {
+		writeAllTargetsRateLimited(w, selErr.RetryAt, now)
+		return
+	}
 	if selErr.Status == http.StatusServiceUnavailable && !selErr.RetryAt.IsZero() {
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(selErr.RetryAt, now)))
 	}
 	http.Error(w, selErr.Message, selErr.Status)
+}
+
+// writeAllTargetsRateLimited answers 429 + Retry-After when every candidate of
+// the model cools after an upstream 429. The body reuses the
+// upstream_rate_limited type of writeUpstreamLimitedResponse and adds the
+// retry_after seconds; no target is named and no upstream body is replayed.
+func writeAllTargetsRateLimited(w http.ResponseWriter, until, now time.Time) {
+	retryAfter := retryAfterSeconds(until, now)
+	body, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"type":        "upstream_rate_limited",
+		"code":        "upstream_rate_limited",
+		"retry_after": retryAfter,
+		"message":     "Every upstream for this model is rate limited; retry after " + strconv.Itoa(retryAfter) + " seconds.",
+	}})
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write(body)
 }
 
 // writeStickyRetry answers a request held by its sticky target: 503 with
@@ -248,14 +274,20 @@ func writeServiceUnavailable(w http.ResponseWriter, selErr *selectionError, now 
 // answered with a 4xx, its status in X-Upstream-Status and its error code (or
 // type) as error.substitute_error_code for diagnosis. The substitute's body is
 // not replayed and no target is named: the client should retry, and will
-// return to the sticky target when it recovers.
-func writeStickyRetry(w http.ResponseWriter, substituteStatus int, substituteCode string, until, now time.Time) {
+// return to the sticky target when it recovers. When every blocker cools after
+// an upstream 429 (rateLimited) the hint is a 429 with the upstream_rate_limited
+// type instead; everything else about it is unchanged.
+func writeStickyRetry(w http.ResponseWriter, substituteStatus int, substituteCode string, until, now time.Time, rateLimited bool) {
 	retryAfter := retryAfterSeconds(until, now)
+	status, kind, what := http.StatusServiceUnavailable, "upstream_temporarily_unavailable", "temporarily unavailable"
+	if rateLimited {
+		status, kind, what = http.StatusTooManyRequests, "upstream_rate_limited", "rate limited"
+	}
 	errBody := map[string]any{
-		"type":        "upstream_temporarily_unavailable",
-		"code":        "upstream_temporarily_unavailable",
+		"type":        kind,
+		"code":        kind,
 		"retry_after": retryAfter,
-		"message":     "The upstream this session is bound to is temporarily unavailable; retry after " + strconv.Itoa(retryAfter) + " seconds.",
+		"message":     "The upstream this session is bound to is " + what + "; retry after " + strconv.Itoa(retryAfter) + " seconds.",
 	}
 	if substituteCode != "" {
 		errBody["substitute_error_code"] = substituteCode
@@ -266,6 +298,6 @@ func writeStickyRetry(w http.ResponseWriter, substituteStatus int, substituteCod
 	if substituteStatus != 0 {
 		w.Header().Set(headerUpstreamStatus, strconv.Itoa(substituteStatus))
 	}
-	w.WriteHeader(http.StatusServiceUnavailable)
+	w.WriteHeader(status)
 	_, _ = w.Write(body)
 }

@@ -96,7 +96,7 @@ func TestStickyVerdictHoldLimitByBindingType(t *testing.T) {
 			rr := env.do("deepseek", tc.session)
 			if tc.wantHint {
 				ra := int(tc.limit / time.Second)
-				assertStickyRetry(t, env, rr.Header(), rr.Code, rr.Body.Bytes(), "400", ra-5, ra+1)
+				assertStickyRateLimited(t, env, rr.Header(), rr.Code, rr.Body.Bytes(), "400", ra-5, ra+1)
 				return
 			}
 			if rr.Code != http.StatusBadRequest || rr.Header().Get("X-Proxy-Target") != "official" {
@@ -108,7 +108,8 @@ func TestStickyVerdictHoldLimitByBindingType(t *testing.T) {
 
 // Without a cached substitute answer the terminal answer of a held request is
 // still the sticky retry (no X-Upstream-Status, no substitute code), not a bare
-// 503 or an upstream_rejected answer.
+// 503 or an upstream_rejected answer. Its sticky target cools after a 429, so
+// the hint is the 429 one.
 func TestStickyVerdictWithoutSubstituteOmitsUpstreamStatus(t *testing.T) {
 	env := newIncidentEnv(t, "", http.StatusBadRequest)
 	if rr := env.do("qwen-max", "sess-q"); rr.Code != http.StatusTooManyRequests {
@@ -121,13 +122,13 @@ func TestStickyVerdictWithoutSubstituteOmitsUpstreamStatus(t *testing.T) {
 	}
 	env.limitModel("bailian", incidentQwenUpstream, 90*time.Second)
 	rr := env.do("qwen-max", "sess-q")
-	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") == "" {
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" {
 		t.Fatalf("status=%d Retry-After=%q", rr.Code, rr.Header().Get("Retry-After"))
 	}
 	if rr.Header().Get("X-Upstream-Status") != "" {
 		t.Fatalf("X-Upstream-Status = %q, want none without a substitute answer", rr.Header().Get("X-Upstream-Status"))
 	}
-	if typ, sub := stickyBody(t, rr.Body.Bytes()); typ != "upstream_temporarily_unavailable" || sub != "" {
+	if typ, sub := stickyBody(t, rr.Body.Bytes()); typ != "upstream_rate_limited" || sub != "" {
 		t.Fatalf("body type=%q substitute=%q", typ, sub)
 	}
 	ra, _ := strconv.Atoi(rr.Header().Get("Retry-After"))
@@ -192,10 +193,12 @@ func TestStickyVerdictNotSuppressedBySubstituteMultiKey429(t *testing.T) {
 	env.bind("sess-mk")
 	env.limitModel("bailian", incidentDeepseekUpstream, 90*time.Second)
 	rr := env.do("deepseek", "sess-mk")
-	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") == "" {
-		t.Fatalf("status=%d body=%s, want the sticky retry hint (not the substitute's 429)", rr.Code, rr.Body.String())
+	// Both the sticky target and the substitute cool after a 429, so the hint is
+	// the proxy's own 429; it carries no substitute answer and replays no upstream body.
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" {
+		t.Fatalf("status=%d body=%s, want the proxy's sticky rate-limit hint (not the substitute's replayed 429)", rr.Code, rr.Body.String())
 	}
-	if typ, _ := stickyBody(t, rr.Body.Bytes()); typ != "upstream_temporarily_unavailable" {
+	if typ, _ := stickyBody(t, rr.Body.Bytes()); typ != "upstream_rate_limited" {
 		t.Fatalf("body = %s", rr.Body.String())
 	}
 	if rr.Header().Get("X-Upstream-Status") != "" {

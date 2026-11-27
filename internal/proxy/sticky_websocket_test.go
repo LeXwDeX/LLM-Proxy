@@ -36,14 +36,14 @@ func TestNativeWebSocketTurnGetsStickyRetryEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := readWebsocketEvent(t, conn)
-	if event["type"] != "error" || event["status"] != float64(503) {
-		t.Fatalf("event = %v, want a 503 error event", event)
+	if event["type"] != "error" || event["status"] != float64(429) {
+		t.Fatalf("event = %v, want a 429 error event", event)
 	}
 	if ra, ok := event["retry_after"].(float64); !ok || ra < 80 || ra > 91 {
 		t.Fatalf("retry_after = %v, want about 90", event["retry_after"])
 	}
 	errObj, _ := event["error"].(map[string]any)
-	if errObj["type"] != "upstream_temporarily_unavailable" || strings.Contains(strings.ToLower(toJSON(errObj)), "thinking mode") {
+	if errObj["type"] != "upstream_rate_limited" || strings.Contains(strings.ToLower(toJSON(errObj)), "thinking mode") {
 		t.Fatalf("event error = %v, want the proxy's own error without the substitute's body", errObj)
 	}
 	if m := env.svc.MetricsSnapshot(); m.TotalStickyRetryHinted != 1 {

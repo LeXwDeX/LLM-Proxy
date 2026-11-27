@@ -12,12 +12,24 @@ import (
 )
 
 // A: when waiting is not possible, a request held by its sticky target gets a
-// retryable 503 + Retry-After instead of a substitute target's 4xx.
+// retryable 503 + Retry-After instead of a substitute target's 4xx. When the
+// sticky target cools after an upstream 429 the same hint is a 429
+// (upstream_rate_limited).
 
 func assertStickyRetry(t *testing.T, env *incidentEnv, rrHeader http.Header, code int, body []byte, wantSubstitute string, minRetry, maxRetry int) {
 	t.Helper()
-	if code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d body=%s, want the sticky retry 503", code, body)
+	assertStickyHint(t, rrHeader, code, body, http.StatusServiceUnavailable, "upstream_temporarily_unavailable", wantSubstitute, minRetry, maxRetry)
+}
+
+func assertStickyRateLimited(t *testing.T, env *incidentEnv, rrHeader http.Header, code int, body []byte, wantSubstitute string, minRetry, maxRetry int) {
+	t.Helper()
+	assertStickyHint(t, rrHeader, code, body, http.StatusTooManyRequests, "upstream_rate_limited", wantSubstitute, minRetry, maxRetry)
+}
+
+func assertStickyHint(t *testing.T, rrHeader http.Header, code int, body []byte, wantStatus int, wantType, wantSubstitute string, minRetry, maxRetry int) {
+	t.Helper()
+	if code != wantStatus {
+		t.Fatalf("status = %d body=%s, want the sticky retry hint %d", code, body, wantStatus)
 	}
 	ra, err := strconv.Atoi(rrHeader.Get("Retry-After"))
 	if err != nil || ra < minRetry || ra > maxRetry {
@@ -36,8 +48,8 @@ func assertStickyRetry(t *testing.T, env *incidentEnv, rrHeader http.Header, cod
 			RetryAfter int    `json:"retry_after"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(body, &payload); err != nil || payload.Error.Type != "upstream_temporarily_unavailable" || payload.Error.RetryAfter != ra {
-		t.Fatalf("body = %s (%v), want a proxy-generated upstream_temporarily_unavailable error", body, err)
+	if err := json.Unmarshal(body, &payload); err != nil || payload.Error.Type != wantType || payload.Error.RetryAfter != ra {
+		t.Fatalf("body = %s (%v), want a proxy-generated %s error", body, err, wantType)
 	}
 	if string(body) != "" && containsAny(string(body), "thinking mode", "reasoning content") {
 		t.Fatalf("the substitute's upstream body was replayed: %s", body)
@@ -59,7 +71,7 @@ func TestStickyRetryHintForSessionBinding(t *testing.T) {
 	env.limitModel("bailian", incidentDeepseekUpstream, 90*time.Second)
 
 	rr := env.do("deepseek", "sess-ds")
-	assertStickyRetry(t, env, rr.Header(), rr.Code, rr.Body.Bytes(), "400", 85, 91)
+	assertStickyRateLimited(t, env, rr.Header(), rr.Code, rr.Body.Bytes(), "400", 85, 91)
 	m := env.svc.MetricsSnapshot()
 	if m.TotalDequeueExhausted != 1 || m.TotalCachedErrorReplayed != 0 || m.TotalStickyRetryHinted != 1 {
 		t.Fatalf("exhausted=%d replayed=%d hinted=%d, want 1/0/1", m.TotalDequeueExhausted, m.TotalCachedErrorReplayed, m.TotalStickyRetryHinted)
@@ -87,7 +99,7 @@ func TestStickyRetryHintForIPBinding(t *testing.T) {
 	env.bind("") // no session header: IP affinity only
 	env.limitModel("bailian", incidentDeepseekUpstream, 90*time.Second)
 	rr := env.do("deepseek", "")
-	assertStickyRetry(t, env, rr.Header(), rr.Code, rr.Body.Bytes(), "400", 85, 91)
+	assertStickyRateLimited(t, env, rr.Header(), rr.Code, rr.Body.Bytes(), "400", 85, 91)
 }
 
 func TestStickyRetryAfterPreSendNetworkFailureOfStickyTarget(t *testing.T) {
@@ -105,7 +117,7 @@ func TestStickyRetryAfterPreSendNetworkFailureOfStickyTarget(t *testing.T) {
 
 func TestStickyRetryNativeWebSocketEventCarriesRetryAfter(t *testing.T) {
 	rec := newResponseRecorder()
-	writeStickyRetry(rec, http.StatusBadRequest, "bad_a", time.Now().Add(12*time.Second), time.Now())
+	writeStickyRetry(rec, http.StatusBadRequest, "bad_a", time.Now().Add(12*time.Second), time.Now(), false)
 	writer := &responsesWebsocketWriter{status: rec.status, header: rec.header}
 	writer.buffer.Write(rec.body.Bytes())
 	event := responsesWebsocketTurnErrorEvent(&responsesWebsocketSession{}, writer)
