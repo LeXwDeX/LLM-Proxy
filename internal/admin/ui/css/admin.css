@@ -877,6 +877,13 @@
     .ep-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:var(--ep-bg, var(--muted-soft)); color:var(--ep-fg, var(--ink-3)); }
     .app.dark .ep-badge { background:var(--accent-soft); color:var(--accent); }
     .quota-target-deleted { color:var(--bad); font-size:11px; margin-left:4px; }
+    .quota-unmanaged { padding:12px 16px; border-bottom:1px solid var(--line); background:var(--warn-soft); }
+    .quota-unmanaged-title { font-weight:600; color:var(--warn); }
+    .quota-unmanaged-hint { margin-top:2px; font-size:12px; color:var(--text-muted); }
+    .quota-unmanaged-list { margin-top:8px; display:flex; flex-direction:column; gap:6px; }
+    .quota-unmanaged-row { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+    .quota-unmanaged-target { font-weight:600; margin-right:4px; }
+    .quota-unmanaged-chip { padding:1px 8px; border-radius:10px; font-size:12px; border:1px solid var(--line); background:var(--surface); }
 
     /* ===== Quota Edit Drawer ===== */
     .quota-drawer-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.4); display:none; z-index:200; }

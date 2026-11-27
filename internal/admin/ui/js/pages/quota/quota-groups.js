@@ -46,7 +46,85 @@ AdminApp.register("quotaGroups", function (app) {
     onChange: function () { renderModelGroups(); },
   });
   modelGroupSort.bind(document.getElementById("modelGroupsTableHead"));
+  // Quota is granted only by model-group bindings (no fallback group), so every enabled (target, upstream
+  // model) that no binding covers is rejected at admission. Mirrors quota.quotaGroupForCounters: bindings are
+  // trimmed and case-insensitive; a binding without a model covers the whole target. Paused targets and paused
+  // mappings serve no traffic and are skipped. A target with no mappings can only be covered as a whole.
+  function unmanagedQuotaModels() {
+    var whole = Object.create(null), exact = Object.create(null);
+    (state.modelGroups || []).forEach(function (group) {
+      (group.bindings || []).forEach(function (binding) {
+        var target = String(binding.target || "").trim().toLowerCase();
+        if (!target) return;
+        var model = String(binding.model || "").trim().toLowerCase();
+        if (!model) whole[target] = true;
+        else exact[target + "\u0000" + model] = true;
+      });
+    });
+    var result = [];
+    (state.targets || []).forEach(function (target) {
+      var name = String(target.name || "").trim();
+      var key = name.toLowerCase();
+      if (!name || target.paused || whole[key]) return;
+      var mappings = (Array.isArray(target.model_mappings) ? target.model_mappings : []).filter(function (mapping) {
+        return mapping && String(mapping.upstream || "").trim();
+      });
+      if (!mappings.length) {
+        result.push({ target: name, models: null });
+        return;
+      }
+      var seen = Object.create(null), models = [];
+      mappings.forEach(function (mapping) {
+        if (mapping.paused) return;
+        var model = String(mapping.upstream).trim(), modelKey = model.toLowerCase();
+        if (seen[modelKey] || exact[key + "\u0000" + modelKey]) return;
+        seen[modelKey] = true;
+        models.push(model);
+      });
+      if (models.length) result.push({ target: name, models: models });
+    });
+    result.sort(function (a, b) { return a.target.localeCompare(b.target, "zh-CN", { numeric: true }); });
+    return result;
+  }
+  function renderUnmanagedModels() {
+    var box = document.getElementById("unmanagedModelsNotice");
+    if (!box) return;
+    // Unknown groups or targets would flag everything: stay silent until both lists are loaded.
+    if (!state.modelGroupsLoaded || !Array.isArray(state.targets)) {
+      box.innerHTML = "";
+      return;
+    }
+    var rows = unmanagedQuotaModels();
+    if (!rows.length) {
+      box.innerHTML = "";
+      return;
+    }
+    var count = rows.reduce(function (sum, row) { return sum + (row.models ? row.models.length : 1); }, 0);
+    box.innerHTML =
+      "<div class='quota-unmanaged' role='status'><div class='quota-unmanaged-title'>尚未纳入管理的模型（" +
+      count +
+      "）</div><div class='quota-unmanaged-hint'>额度只由模型组绑定授予，下列模型未加入任何模型组，客户端请求会被拒绝（403 quota_not_configured）。请新建模型组或编辑已有模型组加入。</div><div class='quota-unmanaged-list'>" +
+      rows
+        .map(function (row) {
+          return (
+            "<div class='quota-unmanaged-row'><span class='quota-unmanaged-target'>" +
+            esc(row.target) +
+            "</span>" +
+            (row.models
+              ? row.models
+                  .map(function (model) {
+                    return "<span class='quota-unmanaged-chip'>" + esc(model) + "</span>";
+                  })
+                  .join("")
+              : "<span class='quota-unmanaged-chip'>全部模型</span>") +
+            "</div>"
+          );
+        })
+        .join("") +
+      "</div></div>";
+  }
   function renderModelGroups() {
+    renderUnmanagedModels();
     document.getElementById("modelGroupsBody").innerHTML = state.modelGroups
       .length
       ? modelGroupSort
