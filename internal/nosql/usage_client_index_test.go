@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,26 +26,51 @@ func migrateClientIndex(t testing.TB, db *bolt.DB) {
 	}
 }
 
-func TestUsageClientIndexMigrationCompletesUnderContinuousWrites(t *testing.T) {
+// legacyClientIndexDB returns a database holding only legacy raw events (and
+// their rollups), so a migration over it has the full index to build.
+func legacyClientIndexDB(t testing.TB, base time.Time) *bolt.DB {
+	t.Helper()
 	db := testDB(t)
 	db.MaxBatchDelay = time.Microsecond
-	base := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
 	events := make([]usage.Event, 12000)
 	for i := range events {
 		events[i] = usage.Event{Timestamp: base.Add(time.Duration(i) * time.Second), ClientName: fmt.Sprintf("client-%d", i%80), Model: "qwen-max", InputTokens: 1}
 	}
 	putLegacyClientEvents(t, db, events)
-	// The deadline only guards against starvation. The race detector slows
-	// both the writer and the migration several times over (about 3s alone
-	// becomes about 7s alone and more under package-parallel load), so the
-	// guard scales with it instead of measuring instrumentation overhead.
-	deadline := 10 * time.Second
-	if raceEnabled {
-		deadline *= 3
+	return db
+}
+
+// Continuous writers must not starve or restart the migration. Liveness is
+// judged by work done, not by absolute speed: the race detector, a loaded
+// shared runner or package-parallel tests slow everything several times over,
+// and a fixed wall-clock budget kept measuring that instead of starvation.
+//
+//   - Progress: the contended run commits no more build batches than the same
+//     migration without a writer plus one scan of every concurrent write, so a
+//     migration that restarts or re-scans because of writes fails regardless of
+//     machine speed.
+//   - Hang guard: the deadline is a generous multiple of the writer-free run on
+//     the same machine and process (contention costs about 1.2x here), so only
+//     a migration that is starved or blocked by the writer can reach it.
+func TestUsageClientIndexMigrationCompletesUnderContinuousWrites(t *testing.T) {
+	const batchSize = 64
+	base := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
+
+	baselineDB := legacyClientIndexDB(t, base)
+	var baselineBatches int
+	started := time.Now()
+	if err := migrateUsageClientIndexObserved(context.Background(), baselineDB, batchSize, func(time.Duration) { baselineBatches++ }); err != nil {
+		t.Fatal(err)
 	}
+	baseline := time.Since(started)
+
+	deadline := 10*baseline + 30*time.Second
+
+	db := legacyClientIndexDB(t, base)
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	done := make(chan error, 1)
+	var writes atomic.Int64
 	store := NewUsageStore(db)
 	go func() {
 		for i := 0; ctx.Err() == nil; i++ {
@@ -52,17 +78,29 @@ func TestUsageClientIndexMigrationCompletesUnderContinuousWrites(t *testing.T) {
 				done <- err
 				return
 			}
+			writes.Add(1)
 		}
 		done <- nil
 	}()
-	err := MigrateUsageClientIndex(ctx, db, 64)
+	var batches int
+	started = time.Now()
+	err := migrateUsageClientIndexObserved(ctx, db, batchSize, func(time.Duration) { batches++ })
+	contended := time.Since(started)
+	written := writes.Load()
 	cancel()
 	if writerErr := <-done; writerErr != nil {
 		t.Fatal(writerErr)
 	}
 	if err != nil {
-		t.Fatalf("continuous atomic writes prevented migration completion: %v", err)
+		t.Fatalf("continuous atomic writes prevented migration completion within %v (baseline without writes %v): %v", deadline, baseline, err)
 	}
+	if written == 0 {
+		t.Fatal("writer made no progress while the migration ran; the test did not exercise contention")
+	}
+	if limit := baselineBatches + int(written)/batchSize + 2; batches > limit {
+		t.Fatalf("writes forced the migration to redo work: %d build batches, want at most %d (baseline %d, %d concurrent writes)", batches, limit, baselineBatches, written)
+	}
+	t.Logf("baseline %v/%d batches, contended %v/%d batches, %d concurrent writes", baseline, baselineBatches, contended, batches, written)
 	if err := db.View(requireClientIndex); err != nil {
 		t.Fatal(err)
 	}
