@@ -81,7 +81,7 @@ integration:
 	go test -tags=integration ./test/...
 
 # 虚假上游端到端：编译真实代理二进制，对接进程内 internal/fakellm，覆盖原厂 + Patch
-# 厂商协议、WebSocket、负载切换与计费回读；不调用任何真实模型。-v 输出已知缺口清单。
+# 厂商协议、WebSocket、负载切换与计费回读；不调用任何真实模型。
 e2e:
 	@echo ">> running fake-upstream end-to-end tests"
 	go test -tags=e2e -count=1 -v ./test/e2e/

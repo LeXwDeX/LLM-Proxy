@@ -39,7 +39,7 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 
 ## 文档与仓库约定
 
-- 当前受维护的说明是 [`README.md`](README.md)（英文主文档）及其中文版 [`README.zh-CN.md`](README.zh-CN.md)、本文件、[`internal/proxy/AGENTS.md`](internal/proxy/AGENTS.md)、[`internal/admin/AGENTS.md`](internal/admin/AGENTS.md) 及 [`scripts/testing/README.md`](scripts/testing/README.md)。不要添加指向不存在文件的链接；只有用户明确要求时才新建或重建指定文档。修改 README 时，英文版与中文版须在同一改动中同步，章节结构保持一致。
+- 当前受维护的说明是 [`README.md`](README.md)（英文主文档）及其中文版 [`README.zh-CN.md`](README.zh-CN.md)、本文件、[`internal/proxy/AGENTS.md`](internal/proxy/AGENTS.md)、[`internal/admin/AGENTS.md`](internal/admin/AGENTS.md)、[`scripts/testing/README.md`](scripts/testing/README.md) 及 fakellm 缺陷台账 [`internal/fakellm/DEFECTS.md`](internal/fakellm/DEFECTS.md)。不要添加指向不存在文件的链接；只有用户明确要求时才新建或重建指定文档。修改 README 时，英文版与中文版须在同一改动中同步，章节结构保持一致。
 - 发现文档与源码不一致时，核对相关用例并修正文档中的实现说明。已确定的策略仍是约束，不能因代码未落实就删除策略或扩大权限。
 - SpecGit 与本地工具生成的声明、Skill、hooks、缓存和索引（如 `.specgit.yaml`、`.agents/`、`.claude/`、`.serena/`、`.codebase-memory/`）不提交、不跟踪；`AGENTS.md`（含 scoped `AGENTS.md`）是唯一例外。仓库根目录的 `ci/` 是自建 CI 工作目录，已被 `.gitignore` 忽略，不入库。
 
@@ -85,6 +85,16 @@ LLMs Proxy 是 Go HTTP 代理服务，为客户端提供统一入口，并按模
 - 涉及协议、Patch、用量、计价或响应编码的改动，在 `make e2e` 中补充或运行对应的 fakellm 成功与失败用例，覆盖适用的 JSON、SSE、WS、显式 Patch 与 `standard` 反例，并回读用量、费用及不完整诊断。
 - 仅文档任务检查路径、命令、事实来源和 diff，执行 `make check-docs` 与 `git diff --check`。
 
+## 发布门禁
+
+发布（tag、Release、部署授权）之前必须通过发布门禁：本地 `release-gate` agent 独立核查，只有裁决为 PASS 才可发布；agent 本身是本地工具，不入库（见上文“文档与仓库约定”），门禁规则以本节与下列脚本为准。
+
+- **改动点覆盖 100%**：自上一次发布 tag 以来，新增或修改的每一条 Go 非测试语句都必须被测试命中，由 `scripts/testing/release_gate_check.py diff-coverage` 对 `go test -coverprofile` 的结果逐行判定。只被 e2e 或 integration 命中的行，须逐行指明具体测试并核对断言；管理前端等非 Go 改动逐项映射到对应脚本测试。
+- **回归文档同次更新**：非测试源码有改动时，[`scripts/testing/README.md`](scripts/testing/README.md) 必须同次更新，新增测试文件须在其中登记（`release_gate_check.py docs`）。
+- **fakellm 缺陷台账**：DEV、TEST、回归任一阶段发现的 fakellm 缺陷（建模缺失、与官方合同不符、无法复现别处已暴露的问题），都要补进 fakellm 与回归用例，并记入 [`internal/fakellm/DEFECTS.md`](internal/fakellm/DEFECTS.md)；fakellm 非测试文件有改动时台账须同次更新，发布时不得留有 `open` 条目（`release_gate_check.py ledger --release`）。
+- **过程真实执行**：DEV、TEST、回归三阶段均有执行记录；CI 必需检查对候选提交全部通过；不得为放行而重跑抖动或跳过必需检查；不得未经同意调用真实模型。
+- 取证不足一律视为不通过；豁免只能来自用户对具体条目的明确指令。门禁规则可以随漏网与误杀收紧，放宽须用户同意。
+
 ## 模型名称、协议和上游转发
 
 - 客户端模型别名匹配按系统的大小写不敏感规则处理；发给 provider 的上游模型名必须保留配置中的原始字符和大小写。不要把上游 model string 统一转成小写。
@@ -127,7 +137,7 @@ make integration          # go test -tags=integration ./test/...
 make e2e                  # 真实代理二进制 + 进程内虚假上游 internal/fakellm，不调用真实模型
 node scripts/testing/admin_ui_test.cjs # 管理前端模块行为门禁
 (cd internal/admin/ui && node --test) # 管理前端子树单元测试
-python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_image_tag scripts.testing.test_check_go_coverage
+python3 -m unittest scripts.test_verify_azure_v1_models scripts.test_workflow_image_tag scripts.testing.test_check_go_coverage scripts.testing.test_release_gate_check
 ```
 
 改动行为后按影响范围执行相应门禁。仅在用户明确说不跑测试时才跳过，并如实说明未验证范围。`scripts/check-agents-docs.sh` 检查 `AGENTS.md` 存在；不要求存在 `CLAUDE.md`。

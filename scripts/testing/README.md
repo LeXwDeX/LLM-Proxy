@@ -82,7 +82,7 @@ node scripts/testing/usage_table_browser_test.cjs
 make e2e   # go test -tags=e2e -count=1 -v ./test/e2e/
 ```
 
-套件编译真实代理二进制，在进程内启动确定性虚假上游 `internal/fakellm`，经管理 API 创建 target、池、客户端与职级后以客户端身份发请求，核对上游实际收到的内容（路径、认证、模型名大小写）、客户端响应和 usage 事件的计费回读。覆盖原厂与 Patch 厂商矩阵（含 `standard` 反例）、Responses WebSocket、key 池限流轮换与耗尽、失败切换与取消不重试，以及 JSON/SSE 响应压缩。`TestKnownGaps` 以 SKIP 列出已知兼容缺口及观测值，`-v` 输出即当前清单。
+套件编译真实代理二进制，在进程内启动确定性虚假上游 `internal/fakellm`，经管理 API 创建 target、池、客户端与职级后以客户端身份发请求，核对上游实际收到的内容（路径、认证、模型名大小写）、客户端响应和 usage 事件的计费回读。覆盖原厂与 Patch 厂商矩阵（含 `standard` 反例）、Responses WebSocket、key 池限流轮换与耗尽、失败切换与取消不重试，以及 JSON/SSE 响应压缩。已知兼容缺口以带 `KNOWN GAP` 标记的 SKIP 登记（目前仅出现在需要真实模型的 `live` 用例中），`make e2e` 的 `-v` 输出不再含常设缺口清单。
 
 当前新增的最终快照合同用例为 `TestClaudeConfirmedFinalSnapshotE2E`（[`test/e2e/claude_final_snapshot_test.go`](../../test/e2e/claude_final_snapshot_test.go)），子用例 `advisor_tail_nonfinal`、`advisor_tail_empty_stop`、`advisor_tail_error_empty_stop`、`advisor_refusal_free_tail_nonfinal`、`replace_empty_iterations`、`fallback_output_tail_nonfinal`。它核对 root/附属记录、模型、token、诊断、失败状态和聚合费用；尾部帧是合成反例，不是官方 Claude 序列。
 
@@ -93,6 +93,24 @@ make e2e   # go test -tags=e2e -count=1 -v ./test/e2e/
 fakellm 的回复与 token 用量由请求字节确定性推导，行为可通过请求内 `[[fake k=v ...]]` 指令、`X-Fake-Scenario` 头或 `POST /_control` 控制；preset 只代表按官方文档建模的合同，不能替代真实厂商验收。独立进程入口为 `cmd/fakellm`（`go run ./cmd/fakellm -h` 查看参数），镜像为 `Dockerfile.fakellm`。
 
 `test/e2e/live_codex_test.go` 需要额外的 `live` 构建标签和操作者自行注入的环境变量，会调用真实模型，不属于 `make e2e`，也不进入 CI。
+
+## 发布门禁检查（release_gate_check.py）
+
+`scripts/testing/release_gate_check.py` 是发布门禁的确定性检查，规则见 AGENTS.md 的“发布门禁”。三个子命令都以上一次发布 tag 作为 `--base`，对 `base...HEAD` 判定：
+
+```sh
+BASE=$(git describe --tags --abbrev=0)   # 上一次发布的 tag
+go test -count=1 -coverpkg=./internal/...,./cmd/... -coverprofile=cover.out ./...
+python3 scripts/testing/release_gate_check.py diff-coverage --base "$BASE" --profile cover.out
+python3 scripts/testing/release_gate_check.py docs --base "$BASE"
+python3 scripts/testing/release_gate_check.py ledger --release
+```
+
+- `diff-coverage`：新增或修改的每一条 Go 非测试语句都必须落在命中次数大于 0 的覆盖块内；不在任何语句块内的行（注释、签名、花括号）不计入；`internal/` 与 `cmd/` 下的改动文件整体不在 profile 中输出 `NOT_IN_PROFILE`，按未覆盖处理。管理前端等非 Go 代码以及这两个目录之外的 Go 文件输出 `MANUAL`，无自动覆盖数据，须人工映射到测试。只被 e2e、integration 命中的行不会进入单元 profile，需逐行指明具体测试。
+- `docs`：`R1` 非测试源码有改动而本文件未更新；`R2` 新增测试文件未在本文件登记（路径或文件名出现即可）；`F1` fakellm 非测试文件有改动而 [`internal/fakellm/DEFECTS.md`](../../internal/fakellm/DEFECTS.md) 未更新；另以 `HINT` 列出新增但本文件未提及的 Test 函数名，不影响退出码。
+- `ledger`：校验 fakellm 缺陷台账格式（编号唯一、阶段与状态取值、`fixed` 须有补充与用例且用例中的 Test 函数真实存在、`accepted` 须有接受理由）；加 `--release` 时还要求没有 `open` 条目。
+
+退出码 0 通过，1 未满足门禁项，2 参数、git、profile 或文件错误。单测为 `scripts/testing/test_release_gate_check.py`（`python3 -m unittest scripts.testing.test_release_gate_check`），在 CI 的 `scripts` job 中运行。该脚本只做机械判定，不替代对断言质量、TDD 证据与 fakellm 缺陷信号的人工核查。
 
 ## bundle 账本跨版本合同（make integration）
 
