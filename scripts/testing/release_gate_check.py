@@ -81,8 +81,10 @@ def is_non_go_code(path: str) -> bool:
 
 def is_source_change(path: str) -> bool:
     if is_go_source(path):
-        return path.startswith(("internal/", "cmd/"))
-    return path.startswith("internal/admin/ui/") and is_non_go_code(path)
+        return path.startswith(("internal/", "cmd/", "scripts/"))
+    if is_non_go_code(path):
+        return path.startswith(("internal/admin/ui/", "scripts/"))
+    return False
 
 
 def is_fake_change(path: str) -> bool:
@@ -122,7 +124,7 @@ def parse_added_test_funcs(diff_text: str) -> List[str]:
 
 # ---------------------------------------------------------------- 覆盖
 
-Block = Tuple[int, int, int, int]  # start_line, end_line, statements, count
+Block = Tuple[int, int, int, int, int, int]  # start_line, end_line, statements, count, start_col, end_col
 
 
 def parse_profile(text: str, module: str) -> Dict[str, List[Block]]:
@@ -141,7 +143,7 @@ def parse_profile(text: str, module: str) -> Dict[str, List[Block]]:
         key = (file, int(match.group("sl")), int(match.group("sc")), int(match.group("el")), int(match.group("ec")))
         count = int(match.group("count"))
         old = merged.get(key)
-        merged[key] = (key[1], key[3], int(match.group("stmts")), max(count, old[3]) if old else count)
+        merged[key] = (key[1], key[3], int(match.group("stmts")), max(count, old[3]) if old else count, key[2], key[4])
     blocks: Dict[str, List[Block]] = {}
     for key, block in merged.items():
         blocks.setdefault(key[0], []).append(block)
@@ -156,7 +158,17 @@ class CoverageResult:
     checked: int = 0
 
 
-def diff_coverage(added: Dict[str, List[int]], blocks: Dict[str, List[Block]]) -> CoverageResult:
+def reaches_only_closing_brace(block: Block, line: int, text: Optional[str]) -> bool:
+    """多行块在末行只到达行首的 `}`（如 `} else if y {`），该行没有属于这个块的语句。"""
+    if text is None or block[1] != line or block[0] == line:
+        return False
+    stripped = text.lstrip()
+    indent = len(text) - len(stripped)
+    return stripped.startswith("}") and block[5] <= indent + 2
+
+
+def diff_coverage(added: Dict[str, List[int]], blocks: Dict[str, List[Block]], line_text=None) -> CoverageResult:
+    """line_text(path, line) 返回候选提交中该行的源码，用于识别只含闭合花括号的块边界；省略时不做该豁免。"""
     result = CoverageResult()
     for path in sorted(added):
         if is_non_go_code(path):
@@ -172,7 +184,9 @@ def diff_coverage(added: Dict[str, List[int]], blocks: Dict[str, List[Block]]) -
             result.missing_files.append(path)
             continue
         for line in sorted(set(added[path])):
-            covering = [b for b in blocks[path] if b[0] <= line <= b[1] and b[2] > 0]
+            text = line_text(path, line) if line_text else None
+            covering = [b for b in blocks[path]
+                        if b[0] <= line <= b[1] and b[2] > 0 and not reaches_only_closing_brace(b, line, text)]
             if not covering:
                 continue
             result.checked += 1
@@ -284,7 +298,10 @@ def missing_cases(entries: Sequence[LedgerEntry], exists) -> List[str]:
     for entry in entries:
         if entry.fields.get("状态") != "fixed":
             continue
-        for name in re.findall(r"\bTest\w+", entry.fields.get("用例", "")):
+        names = re.findall(r"\bTest\w+", entry.fields.get("用例", ""))
+        if not names:
+            errors.append("{} 用例须包含 Test 函数名".format(entry.id))
+        for name in names:
             if not exists(name):
                 errors.append("{} 用例不存在: {}".format(entry.id, name))
     return errors
@@ -297,7 +314,7 @@ def open_entries(entries: Sequence[LedgerEntry]) -> List[str]:
 # ---------------------------------------------------------------- git 与命令行
 
 def git(repo: Path, *args: str) -> str:
-    proc = subprocess.run(["git", "-C", str(repo), "-c", "core.quotepath=false"] + list(args), capture_output=True, text=True)
+    proc = subprocess.run(["git", "-C", str(repo), "-c", "core.quotepath=false", "-c", "color.ui=false", "-c", "color.diff=false"] + list(args), capture_output=True, text=True)
     if proc.returncode != 0:
         raise GateError("git {} 失败: {}".format(" ".join(args), proc.stderr.strip()))
     return proc.stdout
@@ -331,7 +348,15 @@ def cmd_diff_coverage(repo: Path, args: argparse.Namespace) -> int:
         text = Path(args.profile).read_text(encoding="utf-8")
     except OSError as exc:
         raise GateError("无法读取 profile: {}".format(exc))
-    result = diff_coverage(parse_added_lines(diff), parse_profile(text, module_path(repo)))
+    sources: Dict[str, List[str]] = {}
+
+    def line_text(path: str, line: int) -> Optional[str]:
+        if path not in sources:
+            sources[path] = git(repo, "show", "HEAD:" + path).splitlines()
+        lines = sources[path]
+        return lines[line - 1] if 0 < line <= len(lines) else None
+
+    result = diff_coverage(parse_added_lines(diff), parse_profile(text, module_path(repo)), line_text)
     for path, lines in result.uncovered.items():
         for rng in format_ranges(lines):
             print("UNCOVERED {}:{}".format(path, rng))

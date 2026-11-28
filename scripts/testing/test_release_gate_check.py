@@ -68,6 +68,10 @@ def block(path, start, end, count, stmts=1):
     return '{}/{}:{}.1,{}.10 {} {}'.format(MODULE, path, start, end, stmts, count)
 
 
+def block_cols(path, sl, sc, el, ec, count, stmts=1):
+    return '{}/{}:{}.{},{}.{} {} {}'.format(MODULE, path, sl, sc, el, ec, stmts, count)
+
+
 class ParseDiffTests(unittest.TestCase):
     def test_added_lines_cover_pure_additions_and_replacements(self):
         added = gate.parse_added_lines(DIFF)
@@ -108,6 +112,24 @@ class CoverageTests(unittest.TestCase):
         blocks = self.profile(block('internal/proxy/a.go', 11, 11, 1), block('internal/proxy/a.go', 11, 12, 0))
         result = gate.diff_coverage({'internal/proxy/a.go': [11]}, blocks)
         self.assertEqual(result.uncovered, {'internal/proxy/a.go': [11]})
+
+    def test_closing_brace_of_previous_branch_is_not_a_changed_statement(self):
+        # `} else if y {`：前一分支的块在该行只到达行首的 `}`，该分支未执行不应拖累本行。
+        blocks = self.profile(
+            block_cols('internal/proxy/a.go', 10, 5, 12, 3, 0),
+            block_cols('internal/proxy/a.go', 12, 14, 14, 2, 1),
+        )
+        text = {12: '\t} else if y {'}
+        result = gate.diff_coverage({'internal/proxy/a.go': [12]}, blocks, lambda path, line: text.get(line))
+        self.assertEqual(result.uncovered, {})
+
+    def test_block_reaching_past_the_brace_still_counts(self):
+        blocks = self.profile(block_cols('internal/proxy/a.go', 10, 5, 12, 9, 0))
+        text = {12: '\t} foo()'}
+        result = gate.diff_coverage({'internal/proxy/a.go': [12]}, blocks, lambda path, line: text.get(line))
+        self.assertEqual(result.uncovered, {'internal/proxy/a.go': [12]})
+        no_text = gate.diff_coverage({'internal/proxy/a.go': [12]}, blocks)
+        self.assertEqual(no_text.uncovered, {'internal/proxy/a.go': [12]})
 
     def test_file_absent_from_profile_fails_closed(self):
         blocks = self.profile(block('internal/proxy/a.go', 1, 2, 1))
@@ -152,6 +174,13 @@ class DocsTests(unittest.TestCase):
     def test_doc_update_clears_r1(self):
         findings = self.run_docs([('M', 'internal/proxy/forward.go'), ('M', gate.REGRESSION_DOC)])
         self.assertEqual([f for f in findings if f.startswith('R1')], [])
+
+    def test_scripts_source_change_requires_regression_doc(self):
+        for path in ('scripts/tool/main.go', 'scripts/update-model-catalog.py', 'scripts/rebuild.sh',
+                     'scripts/testing/release_gate_check.py'):
+            findings = self.run_docs([('M', path)])
+            self.assertTrue(any(f.startswith('R1') for f in findings), path)
+        self.assertEqual(self.run_docs([('M', 'scripts/testing/test_release_gate_check.py')]), [])
 
     def test_docs_only_change_needs_nothing(self):
         self.assertEqual(self.run_docs([('M', 'README.md')]), [])
@@ -215,6 +244,12 @@ class LedgerTests(unittest.TestCase):
         missing = gate.missing_cases(entries, lambda name: name != 'TestSomethingE2E')
         self.assertEqual(missing, ['FD-001 用例不存在: TestSomethingE2E'])
         self.assertEqual(gate.missing_cases(entries, lambda name: True), [])
+
+    def test_fixed_entry_without_test_name_is_rejected(self):
+        text = LEDGER_OK.replace('TestSomethingE2E', 'internal/fakellm/does_not_exist_test.go')
+        _, entries = gate.lint_ledger(text)
+        errors = gate.missing_cases(entries, lambda name: True)
+        self.assertEqual(errors, ['FD-001 用例须包含 Test 函数名'])
 
     def test_empty_ledger_is_valid(self):
         errors, entries = gate.lint_ledger('# FAKE 缺陷台账\n\n暂无条目\n')
@@ -280,6 +315,31 @@ class CliTests(unittest.TestCase):
         code, out, _ = self.run_main('ledger', '--release')
         self.assertEqual(code, 1)
         self.assertIn('FD-003', out)
+
+    def test_git_color_config_does_not_break_diff_parsing(self):
+        self.git('config', 'color.ui', 'always')
+        self.git('config', 'color.diff', 'always')
+        self.write('internal/proxy/a.go', 'package proxy\n\nfunc A() int {\n\treturn 2\n}\n')
+        self.git('commit', '-qam', 'change')
+        profile = self.repo / 'cover.out'
+        profile.write_text('mode: set\n' + block('internal/proxy/a.go', 3, 5, 0) + '\n')
+        code, out, _ = self.run_main('diff-coverage', '--base', 'base', '--profile', str(profile))
+        self.assertEqual(code, 1, out)
+        self.assertIn('internal/proxy/a.go:4', out)
+
+    def test_cli_ignores_brace_only_overlap_using_committed_source(self):
+        self.write('internal/proxy/a.go', 'package proxy\n\nfunc A(x int) int {\n\tif x > 0 {\n\t\treturn 1\n\t} else if x < 0 {\n\t\treturn 2\n\t}\n\treturn 0\n}\n')
+        self.git('commit', '-qam', 'branches')
+        profile = self.repo / 'cover.out'
+        profile.write_text('mode: set\n' + '\n'.join([
+            block_cols('internal/proxy/a.go', 4, 12, 6, 3, 0),
+            block_cols('internal/proxy/a.go', 6, 5, 8, 3, 1),
+            block_cols('internal/proxy/a.go', 6, 20, 7, 3, 1),
+        ]) + '\n')
+        code, out, _ = self.run_main('diff-coverage', '--base', 'base', '--profile', str(profile))
+        self.assertIn('internal/proxy/a.go:4-5', out)  # 真正未执行的分支内部仍被报告
+        self.assertNotIn('a.go:6', out)
+        self.assertEqual(code, 1)
 
     def test_non_ascii_path_is_not_skipped(self):
         self.write('internal/proxy/中文.go', 'package proxy\n\nfunc B() int {\n\treturn 1\n}\n')
