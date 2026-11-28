@@ -76,6 +76,15 @@ node scripts/testing/usage_table_browser_test.cjs
 
 `internal/nosql/usage_agg_v2_test.go` 覆盖版本化聚合键、旧／新格式混合读取、receipt 数量核对、回放与 backfill 边界；`internal/admin/overview_usage_count_test.go` 回读管理总览，确保含歧义分隔符的旧 cell 不丢失总请求计数。旧歧义维度不恢复，需要维度的读取明确失败。跨版本用例只核对其列出的数据合同，不能证明旧二进制支持新聚合键或安全降级。
 
+## 全部 target 因上游 429 冷却时的响应状态（本机单测与 e2e）
+
+请求模型的全部候选 target 都因上游 429 冷却时，代理本地选路失败，响应为 429 加 `Retry-After` 和代理生成的 `upstream_rate_limited` 错误体（含 `error.retry_after`），并记一行 INFO 日志；其余阻塞原因保持 503。以下用例不调用真实模型，也没有实测 Claude Code 等客户端对 429 与 503 的重试行为：
+
+- `internal/proxy/all_targets_rate_limited_test.go` 的 429 正例：`TestAllTargetsModelCoolingAnswers429`（模型级冷却）、`TestAllTargetsTargetLevel429Answers429`（目标级 429 冷却）、`TestAllTargetsMixedLevel429UsesEarliestRetryAfter`（两级混合时取最早的 `Retry-After`）、`TestAllTargetsSelectionErrorFlagsRateLimited`（选路错误带限流标记）、`TestStickyHeldRateLimitedTargetAnswers429`（粘性会话绑定的 target 冷却）、`TestNativeWebSocketTurnAllTargetsRateLimitedGets429Event`（原生 Responses WebSocket 回合收到 429 错误事件）、`TestAllTargetsRateLimitedIsLoggedAsLocal`（本地生成的 429 有日志，可与转发的上游 429 区分）。
+- 同文件保持 503 的反例：`TestAllTargetsMutedBy5xxStays503`、`TestAllTargetsMixedCooldownReasonsStay503`、`TestAllTargetsRateLimitedPlusFullStays503`、`TestAllTargetsAccountRejectionKeepsItsStatus`、`TestAllTargetsNetworkFailureThenRateLimitedStays503`、`TestAllTargetsModelCooldownDoesNotMaskTargetFailure`、`TestAllTargetsProbeInFlightIsNotRateLimited`、`TestStickyTransportFailureWithRateLimitedSubstituteStays503`、`TestExplicitTargetWithRateLimitedModelStays503`；覆盖 5xx 或网络错误冷却、混合冷却原因、候选已满、账户拒绝、半开探针在途、显式 `X-Proxy-Target` 以及本请求内已有 5xx 或传输错误的转发失败。
+- 已把断言由 503 同步为 429 的既有用例：`internal/proxy/inproxy_wait_test.go`、`model_cooldown_service_test.go`、`model_key_test.go`、`sticky_retry_test.go`、`sticky_verdict_test.go`、`sticky_websocket_test.go`，以及 e2e 的 `TestModelRateLimitKeepsOtherModelSessionOnTargetE2E` 与 `TestStickyRequestGetsRetryHintThenReturnsToTargetE2E`（[`test/e2e/model_cooldown_test.go`](../../test/e2e/model_cooldown_test.go)）。
+- 该行为只改变状态码、错误类型与日志，不改变计费与用量；`/v1/messages` 路径的错误体仍是 OpenAI 形态，未新增指标计数器。
+
 ## 虚假上游端到端（make e2e）
 
 ```sh
